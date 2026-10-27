@@ -348,14 +348,14 @@ measurements on the PAL A500 support this sign-dependent poll point; ordinary
 instruction and host IRQ propagation timing remain separately testable.
 
 The two-CCK boundary and four-CCK operand leads are calibrated for internal
-Paula sources. `INT_PORTS` and `INT_EXTER` retain their previous no-lead
-deadline: recent hardware captures show residual timing differences across CIA
-MOVE and NOP loops, so the internal-source correction does not generalize as a
-universal fix. This source-bit rule also applies to software-set `INTREQ` for
-those bits and makes no claim about physical propagation. TODO: measure the
-external pin transition and CPU poll timing independently. A WinUAE NOP-loop
-probe corroborates that the IRQ ordering regression is distinct from the
-hardware-specific residual timing.
+Paula sources and now also apply to requests tagged as CIA-fed after their
+separate CIA-output and Paula-input stages. Software-set `INT_PORTS` and
+`INT_EXTER` retain the no-lead deadline; the source bit alone does not identify
+physical propagation. The first forwarded CIA request has its own eligibility
+deadline, while a held CIA input reasserts through the ordinary recognition
+delay after Paula acknowledgement. See [CIA output phase and raw request
+visibility](timing.md#cia-output-phase-and-raw-request-visibility) for the
+measured stages and remaining external-source phase uncertainty.
 
 Instruction handlers can move the final prefetch earlier than the generic
 end-of-instruction top-up when 68000 microcode does so. That matters for

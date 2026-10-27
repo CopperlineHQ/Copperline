@@ -243,8 +243,14 @@ fn cia_vpa_transfer_feeds_start_pipeline_on_the_transfer_edge() {
             assert_eq!(bus.paula.intreq & INT_PORTS, 0);
             bus.advance_cpu_idle_devices(1);
         }
-        assert_ne!(bus.paula.intreq & INT_PORTS, 0);
+        assert!(bus.cia_a.irq_line_asserted());
+        // Ordinary output forwarding is two CCK, then Paula samples in four.
         while bus.emulated_cck() < transfer + 36 {
+            assert_eq!(bus.paula.intreq & INT_PORTS, 0);
+            bus.advance_cpu_idle_devices(1);
+        }
+        assert_ne!(bus.paula.intreq & INT_PORTS, 0);
+        while bus.emulated_cck() < transfer + 40 {
             assert_eq!(bus.cpu_visible_intreq() & INT_PORTS, 0);
             bus.advance_cpu_idle_devices(1);
         }
@@ -2074,9 +2080,12 @@ fn cia_b_mask_enable_propagates_latched_timer_interrupt_to_paula() {
 
     let _ = bus.cia_b_write(addr(REG_ICR), 1, 0x80 | 0x01);
 
-    // The pin (and so INTREQ) follows the mask write one E-cycle later.
+    // The output is delayed by the mask-write E phase; Paula then has its
+    // independent four-CCK input stage. Check both sides of the raw boundary.
     assert_eq!(bus.paula.intreq & INT_EXTER, 0);
     bus.advance_devices(8);
+    assert_eq!(bus.paula.intreq & INT_EXTER, 0);
+    bus.advance_devices(1);
     assert_ne!(bus.paula.intreq & INT_EXTER, 0);
 }
 
@@ -2111,6 +2120,13 @@ fn cia_a_pc_strobe_reaches_parallel_port_and_ack_drives_cia_a_flag() {
     assert_ne!(bus.cia_a.debug_icr_data() & 0x10, 0);
     assert_eq!(bus.paula.intreq & INT_PORTS, 0, "FLAG pin has one-E lag");
     bus.advance_devices(5);
+    assert!(bus.cia_a.irq_line_asserted());
+    assert_eq!(
+        bus.paula.intreq & INT_PORTS,
+        0,
+        "Paula input has its own stage"
+    );
+    bus.advance_devices(4);
     assert_ne!(bus.paula.intreq & INT_PORTS, 0);
 
     // A guest PRB read generates the same hardware PC pulse, so it strobes the
@@ -2311,6 +2327,28 @@ fn floppy_index_flag_sync_delay_is_visible_to_cia_b_icr_polling() {
     assert_ne!(bus.cia_b.read(REG_ICR) & 0x10, 0);
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn cia_event_deadline_includes_divider_phase_and_deferred_time() {
+    for phase in 0..5 {
+        for pending in 0..=3 {
+            let mut bus = empty_bus();
+            bus.cia_a.ta_count = 2;
+            bus.cia_a.ta_latch = 2;
+            bus.cia_a.ta_running = true;
+            bus.device_clock.cia_tick_remainder_cck = phase;
+            bus.pending_device_cck = pending;
+            assert_eq!(bus.next_cia_event_cck(), Some(15 - phase - pending));
+        }
+    }
+    let mut bus = empty_bus();
+    assert_eq!(bus.next_cia_event_cck(), None);
+    bus.cia_b.ta_running = true;
+    bus.cia_b.ta_count = 0;
+    bus.device_clock.cia_tick_remainder_cck = 4;
+    bus.pending_device_cck = 2;
+    assert_eq!(bus.next_cia_event_cck(), Some(1));
 }
 
 #[test]

@@ -138,6 +138,18 @@ Roots tap >= 16, pulling the swirl a gulp left and shearing the
 kaleidoscope line by line. The hi-res/SHRES scaling of the pipeline is
 not yet externally verified; only lo-res is pinned.
 
+The phase is the fetch run's, not the register's. On ECS Agnus and AGA
+Alice a DDFSTRT below the hardwired start (`$18`) only latches BPHSTART;
+the run starts when SHW rises at `$18`, on every line, so DDFSTRT
+`$10`..`$16` takes the `$18` run's phase (24 cck past the 32-cck grid on
+the 64-bit fetch, boundary past the tap range: nothing folds). OCS keeps
+the raw comparator anchor, since its surviving SHW latch arms the run at
+the match itself. Pinned by `ddfprobe-agafold3`, vAmiga-verified band by
+band: the Skeleton Krew CD32 constellation (issue #836: lo-res BPL64,
+DDFSTRT `$10`, taps swept across 0..63 while the camera scrolls) folded
+taps >= 48 from the register's phase-16 boundary, jumping the playfield
+one gulp left with black past the fetched data on the right.
+
 BPLCON1-delayed samples at the left edge of a scanline do not reuse the
 previous line's final bitplane word. Before the current line's shifter has a
 sample for a delayed tap, replay marks playfield output active but returns
@@ -770,6 +782,22 @@ from parasyte/pixels#462, which gives up after one reconfigure. Both window
 kinds record the size their surface was configured with, and all resizes go
 through the wrappers that keep that record in step.
 
+Captured desktop mouse motion also inverts `PresentLayout`'s display scale.
+Captured deltas are multiplied by the window's DPI scale factor before
+inverting the physical picture rectangle: macOS supplies points and Wayland
+supplies surface-local motion; for Windows/X11 device counts, this keeps
+sensitivity independent of DPI at a fixed logical picture size.
+Chipset motion uses the source-canvas extent, including crop and per-axis
+scaling. RTG motion instead uses the board's native dimensions divided by the
+physical RTG viewport, excluding chrome even in a classic smooth layout. This
+preserves equal axis factors for square board pixels drawn at an integer
+multiple, independently of the host UI canvas's dimensions.
+The result reaches the host sensitivity multiplier and fractional accumulator
+before whole counts enter the emulated mouse. Uncaptured cursor positions have
+already passed through their inverse canvas layout and are not scaled again.
+Scripted and control-protocol counts, gamepad mouse motion, and the emulated
+JOYxDAT counter model are independent of this captured-device conversion.
+
 The present worker widens the gap between that check and the acquire: a
 frame is planned on the main thread and presented later, and on Windows the
 main thread pumps the modal size-move loop while the user drags an edge, so
@@ -881,38 +909,41 @@ reuse that CL-GD5428 core. The window presents
 that frame at its native resolution through a dedicated GPU texture
 (`window/rtg_texture.rs`) rather than the 716-wide chipset buffer, and the
 TV aperture crop is suppressed -- it is a chipset crop rect, and applying it
-would show a sub-rect of the board's screen. The GPU pass draws over the
-display rect after the scaler has drawn the composed texture, so anything
-the CPU composed over the picture would be painted out. While a menu,
-panel, guest overlay or drop hint is up the window falls back to the CPU
-present path (at the cost of the downscale) so it is not overdrawn. The
-corner overlays -- the `REC` badge, the performance readout and the OSD
-message -- keep the GPU pass instead, since the badge and the readout stay
-up for long stretches: they are composed as usual over the `FB_WIDTH` copy
-of the board frame, each drawer reports the box it painted, and after the
-RTG texture `PresentScaler::render_overlays` redraws just those boxes from
-the composed texture on top. `PresentLayout::overlay_draw` maps each box to
-whole surface pixels and derives its source rect back from them, so the
-redrawn box is sampled exactly as the display draw sampled it and leaves
-no seam; only what shows through the translucent box is the downscaled
-copy. The redraws take uniform slots of their own, because every queue
-write lands before any of the frame's commands run.
+would show a sub-rect of the board's screen. The GPU pass always draws the
+native RTG texture, including while menus, panels, guest debug overlays or
+drop hints are visible. The CPU clears the display rows to transparent and
+paints only the UI. `blend_pixel` preserves straight-alpha colours and
+accumulates coverage, keeping existing opaque CPU composition unchanged.
+Each painted guest/host layer or corner sprite is captured into an atlas
+by `rtg_ui::Frame`, then cleared from the CPU display rows. The native RTG
+fragment shader samples that byte-encoded atlas and blends in encoded
+colour space, matching CPU UI brightness. It premultiplies colours before
+filtering to prevent transparent neighbours introducing dark fringes, then
+decodes the final colour for the sRGB target. This is one RTG draw, not a
+second full-picture blend pass. Empty drawers add no atlas layer; a frame
+without UI takes the native-only path without an upload or UI sampling.
+Chrome remains part of the initial scaler draw.
 
-Under integer scaling the pass draws the board frame at a whole multiple
-of its native resolution, centred in the display rect with black margins
-(`rtg_texture::picture_rect`), so the `FB_WIDTH` copy, stretched over the
-whole display, no longer sits where the picture does. Everything the CPU
-composes for the frame follows the pass's placement instead:
-`PresentLayout::rtg_integer_picture` gives the picture's rect as fractions
-of the display region, `copy_rtg_picture` lays the native frame into
-those display rows with the pass's own per-pixel test and point sample
-(`rtg_texture::picture_texel`) and the pass's black around it, and the
-corner overlays anchor to the picture's whole canvas pixels
-(`picture_canvas_rect`) rather than to the display. The readout, badge and
-message therefore sit at the picture's corners and blend over the same
-board pixels the pass draws under them, and the CPU fallback for a menu,
-panel or guest overlay shows the picture at the pass's size and place
-rather than stretched, at the texture's resolution. If the
+Host menus and panels use `main_ui_present_layout`: an independent uniform
+fit of the UI canvas above chrome, at a whole multiple when one fits.
+Pointer mapping switches to this same fit while host UI is active.
+`rtg_corner_dst` places the REC/performance/OSD sprites at board corners
+without changing their glyph aspect or scale. The host drawer reports its
+scrims so their backdrop extends across board pixels outside the UI fit,
+without stretching the menu or panel itself.
+
+Under integer scaling `surface_present_layout` fits the board's native
+dimensions against the host surface above a separately drawn chrome band.
+It does not inherit the chipset canvas's integer fit, which can restrict a
+640x480 board to 1x on a 1080p surface even though its native pixels fit at
+2x. The chrome band retains its classic size and docks to the bottom, as
+with autocrop. The debugger pane fits the same native dimensions within
+its own viewport, without a chrome band. A surface too small for 1x uses
+an aspect-preserving fractional fit. Smooth RTG keeps the classic layout.
+
+The native fit fills the board destination; unused host surface around
+it remains black. Opening a menu or panel leaves that fit and the native
+board texture unchanged, including when the status bar is hidden. If the
 board claims the display but its frame does not compose yet (mode set
 before the resolution registers), presentation falls back to the chipset
 render rather than freezing on a stale frame.

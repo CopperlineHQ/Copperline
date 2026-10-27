@@ -6278,6 +6278,73 @@ fn wide_fmode_fold_boundary_saturates_past_the_tap_range() {
 }
 
 #[test]
+fn wide_fmode_fold_phase_below_hard_start_is_the_run_start() {
+    // Skeleton Krew CD32 (issue #836): lo-res 7 planes, FMODE=$000F (BPL64,
+    // 32-cck unit, 64-px gulps), DDFSTRT $10 / DDFSTOP $A0, scrolling with
+    // BPLCON1 taps across the whole 0..63 range. Alice only latches BPHSTART
+    // at the $10 match; the run starts at SHW $18 on every line, 24 cck past
+    // the unit grid, so the fold boundary (48 + 16 px) lies past the tap
+    // range exactly as for DDFSTRT $18. The register's own phase (16 cck,
+    // boundary 48) folded taps >= 48 a gulp left: the camera jumped 64 px
+    // and the right edge went black. vAmiga-verified (ddfprobe-agafold3).
+    let control = |ddfstrt: u16, bplcon1: u16| ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x7201,
+        ddfstrt,
+        ddfstop: 0x00A0,
+        fmode: 0x000F,
+        bplcon1,
+        ..ControlState::default()
+    };
+
+    assert_eq!(
+        ddf_run_start_hpos(AgnusRevision::AgaAlice, false, 0x0010),
+        0x0018
+    );
+    assert_eq!(
+        ddf_run_start_hpos(AgnusRevision::Ecs8375, false, 0x0014),
+        0x0018
+    );
+    assert_eq!(
+        ddf_run_start_hpos(AgnusRevision::AgaAlice, false, 0x0050),
+        0x0050
+    );
+    // OCS keeps the raw comparator anchor (surviving-SHW runs).
+    assert_eq!(
+        ddf_run_start_hpos(AgnusRevision::Ocs, false, 0x0010),
+        0x0010
+    );
+
+    // The game's live taps around the old boundary: $FFFF (63), $DD55 (53),
+    // $EE22 (50), $AAFF (47) all render linearly.
+    for (bplcon1, tap) in [(0xFFFF, 63), (0xDD55, 53), (0xEE22, 50), (0xAAFF, 47)] {
+        assert_eq!(
+            control(0x0010, bplcon1).row_reload_advance(),
+            0,
+            "{bplcon1:04X}"
+        );
+        assert_eq!(
+            control(0x0010, bplcon1).sample_delay_for_plane(0),
+            tap,
+            "{bplcon1:04X}"
+        );
+    }
+    // Every sub-$18 start shares the $18 run's (unfolded) map.
+    for ddfstrt in [0x0010, 0x0012, 0x0014, 0x0016] {
+        for bplcon1 in [0xCC00, 0xCC44, 0xCC88, 0xCCCC, 0xCCFF] {
+            assert_eq!(
+                control(ddfstrt, bplcon1).row_reload_advance(),
+                control(0x0018, bplcon1).row_reload_advance(),
+                "DDFSTRT {ddfstrt:02X} BPLCON1 {bplcon1:04X}"
+            );
+            assert_eq!(control(ddfstrt, bplcon1).row_reload_advance(), 0);
+        }
+    }
+    // An in-window start on the same phase-16 grid position still folds.
+    assert_eq!(control(0x0050, 0xCC00).row_reload_advance(), 64);
+}
+
+#[test]
 fn aga_bplcon1_decodes_expanded_scroll_fields() {
     let control = ControlState {
         agnus_revision: AgnusRevision::AgaAlice,

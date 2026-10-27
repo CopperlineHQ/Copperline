@@ -4983,6 +4983,9 @@ impl CpuBus {
         }
         let nmi = self.bus.cartridge_nmi_pending();
         let master_enabled = self.bus.paula.intena & INT_MASTER != 0;
+        if master_enabled && self.bus.cia_irq_forwarding_due() {
+            self.flush_timed_devices_dcache_coherent();
+        }
         let qualified_lead = if self.m68000_ipl_poll { 2 } else { 0 };
         let operand_lead = if self.m68000_ipl_poll { 4 } else { 0 };
         self.sampled_irq_level = if nmi {
@@ -6109,11 +6112,14 @@ mod tests {
             Ok((l2, l6, fnv1a(&bytes), bytes))
         }
 
-        // Frozen from the working unqualified CIA-poll baseline; these are
-        // not hardware goldens. Phases 11 and 12 are the measured production-
-        // qualification regression cases; the full sweep pins neighboring
-        // phases and their boundary.
+        // Software snapshots with the phase-aware CIA output/Paula input
+        // pipeline; these are not hardware goldens. The electrical/readback
+        // acceptance lives in amiga-hardware-probes' cia-recognition and
+        // cia-request references. Phases 0 and 11..15 change from the former
+        // immediate INTREQ/no-lead model; retain exact samples and boundaries
+        // as regression guards alongside the independent Voyage loader smoke.
         let expected: [(u16, u16, u64); 16] = [
+            (1, 2, 12_979_002_978_527_788_998),
             (1, 2, 15_119_320_034_064_197_141),
             (1, 2, 15_119_320_034_064_197_141),
             (1, 2, 15_119_320_034_064_197_141),
@@ -6125,24 +6131,25 @@ mod tests {
             (1, 2, 15_119_320_034_064_197_141),
             (1, 2, 15_119_320_034_064_197_141),
             (1, 2, 15_119_320_034_064_197_141),
-            (1, 2, 15_419_993_572_040_101_253),
-            (1, 2, 15_419_993_572_040_101_253),
-            (1, 2, 15_419_993_572_040_101_253),
-            (1, 2, 15_419_993_572_040_101_253),
-            (1, 2, 15_419_993_572_040_101_253),
+            (1, 2, 15_119_320_034_064_197_141),
+            (1, 2, 15_276_924_133_496_768_066),
+            (1, 2, 15_276_924_133_496_768_066),
+            (1, 2, 15_276_924_133_496_768_066),
         ];
+        let mut observed = Vec::new();
         for phase in 0..16 {
             let result = run_phase(phase)?;
-            assert_eq!(
-                (result.0, result.1, result.2),
-                expected[phase as usize],
-                "phase {phase}: CIA IRQ/MOVEM sample differs from frozen baseline"
-            );
-            if phase == 0 || phase == 7 || phase == 15 {
+            observed.push((result.0, result.1, result.2));
+            if [0, 7, 11, 12, 15].contains(&phase) {
                 let repeated = run_phase(phase)?;
                 assert_eq!(result, repeated, "phase {phase} must replay byte-for-byte");
             }
         }
+        assert_eq!(
+            observed.as_slice(),
+            expected.as_slice(),
+            "CIA IRQ/MOVEM sample differs from frozen software baseline"
+        );
         Ok(())
     }
 
@@ -7151,6 +7158,32 @@ mod tests {
         assert_eq!(bus.read_byte(addr + 1), 0x3C);
         assert_eq!(bus.read_word(addr), 0xA53C);
         assert_eq!(bus.read_long(addr), 0xA53C_A53C);
+    }
+
+    #[test]
+    fn ipl_poll_applies_a_due_cia_input_without_advancing_time() {
+        let mut bus = test_bus(reset_rom(0, 0));
+        bus.irq_latency_setting = 6;
+        bus.paula.intena = INT_MASTER | INT_PORTS;
+        bus.cia_a.write(REG_TALO, 0);
+        bus.cia_a.write(REG_TAHI, 0);
+        bus.cia_a.write(REG_ICR, 0x81);
+        bus.cia_a.write(REG_CRA, 0x09);
+        bus.advance_devices(20);
+        bus.set_cpu_bus_arbitration_enabled(true);
+        bus.sync_cpu_internal_clocks(2);
+        assert_eq!(bus.emulated_cck(), 21);
+        assert_eq!(bus.paula.intreq & INT_PORTS, 0);
+        assert!(bus.cia_irq_forwarding_due());
+
+        let mut cpu = cpu_bus(bus);
+        cpu.m68000_ipl_poll = true;
+        cpu.sample_ipl();
+        assert_eq!(cpu.bus.emulated_cck(), 21);
+        assert_ne!(cpu.bus.paula.intreq & INT_PORTS, 0);
+        assert_eq!(cpu.sampled_operand_irq_level, 2);
+        assert_eq!(cpu.sampled_irq_level, 0);
+        assert!(!cpu.bus.cia_irq_forwarding_due());
     }
 
     fn cpu_bus(bus: Bus) -> CpuBus {
@@ -10174,7 +10207,9 @@ mod tests {
         write_program(&mut bus, 0x0000_0200, &[0x7055]); // MOVEQ #$55,D0
         set_autovector(&mut bus, 2, 0x0000_0200);
         bus.paula.intena = INT_MASTER | INT_PORTS;
-        let _ = bus.cia_a.write(REG_TALO, 1);
+        // Let the explicit CIA-output/Paula-input stages complete inside
+        // MOVE.L. This fixture tests the slice barrier, not propagation.
+        let _ = bus.cia_a.write(REG_TALO, 0);
         let _ = bus.cia_a.write(REG_TAHI, 0);
         let _ = bus.cia_a.write(REG_ICR, 0x80 | 0x01);
         let _ = bus.cia_a.write(REG_CRA, 0x11);

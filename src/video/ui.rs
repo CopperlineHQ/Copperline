@@ -2833,7 +2833,7 @@ fn draw_drop_chooser(
 /// Full-display hint drawn while files hover over the window in a drag.
 /// Not a Panel: it must not gate input, and winit reports no positions
 /// during a file drag, so it can only announce that a drop will land.
-pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
+pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) -> u8 {
     fill_rect_blend(
         frame,
         scale_rect(
@@ -2854,6 +2854,7 @@ pub fn draw_drop_hint(frame: &mut [u8], texture_scale: usize) {
     let x = FB_WIDTH.saturating_sub(text.len() * 8 * px) / 2;
     let y = present_height() / 2 - 8;
     draw_panel_text(frame, x, y, text, PANEL_TEXT_HILIGHT, px, texture_scale);
+    1
 }
 
 /// Vertical pitch of a shortcut row. The panel is sized from this and the
@@ -5855,19 +5856,24 @@ pub fn draw_panel_layer(
 
 /// Draw the whole UI layer: pop-up menu and/or the open panel. Drawn after
 /// the status bar and OSD so it sits on top of everything.
+/// Returns the number of display scrims painted for the RTG backdrop.
 pub fn draw(
     frame: &mut [u8],
     texture_scale: usize,
     ui: &UiState,
     hover: Option<UiControl>,
     data: Option<&PanelViewData>,
-) {
+) -> u8 {
+    let mut scrims = 0;
     if let Some(panel) = &ui.panel {
         draw_panel_layer(frame, texture_scale, panel, hover, data);
+        scrims += 1;
     }
     if ui.menu_open {
         draw_menu(frame, &ui.menu_rows, &ui.menu_nav, texture_scale);
+        scrims += 1;
     }
+    scrims
 }
 
 // ---------------------------------------------------------------------------
@@ -5877,6 +5883,16 @@ pub fn draw(
 /// The menu's own ground: the status bar's colour, since the menu is
 /// the bar's.
 const MENU_BG: u32 = super::window::STATUS_BG;
+
+/// Backdrop outside the fitted UI canvas: extend its actually drawn scrims
+/// across the board without stretching menu or panel geometry.
+pub(in crate::video) fn scrim_pixel(count: u8) -> u32 {
+    let mut alpha = 0.0f32;
+    for _ in 0..count {
+        alpha = (SCRIM_ALPHA * 255.0 + alpha * (1.0 - SCRIM_ALPHA)).round();
+    }
+    (SCRIM & 0x00FF_FFFF) | ((alpha as u32) << 24)
+}
 
 /// The open menu wears the same veil as every other overlay.
 const MENU_VEIL: u32 = SCRIM;

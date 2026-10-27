@@ -39,6 +39,13 @@ pub struct Cia {
     /// Clock-source and one-shot controls reach counting after two PHI2 edges.
     #[serde(default)]
     ta_control_pipe: Option<[u8; 2]>,
+    /// A zero OLD counter can carry before an automatic TAHI reload commits.
+    /// This carry does not stop the newly armed one-shot (A500 kind133).
+    #[serde(default)]
+    ta_auto_zero_carry_pending: bool,
+    #[serde(default)]
+    ta_auto_reload_pending: bool,
+
     // Timer B
     pub tb_count: u16,
     pub tb_latch: u16,
@@ -51,6 +58,12 @@ pub struct Cia {
     tb_enable_pipe: Option<u8>,
     #[serde(default)]
     tb_control_pipe: Option<[u8; 2]>,
+    /// Preserve the old-counter carry across a one-shot TBHI reload,
+    /// independently of the newly loaded counter (A500 CIA-B pin captures).
+    #[serde(default)]
+    tb_auto_zero_carry_pending: bool,
+    #[serde(default)]
+    tb_auto_reload_pending: bool,
     /// Timer-A underflows reach timer B one PHI2 edge later.
     #[serde(default)]
     tb_ta_pending_underflows: u32,
@@ -59,7 +72,8 @@ pub struct Cia {
     ///   bit 0 TA, 1 TB, 2 ALRM, 3 SP, 4 FLG, 7 IR
     /// Reading ICR returns this and then clears all bits (including IR).
     icr_data: u8,
-    /// The external /IRQ pin. Timer underflows drive it in the SAME
+    /// Clock-grid /IRQ state. The bus forwards its sub-E output phase
+    /// separately. Timer underflows assert this in the SAME
     /// E-cycle as the underflow; TOD/FLAG/serial latches and ICR mask
     /// writes lag one E-cycle (the 6526-family interrupt delay, vAmiga
     /// CIASetInt1 vs CIASetInt0). `irq_pin_delay_eticks` counts down
@@ -68,6 +82,10 @@ pub struct Cia {
     irq_pin: bool,
     #[serde(default)]
     irq_pin_delay_eticks: u8,
+    /// Delayed/raced requests reach the output at the rising PHI2 edge;
+    /// ordinary timer requests reach it at the following falling edge.
+    #[serde(default)]
+    irq_pin_rising_phase: bool,
     /// An ICR read is in flight in the current E-cycle: a timer
     /// underflow racing it asserts the pin one E-cycle late instead of
     /// in the same cycle (vAmiga CIAReadIcr0 gating triggerTimerIrq).
@@ -221,7 +239,11 @@ impl Cia {
             ta_enable_pipe: None,
             tb_enable_pipe: None,
             ta_control_pipe: None,
+            ta_auto_zero_carry_pending: false,
+            ta_auto_reload_pending: false,
             tb_control_pipe: None,
+            tb_auto_zero_carry_pending: false,
+            tb_auto_reload_pending: false,
             tb_ta_pending_underflows: 0,
             which,
             regs,
@@ -238,6 +260,7 @@ impl Cia {
             icr_data: 0,
             irq_pin: false,
             irq_pin_delay_eticks: 0,
+            irq_pin_rising_phase: false,
             icr_read_race: false,
             icr_mask: 0,
             sdr: 0,
@@ -293,8 +316,12 @@ impl Cia {
     /// Earliest timer, delayed serial flag, or external IRQ-pin event.
     /// STOP must observe flag completion even when the next timer edge is later.
     pub fn next_event_ticks(&self) -> Option<u32> {
-        self.next_underflow_ticks()
+        let underflow = self.next_underflow_ticks();
+        let pb = (self.regs[REG_CRA] | self.regs[REG_CRB]) & CR_PBON != 0;
+        underflow
             .into_iter()
+            .chain(underflow.filter(|_| pb).map(|n| n.saturating_sub(1).max(1)))
+            .chain((self.ta_pb_pulse_high || self.tb_pb_pulse_high).then_some(1))
             .chain(
                 (self.sdr_output_flag_delay != 0).then_some(u32::from(self.sdr_output_flag_delay)),
             )
@@ -303,6 +330,44 @@ impl Cia {
     }
 
     pub fn next_underflow_ticks(&self) -> Option<u32> {
+        if self.ta_auto_reload_pending || self.tb_auto_reload_pending {
+            // Only the three automatic-load edges need this short simulation.
+            // A carry of the old zero is earlier than the new latch deadline;
+            // a new zero loaded over a nonzero counter carries after reload.
+            let mut probe = self.clone();
+            for edge in 1..=3 {
+                let ta_carry = probe.ta_running
+                    && probe.ta_start_delay == 1
+                    && probe.ta_auto_zero_carry_pending
+                    && Self::enable_pipe(true, probe.ta_start_delay, probe.ta_enable_pipe) & 2 != 0
+                    && probe.effective_ta_control() & 0x20 == 0;
+                let tb_auto_carry = probe.tb_auto_reload_pending
+                    && probe.tb_running
+                    && probe.tb_start_delay == 1
+                    && probe.tb_auto_zero_carry_pending
+                    && Self::enable_pipe(true, probe.tb_start_delay, probe.tb_enable_pipe) & 2 != 0;
+                let tb_carry = probe.tb_pending_underflow_next_edge()
+                    || (TimerBInputMode::from_crb(probe.effective_tb_control())
+                        == TimerBInputMode::Phi2
+                        && if probe.tb_auto_reload_pending {
+                            tb_auto_carry
+                        } else {
+                            Self::timer_deadline(
+                                probe.tb_count,
+                                probe.tb_running,
+                                probe.tb_start_delay,
+                                probe.tb_enable_pipe,
+                            ) == Some(1)
+                        });
+                if ta_carry || tb_carry {
+                    return Some(edge);
+                }
+                probe.tick(1);
+                if !probe.ta_auto_reload_pending && !probe.tb_auto_reload_pending {
+                    return probe.next_underflow_ticks().map(|n| n + edge);
+                }
+            }
+        }
         if self.tb_pending_underflow_next_edge() {
             return Some(1);
         }
@@ -845,9 +910,12 @@ impl Cia {
                     // poll-on-ICR loop would burn through a full
                     // default slice before our CIA tick advances the
                     // timer.
+                    let old_zero = self.ta_count == 0;
                     self.ta_count = self.ta_latch;
                     if self.ta_oneshot {
                         self.ta_pb_output_high = true;
+                        self.ta_auto_zero_carry_pending = old_zero;
+                        self.ta_auto_reload_pending = true;
                         self.ta_enable_pipe = Some(Self::enable_pipe(
                             self.ta_running,
                             self.ta_start_delay,
@@ -873,9 +941,12 @@ impl Cia {
             REG_TBHI => {
                 self.tb_latch = (self.tb_latch & 0x00FF) | ((val as u16) << 8);
                 if !self.tb_running {
+                    let old_zero = self.tb_count == 0;
                     self.tb_count = self.tb_latch;
                     if self.tb_oneshot {
                         self.tb_pb_output_high = true;
+                        self.tb_auto_zero_carry_pending = old_zero;
+                        self.tb_auto_reload_pending = true;
                         self.tb_enable_pipe = Some(Self::enable_pipe(
                             self.tb_running,
                             self.tb_start_delay,
@@ -952,6 +1023,8 @@ impl Cia {
                 let _ = self.tod_check_alarm();
             }
             REG_CRA => {
+                self.ta_auto_zero_carry_pending = false;
+                self.ta_auto_reload_pending = false;
                 self.ta_control_pipe =
                     Some(self.ta_control_pipe.unwrap_or([self.ta_count_control(); 2]));
                 let prev_run = self.ta_running;
@@ -986,6 +1059,8 @@ impl Cia {
                 }
             }
             REG_CRB => {
+                self.tb_auto_zero_carry_pending = false;
+                self.tb_auto_reload_pending = false;
                 self.tb_control_pipe =
                     Some(self.tb_control_pipe.unwrap_or([self.tb_count_control(); 2]));
                 let prev_run = self.tb_running;
@@ -1062,10 +1137,10 @@ impl Cia {
     }
 
     /// Advance both timers by `ticks` (CIA PHI2 cycles = CPU/10).
-    /// Returns true if the external /IRQ pin asserted during this span,
+    /// Returns true if the clock-grid /IRQ state asserted during this span,
     /// either from a masked-in timer underflow (same E-cycle) or from a
     /// delayed source (TOD/FLAG/serial/mask write) whose one-E-cycle
-    /// lag drains here.
+    /// lag drains here. The bus forwards the sub-E output phase separately.
     pub fn tick(&mut self, ticks: u32) -> bool {
         // Zero E-clock ticks advance nothing: timer A needs ticks > 0, the
         // SDR shifter and timer B only move on timer-A underflows (or CNT,
@@ -1095,7 +1170,8 @@ impl Cia {
                     || self.sdr_output_flag_delay != 0
                     || self.ta_pb_pulse_high
                     || self.tb_pb_pulse_high
-                    || self.tb_ta_pending_underflows != 0;
+                    || self.tb_ta_pending_underflows != 0
+                    || self.tb_auto_reload_pending;
                 let span = if transient {
                     1
                 } else {
@@ -1122,10 +1198,32 @@ impl Cia {
         Self::clock_control_pipe(&mut self.tb_control_pipe, tb_current_control);
         let ta_ready = ta_pipe & 2 != 0 && self.ta_start_delay == 0;
         let tb_ready = tb_pipe & 2 != 0 && self.tb_start_delay == 0;
-        let ta_zero_load_carry =
-            self.ta_running && ta_pipe & 2 != 0 && self.ta_start_delay == 1 && self.ta_count == 0;
-        let tb_zero_load_carry =
-            self.tb_running && tb_pipe & 2 != 0 && self.tb_start_delay == 1 && self.tb_count == 0;
+        let ta_load_slot = self.ta_running && ta_pipe & 2 != 0 && self.ta_start_delay == 1;
+        let ta_auto_load_carry =
+            ta_load_slot && self.ta_auto_reload_pending && self.ta_auto_zero_carry_pending;
+        let ta_zero_load_carry = ta_load_slot
+            && if self.ta_auto_reload_pending {
+                self.ta_auto_zero_carry_pending
+            } else {
+                self.ta_count == 0
+            };
+        if ta_load_slot {
+            self.ta_auto_reload_pending = false;
+            self.ta_auto_zero_carry_pending = false;
+        }
+        let tb_load_slot = self.tb_running && tb_pipe & 2 != 0 && self.tb_start_delay == 1;
+        let tb_auto_load_carry =
+            tb_load_slot && self.tb_auto_reload_pending && self.tb_auto_zero_carry_pending;
+        let tb_zero_load_carry = tb_load_slot
+            && if self.tb_auto_reload_pending {
+                self.tb_auto_zero_carry_pending
+            } else {
+                self.tb_count == 0
+            };
+        if tb_load_slot {
+            self.tb_auto_reload_pending = false;
+            self.tb_auto_zero_carry_pending = false;
+        }
         self.ta_enable_pipe = Some(((ta_pipe << 1) | u8::from(self.ta_running)) & 3);
         self.tb_enable_pipe = Some(((tb_pipe << 1) | u8::from(self.tb_running)) & 3);
         self.ta_start_delay = self.ta_start_delay.saturating_sub(1);
@@ -1163,13 +1261,10 @@ impl Cia {
             ta_last_edge_underflow =
                 ta_underflows != 0 && input_ticks == ticks && self.ta_count == self.ta_latch;
             timer_mask |= u8::from(ta_underflows != 0) * ICR_TA;
-            if timer_mask & ICR_TA != 0 && ta_control & 8 != 0 {
+            if timer_mask & ICR_TA != 0 && ta_control & 8 != 0 && !ta_auto_load_carry {
                 self.ta_running = false;
                 self.ta_enable_pipe = Some(0);
                 self.regs[REG_CRA] &= !0x01;
-            }
-            if timer_mask & ICR_TA != 0 {
-                self.update_pb_output(REG_CRA, true, ta_previous_pulse);
             }
         }
         self.arm_sdr_output_flag(ta_underflows);
@@ -1206,14 +1301,25 @@ impl Cia {
                 advance(&mut self.tb_count, self.tb_latch, input_ticks)
             };
             timer_mask |= u8::from(tb_underflows != 0) * ICR_TB;
-            if timer_mask & ICR_TB != 0 && tb_control & 8 != 0 {
+            if timer_mask & ICR_TB != 0 && tb_control & 8 != 0 && !tb_auto_load_carry {
                 self.tb_running = false;
                 self.tb_enable_pipe = Some(0);
                 self.regs[REG_CRB] &= !0x01;
             }
-            if timer_mask & ICR_TB != 0 {
+            if timer_mask & ICR_TB != 0
+                && TimerBInputMode::from_crb(tb_control) != TimerBInputMode::Phi2
+            {
                 self.update_pb_output(REG_CRB, false, tb_previous_pulse);
             }
+        }
+        // PHI2 PB output precedes the flag/counter underflow stage by one E.
+        // Consecutive old-counter carry and new-zero events merge into a
+        // longer pulse. PRB reads observe these same pins, with no preview.
+        if self.regs[REG_CRA] & CR_PBON != 0 && self.ta_pb_event_next_edge() {
+            self.update_pb_output(REG_CRA, true, ta_previous_pulse);
+        }
+        if self.regs[REG_CRB] & CR_PBON != 0 && self.tb_pb_event_next_edge() {
+            self.update_pb_output(REG_CRB, false, tb_previous_pulse);
         }
         // Timer underflows drive the pin in the same E-cycle; serial
         // completion is a delayed source.
@@ -1228,12 +1334,23 @@ impl Cia {
     }
 
     /// Return the one-based E-clock tick on which `/IRQ` first asserts during
-    /// a future batch, without changing the live CIA. Detailed bus tracing
-    /// uses this diagnostic probe to place the edge on the correct raster slot
-    /// while retaining the emulator's ordinary batched device update.
+    /// a future batch, without changing the live CIA. Bus input deadlines and
+    /// detailed tracing use this probe to retain the original event time while
+    /// preserving the ordinary batched device update.
     pub(crate) fn first_irq_edge_tick_within(&self, ticks: u32) -> Option<u32> {
+        // Polling-only timers must not turn a long STOP advance into a
+        // per-E-clock prediction loop when no source can assert the output.
+        if !self.irq_edge_prediction_needed() {
+            return None;
+        }
         let mut probe = self.clone();
         (1..=ticks).find(|_| probe.tick(1))
+    }
+
+    /// Avoid timer prediction for polling-only CIAs, but retain an output
+    /// assertion already armed before its interrupt mask was cleared.
+    pub(crate) fn irq_edge_prediction_needed(&self) -> bool {
+        self.icr_mask & 0x1f != 0 || self.irq_pin_delay_eticks != 0
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1407,6 +1524,7 @@ impl Cia {
             return false;
         }
         self.irq_pin = true;
+        self.irq_pin_rising_phase = false;
         self.irq_pin_delay_eticks = 0;
         true
     }
@@ -1431,6 +1549,7 @@ impl Cia {
             // window; the pin only rises if it still holds.
             if self.icr_data & ICR_IR != 0 {
                 self.irq_pin = true;
+                self.irq_pin_rising_phase = true;
                 return true;
             }
         } else {
@@ -1441,6 +1560,17 @@ impl Cia {
 
     pub fn irq_line_asserted(&self) -> bool {
         self.irq_pin
+    }
+
+    /// Output phase relative to the bus divider's rising-edge event. The
+    /// internal ICR latch remains on the E-clock grid; this sub-E stage is
+    /// forwarded by the bus rather than delaying timer readback.
+    pub(crate) fn irq_output_delay_cck(&self) -> u32 {
+        if self.irq_pin_rising_phase {
+            0
+        } else {
+            2
+        }
     }
 
     /// Test-harness stand-in for the E-clock passing: settle a pending
@@ -1484,6 +1614,38 @@ impl Cia {
 
     fn update_timer_b_pb_output(&mut self) {
         self.update_pb_output(REG_CRB, false, false);
+    }
+
+    fn ta_pb_event_next_edge(&self) -> bool {
+        if self.effective_ta_control() & 0x20 != 0 {
+            return false;
+        }
+        let pipe = Self::enable_pipe(self.ta_running, self.ta_start_delay, self.ta_enable_pipe);
+        let regular = pipe & 2 != 0 && self.ta_start_delay == 0 && self.ta_count == 0;
+        let load = self.ta_running && pipe & 2 != 0 && self.ta_start_delay == 1;
+        let carry = load
+            && if self.ta_auto_reload_pending {
+                self.ta_auto_zero_carry_pending
+            } else {
+                self.ta_count == 0
+            };
+        regular || carry
+    }
+
+    fn tb_pb_event_next_edge(&self) -> bool {
+        if TimerBInputMode::from_crb(self.effective_tb_control()) != TimerBInputMode::Phi2 {
+            return false;
+        }
+        let pipe = Self::enable_pipe(self.tb_running, self.tb_start_delay, self.tb_enable_pipe);
+        let regular = pipe & 2 != 0 && self.tb_start_delay == 0 && self.tb_count == 0;
+        let load = self.tb_running && pipe & 2 != 0 && self.tb_start_delay == 1;
+        let carry = load
+            && if self.tb_auto_reload_pending {
+                self.tb_auto_zero_carry_pending
+            } else {
+                self.tb_count == 0
+            };
+        regular || carry
     }
 
     fn update_pb_output(&mut self, control_reg: usize, timer_a: bool, previous_pulse: bool) {
@@ -1593,6 +1755,61 @@ pub fn reg_from_addr(addr: u64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn irq_prediction_skips_masked_timers_but_retains_armed_output() {
+        let mut cia = Cia::new(Which::A);
+        cia.write(REG_TALO, 0);
+        cia.write(REG_TAHI, 0);
+        cia.write(REG_CRA, 0x11);
+        cia.tick(8);
+        assert!(!cia.irq_edge_prediction_needed());
+        assert_eq!(cia.first_irq_edge_tick_within(8), None);
+        cia.write(REG_ICR, 0x81); // Enable a pending source: delayed assertion.
+        assert!(cia.irq_edge_prediction_needed());
+        cia.write(REG_ICR, 0x01); // Masking does not acknowledge the latched IRQ.
+        assert_eq!(cia.icr_mask & 0x1f, 0);
+        assert!(cia.irq_edge_prediction_needed());
+        assert_eq!(cia.first_irq_edge_tick_within(1), Some(1));
+        assert!(
+            !cia.irq_line_asserted(),
+            "prediction must not mutate the CIA"
+        );
+    }
+
+    #[test]
+    fn physical_pb_output_precedes_irq_and_transfer_reads_observe_pins() {
+        for which in [Which::A, Which::B] {
+            for (lo, control, mask, bit) in [
+                (REG_TALO, REG_CRA, ICR_TA, 0x40),
+                (REG_TBLO, REG_CRB, ICR_TB, 0x80),
+            ] {
+                for latch in [0, 1, 3, 15] {
+                    let mut cia = Cia::new(which);
+                    cia.write(lo, latch);
+                    cia.write(lo + 1, 0);
+                    cia.write(REG_ICR, 0x80 | mask);
+                    cia.write(control, CR_PBON | CR_OUTMODE | 0x19);
+                    let mut pb_edge = None;
+                    let mut irq_edge = None;
+                    for edge in 1..=32 {
+                        cia.tick(1);
+                        if cia.port_b_pins() & bit == 0 && pb_edge.is_none() {
+                            pb_edge = Some(edge);
+                            assert_eq!(cia.debug_icr_data() & mask, 0);
+                        }
+                        if cia.irq_line_asserted() && irq_edge.is_none() {
+                            irq_edge = Some(edge);
+                        }
+                        let pins = cia.port_b_pins();
+                        assert_eq!(cia.read_at_transfer(REG_PRB) & bit, pins & bit);
+                        assert!(cia.take_pc_pulse());
+                    }
+                    assert_eq!(irq_edge, pb_edge.map(|edge| edge + 1));
+                }
+            }
+        }
+    }
 
     #[test]
     fn live_zero_count_reads_reload_data_without_changing_counter() {
@@ -2323,6 +2540,23 @@ mod tests {
         assert!(!cia.irq_line_asserted());
         assert!(cia.tick(1), "the assert lands one E-cycle later");
         assert!(cia.irq_line_asserted());
+        assert_eq!(
+            cia.irq_output_delay_cck(),
+            0,
+            "raced output uses rising phase"
+        );
+    }
+
+    #[test]
+    fn ordinary_timer_output_uses_falling_phase_without_delaying_icr() {
+        let mut cia = Cia::new(Which::B);
+        cia.write(REG_ICR, 0x81);
+        cia.write(REG_TALO, 0);
+        cia.write(REG_TAHI, 0);
+        cia.write(REG_CRA, 0x09);
+        assert!(cia.tick(3));
+        assert_eq!(cia.irq_output_delay_cck(), 2);
+        assert_eq!(cia.read(REG_ICR) & 0x81, 0x81);
     }
 
     #[test]
@@ -2480,8 +2714,7 @@ mod tests {
                     cia.write(control, CR_PBON | 0x09);
                     assert_eq!(cia.port_b_pins() & bit, 0, "pulse idle is low");
                     cia.tick(2);
-                    cia.tick(1);
-                    assert_ne!(cia.port_b_pins() & bit, 0, "underflow pulse is high");
+                    assert_ne!(cia.port_b_pins() & bit, 0, "PB precedes the flag stage");
                     cia.tick(1);
                     assert_eq!(cia.port_b_pins() & bit, 0, "one-shot pulse expires");
                 }
@@ -2564,6 +2797,72 @@ mod tests {
     }
 
     #[test]
+    fn high_byte_autostart_carry_uses_old_counter_not_new_latch() {
+        for which in [Which::A, Which::B] {
+            for (old, latch) in [0, 1, 3, 15]
+                .into_iter()
+                .flat_map(|old| [0, 1, 3, 15].map(|latch| (old, latch)))
+            {
+                let mut cia = Cia::new(which);
+                cia.write(REG_TALO, old);
+                cia.write(REG_TAHI, 0);
+                cia.write(REG_TBLO, 0xff);
+                cia.write(REG_TBHI, 0xff);
+                cia.write(REG_CRB, 0x51);
+                cia.tick(4);
+                cia.write(REG_CRA, CR_PBON | CR_OUTMODE | 8);
+                cia.write(REG_TALO, latch);
+                cia.write(REG_TAHI, 0);
+                let saved = serde_json::to_vec(&cia).unwrap();
+                let mut restored: Cia = serde_json::from_slice(&saved).unwrap();
+                cia.tick(40);
+                for _ in 0..40 {
+                    restored.tick(1);
+                }
+                let expected = if old == 0 { 2 } else { 1 };
+                assert_eq!(0xffff - cia.tb_count, expected);
+                assert!(!cia.ta_running);
+                // Adjacent zero carries merge; a nonzero reload separates
+                // the two output edges and therefore toggles twice.
+                assert_eq!(
+                    cia.port_b_pins() & 0x40,
+                    if old == 0 && latch != 0 { 0x40 } else { 0 }
+                );
+                assert_eq!(
+                    serde_json::to_value(&cia).unwrap(),
+                    serde_json::to_value(&restored).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn autostart_deadline_tracks_old_carry_and_new_count_separately() {
+        for (old, latch, first) in [(0, 15, 3), (1, 0, 4)] {
+            let mut cia = Cia::new(Which::A);
+            cia.write(REG_TALO, old);
+            cia.write(REG_TAHI, 0);
+            cia.write(REG_CRA, 8);
+            cia.tick(4);
+            cia.write(REG_TALO, latch);
+            cia.write(REG_TAHI, 0);
+            assert_eq!(cia.next_underflow_ticks(), Some(first));
+            for remaining in (1..=first).rev() {
+                assert_eq!(cia.next_underflow_ticks(), Some(remaining));
+                cia.tick(1);
+            }
+            assert_eq!(cia.read(REG_ICR) & ICR_TA, ICR_TA);
+            if old == 0 {
+                assert!(cia.ta_running);
+                assert_eq!(cia.next_underflow_ticks(), Some(16));
+                cia.tick(16);
+                assert_eq!(cia.read(REG_ICR) & ICR_TA, ICR_TA);
+            }
+            assert!(!cia.ta_running);
+        }
+    }
+
+    #[test]
     fn timer_a_toggle_output_overrides_pb6_pin() {
         let mut cia = Cia::new(Which::A);
         cia.write(REG_DDRB, 0x00);
@@ -2571,8 +2870,7 @@ mod tests {
         cia.write(REG_TAHI, 0);
         cia.write(REG_CRA, CR_PBON | CR_OUTMODE | 0x01);
         cia.tick(2);
-
-        assert_ne!(cia.read(REG_PRB) & 0x40, 0);
+        assert_eq!(cia.read(REG_PRB) & 0x40, 0);
         cia.tick(1);
         assert_eq!(cia.read(REG_PRB) & 0x40, 0);
         cia.tick(1);
@@ -2584,6 +2882,48 @@ mod tests {
     }
 
     #[test]
+    fn timer_b_autostart_preserves_old_zero_carry_and_new_deadline() {
+        // A500 CIA-B old0/new0 asserts one E-clock before old3/new0.
+        // The old carry does not stop the newly loaded one-shot.
+        for which in [Which::A, Which::B] {
+            for (old, latch, first) in [(0, 0, 3), (3, 0, 4), (0, 3, 3), (3, 3, 7)] {
+                let mut cia = Cia::new(which);
+                cia.write(REG_TBLO, old);
+                cia.write(REG_TBHI, 0);
+                cia.write(REG_CRB, 8);
+                cia.tick(4);
+                cia.write(REG_TBLO, latch);
+                cia.write(REG_TBHI, 0);
+                let mut restored: Cia =
+                    serde_json::from_slice(&serde_json::to_vec(&cia).unwrap()).unwrap();
+                assert_eq!(cia.next_underflow_ticks(), Some(first));
+                for remaining in (1..=first).rev() {
+                    assert_eq!(cia.next_underflow_ticks(), Some(remaining));
+                    cia.tick(1);
+                }
+                assert_eq!(cia.read(REG_ICR) & ICR_TB, ICR_TB);
+                if old == 0 {
+                    assert!(cia.tb_running);
+                    assert_eq!(cia.next_underflow_ticks(), Some(u32::from(latch) + 1));
+                    cia.tick(u32::from(latch) + 1);
+                    assert_eq!(cia.read(REG_ICR) & ICR_TB, ICR_TB);
+                }
+                assert!(!cia.tb_running);
+                for _ in 0..40 {
+                    restored.tick(1);
+                }
+                cia.tick(40 - first - if old == 0 { u32::from(latch) + 1 } else { 0 });
+                let _ = restored.read(REG_ICR);
+                let _ = cia.read(REG_ICR);
+                assert_eq!(
+                    serde_json::to_value(&cia).unwrap(),
+                    serde_json::to_value(&restored).unwrap()
+                );
+            }
+        }
+    }
+
+    #[test]
     fn timer_b_pulse_output_overrides_pb7_pin_once() {
         let mut cia = Cia::new(Which::A);
         cia.write(REG_DDRB, 0x00);
@@ -2591,8 +2931,6 @@ mod tests {
         cia.write(REG_TBHI, 0);
         cia.write(REG_CRB, CR_PBON | 0x08 | 0x01); // one-shot pulse
         cia.tick(2);
-
-        cia.tick(1);
         assert_ne!(cia.read(REG_PRB) & 0x80, 0);
         assert_ne!(
             cia.read(REG_PRB) & 0x80,

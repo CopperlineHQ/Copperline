@@ -407,6 +407,11 @@ probe_tests! {
     // class, issue #371), and an on-grid start folds from the pipeline
     // alone; FS-UAE-verified band by band.
     golden_ddfprobe_agafold2 => probe_aga("ddfprobe-agafold2", "ddfprobe-agafold2.bin", 16.0);
+    // A DDFSTRT below the hardwired $18 start only latches BPHSTART on
+    // Alice; the run starts at SHW $18, so the fold phase is the $18 one and
+    // every tap renders linearly (the Skeleton Krew CD32 scroll-jump
+    // regression class, issue #836); vAmiga-verified band by band.
+    golden_ddfprobe_agafold3 => probe_aga("ddfprobe-agafold3", "ddfprobe-agafold3.bin", 16.0);
     // Wide-FMODE's absolute gulp grid remains linear below the standard
     // fetch slots: lo-res BPL64 $18/$B8 hides its whole first 64-px gulp
     // left of a standard DIW and presents the remaining 320 px edge to edge;
@@ -490,6 +495,10 @@ probe_tests! {
     // Raw startup/BBUSY/BZERO and descending destination-restore snapshots.
     golden_a500_blit_boundaries => probe("a500-blit-boundaries", "a500-blit-boundaries.bin", 16.0);
     golden_a500_display_boundaries => probe_ecs("a500-display-boundaries", "a500-display-boundaries.bin", 16.0);
+    // Both CIA timer-A outputs, raw INTREQR, PRB and ICR across instruction
+    // gaps. Model regression snapshot; electrical evidence and phase limits
+    // are documented separately in internals/timing.md.
+    golden_a500_cia_request => probe_ecs("a500-cia-request", "a500-cia-request.bin", 16.0);
     // AUD0 interrupt cadence strip across a scripted AUDxEN
     // enable/punch/disable/restart sequence (the issue #74 deferred
     // AUDxEN-disable regression class).
