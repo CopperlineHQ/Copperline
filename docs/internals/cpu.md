@@ -75,10 +75,16 @@ which is what makes cycle-budgeted pacing trustworthy. Instruction
 semantics are also checked against Toni Wilen's WinUAE cputest suites
 (every opcode of a CPU model, hundreds of register and memory states each,
 including exception stack frames): `crates/cputest-runner` drives the
-generated test sets against the published `m68k` core, and the nightly
-`cputest.yml` workflow runs the full 68000 suite
+generated test sets against the same `m68k` revision as the emulator,
+and the nightly `cputest.yml` workflow runs the full 68000 suite
 (`crates/cputest-runner/tools/cputest-gen.sh` generates the data for any
 model locally).
+
+The lockfile workflow also runs `python3 tools/check-m68k-locks.py`, which
+requires the root application, player, web, libretro and conformance runner to
+resolve the same m68k version and source. The core's own unit and native JIT
+suites run in the core repository's CI; Cargo does not run dependency unit
+tests as part of Copperline's suite.
 
 ## The batch/JIT execution mode
 
@@ -86,23 +92,30 @@ model locally).
 for the core's instruction-budgeted batch path
 (`CpuCore::run_batch`): hot straight-line runs and self-loops execute as
 compiled Cranelift traces (the `cpu-jit` cargo feature; without it, wasm
-builds included, the same trace machinery runs interpreted), and one
-fast-RAM bank is offered to the core as a zero-cost direct-memory window
-(`AddressBus::fast_mem`). The core takes a single window, so it follows
-the code (`CpuBus::jit_fast_mem`): the bank the batch starts executing
-in, else the bank it covered last (a call into ROM or an interrupt
-handler in chip RAM keeps its caller's bank, with the caller's stack and
-data), else the largest bank. A fixed choice can cover RAM nothing uses:
-Kickstart 3.2 on an A3000 lists the motherboard RAM it sizes itself at a
-higher allocation priority (30) than a Zorro III board (20), so with 16 MB
-on the motherboard and a 256 MB board, ExecBase, libraries and programs
-land in the smaller bank until it fills. The choice is emulated state, not
-only host speed: accesses through the window allocate no cache lines
-(below), while fast-RAM accesses outside it do and can evict chip-RAM
-lines, so the bank decides which chip fetches hit the cache models. It
-depends only on the PC and the previous choice, and save states carry it
-(`MachineRuntimeState`). ROM is never offered, since the window is
-writable. The timing contract is deliberately approximate
+builds included, the same trace machinery runs interpreted).
+
+Local memory reaches the core as direct-memory regions, read and written
+without a bus call. The primary window (`AddressBus::fast_mem`) is the
+fast-RAM bank the batch starts executing in, else the bank it covered last
+(a call into ROM or an interrupt handler in chip RAM keeps its caller's
+bank, with the caller's stack and data), else the largest bank. Following
+the code matters because the guest decides where things live: Kickstart
+3.2 on an A3000 gives the motherboard RAM it sizes itself a higher
+allocation priority (30) than a Zorro III board (20), so with 16 MB on the
+motherboard and a 256 MB board, ExecBase, libraries and programs land in
+the smaller bank first. Up to eight further regions
+(`AddressBus::fast_mem_regions`) cover read-only main and extended ROM and
+the other motherboard, accelerator and Zorro fast-RAM banks. Chip and slow
+RAM, the boot-time ROM overlay, WCS and device or cartridge mappings stay
+on the bus. A store or a whole read-modify-write instruction aimed at ROM,
+and an access that crosses a region boundary, falls back to the bus before
+the instruction changes any register. The mappings are captured afresh for
+each native batch and never serialized, but the primary bank choice is
+saved with the machine (`MachineRuntimeState::jit_window_bank`): with more
+banks fitted than the table holds it still decides which accesses allocate
+cache lines, so it is emulated state, not only host speed.
+
+The timing contract is deliberately approximate
 (`M68kMachine::step_slice_jit`):
 
 - every retired instruction is billed a flat single CPU clock, converted
@@ -116,10 +129,55 @@ writable. The timing contract is deliberately approximate
   normal `CpuBus` paths and advance the beam as they land (that bus is
   shared silicon), and CIA/RTC accesses keep their E-clock costs, keeping
   chipset side effects ordered against display DMA;
-- interrupts are recognized at batch boundaries (every 64 instructions),
-  from the live INTENA/INTREQ state; a level the boundary cannot deliver
-  is never left in the core, since the batch would take it as soon as the
-  mask drops without recomputing INTREQ (a spurious handler re-entry);
+- a batch of code in fast RAM or ROM runs at most 4096 instructions and
+  stops at the next hardware deadline: the next CIA timer or alarm, a
+  CIA interrupt reaching Paula's request input, Copper wake-up, blitter
+  completion or interrupt, audio, floppy, storage, serial, keyboard or pot
+  event, the end of the scanline, or a pending interrupt's recognition
+  latency, and in any case within 64 colour clocks, which bounds
+  host-driven devices whose events cannot be predicted. The budget converts that horizon to instructions with both
+  fractional clock carries, so a batch overshoots it by at most one
+  instruction;
+- inside such a batch the core reports each completed instruction through
+  `AddressBus::batch_boundary`, which only records the count: no device
+  advances while the batch runs from local memory. Because it runs before
+  every decoded instruction, the hook compares a cached interrupt level and
+  stop condition against the SR mask; only a shared-bus access or a prefix
+  flush, the sole ways the interrupt state can change mid-batch, makes it
+  read the chipset again. `CpuBus` bills the
+  completed prefix when something could observe it -- before a chip-bus or
+  device access, a cache-control operation or RESET -- and the host bills
+  the rest when the batch returns. A chip-bus or device access ends the
+  batch at the next instruction boundary, so the chipset catches up before
+  more local code runs. An instruction fetched from chip or slow RAM
+  completes first: yielding between its fetch and dispatch would make the
+  core fetch it again;
+- a batch that starts in chip or slow RAM keeps the coarser lump model:
+  it runs at most 64 instructions with no deadline prediction, declines
+  the core's boundary calls (`AddressBus::wants_batch_boundaries`), and
+  its CPU clocks are billed in one lump when it returns. Its bus accesses still arbitrate and advance the beam as they
+  land, but the CPU time between them is not interleaved exactly, and
+  interrupts wait for the batch to end, so their latency there is bounded
+  by the batch size rather than modelled. Exact billing cost host time on
+  every instruction there and made chip-RAM polling loops about a third
+  slower to emulate; software whose timing depends on chip-RAM code needs
+  the precise CPU mode. A spare-time burst (below) still runs one
+  instruction there, since a shared-bus access ends it. A lump captures
+  its direct regions when it starts, so a board it configures becomes
+  direct, and leaves the cache models, from the next batch. A
+  one-instruction batch gets no direct pointers (it cannot enter a native
+  trace), but its local accesses keep the same cache exclusions as the
+  batches around it.
+  With cache models present a slice reuses those exclusions until a
+  peripheral write, RESET or a new primary bank invalidates them; slice
+  entry and state adoption always rebuild them;
+- interrupts are recognized at batch boundaries from the live
+  INTENA/INTREQ state, and a fast-RAM or ROM batch also ends as soon as a
+  pending level rises above the mask (an SR write unmasking it, say). A
+  level the boundary cannot deliver is never left in the core, since the
+  batch would take it as soon as the mask drops without recomputing INTREQ
+  (a spurious handler re-entry). Posted-write overlap during interrupt
+  entry is charged to the interrupt itself;
 - a slice that runs and then executes STOP is billed only its executed
   time -- the idle period is the next slice's event-bounded fast-forward,
   exactly like the precise path's STOP handling;
@@ -149,14 +207,14 @@ exception frames). The models therefore hold no lines inside the window
 while the core has it (`CpuBus::keep_caches_out_of_window`): capturing a
 window drops the lines it overlaps, and a miss there allocates nothing.
 Under JIT a fast-RAM access is free whether it hits or misses, so nothing
-is lost. Chip RAM and ROM, which the window never covers, stay cached, and
-so does the window bank in a batch that runs without the window; the next
-capture drops those lines again. When the window moves to another bank,
-the bank it left is cached like any other, and capturing the new bank
-drops its lines first. Code inside the window is coherent the
+is lost. The exclusion covers every offered region, ROM included:
+capturing a mapping drops the lines it newly covers, a batch that runs
+with no direct regions lets the bus path cache them again, and a restored
+state rebuilds the list, with its evictions, on its first batch. Chip RAM
+is never offered and stays cached. Code inside any region is coherent the
 moment it changes, whether the guest rewrites it or a device DMAs it there
 (LoadSeg through copperhf): compiled traces compare their code bytes on
-every entry, and no cache line can hold the old bytes. The window is
+every entry, and no cache line can hold the old bytes. All regions are
 withheld while something must see every plain fast-RAM access:
 memory-write debug hooks, the heat map, SMC detection, and injected bus
 faults force each access back onto the bus. Arming any per-instruction
@@ -164,17 +222,17 @@ debug or diagnostic hook (breakpoints, watches, traces,
 `COPPERLINE_DBG_*`) drops the whole slice back to the precise loop, so the
 debugger always sees every instruction.
 
-The window holds physical addresses, and it stays in use when the guest
+The regions hold physical addresses, and they stay in use when the guest
 enables the MMU (bundled AROS does at boot, as do mmu.library, MuForce and
-Linux/m68k). The core then translates each window access through the
+Linux/m68k). The core then translates each direct access through the
 transparent-translation registers and the ATC alone, never a table search.
 An access they cannot map into the window -- an ATC miss, a cached
 translation the access would fault on, a page-crossing access, a physical
-address outside the bank -- runs on the ordinary bus path, which searches
+address outside every region -- runs on the ordinary bus path, which searches
 the tables (billing the descriptor reads) and raises the fault with the
 precise core's frame. The core translates before it calls `CpuBus`, so the
-cache models see the same physical addresses as the window and keep no
-lines inside it under translation either. Compiled traces translate the
+cache models see the same physical addresses as the regions and keep no
+lines inside them under translation either. Compiled traces translate the
 same way, and are re-recorded if the guest switches the MMU on or off
 under them. While the window translates, no 68030 ATC hit records a use in
 the replacement order -- not through the window, a trace or the bus path --
@@ -197,24 +255,39 @@ does not drain samples cannot grow the buffer indefinitely.
 (jit-fastest-speed)=
 ### Fastest possible (`[cpu] speed = "fastest"`)
 
-The opt-in host-adaptive mode, WinUAE's *Fastest possible*, adds no second
-timing model. `M68kMachine::set_jit_speed_factor` divides every CPU clock
-the JIT path bills (the flat per-instruction clock and the exception and
-interrupt entry costs) by a factor, kept as a 16.16 fixed-point divisor
-with its sub-clock remainder carried across batches. Dividing the CPU's
-own clocks is exactly a faster CPU clock: chip-bus and CIA accesses keep
-their bus-time costs, fast RAM and ROM stay free, and beam, DMA and
-interrupt delivery remain as consistent as at any fixed `clock_mhz`. At a
-factor of 1 the divisor is unity and the billing path is the unscaled one,
-so the fixed-clock JIT and the precise core are untouched. The precise core
-never reads the factor.
+The opt-in host-adaptive mode, WinUAE's *Fastest possible*, keeps the
+chipset, audio and emulated time in real time and gives the CPU whatever
+host time each frame leaves. It adds no second timing model; two
+mechanisms share the paced frame:
 
-The factor comes from the emulator's speed governor
-(`src/emulator/fastest.rs`), which watches the host time each real-time
-quantum costs against the emulated time it advanced; [the pacing
-chapter](#jit-fastest-pacing) describes the control loop and when it may
-adapt. It never adapts outside paced quanta, so headless runs stay at
-the configured clock and remain deterministic.
+- The regular quantum runs at an adaptive clock.
+  `M68kMachine::set_jit_speed_factor` divides every CPU clock the JIT path
+  bills (the flat per-instruction clock and the exception and interrupt
+  entry costs) by a factor, kept as a 16.16 fixed-point divisor with its
+  sub-clock remainder carried across batches. Dividing the CPU's own
+  clocks is exactly a faster CPU clock: chip-bus and CIA accesses keep
+  their bus-time costs, fast RAM and ROM stay free, and beam, DMA and
+  interrupt delivery remain as consistent as at any fixed `clock_mhz`. The
+  emulator's speed governor picks the factor and never lets it drop below
+  1, the configured clock ([the pacing chapter](#jit-fastest-pacing)
+  describes the control loop). At a factor of 1 the divisor is unity and
+  the billing path is the unscaled one.
+- The time left before the frame is due runs spare-time bursts
+  (`M68kMachine::step_jit_spare_slice`) with a zero divisor: instructions
+  that touch only fast RAM and ROM consume no chipset time at all. A burst
+  retires at most 4096 instructions. Chip-bus and device accesses keep
+  their normal cost and advance the hardware, and interrupts are
+  recognized between bursts. STOP, a debugger stop or slice preemption
+  ends the phase, as does a cumulative 256 colour clocks (about 72
+  microseconds) of chipset progress, so a polling loop cannot run the
+  devices through the whole spare interval; only the instruction that
+  crosses that budget can overshoot it. The divisor and both fractional
+  carries are restored before the call returns, so no burst state ever
+  reaches a save state.
+
+Neither mechanism runs outside paced quanta: fixed clocks and unpaced
+headless runs keep their deterministic billing. [](jit-performance.md)
+describes how to measure the mode.
 
 The 68000 and 68010 never take the batch path. On the small-box machines
 every CPU cycle drives the one bus shared with Agnus, and the floating-bus
@@ -225,6 +298,24 @@ float to the immediate just read. The batch contract runs without
 prefetch, which lands the float on the immediate and false-detects a
 diagnostic ROM. `[cpu] jit` on these models logs a note and stays
 precise.
+
+### CPU-core extensions awaiting upstream
+
+Copperline pins its `m68k` dependency to a revision of the
+[CopperlineHQ/m68k-rs](https://github.com/CopperlineHQ/m68k-rs) fork that
+combines two upstream proposals, including their review follow-ups:
+[PR #222](https://github.com/benletchford/m68k-rs/pull/222) adds the
+`AddressBus::batch_boundary` callback and
+[PR #223](https://github.com/benletchford/m68k-rs/pull/223) the extra
+physical RAM/ROM regions. Every Cargo workspace consumes that same Git
+revision (see the lockfile check above), and Copperline returns to the
+published crate once both are released.
+
+The boundary callback is a no-op for ordinary embedders; Copperline uses
+it to keep hardware accesses ordered without calling the host from every
+instruction inside a native trace. Its batch accounting is transient: the
+persistent CPU-clock and 16.16 remainders return to `MachineRuntimeState`
+before a save or rollback can happen.
 
 ## Prefetch
 

@@ -16,7 +16,7 @@ This chapter is the implementation and format reference.
 ## Design
 
 Most state uses `serde` derives on the live structs, including `Bus` and
-the published `m68k` core. Types with file handles, decoder internals, or
+the `m68k` core. Types with file handles, decoder internals, or
 feature-dependent board variants use custom serialization. `CpuCore`
 serializes architectural state, prefetch state, MMU state, and timing
 configuration; runtime-only decoded-op, FastMem, and trace-JIT caches are

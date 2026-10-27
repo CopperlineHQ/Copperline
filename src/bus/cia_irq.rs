@@ -191,6 +191,23 @@ mod tests {
         assert_ne!(bus.cpu_poll_intreq(0) & INT_PORTS, 0);
     }
 
+    /// A JIT batch must stop where a staged CIA interrupt reaches Paula's
+    /// request input, not run on to the next timer event.
+    #[test]
+    fn jit_horizon_stops_at_a_staged_cia_request() {
+        let mut bus = super::super::tests::empty_bus();
+        bus.paula.intena = 0xc000 | INT_PORTS;
+        bus.cia_a.write(REG_TALO, 0);
+        bus.cia_a.write(REG_TAHI, 0);
+        bus.cia_a.write(REG_ICR, 0x81);
+        bus.cia_a.write(REG_CRA, 0x09);
+        bus.advance_devices(15);
+        assert!(bus.cia_a.irq_line_asserted());
+        assert_eq!(bus.paula.intreq & INT_PORTS, 0);
+        assert_eq!(bus.cia_irq_routes[0].request_at, 21);
+        assert_eq!(bus.jit_event_horizon_cck(), 6);
+    }
+
     #[test]
     fn cia_route_cancels_unforwarded_edge_and_retains_asserted_input() {
         let mut route = CiaIrqRoute::default();

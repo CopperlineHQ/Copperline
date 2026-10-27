@@ -3754,6 +3754,59 @@ fn assert_wait_deadline_bus_equivalent(actual: &Bus, expected: &Bus) {
     assert_eq!(actual.emulated_frames, expected.emulated_frames);
 }
 
+#[test]
+fn inactive_spans_match_every_serialized_field_of_quantum_execution() {
+    for display in [false, true] {
+        let make_bus = || {
+            let mut bus = if display {
+                sleeping_copper_with_display_dma()
+            } else {
+                empty_bus()
+            };
+            bus.blit_irq_delay_cck = Some(83);
+            bus
+        };
+        let mut actual = make_bus();
+        let mut expected = make_bus();
+        let mut random = 0x1234_5678u32;
+        for index in 0..128 {
+            random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+            let span = 1 + (random % 1200);
+            let a = actual.advance_chipset(span);
+            let b = advance_chipset_quantum_reference(&mut expected, span);
+            assert_eq!((a.new_lines, a.new_frames), (b.new_lines, b.new_frames));
+            assert_wait_deadline_bus_equivalent(&actual, &expected);
+            assert!(
+                bincode::serialize(&actual).unwrap() == bincode::serialize(&expected).unwrap(),
+                "all persistent hardware and capture state, display={display}, span {index}"
+            );
+        }
+    }
+}
+
+#[test]
+fn inactive_spans_stop_before_fetches_and_observers_use_quantum_path() {
+    let mut bus = empty_bus();
+    bus.agnus.hpos = 0x40;
+    assert_eq!(bus.advance_inactive_chip_bus_span(64).unwrap().0, 64);
+    bus.bus_event_observers = 1;
+    assert!(bus.advance_inactive_chip_bus_span(64).is_none());
+    bus.bus_event_observers = 0;
+    bus.cpu_posted_write_debt = 1;
+    assert!(bus.advance_inactive_chip_bus_span(64).is_none());
+    bus.cpu_posted_write_debt = 0;
+    bus.agnus.hpos = 0xe1;
+    assert!(
+        bus.advance_inactive_chip_bus_span(64).is_none(),
+        "refresh boundary"
+    );
+    let mut display = sleeping_copper_with_display_dma();
+    display.agnus.hpos = 0x34;
+    if let Some((span, _)) = display.advance_inactive_chip_bus_span(100) {
+        assert!(span <= 0x40 - 0x34, "Copper WAIT wake bounds the span");
+    }
+}
+
 fn sleeping_copper_with_display_dma() -> Bus {
     let mut bus = empty_bus();
     assert!(!bus.custom_write(0x08E, 2, 0x2C90));

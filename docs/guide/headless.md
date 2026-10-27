@@ -449,7 +449,8 @@ emulated time. Together with `COPPERLINE_REAL_PACING_PROFILE=1` it shows how a
 configuration holds real time on this host, and it is how `[cpu] speed =
 "fastest"` can be watched adapting without a window (an unpaced headless run
 stays at `clock_mhz`). It only changes host timing, except under `[cpu] speed
-= "fastest"`, where pacing is what moves the clock.
+= "fastest"`, where pacing moves the JIT clock and supplies the
+spare-time CPU bursts.
 
 ## Automated compatibility testing (vAmigaTS)
 

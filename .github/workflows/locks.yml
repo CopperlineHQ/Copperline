@@ -5,7 +5,7 @@ name: Lockfile sync
 # by the --locked builds in ci.yml, but the nested workspaces mostly are not:
 # crates/copperline-web, crates/cputest-runner, and crates/hostsocket-plugin
 # carry their own committed locks. The web lock pins the sibling `copperline`
-# path package by version; the cputest-runner lock pins its published `m68k`
+# path package by version; the cputest-runner lock pins its `m68k`
 # dependency; the hostsocket-plugin lock pins its `smoltcp` dependency (the
 # committed assets/hostsocket/hostsocket_plugin.wasm is built from it). A manifest
 # update without a lock refresh breaks `cargo build --locked` (issue #219:
@@ -55,3 +55,7 @@ jobs:
       - name: crates/copperline-player
         working-directory: crates/copperline-player
         run: cargo tree --locked > /dev/null
+      - name: CPU consumers use the same m68k core
+        # Root tests do not run dependency tests. Core CI gates those suites;
+        # this keeps our nightly conformance runner on that exact dependency.
+        run: python3 tools/check-m68k-locks.py

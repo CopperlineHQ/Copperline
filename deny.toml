@@ -87,13 +87,15 @@ deny = []
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Project-owned sources: mt32-rs, Coppersynth, and plmpeg-rs are
+# Project-owned sources: m68k-rs, mt32-rs, Coppersynth, and plmpeg-rs are
 # revision-pinned in the manifest; FluxBridge currently follows its
 # maintained main branch. pixels is the one upstream source: the
 # revision-pinned [patch.crates-io] carrying 0.17.2 plus the bounded
 # surface-acquire retry (parasyte/pixels#462, see Cargo.toml) until a release
 # includes it; drop it with the patch.
 allow-git = [
+    # Temporary CPU extensions; switch back after upstream PRs #222/#223 merge.
+    "https://github.com/CopperlineHQ/m68k-rs",
     "https://github.com/CopperlineHQ/mt32-rs",
     "https://github.com/CopperlineHQ/Coppersynth",
     "https://github.com/CopperlineHQ/plmpeg-rs",

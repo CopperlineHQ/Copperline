@@ -2475,8 +2475,8 @@ pub enum CpuSpeed {
     #[default]
     Fixed,
     /// WinUAE's "fastest possible": while the run is paced to the wall
-    /// clock, the JIT's effective clock adapts to what the host can sustain,
-    /// from `[cpu] clock_mhz` upward, keeping the chipset in real time.
+    /// clock, the JIT clock adapts upward from `[cpu] clock_mhz` (never
+    /// below it) and spare host time runs extra CPU-only bursts.
     /// Not cycle-exact and not reproducible; unpaced runs (headless
     /// captures, benchmarks) stay at `clock_mhz`. Needs `[cpu] jit` on a
     /// 68020 or later.

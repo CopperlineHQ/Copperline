@@ -7815,7 +7815,9 @@ impl Bus {
 
         let mut remaining = target_cck;
         while remaining > 0 {
-            let (cck, tick) = self.advance_one_chip_bus_quantum_limited(None, remaining);
+            let (cck, tick) = self
+                .advance_inactive_chip_bus_span(remaining)
+                .unwrap_or_else(|| self.advance_one_chip_bus_quantum_limited(None, remaining));
             remaining = remaining.saturating_sub(cck);
             add_agnus_tick(&mut total, tick);
         }
@@ -7840,11 +7842,15 @@ impl Bus {
             let quantum_limit = invariant_copper_deadline
                 .map(|deadline| remaining.min(deadline))
                 .unwrap_or(remaining);
-            let (cck, tick) = self.advance_one_chip_bus_quantum_limited_inner(
-                None,
-                quantum_limit,
-                before_deadline,
-            );
+            let (cck, tick) = self
+                .advance_inactive_chip_bus_span(quantum_limit)
+                .unwrap_or_else(|| {
+                    self.advance_one_chip_bus_quantum_limited_inner(
+                        None,
+                        quantum_limit,
+                        before_deadline,
+                    )
+                });
             remaining = remaining.saturating_sub(cck);
             add_agnus_tick(&mut total, tick);
             invariant_copper_deadline = invariant_copper_deadline
@@ -7893,6 +7899,38 @@ impl Bus {
     /// 030/040/060 data cache.
     pub fn take_devices_wrote_memory(&mut self) -> bool {
         std::mem::take(&mut self.devices_wrote_memory)
+    }
+
+    /// Conservative deadline for a CPU burst using only local memory. Shared
+    /// bus/MMIO accesses end the burst independently. Keep a 64-CCK ceiling for
+    /// asynchronous host devices whose arrivals cannot be predicted.
+    pub(crate) fn jit_event_horizon_cck(&self) -> u32 {
+        [
+            Some(64),
+            // Timer and alarm events, and a staged interrupt's arrival at
+            // Paula's external request input.
+            self.next_cia_event_cck(),
+            self.next_irq_visible_cck(),
+            self.agnus.cck_until_line_ticks(1),
+            self.next_copper_wakeup_cck(),
+            self.next_blitter_completion_cck(),
+            self.next_blitter_irq_cck(),
+            self.next_audio_irq_cck(),
+            self.next_serial_event_cck(),
+            self.next_storage_event_cck(),
+            self.next_keyboard_event_cck(),
+            self.next_pot_event_cck(),
+            self.next_cia_b_tod_alarm_cck(),
+            self.floppy.next_completion_cck(self.agnus.dmacon),
+            self.floppy.next_sync_irq_cck(self.agnus.dmacon),
+            self.floppy.next_index_pulse_cck(),
+            Some(self.next_frame_event_cck()),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(1)
+        .max(1)
     }
 
     pub fn next_blitter_completion_cck(&self) -> Option<u32> {

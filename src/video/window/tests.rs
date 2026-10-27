@@ -10784,6 +10784,22 @@ fn windowless_run_ends_with_the_guest_return_code() {
 }
 
 #[test]
+fn run_return_marker_is_reread_after_a_filesys_write() {
+    let marker = temp_capture_path("late-done");
+    std::fs::remove_file(&marker).ok();
+    let mut app = test_app();
+    app.set_exit_on_return(marker.clone());
+    assert!(!app.poll_run_return(), "no marker yet");
+    // The guest writes the marker through a filesys unit, which records the
+    // write before the next poll.
+    std::fs::write(&marker, b"5\n").unwrap();
+    crate::filesys::note_host_write();
+    assert!(app.poll_run_return());
+    assert_eq!(app.exit_status(), 5);
+    std::fs::remove_file(&marker).ok();
+}
+
+#[test]
 fn windowless_run_ends_cleanly_on_guest_exit_emu() {
     let shot = temp_capture_path("exit-emu.png");
     let mut app = test_app();

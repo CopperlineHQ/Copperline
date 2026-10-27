@@ -82,6 +82,7 @@ project:
         - file: internals/video.md
         - file: internals/audio.md
         - file: internals/cpu.md
+        - file: internals/jit-performance.md
         - file: internals/peripherals.md
         - file: internals/toccata.md
         - file: internals/mhi.md
@@ -163,6 +164,7 @@ project:
         - internals/video.md
         - internals/audio.md
         - internals/cpu.md
+        - internals/jit-performance.md
         - internals/peripherals.md
         - internals/toccata.md
         - internals/mhi.md

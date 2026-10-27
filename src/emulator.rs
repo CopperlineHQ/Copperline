@@ -20,6 +20,11 @@ mod fastest;
 
 const INSTRUCTIONS_PER_SLICE: usize = 32_000;
 const INSTRUCTIONS_PER_REALTIME_SLICE: usize = 8_192;
+/// About 72 microseconds of chipset time per spare phase. Occasional OS
+/// register accesses may resume local work, but a polling loop cannot spend
+/// the whole host deadline advancing devices. Checked between instructions,
+/// so the final bus transaction (including DMA contention) may cross the cap.
+const SPARE_CHIPSET_BUDGET_CCK: u64 = 256;
 /// Longest blind STOP-state fast-forward, in colour clocks, while a serial
 /// sink with a live host input side is attached (see the cap site in
 /// `idle_fast_forward_chunk`). 256 cck is about 72 microseconds: well under
@@ -451,8 +456,8 @@ pub struct EmuStats {
 pub struct PerfCounters {
     pub busy: Duration,
     pub pacer_slips: u32,
-    /// The effective JIT clock in MHz under `[cpu] speed = "fastest"`
-    /// (a level, not a counter); `None` at a fixed clock.
+    /// Measured JIT throughput in equivalent MHz under `speed = "fastest"`,
+    /// including spare bursts (a level, not a counter); None at a fixed clock.
     pub jit_mhz: Option<f64>,
 }
 
@@ -568,8 +573,8 @@ impl Emulator {
         let floor_mhz = self.configured_cpu_mhz();
         self.fastest = Some(fastest::SpeedGovernor::new(floor_mhz));
         log::warn!(
-            "cpu speed: fastest -- the JIT clock adapts to the host from \
-             {floor_mhz:.2} MHz while paced to real time; NOT cycle-exact and \
+            "cpu speed: fastest -- spare host time runs CPU bursts after a \
+             {floor_mhz:.2} MHz minimum clock (adapted to host load) while paced to real time; NOT cycle-exact and \
              NOT reproducible (runs differ from run to run and host to host; \
              unpaced headless runs stay at {floor_mhz:.2} MHz)"
         );
@@ -594,8 +599,8 @@ impl Emulator {
         }
     }
 
-    /// The effective JIT clock in MHz while `[cpu] speed = "fastest"` is
-    /// active, `None` for the fixed clock.
+    /// Measured JIT throughput expressed as equivalent MHz (one instruction
+    /// per clock), including spare bursts; None for the fixed clock.
     pub fn jit_effective_mhz(&self) -> Option<f64> {
         self.fastest
             .as_ref()
@@ -612,6 +617,7 @@ impl Emulator {
         busy: Duration,
         emulated_before: f64,
         retired_before: u64,
+        regular_instructions: u64,
         precise_stepping: bool,
     ) {
         if self.fastest.is_none() {
@@ -630,6 +636,7 @@ impl Emulator {
             gap,
             emulated_seconds: self.bus().emulated_seconds() - emulated_before,
             instructions: self.retired_instructions.saturating_sub(retired_before),
+            regular_instructions,
             jit_active: !precise_stepping && self.machine.jit_batch_path_active(),
         };
         let Some(governor) = self.fastest.as_mut() else {
@@ -1632,7 +1639,7 @@ impl Emulator {
         let floor_mhz = self.configured_cpu_mhz();
         if let Some(governor) = self.fastest.as_mut() {
             governor.rebase(floor_mhz);
-            let factor = governor.factor();
+            let factor = governor.factor_for_pacing(self.paced);
             self.machine.set_jit_speed_factor(factor);
         }
     }
@@ -2440,6 +2447,10 @@ impl Emulator {
             return;
         }
         self.paced = paced;
+        if let Some(governor) = self.fastest.as_ref() {
+            let factor = governor.factor_for_pacing(paced);
+            self.machine.set_jit_speed_factor(factor);
+        }
         if paced {
             self.reanchor_realtime_clock();
         }
@@ -2925,6 +2936,28 @@ impl Emulator {
         }
         self.realtime_quantum_remaining = remaining;
         self.realtime_quantum_cpu_idle = remaining != 0 && cpu_idle;
+        let baseline_busy = busy_started.elapsed();
+        let baseline_retired = self.retired_instructions;
+        if pc_outside.is_none()
+            && self.fastest.is_some()
+            && self.paces_realtime()
+            && !self.runahead_phase
+            && self.tt_ring.is_none()
+            && !self.machine.ui_debug_stop_pending()
+        {
+            if let Some(started) = self.stats.started_at {
+                let emulated_now = self.bus().emulated_seconds();
+                let seconds = fastest_baseline.map_or(0.0, |(before, _)| emulated_now - before);
+                let target = realtime_device_time_target(
+                    started,
+                    emulated_now,
+                    self.bus().live_audio_output_lead_seconds(),
+                );
+                if let Some(deadline) = target.and_then(|t| fastest::spare_deadline(t, seconds)) {
+                    self.run_spare_cpu_while(|| Instant::now() < deadline)?;
+                }
+            }
+        }
         // Pace presentation to wall-clock only for the interactive window;
         // headless runs advance the deterministic core unthrottled. During a
         // run-ahead burst the sleep is deferred to the burst's anchor target
@@ -2939,13 +2972,39 @@ impl Emulator {
         if let Some((emulated_before, retired_before)) = fastest_baseline {
             self.govern_fastest(
                 busy_started,
-                busy,
+                baseline_busy,
                 emulated_before,
                 retired_before,
+                baseline_retired.saturating_sub(retired_before),
                 pc_outside.is_some(),
             );
         }
         Ok(reached)
+    }
+
+    /// The closure is the host deadline in production and a bounded budget
+    /// in tests. Each shared-bus access yields to interrupt recognition, then
+    /// another burst may run within the same fixed host deadline. Bound their
+    /// cumulative chipset advance so polling cannot extend the spare phase.
+    fn run_spare_cpu_while(&mut self, mut has_time: impl FnMut() -> bool) -> Result<()> {
+        let mut chipset_cck = 0u64;
+        while self.machine.jit_batch_path_active()
+            && !self.machine.stopped()
+            && !self.machine.ui_debug_stop_pending()
+            && has_time()
+        {
+            let run = self.execute_cpu_slice_mode(INSTRUCTIONS_PER_REALTIME_SLICE, true)?;
+            self.machine.refresh_irq_line();
+            chipset_cck += u64::from(run.bus_advanced_cck);
+            if run.actual_instructions == 0
+                || run.cpu_stopped
+                || self.bus().slice_preempted
+                || chipset_cck >= SPARE_CHIPSET_BUDGET_CCK
+            {
+                break;
+            }
+        }
+        Ok(())
     }
 
     fn reset_realtime_quantum(&mut self) {
@@ -3214,7 +3273,15 @@ impl Emulator {
     }
 
     fn execute_cpu_slice(&mut self, chunk: usize) -> Result<ExecutedSlice> {
-        let run = self.machine.step_slice(chunk)?;
+        self.execute_cpu_slice_mode(chunk, false)
+    }
+
+    fn execute_cpu_slice_mode(&mut self, chunk: usize, spare: bool) -> Result<ExecutedSlice> {
+        let run = if spare {
+            self.machine.step_jit_spare_slice(chunk)?
+        } else {
+            self.machine.step_slice(chunk)?
+        };
         self.stats.slices += 1;
         let actual_instructions = run.instructions;
         let actual_cpu_cycles = run.cpu_cycles;
@@ -5390,9 +5457,8 @@ mod tests {
         let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
         let floor = emu.jit_effective_mhz().expect("governor armed");
         assert!((floor - 24.83).abs() < 0.01, "{floor}");
-        // A whole window in one sample: 10 ms of host time for 100 ms of
-        // emulated time (load 0.1) at 100 MIPS -- clock-bound with
-        // headroom to spare.
+        // A whole light window: 10 ms host time for 100 ms emulated
+        // at 100 MIPS, allowing a rise in the regular CPU clock.
         emu.retired_instructions = 10_000_000;
         let emulated_before = emu.bus().emulated_seconds() - 0.1;
         let quantum = |emu: &mut super::Emulator, precise: bool| {
@@ -5401,6 +5467,7 @@ mod tests {
                 Duration::from_millis(10),
                 emulated_before,
                 0,
+                emu.retired_instructions,
                 precise,
             );
         };
@@ -5412,11 +5479,11 @@ mod tests {
         quantum(&mut emu, false);
         assert!(
             (emu.machine.jit_speed_factor() - 1.25).abs() < 1e-3,
-            "paced JIT quantum raises the clock one step: {}",
+            "paced CPU-bound work raises the baseline: {}",
             emu.machine.jit_speed_factor()
         );
         let mhz = emu.jit_effective_mhz().unwrap();
-        assert!((mhz - floor * 1.25).abs() < 1e-9);
+        assert!((mhz - 100.0).abs() < 1e-9, "reports measured throughput");
         assert_eq!(emu.perf_counters().jit_mhz, Some(mhz));
     }
 
@@ -5428,7 +5495,7 @@ mod tests {
     fn fastest_governor_does_not_count_presentation_waits_as_load() {
         use crate::timebase::{Duration, Instant};
         // 3 ms of emulation and 14 ms between quanta per 1/60 s quantum:
-        // with the gap counted the load is ~1.0, so the clock must hold.
+        // with the gap counted the load is ~1.0, so the baseline stays at its floor.
         let run = |reported_wait: Duration| {
             let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
             emu.set_paced(true);
@@ -5443,12 +5510,13 @@ mod tests {
                     Duration::from_millis(3),
                     emu.bus().emulated_seconds() - quantum,
                     n * 1_000_000,
+                    1_000_000,
                     false,
                 );
             }
             emu.machine.jit_speed_factor()
         };
-        assert_eq!(run(Duration::ZERO), 1.0, "a busy frontend holds the clock");
+        assert_eq!(run(Duration::ZERO), 1.0, "a busy frontend holds the floor");
         assert!(
             run(Duration::from_millis(13)) > 1.0,
             "a presenter blocked on vsync is headroom, not load"
@@ -5509,7 +5577,8 @@ mod tests {
         let floor = emu.jit_effective_mhz().unwrap();
         assert!((floor - 14.19).abs() < 0.01, "{floor}");
 
-        // Adapted (a paced window raised it): the reached clock is kept.
+        // A light paced window raises the baseline. Loading a slower configured
+        // clock keeps the adapted rate, even above that clock; telemetry restarts.
         let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
         emu.set_paced(true);
         emu.retired_instructions = 10_000_000;
@@ -5518,13 +5587,167 @@ mod tests {
             crate::timebase::Duration::from_millis(10),
             emu.bus().emulated_seconds() - 0.1,
             0,
+            emu.retired_instructions,
             false,
         );
-        let reached = emu.jit_effective_mhz().unwrap();
-        assert!(reached > 24.9, "{reached}");
+        let baseline = emu.machine.jit_speed_factor() * emu.configured_cpu_mhz();
+        assert!(baseline > 25.0);
         emu.load_state_bytes(&slower).unwrap();
-        assert_eq!(emu.jit_effective_mhz(), Some(reached));
+        assert!((emu.jit_effective_mhz().unwrap() - baseline).abs() < 0.001);
         assert!(emu.machine.jit_speed_factor() > 1.0);
+    }
+
+    #[test]
+    fn fastest_warp_uses_at_least_the_configured_clock_and_restores_the_baseline() {
+        let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
+        emu.set_paced(true);
+        emu.govern_fastest(
+            crate::timebase::Instant::now(),
+            crate::timebase::Duration::from_millis(200),
+            emu.bus().emulated_seconds() - 0.1,
+            0,
+            emu.retired_instructions,
+            false,
+        );
+        let baseline = emu.machine.jit_speed_factor();
+        assert_eq!(baseline, 1.0);
+        emu.set_paced(false);
+        assert_eq!(
+            emu.machine.jit_speed_factor(),
+            1.0,
+            "idle telemetry cannot slow warp"
+        );
+        emu.set_paced(true);
+        assert_eq!(emu.machine.jit_speed_factor(), baseline);
+    }
+
+    #[test]
+    fn fastest_state_load_during_warp_preserves_the_configured_floor() {
+        let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
+        emu.step_frame().unwrap();
+        let state = emu.save_state_bytes().unwrap();
+        emu.set_paced(true);
+        emu.govern_fastest(
+            crate::timebase::Instant::now(),
+            crate::timebase::Duration::from_millis(200),
+            emu.bus().emulated_seconds() - 0.1,
+            emu.retired_instructions,
+            0,
+            false,
+        );
+        emu.set_paced(false);
+        assert!(emu.machine.jit_speed_factor() >= 1.0);
+        emu.load_state_bytes(&state).unwrap();
+        assert!(!emu.paced());
+        assert!(emu.machine.jit_speed_factor() >= 1.0);
+    }
+
+    #[test]
+    fn spare_cpu_budget_runs_native_work_without_advancing_device_time() {
+        let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
+        emu.step_frame().unwrap();
+        let cck = emu.bus().emulated_cck();
+        let retired = emu.retired_instructions;
+        let factor = emu.machine.jit_speed_factor();
+        let mut bursts = 0;
+        emu.run_spare_cpu_while(|| {
+            bursts += 1;
+            bursts <= 3
+        })
+        .unwrap();
+        assert_eq!(emu.retired_instructions - retired, 3 * 4096);
+        assert_eq!(emu.bus().emulated_cck(), cck);
+        assert_eq!(emu.machine.jit_speed_factor(), factor);
+        let before = emu.retired_instructions;
+        emu.run_spare_cpu_while(|| false).unwrap();
+        assert_eq!(
+            emu.retired_instructions, before,
+            "expired deadline does no work"
+        );
+        emu.machine.set_jit_enabled(false);
+        emu.run_spare_cpu_while(|| true).unwrap();
+        assert_eq!(
+            emu.retired_instructions, before,
+            "precise mode cannot burst"
+        );
+    }
+
+    fn spare_cpu_program(words: &[u16]) -> super::Emulator {
+        let mut emu = jit_counting_emulator(crate::config::CpuSpeed::Fastest);
+        for (index, word) in words.iter().enumerate() {
+            let offset = 0x10 + index * 2;
+            emu.bus_mut().mem.rom[offset..offset + 2].copy_from_slice(&word.to_be_bytes());
+        }
+        emu
+    }
+
+    #[test]
+    fn spare_cpu_resumes_after_device_access_and_stops_at_stop() {
+        let mut emu = spare_cpu_program(&[
+            0x33fc, 0x00f0, 0x00df, 0xf180, // MOVE.W #$f0,COLOR00
+            0x5280, // ADDQ.L #1,D0
+            0x4e72, 0x2700, // STOP
+        ]);
+        emu.run_spare_cpu_while(|| true).unwrap();
+        assert_eq!(emu.bus().denise.palette[0], 0x00f0);
+        assert_eq!(emu.machine.d(0), 1, "resume local work after MMIO");
+        assert!(emu.machine.stopped());
+    }
+
+    #[test]
+    fn spare_cpu_bounds_chipset_advance_in_a_device_polling_loop() {
+        let mut emu = spare_cpu_program(&[
+            0x3039, 0x00df, 0xf006, // MOVE.W VHPOSR,D0
+            0x5281, // ADDQ.L #1,D1
+            0x60f6, // BRA.S back to VHPOSR read
+        ]);
+        let before = emu.bus().emulated_cck();
+        let mut bursts = 0;
+        emu.run_spare_cpu_while(|| {
+            bursts += 1;
+            bursts < 10_000
+        })
+        .unwrap();
+        let advanced = emu.bus().emulated_cck() - before;
+        assert!(
+            advanced >= super::SPARE_CHIPSET_BUDGET_CCK,
+            "polling must resume: {advanced}"
+        );
+        assert!(
+            advanced < super::SPARE_CHIPSET_BUDGET_CCK + 16,
+            "stop after the last bus instruction: {advanced}"
+        );
+        assert!(
+            bursts < 10_000,
+            "chipset budget, not host deadline, stops polling"
+        );
+        assert!(emu.machine.d(1) > 1);
+    }
+
+    #[test]
+    fn spare_cpu_delivers_enabled_interrupt_before_resuming_local_work() {
+        let mut emu = spare_cpu_program(&[
+            0x33fc, 0xc004, 0x00df, 0xf09a, // MOVE.W #master+SOFT,INTENA
+            0x7001, // MOVEQ #1,D0: must not run before the handler
+            0x4e72, 0x2700,
+        ]);
+        emu.bus_mut().mem.rom[0x40..0x46].copy_from_slice(&[0x72, 0x07, 0x4e, 0x72, 0x27, 0x00]); // MOVEQ #7,D1; STOP
+        emu.bus_mut().mem.chip_ram[25 * 4..25 * 4 + 4]
+            .copy_from_slice(&0x00f8_0040u32.to_be_bytes());
+        emu.machine.debug_set_register(15, 0x4000);
+        emu.machine.debug_set_register(16, 0x2000);
+        // Isolate recognition between bursts from Paula's propagation delay;
+        // the request is immediately eligible when INTENA enables it.
+        emu.bus_mut().irq_latency_setting = 0;
+        emu.bus_mut().custom_write(0x09c, 2, 0x8004); // pending SOFT
+        emu.run_spare_cpu_while(|| true).unwrap();
+        assert_eq!(emu.machine.d(1), 7, "the next burst services the interrupt");
+        assert_eq!(
+            emu.machine.d(0),
+            0,
+            "IRQ precedes the next ordinary instruction"
+        );
+        assert!(emu.machine.stopped());
     }
 
     /// The mode needs the JIT: without it the governor is never armed.

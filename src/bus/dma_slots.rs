@@ -18,6 +18,61 @@ fn diag_cop_writes_on() -> bool {
 }
 
 impl Bus {
+    /// Batch a proven idle interval between fixed DMA slots. All captures
+    /// and beam bookkeeping still pass through advance_beam; no DMA transfer,
+    /// CPU write, Copper transition or observable slot trace may be skipped.
+    /// Leave line rollover and audio request latching to the ordinary quantum.
+    pub(super) fn advance_inactive_chip_bus_span(
+        &mut self,
+        limit: u32,
+    ) -> Option<(u32, AgnusTick)> {
+        let hpos = self.agnus.hpos;
+        if limit < 2
+            || !(0x34..0xe2).contains(&hpos)
+            || self.blitter.busy
+            || self.cpu_posted_write_debt != 0
+            || self.chip_bus_observers_on
+            || self.bus_event_observers != 0
+            || !self.ui_beam_traps.is_empty()
+            || self.precise_timed_device_trace()
+            || !self.ddf_seq_active()
+        {
+            return None;
+        }
+        let line_end = self.agnus.current_line_cck().saturating_sub(1).min(0xe2);
+        let mut span = limit.min(line_end.saturating_sub(hpos));
+        if self.copper_dma_enabled() {
+            if !self.copper_sleeping_before_wake_bound(span) {
+                return None;
+            }
+            let CopperWakeBound::At(bound) = self.copper_wake_bound else {
+                return None;
+            };
+            span = span.min(
+                bound
+                    .saturating_sub(self.emulated_cck)
+                    .min(u64::from(u32::MAX)) as u32,
+            );
+        }
+        if let Some(deadline) = self.cck_until_pending_copper_frame_start() {
+            span = span.min(deadline);
+        }
+        if let Some(deadline) = self.blit_irq_delay_cck {
+            span = span.min(deadline);
+        }
+        if let Some(fetch) = self.ddf_seq_next_fetch(hpos, hpos + span) {
+            span = span.min(fetch - hpos);
+        }
+        if span < 2 {
+            return None;
+        }
+        self.last_chip_bus_owner = ChipBusOwner::Idle;
+        let tick = self.advance_beam(span);
+        debug_assert_eq!(tick.new_lines, 0);
+        self.audio_pending_cck = self.audio_pending_cck.saturating_add(span);
+        Some((span, tick))
+    }
+
     pub(super) fn advance_one_chip_bus_quantum(
         &mut self,
         forced_owner: Option<ChipBusOwner>,

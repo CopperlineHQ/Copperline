@@ -231,16 +231,20 @@ so rollback neither accesses a live directory mount nor persists guest writes.
 The flow of a frame:
 
 1. The frame loop hands the CPU an instruction budget. The CPU executes
-   one instruction at a time through the published `m68k` core (or, with
-   the experimental `[cpu] jit`, in fixed multi-instruction batches; see
-   [](cpu.md)). Every memory access the instruction makes is routed through
-   the bus adapter and *billed in colour clocks* (CCK, 3.546895 MHz -- the
-   chip bus clock). The precise CPU loop selects its diagnostic-capable or
-   branch-free normal form once per slice. Arming a debugger, trace, watchpoint, waveform PC
-   trigger or diagnostic recorder selects the former; normal and browser
-   runs therefore do not retest every inactive hook after every instruction.
-   An instruction-granular control stop retains the unfinished budget and its
-   `STOP` fast-forward state in `Emulator`; resume completes that same quantum
+   one instruction at a time through the `m68k` core, and every memory
+   access the instruction makes is routed through the bus adapter and
+   *billed in colour clocks* (CCK, 3.546895 MHz -- the chip bus clock).
+   The experimental `[cpu] jit` runs batches instead, bounded by hardware
+   deadlines: up to 4096 instructions of code in fast RAM or ROM, one
+   instruction of code in chip RAM. It reads fast RAM and ROM directly, so
+   only chip-bus and device accesses take the bus adapter (see
+   [](cpu.md)). The precise CPU loop selects its diagnostic-capable or
+   branch-free normal form once per slice. Arming a debugger, trace,
+   watchpoint, waveform PC trigger or diagnostic recorder selects the
+   former; normal and browser runs therefore do not retest every inactive
+   hook after every instruction. An instruction-granular control stop
+   retains the unfinished budget and its `STOP` fast-forward state in
+   `Emulator`; resume completes that same quantum
    before starting another, so a host-side observation cannot move an
    emulated interrupt race by repartitioning the execution loop.
 2. Advancing the clock for a CPU access also advances everything else:

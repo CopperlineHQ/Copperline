@@ -15,7 +15,8 @@ name = "cputest-runner"
 path = "src/main.rs"
 
 [dependencies]
-m68k = "0.14.7"
+# Match the emulator dependency; CI checks all CPU consumer lockfiles.
+m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "fdcdbd20e44b464a6e6e1fd6a01e12aae77a5694" }
 
 [build-dependencies]
 cc = "1"

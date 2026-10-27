@@ -935,6 +935,16 @@ impl ZorroChain {
             .find(|&(base, len, _)| addr.wrapping_sub(base) < len)
     }
 
+    /// Whether any configured RAM board overlaps a physical range. Used to
+    /// keep lower-priority ROM decode out of the JIT direct-memory table.
+    pub(crate) fn ram_overlaps(&self, base: u32, len: u32) -> bool {
+        len != 0
+            && self.regions.iter().any(|&(start, size, _)| {
+                u64::from(start) < u64::from(base) + u64::from(len)
+                    && u64::from(base) < u64::from(start) + u64::from(size)
+            })
+    }
+
     /// Configured RAM windows as (base, len) pairs, for the debugger's
     /// memory hunt.
     pub fn ram_regions(&self) -> Vec<(u32, u32)> {

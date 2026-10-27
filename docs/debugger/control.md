@@ -376,7 +376,7 @@ queue has lost.
 ### Session management
 - `hello {"token": "..."}`: Handshake and protocol version query.
 - `auth {"token": "..."}`: Authenticate active connection.
-- `status`: Returns emulation state, frame counters, host execution timing, and pacing (`paced`, `warp`, and `jit_mhz`, the effective JIT clock under `[cpu] speed = "fastest"`, null at a fixed clock).
+- `status`: Returns emulation state, frame counters, host execution timing, and pacing (`paced`, `warp`, and `jit_mhz`, measured JIT throughput in equivalent MHz including spare CPU bursts under `[cpu] speed = "fastest"`, null at a fixed clock).
 - `shutdown`: Terminates the emulator process.
 
 ### Execution control
