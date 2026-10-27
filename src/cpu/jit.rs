@@ -10,6 +10,10 @@ use super::*;
 pub(super) enum JitBatchTiming {
     /// No deferred prefix: bill the instruction directly after run_batch.
     Single,
+    /// Code fetched from chip or slow RAM: no deferred prefix and no boundary
+    /// checks. Bus accesses still arbitrate and advance the beam as they land;
+    /// the batch's CPU clocks are billed in one lump after run_batch.
+    Lump,
     Multiple(JitTiming),
 }
 
@@ -78,7 +82,8 @@ impl CpuBus {
     /// same shared-bus fetch twice. Interrupts and deadlines still yield there.
     pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize, fetch: bool) {
         // A one-instruction batch has no completed prefix before this access,
-        // and returns to the host before the next instruction anyway.
+        // and returns to the host before the next instruction anyway. A lump
+        // defers nothing and bills at its end.
         if matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_)))
             && !self.jit_plain_access(address, size)
         {
@@ -243,8 +248,10 @@ impl M68kMachine {
     }
 
     /// Fast execution remains a one-clock-per-instruction accelerator model.
-    /// Hardware accesses and interrupts synchronize at instruction boundaries;
-    /// direct-memory traces can run until the next device deadline.
+    /// In fast RAM and ROM, hardware accesses and interrupts synchronize at
+    /// instruction boundaries and direct-memory traces can run until the next
+    /// device deadline. Code fetched from chip or slow RAM runs in lump-billed
+    /// batches whose interrupt latency is bounded by their size, not modelled.
     pub(super) fn step_slice_jit(&mut self, count: usize) -> Result<CpuStepSlice> {
         // Host-side memory replacement and state adoption happen between
         // slices; cache exclusions must be derived from their new mappings.
@@ -278,20 +285,21 @@ impl M68kMachine {
             // Recompute INTREQ on every host boundary, including after RTE.
             // Never leave a stale request latched in the core's batch runner.
             self.cpu.set_irq(0);
-            // Shared-bus code already has a one-instruction budget. Predicting
-            // blitter, disk and CIA deadlines cannot shorten it, and doing so
-            // for every fetch is expensive in polling loops.
-            let local_code = count - instructions > 1 && self.bus.jit_plain_access(self.cpu.pc, 2);
-            let horizon = if local_code {
-                self.bus.bus.jit_event_horizon_cck()
+            // Code fetched from chip or slow RAM is billed in lumps, without
+            // deadline prediction or boundary checks: exact billing there costs
+            // host time on every instruction. A spare-time burst still runs one
+            // instruction there, because shared-bus accesses end the burst.
+            let remaining = count - instructions;
+            let local_code = remaining > 1 && self.bus.jit_plain_access(self.cpu.pc, 2);
+            let (budget, horizon) = if local_code {
+                let horizon = self.bus.bus.jit_event_horizon_cck();
+                (self.jit_batch_budget(remaining, horizon) as u32, horizon)
+            } else if self.jit_clock_divisor_q16 == 0 {
+                (1, 1)
             } else {
-                1
+                (remaining.min(JIT_SHARED_BATCH_INSTRUCTIONS) as u32, 1)
             };
-            let budget = if local_code {
-                self.jit_batch_budget(count - instructions, horizon) as u32
-            } else {
-                1
-            };
+            let deferred = local_code && budget > 1;
             self.bus.diag_current_pc = self.cpu.pc;
             self.bus.bus.cpu_pc = self.cpu.pc;
             self.bus.window_offered = false;
@@ -299,6 +307,8 @@ impl M68kMachine {
             let bus_checkpoint = self.bus.bus.slice_bus_advanced_cck();
             self.bus.jit_batch = Some(if budget == 1 {
                 JitBatchTiming::Single
+            } else if !deferred {
+                JitBatchTiming::Lump
             } else {
                 JitBatchTiming::Multiple(JitTiming {
                     retired: 0,
@@ -320,13 +330,18 @@ impl M68kMachine {
             });
             let cpu_was_stopped = self.cpu.is_stopped();
             let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
-            if budget == 1 {
-                // There is no completed prefix within a single instruction.
-                // Avoid constructing/copying deferred timing state and running
-                // its boundary checks; keep the same end-of-instruction bill.
+            if !deferred {
+                // There is no completed prefix within a single instruction,
+                // and a lump defers none. Avoid constructing/copying deferred
+                // timing state and running its boundary checks; bill the
+                // batch at its end.
                 self.bus.jit_batch = None;
                 if result.instructions != 0 {
-                    let clocks = self.jit_scaled_clocks(JIT_CPU_CLOCKS_PER_INSTRUCTION);
+                    let clocks = self.jit_scaled_clocks(
+                        result
+                            .instructions
+                            .saturating_mul(JIT_CPU_CLOCKS_PER_INSTRUCTION),
+                    );
                     let cck = self.charge_cpu_clocks_less_bus_overlap(clocks as i32);
                     cpu_cycles = cpu_cycles.saturating_add(clocks);
                     cpu_cck = cpu_cck.saturating_add(cck);

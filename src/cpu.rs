@@ -420,6 +420,11 @@ const MAX_INSTRUCTION_BYTES: u32 = 12;
 /// hardware deadline. Slow bus accesses request an earlier host boundary.
 const JIT_BATCH_INSTRUCTIONS: usize = 4096;
 
+/// Batch size for code fetched from chip or slow RAM. Its CPU clocks are
+/// billed in one lump after the batch, and interrupts are recognized between
+/// batches, so this bounds their latency there instead of modelling it.
+const JIT_SHARED_BATCH_INSTRUCTIONS: usize = 64;
+
 /// Flat CPU-clock cost billed per instruction retired by the JIT slice.
 /// The batch path reports no cycle counts, so this constant sets the JIT
 /// machine's nominal speed: one instruction per clock models an ideal
@@ -8525,6 +8530,41 @@ mod tests {
         Ok(())
     }
 
+    /// Code fetched from chip RAM runs in lump-billed batches with no boundary
+    /// checks, so a level unmasked inside one is recognized when it ends.
+    #[test]
+    fn jit_chip_resident_lump_recognizes_interrupts_between_batches() -> Result<()> {
+        use crate::chipset::paula::INT_SOFT;
+        let pc = 0x1000u32;
+        let handler = 0x2000u32;
+        let run = |chunk: usize| -> Result<u32> {
+            let mut bus = test_bus_with_pc(pc);
+            let mut program = vec![0x4e71; 8];
+            program.extend([0x46fc, 0x2000]); // unmask
+            program.extend([0x5280; 8]); // ADDQ.L #1,D0
+            program.push(0x60fe);
+            write_program(&mut bus, pc, &program);
+            write_program(&mut bus, handler, &[0x742a, 0x4e72, 0x2700]);
+            set_autovector(&mut bus, 1, handler);
+            bus.irq_latency_setting = 0;
+            bus.paula.intena = INT_MASTER | INT_SOFT;
+            bus.paula.intreq = INT_SOFT;
+            let mut machine = M68kMachine::new(bus, CpuModel::M68020, true)?;
+            machine.set_jit_enabled(true);
+            machine.cpu.set_sr(0x2700);
+            for _ in 0..1024 {
+                if machine.step_slice(chunk)?.stopped {
+                    assert_eq!(machine.d(2), 42);
+                    return Ok(machine.d(0));
+                }
+            }
+            panic!("pending interrupt did not reach its handler");
+        };
+        assert_eq!(run(1)?, 0, "one-instruction slices take it at once");
+        assert_eq!(run(4096)?, 8, "the lump finishes before the handler");
+        Ok(())
+    }
+
     #[test]
     fn jit_slice_takes_trap_exceptions() -> Result<()> {
         let pc = FAST_RAM_BASE as u32 + 0x100;
@@ -9006,7 +9046,7 @@ mod tests {
                 0x4e71, // NOP captures the original exclusions
                 0x13fc, 0x0040, 0x00e8, 0x0048, // configure the new Z2 board at $400000
                 0x2039, 0x0040, 0x0000, // MOVE.L newly mapped RAM,D0
-                0x4e72, 0x2700,
+                0x60fe, // BRA.S *
             ],
             CpuModel::M68030,
         )?;
@@ -9019,8 +9059,11 @@ mod tests {
         machine.apply_cacr_updates();
         machine.bus.jit_window_bank = Some(FAST_RAM_BASE as u32);
         machine.set_jit_enabled(true);
-        assert!(machine.step_slice(64)?.stopped);
+        machine.step_slice(64)?;
         assert_eq!(machine.d(0), 0x1234_5678);
+        // A lump captures its direct regions when it starts, so the new board
+        // reaches the exclusions when the next batch captures them.
+        machine.step_slice(64)?;
         assert!(machine.bus.in_cache_free_window(0x0040_0000, 4));
         assert!(machine
             .bus

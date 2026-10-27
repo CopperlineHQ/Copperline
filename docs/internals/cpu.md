@@ -138,7 +138,7 @@ The timing contract is deliberately approximate
   predicted. The budget converts that horizon to instructions with both
   fractional clock carries, so a batch overshoots it by at most one
   instruction;
-- inside a batch the core reports each completed instruction through
+- inside such a batch the core reports each completed instruction through
   `AddressBus::batch_boundary`, which only records the count: no device
   advances while the batch runs from local memory. Because it runs before
   every decoded instruction, the hook compares a cached interrupt level and
@@ -152,20 +152,32 @@ The timing contract is deliberately approximate
   more local code runs. An instruction fetched from chip or slow RAM
   completes first: yielding between its fetch and dispatch would make the
   core fetch it again;
-- code fetched from chip or slow RAM runs one instruction per batch. It
-  needs no deadline prediction (nothing can shorten a one-instruction
-  budget) and gets no direct pointers (one instruction cannot enter a
-  native trace), but its local accesses keep the same cache exclusions as
-  the batches around it. With cache models present a slice reuses those
-  exclusions until a peripheral write, RESET or a new primary bank
-  invalidates them; slice entry and state adoption always rebuild them;
+- a batch that starts in chip or slow RAM keeps the coarser lump model:
+  it runs at most 64 instructions with no deadline prediction and no
+  boundary checks, and its CPU clocks are billed in one lump when it
+  returns. Its bus accesses still arbitrate and advance the beam as they
+  land, but the CPU time between them is not interleaved exactly, and
+  interrupts wait for the batch to end, so their latency there is bounded
+  by the batch size rather than modelled. Exact billing cost host time on
+  every instruction there and made chip-RAM polling loops about a third
+  slower to emulate; software whose timing depends on chip-RAM code needs
+  the precise CPU mode. A spare-time burst (below) still runs one
+  instruction there, since a shared-bus access ends it. A lump captures
+  its direct regions when it starts, so a board it configures becomes
+  direct, and leaves the cache models, from the next batch. A
+  one-instruction batch gets no direct pointers (it cannot enter a native
+  trace), but its local accesses keep the same cache exclusions as the
+  batches around it.
+  With cache models present a slice reuses those exclusions until a
+  peripheral write, RESET or a new primary bank invalidates them; slice
+  entry and state adoption always rebuild them;
 - interrupts are recognized at batch boundaries from the live
-  INTENA/INTREQ state, and a batch also ends as soon as a pending level
-  rises above the mask (an SR write unmasking it, say). A level the
-  boundary cannot deliver is never left in the core, since the batch would
-  take it as soon as the mask drops without recomputing INTREQ (a spurious
-  handler re-entry). Posted-write overlap during interrupt entry is charged
-  to the interrupt itself;
+  INTENA/INTREQ state, and a fast-RAM or ROM batch also ends as soon as a
+  pending level rises above the mask (an SR write unmasking it, say). A
+  level the boundary cannot deliver is never left in the core, since the
+  batch would take it as soon as the mask drops without recomputing INTREQ
+  (a spurious handler re-entry). Posted-write overlap during interrupt
+  entry is charged to the interrupt itself;
 - a slice that runs and then executes STOP is billed only its executed
   time -- the idle period is the next slice's event-bounded fast-forward,
   exactly like the precise path's STOP handling;
