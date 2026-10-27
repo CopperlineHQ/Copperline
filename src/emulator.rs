@@ -2986,7 +2986,7 @@ impl Emulator {
         idle_cap: usize,
         force_precise: bool,
     ) -> Result<RealSliceAccounting> {
-        let chunk = if *cpu_idle {
+        let (chunk, idle_event_cck) = if *cpu_idle {
             self.idle_fast_forward_chunk(idle_cap)
         } else if self.cpu_jit && !force_precise {
             // JIT mode hands the machine a fixed multi-instruction slice;
@@ -2995,12 +2995,12 @@ impl Emulator {
             // caller's budget remainder -- keeps the batch boundaries, and
             // therefore interrupt delivery, identical for every caller that
             // replays the same machine state.
-            INSTRUCTIONS_PER_REALTIME_SLICE
+            (INSTRUCTIONS_PER_REALTIME_SLICE, None)
         } else {
-            1
+            (1, None)
         };
         let run = self.execute_cpu_slice(chunk)?;
-        let accounting = real_slice_accounting(
+        let mut accounting = real_slice_accounting(
             &run,
             chunk,
             self.cpu_cycles_per_instruction,
@@ -3011,7 +3011,20 @@ impl Emulator {
             // and timed devices through the idle period. (A running slice
             // needs nothing here: the cycle-exact core already advanced
             // its full device time through sync/grant as it executed.)
-            let idle_cck = accounting.slice_cck.saturating_sub(run.bus_advanced_cck);
+            // The instruction-budget conversion can round a three-CCK
+            // event horizon up to four. Preserve the actual device deadline;
+            // CPU STOP polling still decides when the interrupt is accepted.
+            let idle_cck = bounded_idle_cck(
+                accounting.slice_cck.saturating_sub(run.bus_advanced_cck),
+                idle_event_cck,
+                run.bus_advanced_cck,
+            );
+            accounting.device_cck = accounting
+                .device_cck
+                .min(idle_cck.saturating_add(run.bus_advanced_cck));
+            accounting.slice_cck = accounting
+                .slice_cck
+                .min(idle_cck.saturating_add(run.bus_advanced_cck));
             self.bus_mut().advance_cpu_idle_devices(idle_cck);
         }
         // `refresh_irq_line` applies any deferred timed-device color clocks
@@ -3037,22 +3050,18 @@ impl Emulator {
     /// to the frame boundary) so the chipset advances only up to that
     /// event -- the CPU then wakes at the correct beam position and the
     /// handler is cycle-stepped from there.
-    fn idle_fast_forward_chunk(&self, remaining: usize) -> usize {
+    fn idle_fast_forward_chunk(&self, remaining: usize) -> (usize, Option<u32>) {
         let mut chunk = remaining
             .min(INSTRUCTIONS_PER_SLICE)
             .min(INSTRUCTIONS_PER_REALTIME_SLICE);
         let bus = self.bus();
-        let cap_cck = |cck: u32, chunk: &mut usize| {
+        let mut event_cck = None;
+        let mut cap_cck = |cck: u32, chunk: &mut usize| {
+            event_cck = Some(event_cck.map_or(cck, |earliest: u32| earliest.min(cck)));
             *chunk = (*chunk).min(self.instructions_for_cck(cck).max(1));
         };
-        if let Some(ticks) = bus
-            .cia_a
-            .next_event_ticks()
-            .into_iter()
-            .chain(bus.cia_b.next_event_ticks())
-            .min()
-        {
-            chunk = chunk.min(self.instructions_for_cia_ticks(ticks).max(1));
+        if let Some(cck) = bus.next_cia_event_cck() {
+            cap_cck(cck, &mut chunk);
         }
         // An interrupt already latched in INTREQ but still inside its
         // IPL-pin recognition pipe is invisible to the CPU right now, and a
@@ -3112,7 +3121,7 @@ impl Emulator {
         if let Some(cck) = bus.next_cia_b_tod_alarm_cck() {
             cap_cck(cck, &mut chunk);
         }
-        chunk.max(1)
+        (chunk.max(1), event_cck)
     }
 
     pub fn report_stats(&self) {
@@ -3142,10 +3151,6 @@ impl Emulator {
     fn instruction_budget(&mut self) -> usize {
         let (quantum, _target) = realtime_budget(self.cpu_cycles_per_instruction);
         quantum
-    }
-
-    fn instructions_for_cia_ticks(&self, ticks: u32) -> usize {
-        self.instructions_for_cck(ticks.saturating_mul(5))
     }
 
     fn instructions_for_cck(&self, cck: u32) -> usize {
@@ -3340,6 +3345,14 @@ fn cck_for_instructions(instructions: usize, cpu_cycles_per_instruction: f64) ->
 fn instructions_for_cck_value(cck: u32, cpu_cycles_per_instruction: f64) -> usize {
     ((cck as f64 * CPU_CYCLES_PER_COLOR_CLOCK / cpu_cycles_per_instruction).ceil())
         .clamp(0.0, usize::MAX as f64) as usize
+}
+
+fn bounded_idle_cck(bulk_cck: u32, event_cck: Option<u32>, already_advanced_cck: u32) -> u32 {
+    event_cck
+        // A due event still needs a clock to retire (for example a matched
+        // Copper WAIT). A zero horizon must not freeze a stopped CPU forever.
+        .map(|deadline| bulk_cck.min(deadline.max(1).saturating_sub(already_advanced_cck)))
+        .unwrap_or(bulk_cck)
 }
 
 #[cfg(test)]
@@ -5873,6 +5886,90 @@ mod tests {
     }
 
     #[test]
+    fn stopped_cpu_due_deadlines_allow_progress_without_overshooting() {
+        assert_eq!(super::bounded_idle_cck(4, Some(0), 0), 1);
+        assert_eq!(super::bounded_idle_cck(4, Some(0), 1), 0);
+        assert_eq!(super::bounded_idle_cck(4, Some(3), 0), 3);
+        assert_eq!(super::bounded_idle_cck(4, Some(3), 1), 2);
+    }
+
+    #[test]
+    fn stopped_cpu_progresses_past_a_matched_copper_wait() {
+        let mut emu = emulator_stopped_waiting_for_vblank(0x2700);
+        {
+            let bus = emu.machine.bus_mut();
+            for (offset, word) in [0x4061u16, 0xfffe, 0xffff, 0xfffe].into_iter().enumerate() {
+                let address = 0x1000 + offset * 2;
+                bus.mem.chip_ram[address..address + 2].copy_from_slice(&word.to_be_bytes());
+            }
+            for (offset, value) in [
+                (0x100, 0xc200),
+                (0x08e, 0x2c81),
+                (0x090, 0x2cc1),
+                (0x092, 0x003c),
+                (0x094, 0x00d4),
+                (0x080, 0),
+                (0x082, 0x1000),
+                (0x096, 0x8380),
+                (0x088, 0),
+            ] {
+                bus.custom_write(0x00df_f000 + offset, 2, value);
+            }
+            for _ in 0..400_000 {
+                if bus.next_copper_wakeup_cck() == Some(0) {
+                    break;
+                }
+                bus.advance_cpu_idle_devices(1);
+            }
+            assert_eq!(bus.next_copper_wakeup_cck(), Some(0));
+        }
+        let before = emu.bus().emulated_cck();
+        let mut idle = true;
+        for _ in 0..64 {
+            emu.run_one_step_mode(&mut idle, super::INSTRUCTIONS_PER_REALTIME_SLICE, true)
+                .unwrap();
+        }
+        assert!(emu.bus().emulated_cck() >= before + 64);
+        assert!(emu.machine.stopped());
+    }
+
+    #[test]
+    fn stopped_cpu_does_not_round_past_a_cia_event() {
+        use crate::chipset::cia::{REG_CRA, REG_ICR, REG_TAHI, REG_TALO};
+
+        let mut emu = emulator_stopped_waiting_for_vblank(0x2700);
+        {
+            let bus = emu.machine.bus_mut();
+            bus.cia_b.write(REG_TALO, 3);
+            bus.cia_b.write(REG_TAHI, 0);
+            bus.cia_b.write(REG_ICR, 0x81);
+            bus.cia_b.write(REG_CRA, 0x09);
+            for _ in 0..64 {
+                if bus.next_cia_event_cck() == Some(3) {
+                    break;
+                }
+                bus.advance_cpu_idle_devices(1);
+            }
+            assert_eq!(bus.next_cia_event_cck(), Some(3));
+        }
+
+        let cap = super::INSTRUCTIONS_PER_REALTIME_SLICE;
+        let (chunk, deadline) = emu.idle_fast_forward_chunk(cap);
+        assert!(chunk > 1, "exercise the rounded bulk-idle path");
+        assert_eq!(deadline, Some(3));
+        let before = emu.bus().emulated_cck();
+        let retired = emu.retired_instructions();
+        let mut idle = true;
+        let accounting = emu.run_one_step_mode(&mut idle, cap, true).unwrap();
+
+        assert_eq!(emu.bus().emulated_cck() - before, 3);
+        assert_eq!(accounting.slice_cck, 3);
+        assert_eq!(accounting.device_cck, 3);
+        assert_eq!(emu.retired_instructions(), retired);
+        assert!(emu.machine.stopped());
+    }
+
+    #[test]
     fn stopped_cpu_fast_forward_is_bounded_by_pending_blitter_irq() {
         let mut emu = emulator_stopped_waiting_for_vblank(0x2700);
         {
@@ -5895,11 +5992,12 @@ mod tests {
         }
 
         let irq_instructions = emu.instructions_for_cck(1).max(1);
-        let chunk = emu.idle_fast_forward_chunk(super::INSTRUCTIONS_PER_REALTIME_SLICE);
+        let (chunk, deadline) = emu.idle_fast_forward_chunk(super::INSTRUCTIONS_PER_REALTIME_SLICE);
         assert_eq!(
             chunk, irq_instructions,
             "a stopped CPU must nap only as far as the pending INTREQ.BLIT assertion"
         );
+        assert_eq!(deadline, Some(1));
     }
 
     #[test]

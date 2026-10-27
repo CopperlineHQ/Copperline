@@ -929,11 +929,18 @@ pub struct Bus {
     irq_latency_visible_at: [u64; 16],
     irq_latency_mask: u16,
     irq_latency_last_pending: u16,
+    #[serde(default)]
+    cia_irq_routes: [cia_irq::CiaIrqRoute; 2],
     /// Measured software-written PORTS/EXTER/COPER requests, not external-pin
     /// edges. CPU writes qualify the CPU-write deadline; Copper PORTS/EXTER
     /// requests qualify the internal Paula poll phase.
     #[serde(default, alias = "irq_copper_request_mask")]
     irq_software_request_mask: u16,
+    /// CIA requests that have passed the output/input stages. Their running
+    /// polls use Paula's qualified phase; unrelated INT2/INT6 devices retain
+    /// the former unmeasured external-pin path.
+    #[serde(default)]
+    irq_cia_request_mask: u16,
     /// Configured IPL-pipe length in cck (from COPPERLINE_IRQ_LATENCY_CCK or the
     /// default); 0 disables the pipe and the cpu.rs boundary-sampling delay. A
     /// field (not a global) so tests can set it per-instance -- mechanism tests
@@ -3784,7 +3791,9 @@ impl Bus {
             irq_latency_visible_at: [0; 16],
             irq_latency_mask: 0,
             irq_latency_last_pending: 0,
+            cia_irq_routes: Default::default(),
             irq_software_request_mask: 0,
+            irq_cia_request_mask: 0,
             irq_latency_setting: irq_latency_setting_from_env(),
             beam_top_palette: Palette::new(),
             beam_bottom_palette: Palette::new(),
@@ -5472,7 +5481,9 @@ impl Bus {
         self.irq_latency_visible_at = [0; 16];
         self.irq_latency_mask = 0;
         self.irq_latency_last_pending = 0;
+        self.cia_irq_routes = Default::default();
         self.irq_software_request_mask = 0;
+        self.irq_cia_request_mask = 0;
         self.trace_cia_irq_pins = (false, false);
         self.trace_intreq = 0;
         self.beam_top_palette = Palette::new();
@@ -7904,6 +7915,31 @@ impl Bus {
         self.blit_irq_delay_cck.filter(|&cck| cck != 0)
     }
 
+    /// CIA deadline relative to the current beam, including deferred device time.
+    pub fn next_cia_event_cck(&self) -> Option<u32> {
+        let ticks = self
+            .cia_a
+            .next_event_ticks()
+            .into_iter()
+            .chain(self.cia_b.next_event_ticks())
+            .min();
+        ticks
+            .map(|ticks| {
+                ticks
+                    .saturating_mul(5)
+                    .saturating_sub(self.device_clock.cia_tick_remainder_cck)
+                    .saturating_sub(self.pending_device_cck)
+                    .max(1)
+            })
+            .into_iter()
+            .chain(
+                self.cia_irq_routes
+                    .iter()
+                    .filter_map(|route| route.next_event(self.emulated_cck)),
+            )
+            .min()
+    }
+
     pub fn next_serial_event_cck(&self) -> Option<u32> {
         self.paula.next_serial_event_cck()
     }
@@ -7956,10 +7992,9 @@ impl Bus {
     /// by two colour clocks; an unqualified operand poll precedes it by four.
     /// STOP uses the boundary deadline directly. Only already asserted sources
     /// are considered: this never predicts a future device interrupt. The
-    /// two/four-CCK leads are calibrated for internal Paula sources only;
-    /// Pin-fed `INT_PORTS`/`INT_EXTER` retain their previous no-lead deadline.
-    /// Software writes to those Paula request bits use the measured internal
-    /// poll phase; the bit number alone does not identify an external edge.
+    /// two/four-CCK leads apply to internal Paula sources and staged CIA
+    /// requests. Other pin-fed INT2/INT6 devices retain the no-lead deadline;
+    /// the request bit alone cannot identify which source asserted it.
     pub(crate) fn cpu_poll_intreq(&self, lead_cck: u32) -> u16 {
         let lead_cck = if self.cpu_clocks_per_cck == 2 && !self.cpu_short_bus_cycle {
             lead_cck
@@ -7971,17 +8006,15 @@ impl Bus {
             visible &= !INT_COPER;
         }
         // Hold each newly-raised interrupt invisible until its own pipe delay
-        // has elapsed; sources released earlier stay visible. The COPER/STOP-
-        // derived two/four-CCK leads were not calibrated for INT2/INT6 routes,
-        // so preserve their previous no-lead deadline pending separate
-        // transition/poll measurement. Software-generated requests for those
-        // bits instead follow the internal poll phase measured on A500.
+        // has elapsed; sources released earlier stay visible. CIA requests now
+        // have explicit source/input stages, so use the common qualified poll
+        // rather than counting that source delay again during a running loop.
         let mut delayed = self.irq_latency_mask;
         while delayed != 0 {
             let bit = delayed.trailing_zeros() as usize;
             delayed &= delayed - 1;
             let source_lead_cck = if (1u16 << bit) & (INT_PORTS | INT_EXTER) != 0
-                && (1u16 << bit) & self.irq_software_request_mask == 0
+                && (1u16 << bit) & (self.irq_software_request_mask | self.irq_cia_request_mask) == 0
             {
                 0
             } else {
@@ -8103,6 +8136,7 @@ impl Bus {
 
     fn note_intreq_set_edges(&mut self) {
         let current = self.paula.intreq & IRQ_SOURCE_BITS;
+        self.irq_cia_request_mask &= current;
         if current & !self.trace_intreq != 0 {
             self.note_bus_event_named(BUS_EVENT_INTREQ, Some("intreq_set"));
         }
@@ -8442,37 +8476,44 @@ impl Bus {
 
         let cia_remainder = self.device_clock.cia_tick_remainder_cck;
         let ticks = self.device_clock.cia_ticks_for_cck(cck);
-        let cia_a_edge_tick = (!trace_spans.is_empty() && !self.trace_cia_irq_pins.0)
-            .then(|| self.cia_a.first_irq_edge_tick_within(ticks))
-            .flatten();
-        let cia_b_edge_tick = (!trace_spans.is_empty() && !self.trace_cia_irq_pins.1)
-            .then(|| self.cia_b.first_irq_edge_tick_within(ticks))
-            .flatten();
+        let cia_a_edge_tick = (!self.cia_irq_routes[0].logical
+            && ticks != 0
+            && self.cia_a.irq_edge_prediction_needed()
+            && self.cia_a.next_event_ticks().is_some_and(|n| n <= ticks))
+        .then(|| self.cia_a.first_irq_edge_tick_within(ticks))
+        .flatten();
+        let cia_b_edge_tick = (!self.cia_irq_routes[1].logical
+            && ticks != 0
+            && self.cia_b.irq_edge_prediction_needed()
+            && self.cia_b.next_event_ticks().is_some_and(|n| n <= ticks))
+        .then(|| self.cia_b.first_irq_edge_tick_within(ticks))
+        .flatten();
         // Cached once: this runs on the per-device-tick path, so a live env
         // lookup here would cost real-time performance for a debug-only logger.
         let dbg_cia = dbg_cia_on();
-        if self.cia_a.tick(ticks) {
-            self.paula.intreq |= INT_PORTS;
-            if dbg_cia {
-                log::info!(
-                    "cia A irq secs={:.5} f={} icr={:#04X}",
-                    self.emulated_seconds(),
-                    self.emulated_frames,
-                    self.cia_a.debug_icr_data(),
-                );
-            }
+        if self.cia_a.tick(ticks) && dbg_cia {
+            log::info!(
+                "cia A irq secs={:.5} f={} icr={:#04X}",
+                self.emulated_seconds(),
+                self.emulated_frames,
+                self.cia_a.debug_icr_data(),
+            );
         }
-        if self.cia_b.tick(ticks) {
-            self.paula.intreq |= INT_EXTER;
-            if dbg_cia {
-                log::info!(
-                    "cia B irq secs={:.5} f={} icr={:#04X}",
-                    self.emulated_seconds(),
-                    self.emulated_frames,
-                    self.cia_b.debug_icr_data(),
-                );
-            }
+        if self.cia_b.tick(ticks) && dbg_cia {
+            log::info!(
+                "cia B irq secs={:.5} f={} icr={:#04X}",
+                self.emulated_seconds(),
+                self.emulated_frames,
+                self.cia_b.debug_icr_data(),
+            );
         }
+        let tick_at = |tick: u32| {
+            self.emulated_cck.saturating_sub(u64::from(cck))
+                + u64::from(5u32.saturating_sub(cia_remainder))
+                + u64::from(tick.saturating_sub(1)) * 5
+        };
+        let source_at = [cia_a_edge_tick.map(tick_at), cia_b_edge_tick.map(tick_at)];
+        self.update_cia_irq_routes(source_at);
         // Predicting on cloned CIAs above leaves this live update batched, but
         // still lets the diagnostic trace stamp each timer-driven pin edge on
         // its exact E-clock slot before TOD and external inputs below can add
@@ -8491,9 +8532,7 @@ impl Bus {
         }
 
         for _ in 0..agnus_tick.new_frames {
-            if self.cia_a.tick_tod() {
-                self.paula.intreq |= INT_PORTS;
-            }
+            self.cia_a.tick_tod();
         }
         for _ in 0..agnus_tick.new_lines {
             // Denise clocks the POTxDAT counters at H-sync, the same per-line
@@ -8503,35 +8542,32 @@ impl Bus {
                 VideoStandard::Ntsc => 7,
             };
             self.paula.tick_pot_hsync(self.pot_pins(), discharge_lines);
-            if self.cia_b.tick_tod() {
-                self.paula.intreq |= INT_EXTER;
-                if dbg_cia {
-                    log::info!(
-                        "cia B TOD alarm (tick) secs={:.5} f={}",
-                        self.emulated_seconds(),
-                        self.emulated_frames,
-                    );
-                }
+            if self.cia_b.tick_tod() && dbg_cia {
+                log::info!(
+                    "cia B TOD alarm (tick) secs={:.5} f={}",
+                    self.emulated_seconds(),
+                    self.emulated_frames,
+                );
             }
         }
         for _ in 0..agnus_tick.new_frames {
             if self
                 .cia_b
                 .sync_tod_to_frame(self.agnus.nominal_frame_lines())
+                && dbg_cia
             {
-                self.paula.intreq |= INT_EXTER;
-                if dbg_cia {
-                    log::info!(
-                        "cia B TOD alarm (frame sync) secs={:.5} f={}",
-                        self.emulated_seconds(),
-                        self.emulated_frames,
-                    );
-                }
+                log::info!(
+                    "cia B TOD alarm (frame sync) secs={:.5} f={}",
+                    self.emulated_seconds(),
+                    self.emulated_frames,
+                );
             }
         }
 
-        if !self.keyboard.is_idle() && self.keyboard.tick(cck, &mut self.cia_a) {
-            self.paula.intreq |= INT_PORTS;
+        if !self.keyboard.is_idle() {
+            // CNT-clocked timers can assert here too. Forward their output
+            // through the common CIA/Paula stages, just like serial input.
+            self.keyboard.tick(cck, &mut self.cia_a);
         }
         if self.keyboard.take_system_reset_request() {
             self.keyboard_system_reset_pending = true;
@@ -8624,11 +8660,8 @@ impl Bus {
                 self.paula.intreq |= INT_DSKSYNC;
             }
             if self.floppy.take_index_pulse() {
-                let flag_irq = self.cia_b.assert_flag();
+                self.cia_b.assert_flag();
                 self.cia_b.release_flag();
-                if flag_irq {
-                    self.paula.intreq |= INT_EXTER;
-                }
             }
             self.feed_drive_sounds();
         }
@@ -8694,12 +8727,7 @@ impl Bus {
             );
         }
         self.trace_cia_irq_pins = pins;
-        if pins.0 {
-            self.paula.intreq |= INT_PORTS;
-        }
-        if pins.1 {
-            self.paula.intreq |= INT_EXTER;
-        }
+        self.update_cia_irq_routes([None, None]);
     }
 
     pub fn flush_pending_vbi(&mut self) {
@@ -9542,6 +9570,7 @@ impl Bus {
     // -----------------------------------------------------------------
 
     fn sync_cia_irq_trace_after_access(&mut self, cia_b: bool) {
+        self.update_cia_irq_routes([None, None]);
         let asserted = if cia_b {
             self.cia_b.irq_line_asserted()
         } else {
@@ -9631,9 +9660,6 @@ impl Bus {
             cartridge.note_cia_write(false, reg, byte);
         }
         let eff = self.cia_a.write(reg, byte);
-        if self.cia_a.irq_line_asserted() {
-            self.paula.intreq |= INT_PORTS;
-        }
         self.sync_cia_irq_trace_after_access(false);
         match eff.keyboard_handshake {
             Some(true) => self.keyboard.amiga_kdat_edge(true),
@@ -9777,9 +9803,6 @@ impl Bus {
         }
         let anchor_tod = reg == REG_TODLO && !self.cia_b.tod_writes_alarm();
         let eff = self.cia_b.write(reg, byte);
-        if self.cia_b.irq_line_asserted() {
-            self.paula.intreq |= INT_EXTER;
-        }
         self.sync_cia_irq_trace_after_access(true);
         if anchor_tod {
             self.cia_b.anchor_tod_to_frame(0);
@@ -13323,6 +13346,7 @@ fn palette_event_sequences_equivalent(a: &[BeamRegisterWrite], b: &[BeamRegister
         })
 }
 
+mod cia_irq;
 mod collisions;
 mod custom_regs;
 mod ddf_line;

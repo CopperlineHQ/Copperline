@@ -49,8 +49,9 @@ through balanced MOVEM save/restore lists. Sixteen relative timer-start phases
 check interrupt counts and the complete 600-byte sample buffer's checksum.
 This reproduces the interrupt-sensitive pattern used by Voyage's startup
 without including its code, disk, or a Kickstart ROM. The expected values are
-regression references from the last working polling behavior, not hardware
-captures. Run it with:
+emulator regression snapshots, not hardware captures. Phases 0 and 11–15 were
+re-snapshotted after the staged CIA request model was introduced; the remaining
+phases retain their earlier references. Run it with:
 
 ```sh
 cargo test --locked --lib cia_timer_irqs_preserve_movem_sample_phase
@@ -58,6 +59,17 @@ vasmm68k_mot -Fbin -m68000 -o timing-test/cia-movem-irq.bin timing-test/cia-move
 ```
 
 The assembled fixture is committed so the test needs no assembler.
+
+`a500-cia-request.asm` boots without external assets in `probe_golden`. It
+samples raw INTREQR, timer-A PB6 output, ICR and beam on both CIAs after
+0–15 NOP gaps, with CPU interrupts and display DMA disabled during sampling.
+The committed image is an emulator regression snapshot of the staged model,
+not a hardware capture of this fixture. Electrical timer/race measurements
+and unmeasured external-source phase assumptions are described in
+[the timing reference](../docs/internals/timing.md#cia-output-phase-and-raw-request-visibility).
+Assemble with `vasmm68k_mot -m68000 -no-opt -Fbin` and run
+`cargo test --profile ci --test probe_golden golden_a500_cia_request`.
+
 Toni Wilen's WinUAE provided an independent CIA/Copper interrupt control
 comparison during diagnosis; the sample hashes remain regression references.
 See [the polling investigation](../docs/internals/a500-irq-focus-2026-10-15.md)
