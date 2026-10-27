@@ -135,7 +135,7 @@ range checks as the equivalent TOML fields:
 | `--floppy-replay-speed DFN SPEED` | `[floppy.dfN] replay_speed` | replay already-captured tracks at `fast` (the default, double speed) or `normal` (the platter's own) |
 | `--floppy-bridge-writable DFN` | `[floppy.dfN] write_protected = false` | allow writing to the real disk |
 | `--joystick MODE` | `[input] joystick` | `gamepad` (default), `keyboard` |
-| `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = 1:1) |
+| `--mouse-sensitivity N` | `[input] mouse_sensitivity` | `0`-`100` host mouse speed (`50` default = neutral multiplier) |
 | `--mouse-capture MODE` | `[input] mouse_capture` | when the host mouse is grabbed: `click` (default), `auto`, `manual` |
 | `--port1 DEVICE` | `[input] port1` | `mouse` (default), `gamepad-mouse`, `joystick`, `cd32`, `analogue`, `lightpen`, `none` |
 | `--port2 DEVICE` | `[input] port2` | the same devices except `gamepad-mouse`; default `joystick` (`cd32` on the CD32 profile) |
@@ -1013,9 +1013,17 @@ are resampled there. Only when the window is too small for even a 1:1 copy
 fall back to the smooth fit rather than cropping to what fits. RTG board
 modes follow the setting too: their frame is scaled from its own native
 resolution, so a 640x480 board screen is drawn at 1x, 2x, 3x of *those*
-pixels inside the display area. The performance readout, the on-screen
-messages and the recording badge sit at the corners of that picture, and
-it keeps its size and place while a menu or panel is open over it.
+pixels inside the display area.
+The fit uses the window area above the status bar and open panel strips,
+independently of the chipset canvas: a 640x480 board screen fits at 2x on
+a 1920x1080 display. The debugger's display pane uses the same native fit.
+The performance readout, the on-screen messages and the recording badge
+sit at the corners of that picture. Menus, panels and their translucent
+backgrounds use the same brightness as chipset displays. Menus and panels
+keep the UI canvas's proportions and scale, independently of the board mode.
+They are composited over the native RTG texture, so opening them
+preserves its exact pixel blocks, size and position, including with the
+status bar hidden.
 
 Integer scaling draws from the unresampled canvas (one host row per woven
 scanline, matching `pixel_aspect = "square"`). Under the default TV aspect,
@@ -1596,7 +1604,7 @@ port2 = "joystick"        # same values except gamepad-mouse; default "cd32" on 
 # port3 = "joystick"      # parallel-port four-player adapter sockets:
 # port4 = "joystick"      #   joystick | none (see [parallel] joystick-adapter)
 joystick = "gamepad"      # "gamepad" (default) or "keyboard"
-mouse_sensitivity = 50    # host mouse speed 0-100 (50 default = 1:1)
+mouse_sensitivity = 50    # host mouse speed 0-100 (50 default = neutral multiplier)
 mouse_capture = "click"   # when to grab the mouse: click | auto | manual
 middle_click_release = false # middle click releases capture instead of reaching the guest
 autofire_hz = 0           # pulse a held fire button at this rate; 0 = off
@@ -1692,11 +1700,16 @@ run. (`auto` is still accepted here as a backward-compatibility alias for
 `gamepad`; the old auto-detect mode has been removed.)
 
 `mouse_sensitivity` scales how fast the emulated pointer tracks the host
-mouse, 0-100. `50` (the default, shown as *Default* in the GUI) is 1:1,
-`0` is a quarter speed and `100` quadruple, on an exponential scale so each
-step is an even ratio. It is a host-input
-scale applied to live mouse motion only: it never touches the emulated machine
-or scripted `--mouse-after` input, so headless and recorded runs stay
+mouse, 0-100. `50` (the default, shown as *Default* in the GUI) is a neutral
+multiplier, `0` is a quarter speed and `100` quadruple, on an exponential scale
+so each step is an even ratio. Captured and uncaptured mouse motion both compensate
+for the picture's display scale before this multiplier is applied. Captured
+movement uses logical host size, so a larger window or fullscreen picture does
+not increase mouse speed and monitor DPI does not change the sensitivity.
+Captured RTG motion uses the board's native pixels. Guest mouse
+preferences and host cursor acceleration can still affect the feel.
+It is a host-input scale applied to live mouse motion only: it never touches
+the emulated machine or scripted `--mouse-after` input, so headless and recorded runs stay
 deterministic. Set it from the launcher's *Input* tab or
 `--mouse-sensitivity N`, and adjust it live with `Cmd+Shift+>` / `Cmd+Shift+<`
 (`Alt+Shift+>` / `Alt+Shift+<` on Linux and Windows), which ramp while held.

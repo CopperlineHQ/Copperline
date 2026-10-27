@@ -2087,7 +2087,7 @@ fn print_help() {
          --rtc-frozen                   stop the seeded clock at --rtc-time exactly\n  \
          --joystick MODE                initial joystick input: gamepad or keyboard\n  \
          \x20                            (gamepad lets the keyboard pass through to the Amiga)\n  \
-         --mouse-sensitivity N          host mouse sensitivity 0-100 (50 default = 1:1)\n  \
+         --mouse-sensitivity N          host mouse sensitivity 0-100 (50 default = neutral)\n  \
          --mouse-capture MODE           when to grab the host mouse: click (default), auto, manual\n  \
          --port1 DEVICE                 controller in port 1: mouse (default),\n  \
          \x20                            gamepad-mouse, joystick, cd32, analogue, lightpen,\n  \

@@ -565,7 +565,7 @@ as well as sprite-playfield bit 1 when the enabled plane match fails.
 These fixture updates introduce no further emulation changes.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 45 takes ~20 s on an
+parallel on the available cores (the full suite of 47 takes ~20 s on an
 8-core host vs ~90 s sequentially).
 
 ### vAmiga AGA cross-check (2026-08-27)
@@ -621,6 +621,7 @@ Every figure below is the tool's own output against the committed golden:
 | `dpfprobe-aga` | exact (bijective, 0 differing pixels) |
 | `hamprobe-ham8` | exact (byte-for-byte under `VAMIGA_RGB=1`) |
 | `ddfprobe-agafold2` | 0.051% - one raster line (row 130) at a band edge |
+| `ddfprobe-agafold3` | 0.051% - one raster line (row 136) at a band edge |
 | `agaplanes` | 0.091% - one 8-px column (x 678-685) at a band's right fetch edge |
 | `rdram-aga` | 0.098% - the two band-transition lines (rows 38 and 166) |
 | `agafetch-mode` | **8.844% - the FMODE 10 band** |
@@ -674,6 +675,12 @@ tap range instead of wrapping, so the SANITY Roots II AGA
 swirl/kaleidoscope taps render linearly -- the issue #371 regression
 class -- while an on-grid start folds from the pipeline alone;
 FS-UAE-verified band by band),
+`ddfprobe-agafold3` (the fold below the hardwired DDF start: on Alice a
+DDFSTRT `$10`..`$16` only latches BPHSTART and the run starts at SHW `$18`,
+so the fold takes the `$18` run's phase and every lo-res BPL64 tap renders
+linearly, while an in-window start on the register's phase 16 still folds
+from tap 48 -- the Skeleton Krew CD32 scroll-jump regression class, issue
+#836; vAmiga-verified band by band on its 5.0b1 `A1200_2MB` AGA setup),
 `ddfprobe-agaorigin` (the AGA wide-FMODE absolute origin below the standard
 fetch slots: lo-res BPL64 DDFSTRT `$18` / DDFSTOP `$B8` hides the complete
 first 64-pixel gulp left of the standard DIW, leaving the other five gulps to

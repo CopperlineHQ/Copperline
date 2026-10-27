@@ -106,6 +106,11 @@ __pycache__/
 # bundle stages under /target, already ignored above.
 /*.dmg
 
+# Windows packages (packaging/windows/); installer scratch files use /target.
+/Copperline-*-win-*/
+/Copperline-*-win-*.zip
+/Copperline-*-win-*-setup.exe
+
 # Guest-code build intermediates (the committed artifact is the .bin blob).
 /guest/services/handler.*
 /guest/copperhf/device.exe

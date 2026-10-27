@@ -51,6 +51,19 @@ chmod +x Copperline-*.AppImage
 
 *Note:* On Linux, presentation requires a Vulkan driver. Most modern GPUs support Vulkan natively. For virtual machines or older hardware, install the Mesa software Vulkan driver (`mesa-vulkan-drivers` on Debian/Ubuntu/Fedora, or `vulkan-swrast` on Arch).
 
+### Windows
+
+Download `Copperline-X.Y.Z-win-x64-setup.exe` or
+`Copperline-X.Y.Z-win-arm64-setup.exe` from the
+[releases page](https://github.com/CopperlineHQ/Copperline/releases), matching
+your PC's architecture. The installer needs no administrator rights and adds
+a Start menu shortcut. Run a newer installer to update; uninstall through
+Windows Settings. Your settings and saves are preserved.
+
+Portable ZIPs remain available for both architectures; extract the whole
+archive and run `copperline.exe`. See the [Windows installation
+guide](docs/guide/getting-started.md#installing-on-windows).
+
 ### Building from source
 
 ```sh
@@ -64,6 +77,10 @@ build option; unoptimized debug builds are too slow for real-time emulation.
 display offsets. Combine it with **Autocrop** and **Integer** scaling to fit
 the detected display at the largest whole-pixel scale, including artwork
 outside the normal TV aperture. See [display configuration](docs/guide/configuration.md).
+RTG integer scaling fits the board's native resolution to the available display
+area: a 640x480 desktop reaches 2x on a 1920x1080 screen, with room for the status bar.
+The RTG picture stays at native pixel quality while menus and panels keep
+their usual proportions and translucency.
 
 The [Debug workspace](docs/debugger/window.md) puts the Amiga display beside
 its debugger, Frame Analyzer, and Console in one desktop window. Open
@@ -119,6 +136,12 @@ ordinary windows.
 - **Native screenshot (1:1)**: `Cmd+Option+S` (macOS) / `Ctrl+Alt+S` (Linux/Windows)
 - **Mouse capture**: `Cmd+G` (macOS) / `Alt+G` (Linux/Windows)
 - **Joystick toggle**: `Cmd+J` (macOS) / `Alt+J` (Linux/Windows) switches between physical gamepad and keyboard arrows.
+
+Captured mouse movement compensates for the picture's display scale, so
+enlarging the window or entering fullscreen does not amplify its speed.
+The conversion accounts for monitor DPI and uses native board pixels for RTG.
+Adjust the live mouse speed with `[input] mouse_sensitivity` or the launcher's
+*Input* tab.
 
 See the [UI guide](docs/guide/ui.md) for full interface details.
 
