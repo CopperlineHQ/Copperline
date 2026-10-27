@@ -61,6 +61,12 @@ impl CpuBus {
         matches!(self.jit_batch, Some(JitBatchTiming::Single))
     }
 
+    /// Only a deferred-billing batch reads progress or yields mid-batch; the
+    /// core skips every boundary call in the others.
+    pub(super) fn jit_batch_wants_boundaries(&self) -> bool {
+        matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_)))
+    }
+
     fn jit_plain_access(&self, address: u32, size: usize) -> bool {
         matches!(
             self.classify_plain_memory(self.mask(address), size),

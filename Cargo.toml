@@ -184,7 +184,7 @@ host-serial = ["dep:serialport"]
 [dependencies]
 # Batch boundaries and physical RAM/ROM regions pending upstream PRs #222/#223.
 # Keep the conformance runner on this same revision (tools/check-m68k-locks.py).
-m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "9a2ebba6947989c3612733742dd1ded7563c828e", features = ["serde"] }
+m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "fdcdbd20e44b464a6e6e1fd6a01e12aae77a5694", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "aa54c40c232a826f3d6f117ac8a0b165e7571f32", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.

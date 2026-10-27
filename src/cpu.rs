@@ -5299,6 +5299,10 @@ impl AddressBus for CpuBus {
         self.note_jit_batch_boundary(retired, pc, sr)
     }
 
+    fn wants_batch_boundaries(&mut self) -> bool {
+        self.jit_batch_wants_boundaries()
+    }
+
     fn last_fetch_was_cached(&self) -> bool {
         self.last_fetch_cache_hit
     }

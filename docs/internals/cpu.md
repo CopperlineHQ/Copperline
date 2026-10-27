@@ -153,9 +153,9 @@ The timing contract is deliberately approximate
   completes first: yielding between its fetch and dispatch would make the
   core fetch it again;
 - a batch that starts in chip or slow RAM keeps the coarser lump model:
-  it runs at most 64 instructions with no deadline prediction and no
-  boundary checks, and its CPU clocks are billed in one lump when it
-  returns. Its bus accesses still arbitrate and advance the beam as they
+  it runs at most 64 instructions with no deadline prediction, declines
+  the core's boundary calls (`AddressBus::wants_batch_boundaries`), and
+  its CPU clocks are billed in one lump when it returns. Its bus accesses still arbitrate and advance the beam as they
   land, but the CPU time between them is not interleaved exactly, and
   interrupts wait for the batch to end, so their latency there is bounded
   by the batch size rather than modelled. Exact billing cost host time on
