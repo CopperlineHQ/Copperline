@@ -396,6 +396,11 @@ probe_tests! {
     // class, issue #371), and an on-grid start folds from the pipeline
     // alone; FS-UAE-verified band by band.
     golden_ddfprobe_agafold2 => probe_aga("ddfprobe-agafold2", "ddfprobe-agafold2.bin", 16.0);
+    // A DDFSTRT below the hardwired $18 start only latches BPHSTART on
+    // Alice; the run starts at SHW $18, so the fold phase is the $18 one and
+    // every tap renders linearly (the Skeleton Krew CD32 scroll-jump
+    // regression class, issue #836); vAmiga-verified band by band.
+    golden_ddfprobe_agafold3 => probe_aga("ddfprobe-agafold3", "ddfprobe-agafold3.bin", 16.0);
     // Wide-FMODE's absolute gulp grid remains linear below the standard
     // fetch slots: lo-res BPL64 $18/$B8 hides its whole first 64-px gulp
     // left of a standard DIW and presents the remaining 320 px edge to edge;
