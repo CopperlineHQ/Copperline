@@ -605,7 +605,11 @@ fn parse_cue(data: &[u8], version: Version, path: &Path) -> Result<Vec<CueEntry>
         let lba = match version {
             Version::New => i32::from_be_bytes(raw[4..8].try_into().unwrap()),
             Version::Old => {
-                let (minutes, seconds, frames) = (raw[5], raw[6], raw[7]);
+                // CUES carries the absolute MSF a disc's Q sub-channel
+                // reports, BCD-coded like the track and index fields.
+                let minutes = from_bcd(raw[5], "minute", path)?;
+                let seconds = from_bcd(raw[6], "second", path)?;
+                let frames = from_bcd(raw[7], "frame", path)?;
                 if seconds >= 60 || frames >= 75 {
                     bail!("{}: invalid MSF address in NRG CUES chunk", path.display());
                 }
@@ -730,9 +734,10 @@ mod tests {
         entry[2] = index;
         if old {
             let absolute = lba + 150;
-            entry[5] = (absolute / (60 * 75)) as u8;
-            entry[6] = ((absolute / 75) % 60) as u8;
-            entry[7] = (absolute % 75) as u8;
+            let bcd = |value: i32| (((value / 10) << 4) | (value % 10)) as u8;
+            entry[5] = bcd(absolute / (60 * 75));
+            entry[6] = bcd((absolute / 75) % 60);
+            entry[7] = bcd(absolute % 75);
         } else {
             entry[4..8].copy_from_slice(&lba.to_be_bytes());
         }
@@ -841,6 +846,57 @@ mod tests {
         write_dao_image(&path, true);
         assert_mixed_dao(&path);
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Descriptor chunks copied from a Nero-written CD32 image (the UFO:
+    /// Enemy Unknown disc): one MODE1/2048 track with a stored 150-sector
+    /// pregap, whose CUES lead-out `00 42 40` is only a valid MSF as BCD
+    /// (42 s 40 f = 3190 frames, i.e. LBA 3040).
+    #[test]
+    fn nero_cues_msf_is_bcd_coded() {
+        let cue = [
+            0x41, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x41, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
+            0x41, 0x01, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, //
+            0x41, 0xAA, 0x01, 0x00, 0x00, 0x00, 0x42, 0x40,
+        ];
+        let mut dao = vec![0u8; DAO_HEADER_BYTES];
+        dao[3] = 0x34;
+        dao[19] = 1;
+        dao[20] = 1;
+        dao[21] = 1;
+        let mut entry = dao_entry(DATA_SECTOR_BYTES as u16, 0, [0, 0x4B000, 0x63B000], true);
+        entry[17] = 1;
+        dao.extend(entry);
+
+        let path = Path::new("bcd-msf.nrg");
+        let entries = parse_cue(&cue, Version::Old, path).unwrap();
+        assert_eq!(cue_lba(&entries, 1, 0), Some(-150));
+        assert_eq!(cue_lba(&entries, 1, 1), Some(0));
+        assert_eq!(cue_lba(&entries, 0xAA, 1), Some(3040));
+
+        let (tracks, extents, total) =
+            parse_dao_layout(&cue, &dao, Version::Old, 0x63B000, path).unwrap();
+        assert_eq!(total, 3040);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].kind, TrackKind::Mode1_2048);
+        assert_eq!(tracks[0].start_sector, 0);
+        assert_eq!(tracks[0].sector_count, 3040);
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents[0].disc_start, 0);
+        assert_eq!(extents[0].sector_count, 3040);
+        assert!(matches!(
+            extents[0].storage,
+            Storage::Source {
+                source: 0,
+                byte_offset: 0x4B000
+            }
+        ));
+
+        // A non-BCD MSF digit is rejected rather than read as binary.
+        let mut binary = cue;
+        binary[30] = 0x4A;
+        assert!(parse_cue(&binary, Version::Old, path).is_err());
     }
 
     #[test]
