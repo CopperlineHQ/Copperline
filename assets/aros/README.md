@@ -17,17 +17,26 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-10-09 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit `949d6834f8`.
+Built from source on 2026-10-30 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit `1fef6c415e`.
 No local patch and no unmerged pull request is carried.
 
-The build links `.rom` at 523,156 bytes and `.ext` at 522,678 bytes of the
-524,288-byte banks, leaving 1,132 and 1,610 bytes spare (8,352 and 15,902
-at the previous refresh). The main bank overflowed upstream during this
-cycle and `55d7530cc1` moved lowlevel.library into the ext bank, which
-also gains ramdrive.device (`1bcf9a04ae`). Both banks are now nearly
-full: a future refresh that overflows one has to drop modules from the
-ROM's module list rather than grow the file.
+The build links `.rom` at 522,216 bytes and `.ext` at 522,104 bytes of the
+524,288-byte banks, leaving 2,072 and 2,184 bytes spare (1,132 and 1,610
+at the previous refresh). Upstream made room before adding the gfx.hidd
+display compositor (`b72155e2bb`):
+
+- Generated library and resource setup calls shared libautoinit helpers,
+  and module strings are pooled per bank (`aaab1ff30d`).
+- The empty symbol set every module carried is pooled per bank
+  (`c9b64995c2`).
+- Duplicated helpers in the ext bank, which had overflowed by 938 bytes,
+  are compiled once (`e46ecb2e00`).
+- The no-media boot image is LZ-packed and cut to 8 colours
+  (`b48168b9cf`, `c9b64995c2`).
+
+audio.device and disk.resource moved from the main bank to the ext bank
+(`adff8323a1`).
 
 Free memory when a `--run` staged program starts on a `--factory` machine,
 measured with a guest probe that calls `AvailMem` (a bare assembler
@@ -36,17 +45,104 @@ comparable with the older table further down, which used a C probe):
 
 | Machine                        | previous ROM | this ROM  | change  |
 |--------------------------------|--------------|-----------|---------|
-| A500, 512K chip + 512K slow    |      758,520 |   790,488 | +31,968 |
-| A500, 1 MB chip, no slow/fast  |      758,624 |   793,736 | +35,112 |
-| A1200, 2 MB chip, no fast      |    1,793,920 | 1,829,032 | +35,112 |
+| A500, 512K chip + 512K slow    |      790,488 |   788,712 |  -1,776 |
+| A500, 1 MB chip, no slow/fast  |      793,736 |   791,960 |  -1,776 |
+| A1200, 2 MB chip, no fast      |    1,829,032 | 1,827,256 |  -1,776 |
 
-The largest contiguous chip block grows by slightly more than the total:
-751,816 -> 786,936 bytes (+35,120) on the 1 MB A500 and 1,787,112 ->
-1,822,248 (+35,136) on the A1200. On the 512K chip + 512K slow A500 the
-whole gain lands in slow RAM; free chip RAM there stays at 509,112 bytes.
+The largest contiguous chip block shrinks by the same 1,776 bytes, to
+785,160 on the 1 MB A500 and 1,820,472 on the A1200. On the 512K chip +
+512K slow A500 the loss is all slow RAM; free chip RAM stays at 509,112
+bytes. The loss has not been traced to a single commit. Among the changes
+in this cycle that allocate at boot are the base compositor object
+gfx.hidd now creates for each display (`b72155e2bb`) and the larger
+TrackDiskBase with its graphics.library open count (`876234286f`,
+`a57919d299`).
 
-Upstream changes since the previous refresh (master `f1ec64f45a`) that
-reach this ROM:
+Upstream changes since the previous refresh (master `949d6834f8`) that
+reach this ROM (74 of the 662 commits in the range change the ROM's
+contents):
+
+- exec: the m68k task-exception trampoline calls Enable() after a
+  `tc_ExceptCode` dispatch and restores the interrupted code's condition
+  codes, where IDNestCnt used to stay one too high (`4ac3fbc085`).
+- graphics, amigavideo, layers and intuition (mostly Nicolas Ramz):
+  - LoadView() re-enables the vertical blank interrupt (INTENA
+    `INTF_SETCLR|INTF_VERTB`) on every call, so WaitTOF() works after a
+    hardware takeover (`02bd74f1d9`).
+  - OwnBlitter() and DisownBlitter() preserve D0/D1/A0/A1, as Kickstart
+    3.1 does (`646e6ddc3c`).
+  - CWait()/CMove() initialise a zeroed user Copper list (`6352e27331`).
+  - Planar AND copies, solid lines, small raw blits and masked planar
+    copies go through the blitter, with BLTCON1 written before BLTBDAT
+    (`93f52fbbfe`, `948f893399`).
+  - A displayed ViewPort's Copper list is retired rather than freed
+    while the Copper still runs it (`1ef776834d`), and FreeRaster()
+    leaves the planes of a displayed bitmap alone (`c52d5395f2`).
+  - RemakeDisplay() no longer holds the IBase lock across
+    RethinkDisplay(), a deadlock that hung boot shells running
+    add21k-style tools (`1b2f22c6b8`).
+  - A classic screen's BitMap copy keeps its stride and interleave, and
+    OpenScreen() leaves an SA_BackFill screen to its hook (`00f0156312`).
+  - Superbitmap layers follow Kickstart 3.1 scrolling and backup offsets
+    (`d7b4f80e7b`).
+  - Display composition moves into gfx.hidd (`b72155e2bb`), with layer
+    input shapes (`5fd290b1fb`). amigavideo reports its own compositing,
+    so native screens never get composited layers.
+- CD32:
+  - cd.device keeps its Akiko read-ahead range across CD_CHANGENUM and
+    CD_CHANGESTATE (`a98b378cdc`). CD_PAUSE and CD_PLAYTRACK take word
+    arguments as the CD32 Kickstart does (`5d4ecffdfa`, `665a5d5194`).
+  - cd32mpeg.device is registered only when an FMV cartridge is present
+    (`e35afb03ee`).
+  - lowlevel.library ElapsedTime() returns 16.16 E-clock intervals
+    instead of milliseconds (`9b519b5624`).
+  - A quiet CD boot keeps a windowless boot-console port as the boot
+    process's console (`a1b8aa6fd8`).
+  - CDVDFS gets ISO, Rock Ridge, Joliet and HFS bounds and read-error
+    hardening (`550c1bd0a9`), and takes back reclaimed caches when memory
+    frees up (`ae64047e08`).
+- audio.device stops the active channel DMA on a flush, and aborting a
+  queued write no longer stops the playing sample (`a399fe2fc7`).
+- trackdisk.device keeps SysBase, GfxBase and DiskBase at the Kickstart
+  1.x TrackDiskBase offsets $34/$38/$3C (`876234286f`) and opens
+  graphics.library once instead of per track decode (`a57919d299`).
+- dosboot keeps the boot block buffer after a successful boot, as
+  Kickstart does, for boot blocks that free or reuse it themselves
+  (`35bdefb030`).
+- Shell and Run: the Shell unloads `cli_Module` after a command, fixing
+  PowerPacker and Imploder self-decrunchers (`fef7adea47`), and Run keeps
+  the child command's quoting and redirections (`cc44e4a360`,
+  `bf7075aab8`).
+- dos.library: LIBS: and DRIVERS: get separate boot locks (`4ae0a994fe`),
+  and pattern matching and NameFromLock() handle a zero current directory,
+  allocation failures and short buffers (`67f7b77542`, `247ca6ed33`,
+  `7bc6eecbe8`).
+- afs-handler reads only the volume's own bitmap blocks when counting
+  used blocks, rather than a 64 KB read-ahead on every floppy mount
+  (`dc7bed951d`), and validates volumes with more than one bitmap block
+  correctly (`9ebf8cb390`).
+- RAM: handler enumeration, allocation-failure, soft-link and Info()
+  fixes (`df6a9f8e40`, `086ebfff52`, `f44a5135a1`, `a1634b9aa5`,
+  `149f75e414`, `7f89733b59`).
+- CON: startup, timed-wait and result fixes (`d07303a318`) and Ctrl-W
+  word deletion (`afc9815ef9`).
+- `672e4ef2ed` turns off the debug tracing diag, expansion and romboot
+  printed to the serial port on every boot (the board, `callroms` and
+  `romtaginit` lines).
+
+The previous refresh was built on 2026-10-09 from master `949d6834f8`,
+also with no local patch and no unmerged pull request. It linked `.rom`
+at 523,156 bytes and `.ext` at 522,678 bytes, leaving 1,132 and 1,610
+bytes spare (8,352 and 15,902 at the refresh before it). The main bank
+had overflowed upstream during that cycle and `55d7530cc1` moved
+lowlevel.library into the ext bank, which also gained ramdrive.device
+(`1bcf9a04ae`). Measured the same way, it had 31,968 to 35,112 bytes
+more free memory at a `--run` program's start than the refresh before
+it: 758,520 -> 790,488 bytes on the 512K chip + 512K slow A500, 758,624
+-> 793,736 on a 1 MB chip-only A500 and 1,793,920 -> 1,829,032 on a 2 MB
+A1200.
+
+That refresh picked up these changes since master `f1ec64f45a`:
 
 - m68k memory footprint (Nicolas Ramz). The Exec housekeeper, the
   AmigaVideo display housekeeper, the CD32 unit task and the

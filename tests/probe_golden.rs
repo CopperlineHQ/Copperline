@@ -10,12 +10,16 @@
 //! compares it pixel-for-pixel against the committed reference under
 //! `timing-test/golden/`.
 //!
-//! Exception: the two probes that render live E-clock-referenced counts
-//! (`timing-test`, `bltprobe-pace`) do depend on the instant the ROM hands
-//! control to the bootblock -- the E-clock and DMA-cadence phase relative to
-//! the beam at probe start varies with boot duration, shifting the displayed
-//! counts by a tick or two. Refreshing the bundled AROS ROM therefore moves
-//! those two goldens and requires a re-bless.
+//! Exception: four probes depend on the state the ROM hands to the
+//! bootblock. The two that render live E-clock-referenced counts
+//! (`timing-test`, `bltprobe-pace`) see the E-clock and DMA-cadence phase
+//! relative to the beam vary with boot duration, shifting the displayed
+//! counts by a tick or two. `a500-cia-request` records beam positions after
+//! E-clock-synchronised CIA accesses, and its ICR samples include CIA-A
+//! timer B, which the probe never programs and the ROM leaves running.
+//! `jit-bus-boundary` draws markers whose position against the beam also
+//! follows the handoff instant. Refreshing the bundled AROS ROM can move any
+//! of these four goldens and requires a re-bless.
 //!
 //! The emulator core is deterministic, so any pixel difference is a real
 //! behaviour change. When a change is intentional (a hardware-model fix that
