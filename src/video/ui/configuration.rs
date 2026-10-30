@@ -1729,6 +1729,7 @@ pub(in crate::video::ui) fn launcher_action_label(control: UiControl) -> &'stati
         UiControl::LauncherSave => "Save...",
         UiControl::LauncherDefaults => "Defaults",
         UiControl::LauncherRun => "Run",
+        UiControl::LauncherSaveCurrent => "Save",
         UiControl::LauncherSaveAs => "Save As",
         UiControl::LauncherSaveDefault => "Save default",
         UiControl::LauncherResetDefault => "Reset default",
@@ -1736,9 +1737,11 @@ pub(in crate::video::ui) fn launcher_action_label(control: UiControl) -> &'stati
     }
 }
 
-/// What the Save dialog offers, left to right. The one that deletes
-/// something sits furthest from where the pointer comes in.
-pub(in crate::video) const SAVE_ACTIONS: [UiControl; 3] = [
+/// What the Save dialog offers, left to right. The one done most often
+/// is first, where the focus starts, and the one that deletes something
+/// sits furthest from where the pointer comes in.
+pub(in crate::video) const SAVE_ACTIONS: [UiControl; 4] = [
+    UiControl::LauncherSaveCurrent,
     UiControl::LauncherSaveAs,
     UiControl::LauncherSaveDefault,
     UiControl::LauncherResetDefault,
@@ -1760,19 +1763,35 @@ pub(in crate::video::ui) const SAVE_DIALOG_HELP_LINES: usize = 2;
 pub(in crate::video::ui) const SAVE_DIALOG_LINE_H: usize = 12;
 pub(in crate::video::ui) const SAVE_DIALOG_HELP_GAP: usize = 16;
 
-/// What each button does, said while the pointer is on it.
+/// What each button does, said while the pointer is on it, in lines of
+/// `chars` characters.
 ///
-/// Anything that is not one of the three gets the Save line. This is a
+/// Anything that is not one of the four gets the Save As line. This is a
 /// Save dialog opened from a Save button, so with the pointer resting
 /// nowhere in particular it should say what saving means rather than go
 /// blank and leave a hole where a sentence was a moment ago.
-pub(in crate::video::ui) fn save_dialog_help(control: UiControl) -> &'static str {
-    match control {
-        UiControl::LauncherSaveDefault => {
-            "Sets the running configuration as the default when you launch Copperline."
+///
+/// Save names the file it will write over, since it does so without
+/// asking: the pointer resting on it is the last chance to see which file
+/// that is. The path is clipped to one line of its own, so the sentence
+/// always fits the two lines the dialog keeps.
+pub(in crate::video::ui) fn save_dialog_help(
+    control: UiControl,
+    config_file: Option<&std::path::Path>,
+    chars: usize,
+) -> String {
+    match (control, config_file) {
+        (UiControl::LauncherSaveCurrent, Some(path)) => {
+            let path = clip_path_to_chars(&path.display().to_string(), chars.saturating_sub(1));
+            format!("Saves the running configuration over {path}.")
         }
-        UiControl::LauncherResetDefault => "Resets the current default config to factory settings.",
-        _ => "Save the running configuration to a file.",
+        (UiControl::LauncherSaveDefault, _) => {
+            "Sets the running configuration as the default when you launch Copperline.".into()
+        }
+        (UiControl::LauncherResetDefault, _) => {
+            "Resets the current default config to factory settings.".into()
+        }
+        _ => "Save the running configuration to a file.".into(),
     }
 }
 

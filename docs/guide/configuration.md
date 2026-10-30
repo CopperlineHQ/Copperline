@@ -330,7 +330,9 @@ instead of the search.
 ```
 
 `[paths]` sets where Copperline writes its output files, where file
-dialogs open when their field is empty, and where a relative media path is
+dialogs open when their field is empty (until a dialog for that kind of
+file has been used in the session -- from then on it opens where the last
+one was answered), and where a relative media path is
 looked for when the working directory does not have it (see
 [Relative media paths](#relative-media-paths)). Every key is optional and falls back
 to the default directory structure under the host data directory

@@ -1494,6 +1494,15 @@ pub struct App {
     /// wants done with the answer. Only macOS ever has one (see
     /// `native_dialog`); the machine is held while it is there.
     pending_pick: Option<native_dialog::PendingPick>,
+    /// Where each kind of file picker was last answered, so the next one
+    /// of that kind opens there rather than back at its starting folder.
+    picked_dirs: native_dialog::PickedDirs,
+    /// The configuration file the configuration screen's Save writes to:
+    /// the one last loaded or saved there this session. Kept here rather
+    /// than in the screen's own state, which is rebuilt every time it
+    /// opens, so a machine run from a loaded file can be saved back to it
+    /// after it has been running a while.
+    config_file: Option<PathBuf>,
     /// Per-drive disk-swap playlists: the ordered image paths the user can
     /// cycle through for each drive with the disk-swap shortcut. Lets a
     /// multi-disk demo run on a single drive.
@@ -3038,6 +3047,8 @@ impl App {
             whdload_job: None,
             image_job: None,
             pending_pick: None,
+            picked_dirs: Default::default(),
+            config_file: None,
             disk_playlists,
             disk_write_protected,
             disk_playlist_index: [0; 4],
@@ -8156,12 +8167,17 @@ impl App {
                     state.tab = state.setup.settle_tab(state.tab);
                     state.setup.refresh_host_devices();
                     state.status = Some(StatusMessage::ok("Reset to defaults"));
+                    // What is on the screen no longer came from the file
+                    // last loaded, so Save must not quietly write a fresh
+                    // machine over it: it asks where, as Save As does.
+                    self.set_config_file(None);
                 }
             }
             UiControl::LauncherBrowse(field) => self.launcher_browse(field),
             UiControl::LauncherZorroAdd => self.launcher_add_zorro(),
             UiControl::LauncherLoad => self.launcher_load(),
             UiControl::LauncherSave => self.launcher_toggle_save_dialog(),
+            UiControl::LauncherSaveCurrent => self.launcher_save_current(),
             UiControl::LauncherSaveAs => self.launcher_save(),
             UiControl::LauncherSaveDefault => self.launcher_save_default(),
             UiControl::LauncherResetDefault => self.launcher_reset_default(),
@@ -8215,7 +8231,7 @@ mod app_states;
 #[cfg(feature = "update-check")]
 mod app_update;
 use app_nav::{cycle_hold_delay, PadNav};
-use native_dialog::PickRequest;
+use native_dialog::{PickDir, PickRequest};
 mod adapter;
 mod app_panels;
 mod app_session;

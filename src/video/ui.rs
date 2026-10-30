@@ -1181,6 +1181,9 @@ pub enum UiControl {
     LauncherLoad,
     /// Configuration screen: open the Save menu.
     LauncherSave,
+    /// Save menu: save the configuration back to the file last loaded or
+    /// saved on the screen; with none yet, the same as Save As.
+    LauncherSaveCurrent,
     /// Save menu: save the configuration to a .toml file of its own.
     LauncherSaveAs,
     /// Save menu: save it as the configuration Copperline starts with.

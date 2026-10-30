@@ -414,7 +414,8 @@ impl App {
     #[cfg(feature = "coppersynth")]
     pub(super) fn load_csynth_soundfont(&mut self) {
         let dialog = PickRequest::file("Choose a SoundFont")
-            .filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"]);
+            .filter("SoundFonts", &["sf2", "SF2", "zip", "ZIP"])
+            .remember(PickDir::SoundFont);
         self.pick_path(dialog, |app, picked| {
             if let Some(path) = picked {
                 app.fit_csynth_soundfont(path);
@@ -456,7 +457,9 @@ impl App {
         } else {
             "Choose an MT-32 PCM ROM"
         };
-        let dialog = PickRequest::file(title).filter("ROM images", &["rom", "ROM", "bin", "BIN"]);
+        let dialog = PickRequest::file(title)
+            .filter("ROM images", &["rom", "ROM", "bin", "BIN"])
+            .remember(PickDir::Mt32Rom);
         self.pick_path(dialog, move |app, picked| {
             if let Some(path) = picked {
                 app.fit_mt32_rom(control, path);

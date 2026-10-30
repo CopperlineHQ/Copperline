@@ -460,6 +460,7 @@ fn band(target: NavTarget) -> Band {
         NavTarget::Ui(
             UiControl::LauncherLoad
             | UiControl::LauncherSave
+            | UiControl::LauncherSaveCurrent
             | UiControl::LauncherSaveAs
             | UiControl::LauncherDefaults
             | UiControl::LauncherRun,

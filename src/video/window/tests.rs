@@ -15589,3 +15589,148 @@ fn multitap_keyboard_takeover_keeps_guest_key_releases_balanced() {
     assert!(app.handle_keyboard_joystick_key(KeyCode::ArrowLeft, false));
     assert!(!app.keyboard_joy_held[0].is_set(KeyCode::ArrowLeft));
 }
+
+/// A picker opens where the last one of its kind was answered, and only
+/// its kind: the floppy folder is not where a Kickstart is looked for.
+#[test]
+fn pickers_open_where_the_last_of_their_kind_was_answered() {
+    use super::native_dialog::{PickDir, PickRequest};
+    let root = tempfile::tempdir().unwrap();
+    let floppies = root.path().join("floppies");
+    let roms = root.path().join("roms");
+    std::fs::create_dir_all(&floppies).unwrap();
+    std::fs::create_dir_all(&roms).unwrap();
+    let mut app = test_app();
+
+    // Nothing answered yet, so the request is left to its caller and the
+    // host, exactly as before there was anything to remember.
+    let mut request = PickRequest::files("DF0").remember(PickDir::Floppy);
+    let then = app.remembering(&mut request, Box::new(|_, _| {}));
+    assert_eq!(request.opens_in(), None);
+    then(
+        &mut app,
+        Some(vec![floppies.join("disk1.adf"), floppies.join("disk2.adf")]),
+    );
+
+    let mut request = PickRequest::files("DF1").remember(PickDir::Floppy);
+    let then = app.remembering(&mut request, Box::new(|_, _| {}));
+    assert_eq!(request.opens_in(), Some(floppies.as_path()));
+    // A cancel forgets nothing.
+    then(&mut app, None);
+    assert_eq!(app.picked_dir(PickDir::Floppy), Some(floppies.clone()));
+
+    // Every kind has its own folder, and a request with no kind is
+    // left alone.
+    assert_eq!(app.picked_dir(PickDir::Rom), None);
+    let mut request = PickRequest::file("Cover art");
+    let _ = app.remembering(&mut request, Box::new(|_, _| {}));
+    assert_eq!(request.opens_in(), None);
+
+    // A caller with an answer of its own keeps it.
+    let mut request = PickRequest::files("DF0")
+        .directory(Some(roms.clone()))
+        .remember(PickDir::Floppy);
+    let _ = app.remembering(&mut request, Box::new(|_, _| {}));
+    assert_eq!(request.opens_in(), Some(roms.as_path()));
+
+    // The answer is noted before the caller sees it, so a second picker
+    // opened from the first's continuation (the extended ROM after the
+    // Kickstart) already starts beside what the first one picked.
+    let seen = Rc::new(RefCell::new(None));
+    let slot = Rc::clone(&seen);
+    let mut request = PickRequest::file("Kickstart").remember(PickDir::Rom);
+    let then = app.remembering(
+        &mut request,
+        Box::new(move |app, _| *slot.borrow_mut() = app.picked_dir(PickDir::Rom)),
+    );
+    then(&mut app, Some(vec![roms.join("kick.rom")]));
+    assert_eq!(*seen.borrow(), Some(roms.clone()));
+
+    // A folder that has gone since is not handed to the next dialog.
+    std::fs::remove_dir(&floppies).unwrap();
+    assert_eq!(app.picked_dir(PickDir::Floppy), None);
+}
+
+/// Save writes the screen back over the configuration it was loaded from,
+/// without a picker, and Save As starts beside that file under its name.
+#[test]
+fn save_writes_back_to_the_configuration_last_loaded() {
+    use crate::config::MachineModel;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("my machine.toml");
+    let mut app = test_app();
+    app.open_launcher();
+    let original = app.launcher_state().unwrap().setup.to_toml().unwrap();
+    std::fs::write(&path, &original).unwrap();
+
+    assert_eq!(app.config_file, None, "nothing loaded or saved yet");
+    app.launcher_load_from(&path);
+    assert_eq!(app.config_file.as_deref(), Some(path.as_path()));
+    assert_eq!(
+        app.launcher_state().unwrap().config_file.as_deref(),
+        Some(path.as_path()),
+        "the dialog has the file to name"
+    );
+
+    // Change something, save, and the file holds the change.
+    let state = app.launcher_state_mut().unwrap();
+    let model = if state.setup.model() == Some(MachineModel::A1200) {
+        MachineModel::A500
+    } else {
+        MachineModel::A1200
+    };
+    state.setup.select_model(Some(model));
+    state.save_dialog = true;
+    let changed = state.setup.to_toml().unwrap();
+    assert_ne!(changed, original);
+    app.launcher_save_current();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), changed);
+    let state = app.launcher_state().unwrap();
+    assert!(!state.save_dialog, "Save puts the dialog away");
+    assert_eq!(
+        state.status.as_ref().map(|status| status.text.as_str()),
+        Some("Saved my machine.toml")
+    );
+
+    // The file outlives the screen: closed and reopened over the
+    // running machine, Save still knows where it goes.
+    app.ui.panel = None;
+    app.open_launcher();
+    assert_eq!(
+        app.launcher_state().unwrap().config_file.as_deref(),
+        Some(path.as_path())
+    );
+
+    // Save As offers the same folder and name, to save a copy beside it.
+    let request = app.config_save_request();
+    assert_eq!(request.opens_in(), Some(dir.path()));
+    assert_eq!(request.suggests(), Some("my machine.toml"));
+    assert_eq!(app.config_load_request().opens_in(), Some(dir.path()));
+
+    // Defaults starts a different machine, which Save must not write
+    // over the loaded one without asking.
+    app.activate_ui_control(UiControl::LauncherDefaults);
+    assert_eq!(app.config_file, None);
+    assert_eq!(app.launcher_state().unwrap().config_file, None);
+    assert_eq!(app.config_save_request().suggests(), Some("machine.toml"));
+}
+
+/// A save that fails keeps the file it was aimed at, which is still the
+/// one being edited, and says so on the status line.
+#[test]
+fn a_failed_save_keeps_its_file_and_reports_the_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    // A directory where the file should be: the write cannot succeed.
+    let path = dir.path().join("blocked.toml");
+    std::fs::create_dir(&path).unwrap();
+    let mut app = test_app();
+    app.open_launcher();
+    app.set_config_file(Some(path.clone()));
+    app.launcher_save_current();
+    assert_eq!(app.config_file.as_deref(), Some(path.as_path()));
+    let state = app.launcher_state().unwrap();
+    assert_eq!(
+        state.status.as_ref().map(|status| status.text.as_str()),
+        Some("Save failed (see log)")
+    );
+}
