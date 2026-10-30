@@ -2956,6 +2956,7 @@ mod tests {
     #[test]
     fn server_and_benchmark_modes_refuse_work_they_would_drop() -> Result<()> {
         let cd = ["--insert-cd-after", "5", "game.cue"];
+        let eject = ["--eject-disk-after", "5", "df0"];
         let ret = ["--run", "prog", "--exit-on-return"];
         let shot = ["--expect-screenshot", "5", "ref.png"];
         for (mode, validate) in [
@@ -2967,7 +2968,8 @@ mod tests {
             (["--control", ":7710"], validate_control_args),
         ] {
             for (extra, named) in [
-                (&cd[..], "CD inserts"),
+                (&cd[..], "disk or CD changes"),
+                (&eject[..], "disk or CD changes"),
                 (&ret[..], "--exit-on-return"),
                 (&shot[..], "--expect-screenshot"),
             ] {
