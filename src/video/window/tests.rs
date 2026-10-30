@@ -9676,6 +9676,85 @@ fn dropped_floppy_with_single_drive_inserts_directly() {
 }
 
 #[test]
+fn scheduled_disk_changes_apply_in_time_order_whatever_the_flag_order() {
+    // `--insert-disk-after 0.02 df1 B --eject-disk-after 0.01 df1`: both
+    // come due in the same step, and the eject must land first or it would
+    // throw out the disk just inserted.
+    let mut app = test_app();
+    app.emu
+        .bus_mut()
+        .floppy
+        .set_connected_drives([true, true, false, false]);
+    let first = temp_adf("first.adf");
+    let second = temp_adf("second.adf");
+    app.emu
+        .bus_mut()
+        .floppy
+        .insert_disk_image(1, first.clone(), true)
+        .unwrap();
+    app.pending_auto_disk_changes = vec![
+        super::DiskChangeSpec {
+            secs: 0.02,
+            drive_idx: 1,
+            change: super::DiskChange::Insert {
+                path: second.clone(),
+                write_protected: true,
+            },
+        },
+        super::DiskChangeSpec {
+            secs: 0.01,
+            drive_idx: 1,
+            change: super::DiskChange::Eject,
+        },
+    ];
+    app.arm_scheduled_events();
+    // Armed in time order, so the one-change-per-step netplay path takes
+    // them in that order too.
+    assert_eq!(app.auto_disk_changes[0].change, super::DiskChange::Eject);
+
+    while app.emu.bus().emulated_seconds() < 0.03 {
+        app.emu.step_frame().expect("frame");
+    }
+    app.fire_scheduled_events();
+    assert!(app.auto_disk_changes.is_empty());
+    let name = app.emu.bus().floppy.inserted_disk_name(1).unwrap();
+    assert!(name.contains("second.adf"), "df1 holds {name}");
+    std::fs::remove_file(&first).unwrap();
+    std::fs::remove_file(&second).unwrap();
+}
+
+#[test]
+fn scheduled_disk_eject_empties_the_drive_and_records_only_real_ejects() {
+    let mut app = test_app();
+    let adf = temp_adf("eject.adf");
+    app.emu
+        .bus_mut()
+        .floppy
+        .insert_disk_image(0, adf.clone(), true)
+        .unwrap();
+    app.input_recorder = Some(crate::inputrec::InputRecorder::new(0.0));
+    // The second eject finds the drive already empty: a warning, nothing
+    // recorded, and the drive stays empty.
+    for _ in 0..2 {
+        app.auto_disk_changes.push(super::ScheduledDiskChange {
+            change_at_emulated_secs: 0.0,
+            drive_idx: 0,
+            change: super::DiskChange::Eject,
+        });
+    }
+    app.fire_scheduled_events();
+    assert!(app.auto_disk_changes.is_empty());
+    assert!(!app.emu.bus().floppy.disk_inserted(0));
+    let script = app.input_recorder.take().unwrap().finish();
+    assert_eq!(
+        script.matches("eject-disk-after").count(),
+        1,
+        "only the real eject is recorded: {script}"
+    );
+    std::fs::remove_file(&adf).unwrap();
+}
+
+#[test]
 fn dropped_zipped_adf_with_single_drive_inserts_directly() {
     let adf = vec![0x5a; crate::floppy::ADF_SIZE];
     for name in ["disk.zip", "disk.ZIP", "disk.adz"] {

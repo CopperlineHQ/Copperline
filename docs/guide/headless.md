@@ -334,9 +334,10 @@ leaves the drive empty, exactly as the status bar's eject button does: the
 drive latches `/CHNG` low and reports no disk until another one goes in, so
 the guest's disk-change polling sees the removal. Writes the guest made to
 the image were already saved as each track was written, so an eject loses
-nothing. The log records `floppy.dfN ejected`; ejecting a drive that holds
-no disk, or one that is not connected, logs a warning and the run carries
-on.
+nothing. The log records `floppy.dfN ejected`. Ejecting a drive that holds
+no disk at that moment logs a warning and the run carries on; naming a drive
+that is not connected is refused at startup, as for `--insert-disk-after`
+(raise `--floppy-drives` or configure the drive).
 
 Ejects share one schedule with `--insert-disk-after` and
 `--defer-disk-insert`, applied in timestamp order, so a removal followed by

@@ -482,9 +482,14 @@ impl Session {
                 Ok(None)
             }
             HostOp::FloppyEject { drive } => {
+                // Ejecting an empty drive still succeeds, but only a real
+                // removal is recorded, as for the window's eject.
+                let had_disk = self.emu.bus().floppy.disk_inserted(drive);
                 let reply = match self.emu.bus_mut().floppy.eject_disk_image(drive) {
                     Ok(()) => {
-                        self.note_media_change(drive, None);
+                        if had_disk {
+                            self.note_media_change(drive, None);
+                        }
                         proto::ok_line(&id, json!({}))
                     }
                     Err(e) => proto::err_line(&id, &CtlError::io(format!("{e:#}"))),

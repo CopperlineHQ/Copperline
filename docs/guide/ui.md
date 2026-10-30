@@ -1242,8 +1242,8 @@ scheduled emulated time (see [](headless.md#capturing-gif-clips)).
 machine -- key presses with their hold times (typed on the host keyboard
 or clicked on the [on-screen one](#on-screen-keyboard), which reaches the
 machine by the same path), mouse buttons and motion, joystick / CD32-pad
-controls, analogue pot positions, and floppy inserts, on whichever port
-carries each device -- each stamped with its emulated time. Pressing it
+controls, analogue pot positions, and floppy inserts and ejects, on
+whichever port carries each device -- each stamped with its emulated time. Pressing it
 again stops the recording and writes
 `copperline-input-<YYYYMMDDHHmmSS>.clscript` in the
 [recordings folder](#where-files-go): a plain text file of scripted-input
