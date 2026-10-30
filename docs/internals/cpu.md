@@ -75,7 +75,7 @@ which is what makes cycle-budgeted pacing trustworthy. Instruction
 semantics are also checked against Toni Wilen's WinUAE cputest suites
 (every opcode of a CPU model, hundreds of register and memory states each,
 including exception stack frames): `crates/cputest-runner` drives the
-generated test sets against the same `m68k` revision as the emulator,
+generated test sets against the same `m68k` release as the emulator,
 and the nightly `cputest.yml` workflow runs the full 68000 suite
 (`crates/cputest-runner/tools/cputest-gen.sh` generates the data for any
 model locally).
@@ -299,17 +299,16 @@ prefetch, which lands the float on the immediate and false-detects a
 diagnostic ROM. `[cpu] jit` on these models logs a note and stays
 precise.
 
-### CPU-core extensions awaiting upstream
+### CPU-core batch extensions
 
-Copperline pins its `m68k` dependency to a revision of the
-[CopperlineHQ/m68k-rs](https://github.com/CopperlineHQ/m68k-rs) fork that
-combines two upstream proposals, including their review follow-ups:
-[PR #222](https://github.com/benletchford/m68k-rs/pull/222) adds the
-`AddressBus::batch_boundary` callback and
+Copperline requires `m68k` 0.15.0, the first release with the two batch
+extensions it depends on:
+[PR #222](https://github.com/benletchford/m68k-rs/pull/222) added the
+`AddressBus::batch_boundary` callback (and `wants_batch_boundaries`, which
+lets a host decline it for a batch) and
 [PR #223](https://github.com/benletchford/m68k-rs/pull/223) the extra
-physical RAM/ROM regions. Every Cargo workspace consumes that same Git
-revision (see the lockfile check above), and Copperline returns to the
-published crate once both are released.
+physical RAM/ROM regions (`FastMemRegion`). Every Cargo workspace resolves
+that same published release (see the lockfile check above).
 
 The boundary callback is a no-op for ordinary embedders; Copperline uses
 it to keep hardware accesses ordered without calling the host from every
