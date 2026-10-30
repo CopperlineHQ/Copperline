@@ -65,9 +65,60 @@
 //! GTK and the XDG portal are called directly on this thread, which is what
 //! they require.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use super::App;
+
+/// What a picker is choosing, for opening the next picker of the same kind
+/// where the last one was answered.
+///
+/// By what the file is rather than by which dialog asked for it: a floppy
+/// inserted from the menu and one chosen on the configuration screen come
+/// from the same folder, and a Kickstart picked for the launcher is next to
+/// the one the menu's Load Kickstart wants.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum PickDir {
+    Config,
+    Floppy,
+    HardDrive,
+    Cd,
+    Rom,
+    Mt32Rom,
+    SoundFont,
+    State,
+    Whdload,
+}
+
+/// Where each kind of picker was last answered, for this session.
+///
+/// Not kept across runs: the first picker of a session opens where its
+/// caller says (or where the host's own dialog remembers), and from then
+/// on wherever the person last went.
+#[derive(Debug, Default)]
+pub(super) struct PickedDirs(HashMap<PickDir, PathBuf>);
+
+impl PickedDirs {
+    /// The folder the last answered picker of `kind` was showing, while it
+    /// is still there. One deleted or unmounted since is forgotten rather
+    /// than handed to a dialog that would fall back somewhere arbitrary.
+    pub(super) fn get(&self, kind: PickDir) -> Option<PathBuf> {
+        self.0.get(&kind).filter(|dir| dir.is_dir()).cloned()
+    }
+
+    /// Note where a picker of `kind` was answered: the folder holding what
+    /// was picked, which is the folder the dialog was showing. A picked
+    /// folder counts the same way, by the folder it was picked from.
+    fn record(&mut self, kind: PickDir, picked: &[PathBuf]) {
+        let dir = picked
+            .first()
+            .and_then(|path| path.parent())
+            .filter(|dir| !dir.as_os_str().is_empty());
+        if let Some(dir) = dir {
+            self.0.insert(kind, dir.to_path_buf());
+        }
+    }
+}
 
 /// What kind of answer a picker gives.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,6 +142,7 @@ pub(super) struct PickRequest {
     filters: Vec<(String, Vec<String>)>,
     directory: Option<PathBuf>,
     file_name: Option<String>,
+    remember: Option<PickDir>,
 }
 
 impl PickRequest {
@@ -101,6 +153,7 @@ impl PickRequest {
             filters: Vec::new(),
             directory: None,
             file_name: None,
+            remember: None,
         }
     }
 
@@ -152,6 +205,29 @@ impl PickRequest {
     pub(super) fn file_name(mut self, file_name: impl Into<String>) -> Self {
         self.file_name = Some(file_name.into());
         self
+    }
+
+    /// File the answer under `kind`, and open where the last picker of that
+    /// kind was answered unless [`Self::directory`] names somewhere. A
+    /// caller with a better answer of its own than the remembered folder
+    /// (the folder a field's current file is in) passes it as the directory;
+    /// one whose answer is only a fallback (a configured media folder) asks
+    /// [`App::picked_dir`] first.
+    pub(super) fn remember(mut self, kind: PickDir) -> Self {
+        self.remember = Some(kind);
+        self
+    }
+
+    /// Where the picker will open, for the tests.
+    #[cfg(test)]
+    pub(super) fn opens_in(&self) -> Option<&std::path::Path> {
+        self.directory.as_deref()
+    }
+
+    /// The name a save picker will suggest, for the tests.
+    #[cfg(test)]
+    pub(super) fn suggests(&self) -> Option<&str> {
+        self.file_name.as_deref()
     }
 }
 
@@ -269,7 +345,7 @@ impl App {
     /// picker either way; callers do neither.
     pub(super) fn pick_paths(
         &mut self,
-        request: PickRequest,
+        mut request: PickRequest,
         then: impl FnOnce(&mut App, Option<Vec<PathBuf>>) + 'static,
     ) {
         if self.pending_pick.is_some() {
@@ -281,9 +357,10 @@ impl App {
             );
             return;
         }
+        let then = self.remembering(&mut request, Box::new(then));
         #[cfg(target_os = "macos")]
         {
-            self.open_deferred_pick(request.open_deferred(), Box::new(then));
+            self.open_deferred_pick(request.open_deferred(), then);
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -291,8 +368,34 @@ impl App {
             // the mute needs no state behind it.
             self.suspend_live_audio_for_host_io();
             let picked = pick(move || request.run_blocking());
-            self.finish_pick(Box::new(then), picked);
+            self.finish_pick(then, picked);
         }
+    }
+
+    /// Where the last picker of `kind` was answered this session, while
+    /// that folder still exists.
+    pub(super) fn picked_dir(&self, kind: PickDir) -> Option<PathBuf> {
+        self.picked_dirs.get(kind)
+    }
+
+    /// Open a request that names no directory where the last picker of its
+    /// kind was answered, and note where this one is answered before its
+    /// caller sees the answer -- so a picker the caller opens from there
+    /// (the extended ROM after the Kickstart) already starts beside it.
+    /// A request with no kind passes through untouched.
+    pub(super) fn remembering(&self, request: &mut PickRequest, then: PickThen) -> PickThen {
+        let Some(kind) = request.remember else {
+            return then;
+        };
+        if request.directory.is_none() {
+            request.directory = self.picked_dir(kind);
+        }
+        Box::new(move |app: &mut App, picked: Option<Vec<PathBuf>>| {
+            if let Some(paths) = &picked {
+                app.picked_dirs.record(kind, paths);
+            }
+            then(app, picked)
+        })
     }
 
     /// Put a sheet up. The loop runs on under it, so its mute is not a

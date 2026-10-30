@@ -102,8 +102,9 @@ pub(in crate::video::ui) fn draw_launcher_confirm(
 /// The Save dialog, centred on the panel like the confirm.
 pub(in crate::video::ui) fn launcher_save_dialog_rect(rect: Rect) -> Rect {
     let (bw, bh) = SAVE_DIALOG_BUTTON;
+    let buttons = SAVE_ACTIONS.len();
     let (w, h) = (
-        2 * SAVE_DIALOG_MARGIN + 3 * bw + 2 * SAVE_DIALOG_GAP,
+        2 * SAVE_DIALOG_MARGIN + buttons * bw + (buttons - 1) * SAVE_DIALOG_GAP,
         TITLE_H
             + 2 * SAVE_DIALOG_MARGIN
             + SAVE_DIALOG_HELP_LINES * SAVE_DIALOG_LINE_H
@@ -118,8 +119,10 @@ pub(in crate::video::ui) fn launcher_save_dialog_rect(rect: Rect) -> Rect {
     }
 }
 
-/// The three buttons in it.
-pub(in crate::video::ui) fn launcher_save_dialog_rects(rect: Rect) -> [(UiControl, Rect); 3] {
+/// The buttons in it.
+pub(in crate::video::ui) fn launcher_save_dialog_rects(
+    rect: Rect,
+) -> [(UiControl, Rect); SAVE_ACTIONS.len()] {
     let dialog = launcher_save_dialog_rect(rect);
     let (w, h) = SAVE_DIALOG_BUTTON;
     std::array::from_fn(|i| {
@@ -155,9 +158,9 @@ pub(in crate::video::ui) fn draw_launcher_save_dialog(
         scale,
     );
     // The close gadget in its title bar is how this is dismissed. There is
-    // no Cancel among the three because none of them answers a question --
-    // they are three things you might do, and not doing any of them is
-    // closing the window rather than choosing a fourth.
+    // no Cancel among the four because none of them answers a question --
+    // they are four things you might do, and not doing any of them is
+    // closing the window rather than choosing a fifth.
     draw_title_bar(
         frame,
         dialog,
@@ -176,12 +179,16 @@ pub(in crate::video::ui) fn draw_launcher_save_dialog(
         );
     }
     // Above the row, where a dialog's own words go, and never blank: with
-    // neither hand on any of the three it says what the dialog is for.
+    // neither hand on any of the four it says what the dialog is for.
     // The marker is asked first, as the lighting asks it -- what the
     // keyboard is standing on is what the line should be about.
-    let help = save_dialog_help(nav_target().or(hover).unwrap_or(UiControl::LauncherSaveAs));
     let chars = (dialog.w - 2 * SAVE_DIALOG_MARGIN) / font::GLYPH_W;
-    for (i, line) in wrap_text(help, chars, chars)
+    let help = save_dialog_help(
+        nav_target().or(hover).unwrap_or(UiControl::LauncherSaveAs),
+        state.config_file.as_deref(),
+        chars,
+    );
+    for (i, line) in wrap_text(&help, chars, chars)
         .into_iter()
         .take(SAVE_DIALOG_HELP_LINES)
         .enumerate()

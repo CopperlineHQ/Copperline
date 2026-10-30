@@ -4104,6 +4104,28 @@ fn panels_render_into_their_rects() {
             None,
         );
         save_at(&frame, "launcher-save-menu", bw, bh);
+        // And on Save, once there is a file for it to write over, which it
+        // names.
+        let mut frame = vec![0u8; bw * bh * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.save_dialog = true;
+        state.config_file = Some(std::path::PathBuf::from(
+            "/Users/someone/Library/Application Support/Copperline/configs/a1200.toml",
+        ));
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(
+            &mut frame,
+            big,
+            &ui,
+            Some(UiControl::LauncherSaveCurrent),
+            None,
+        );
+        save_at(&frame, "launcher-save-menu-file", bw, bh);
 
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(launcher::MachineSetup::default());
@@ -4323,7 +4345,7 @@ fn panels_render_into_their_rects() {
 
     // The Save dialog: every button reachable, nothing under it
     // reachable while it is up, and anything that is not one of the
-    // three -- its close gadget included -- putting it away.
+    // four -- its close gadget included -- putting it away.
     {
         let mut state = LauncherState::new(launcher::MachineSetup::default());
         state.save_dialog = true;
@@ -4401,23 +4423,48 @@ fn panels_render_into_their_rects() {
         // dialog cannot grow to suit a longer one -- resizing under a
         // pointer that is crossing the buttons would move them -- so a
         // sentence that does not fit is silently cut off instead.
+        // Save's names the file it writes over, which can be any length
+        // and have spaces in it anywhere; it fits all the same.
         let chars = (dialog.w - 2 * SAVE_DIALOG_MARGIN) / font::GLYPH_W;
-        for (control, _) in items {
-            let help = save_dialog_help(control);
-            assert!(!help.is_empty(), "{control:?} has nothing to say");
-            let lines = wrap_text(help, chars, chars);
-            assert!(
-                lines.len() <= SAVE_DIALOG_HELP_LINES,
-                "{help:?} wraps to {} lines, and there is room for {}",
-                lines.len(),
-                SAVE_DIALOG_HELP_LINES
-            );
+        let deep = std::path::PathBuf::from(format!(
+            "/Users/someone/Library/Application Support/{}/My Amiga \
+             Configurations/A1200 with a very long descriptive name.toml",
+            "nested ".repeat(12)
+        ));
+        let files = [
+            None,
+            Some(std::path::Path::new("machine.toml")),
+            Some(deep.as_path()),
+        ];
+        for file in files {
+            for (control, _) in items {
+                let help = save_dialog_help(control, file, chars);
+                assert!(!help.is_empty(), "{control:?} has nothing to say");
+                let lines = wrap_text(&help, chars, chars);
+                assert!(
+                    lines.len() <= SAVE_DIALOG_HELP_LINES,
+                    "{help:?} wraps to {} lines, and there is room for {}",
+                    lines.len(),
+                    SAVE_DIALOG_HELP_LINES
+                );
+            }
         }
+        // Save names its file, the end of it at least, and says nothing
+        // about one when it has none to write and will ask instead.
+        let named = save_dialog_help(UiControl::LauncherSaveCurrent, Some(&deep), chars);
+        assert!(
+            named.contains("very long descriptive name.toml"),
+            "{named:?} does not say which file"
+        );
+        assert_eq!(
+            save_dialog_help(UiControl::LauncherSaveCurrent, None, chars),
+            save_dialog_help(UiControl::LauncherSaveAs, None, chars)
+        );
         // With the pointer on nothing, the dialog still says what it
         // is for rather than leaving the space empty.
         assert_eq!(
-            save_dialog_help(UiControl::LauncherSave),
-            save_dialog_help(UiControl::LauncherSaveAs)
+            save_dialog_help(UiControl::LauncherSave, None, chars),
+            save_dialog_help(UiControl::LauncherSaveAs, None, chars)
         );
 
         // And with it closed, its buttons are not there to be hit.

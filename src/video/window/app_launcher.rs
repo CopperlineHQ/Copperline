@@ -57,6 +57,7 @@ impl App {
         if let Some(setup) = &self.netplay_setup {
             state.netplay = setup.clone();
         }
+        state.config_file = self.config_file.clone();
         // A machine set up with a real disk names it on the Storage page, and
         // naming it properly means knowing what is on it. Looking is otherwise
         // put off until the Host Disk page opens, so a launcher that never
@@ -112,11 +113,14 @@ impl App {
             self.launcher_browse_save(field, "printer.txt");
             return;
         }
-        // Beside whatever the field already holds; failing that, the
-        // directory kept for that kind of media. A field with a value is
-        // the better answer of the two -- somebody editing df1 after df0
-        // wants the folder df0 came from, not a fixed one -- so the
-        // configured directory is only ever the fallback.
+        // Beside whatever the field already holds; failing that, wherever
+        // the last picker for that kind of media was answered; failing
+        // that, the directory kept for it. A field with a value is the best
+        // answer -- replacing a disk wants the folder it came from -- and
+        // the last folder used beats a fixed one: somebody filling df1
+        // after df0 wants the folder df0 came from. The configured
+        // directory is only ever the first answer of a session.
+        let kind = Self::media_pick_dir(field);
         let start_dir = self
             .launcher_state()
             .and_then(|s| s.setup.path(field))
@@ -125,6 +129,7 @@ impl App {
             // media folder when the working directory lacks it -- so that is
             // where its dialog opens too.
             .filter(|d| !d.as_os_str().is_empty())
+            .or_else(|| kind.and_then(|kind| self.picked_dir(kind)))
             .or_else(|| Self::media_start_dir(field));
         // A hard-drive slot can be a raw image or a host directory (built
         // into an in-memory FFS/OFS volume at open time; see
@@ -246,6 +251,10 @@ impl App {
                 _ => dialog.filter("Hard disk images", crate::harddrive::IMAGE_EXTENSIONS),
             }
         };
+        let dialog = match kind {
+            Some(kind) => dialog.remember(kind),
+            None => dialog,
+        };
         self.pick_path(dialog.directory(start_dir), move |app, picked| {
             let Some(mut path) = picked else { return };
             if field == LauncherField::WhdloadGame {
@@ -302,6 +311,35 @@ impl App {
             // own that the launcher already knows; nothing to add here.
             LauncherField::WhdloadGame | LauncherField::Cd32Nvram => None,
             _ => crate::paths::harddrives_dir(),
+        }
+    }
+
+    /// Which remembered folder a path field's picker shares, grouped as its
+    /// filters are just above: every ROM row with every other, and with the
+    /// menu's Load Kickstart; every hard-disk slot with the others and the
+    /// PCMCIA card. `None` for the one-off files that have a home of their
+    /// own (the CD32 NVRAM image).
+    pub(super) fn media_pick_dir(field: LauncherField) -> Option<PickDir> {
+        match field {
+            LauncherField::Mt32ControlRom | LauncherField::Mt32PcmRom => Some(PickDir::Mt32Rom),
+            LauncherField::Rom
+            | LauncherField::ExtendedRom
+            | LauncherField::FmvRom
+            | LauncherField::ScsiRom
+            | LauncherField::ScsiRomOdd
+            | LauncherField::LideRom
+            | LauncherField::LideRomBank2
+            | LauncherField::Sf2000SdRom => Some(PickDir::Rom),
+            LauncherField::Df0Image
+            | LauncherField::Df1Image
+            | LauncherField::Df2Image
+            | LauncherField::Df3Image => Some(PickDir::Floppy),
+            LauncherField::CdImage => Some(PickDir::Cd),
+            LauncherField::WhdloadGame => Some(PickDir::Whdload),
+            LauncherField::Cd32Nvram => None,
+            #[cfg(feature = "coppersynth")]
+            LauncherField::CsynthSoundfont => Some(PickDir::SoundFont),
+            _ => Some(PickDir::HardDrive),
         }
     }
 
@@ -964,7 +1002,14 @@ impl App {
         };
         let dialog = PickRequest::save("Create disk image")
             .filter(kind, ext)
-            .file_name(suggested);
+            .file_name(suggested)
+            // Made to be used, so it goes where that kind of image is
+            // chosen from, and the next pick finds it there.
+            .remember(if floppy {
+                PickDir::Floppy
+            } else {
+                PickDir::HardDrive
+            });
         self.pick_path(dialog, move |app, picked| {
             if let Some(path) = picked {
                 app.launcher_write_image(spec, path);
@@ -1096,7 +1141,7 @@ impl App {
     }
 
     pub(super) fn launcher_load(&mut self) {
-        let dialog = PickRequest::file("Load configuration").filter("Copperline config", &["toml"]);
+        let dialog = self.config_load_request();
         self.pick_path(dialog, |app, picked| {
             if let Some(path) = picked {
                 app.launcher_load_from(&path);
@@ -1104,9 +1149,56 @@ impl App {
         });
     }
 
+    /// Where the configuration pickers open: beside the file Save writes
+    /// to, else wherever the last of them was answered, else the folder
+    /// configurations are kept in. Load and Save As share it, so a file
+    /// saved in some folder of the person's own is found there by the next
+    /// Load, and the other way about.
+    fn config_dialog_dir(&self) -> Option<std::path::PathBuf> {
+        self.config_file
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty() && dir.is_dir())
+            .map(std::path::Path::to_path_buf)
+            .or_else(|| self.picked_dir(PickDir::Config))
+            .or_else(crate::paths::configs_dir)
+    }
+
+    pub(super) fn config_load_request(&self) -> PickRequest {
+        PickRequest::file("Load configuration")
+            .filter("Copperline config", &["toml"])
+            .directory(self.config_dialog_dir())
+            .remember(PickDir::Config)
+    }
+
+    /// Save As suggests the file Save would write, so saving a changed
+    /// copy beside it is a matter of editing the name rather than finding
+    /// the folder again.
+    pub(super) fn config_save_request(&self) -> PickRequest {
+        let name = self
+            .config_file
+            .as_deref()
+            .and_then(std::path::Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or("machine.toml");
+        PickRequest::save("Save configuration")
+            .filter("Copperline config", &["toml"])
+            .file_name(name)
+            .directory(self.config_dialog_dir())
+            .remember(PickDir::Config)
+    }
+
+    /// Make `path` the file Save writes to, or forget it with `None`.
+    pub(super) fn set_config_file(&mut self, path: Option<std::path::PathBuf>) {
+        self.config_file = path.clone();
+        if let Some(state) = self.launcher_state_mut() {
+            state.config_file = path;
+        }
+    }
+
     /// Open the configuration `launcher_load` was given, and run it at once
     /// if it asks for that.
-    fn launcher_load_from(&mut self, path: &std::path::Path) {
+    pub(super) fn launcher_load_from(&mut self, path: &std::path::Path) {
         let mut run_at_once = false;
         match MachineSetup::load_from(path) {
             Ok(setup) => {
@@ -1135,6 +1227,7 @@ impl App {
                         display_file_name(path)
                     )));
                 }
+                self.set_config_file(Some(path.to_path_buf()));
             }
             Err(e) => {
                 warn!("config load failed ({}): {e:#}", path.display());
@@ -1283,30 +1376,52 @@ impl App {
         }
     }
 
+    /// Save As: ask where, write it there, and make that the file Save
+    /// writes to from now on.
     pub(super) fn launcher_save(&mut self) {
         self.launcher_close_save_dialog();
         let Some(toml) = self.launcher_toml_for_save() else {
             return;
         };
-        let dialog = PickRequest::save("Save configuration")
-            .filter("Copperline config", &["toml"])
-            .file_name("machine.toml")
-            // Where configurations are kept, which is a better first answer
-            // than wherever the last unrelated dialog happened to end up.
-            .directory(crate::paths::configs_dir());
+        let dialog = self.config_save_request();
         self.pick_path(dialog, move |app, picked| {
             let Some(path) = picked else { return };
-            match std::fs::write(&path, toml) {
-                Ok(()) => app.set_launcher_status(StatusMessage::ok(format!(
+            app.write_config_file(path, &toml);
+        });
+    }
+
+    /// Save: write over the file last loaded or saved on this screen,
+    /// without asking. With none yet it is Save As, as Save is for a
+    /// document that has never been saved anywhere.
+    pub(super) fn launcher_save_current(&mut self) {
+        let Some(path) = self.config_file.clone() else {
+            self.launcher_save();
+            return;
+        };
+        self.launcher_close_save_dialog();
+        let Some(toml) = self.launcher_toml_for_save() else {
+            return;
+        };
+        self.write_config_file(path, &toml);
+    }
+
+    /// Write a configuration out and say so. A file written becomes the
+    /// one Save writes to; a failed write leaves that as it was, since the
+    /// file it names is still the one being edited.
+    fn write_config_file(&mut self, path: std::path::PathBuf, toml: &str) {
+        match std::fs::write(&path, toml) {
+            Ok(()) => {
+                self.set_launcher_status(StatusMessage::ok(format!(
                     "Saved {}",
                     display_file_name(&path)
-                ))),
-                Err(e) => {
-                    warn!("config save failed ({}): {e}", path.display());
-                    app.set_launcher_status(StatusMessage::err("Save failed (see log)"));
-                }
+                )));
+                self.set_config_file(Some(path));
             }
-        });
+            Err(e) => {
+                warn!("config save failed ({}): {e}", path.display());
+                self.set_launcher_status(StatusMessage::err("Save failed (see log)"));
+            }
+        }
     }
 
     /// Run the opened configuration at once when it asks for that --

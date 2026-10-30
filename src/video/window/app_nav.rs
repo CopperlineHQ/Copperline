@@ -155,6 +155,7 @@ pub(super) fn launcher_action_control(control: UiControl) -> bool {
         control,
         UiControl::LauncherLoad
             | UiControl::LauncherSave
+            | UiControl::LauncherSaveCurrent
             | UiControl::LauncherSaveAs
             | UiControl::LauncherDefaults
             | UiControl::LauncherRun

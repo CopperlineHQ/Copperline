@@ -905,8 +905,9 @@ impl App {
         // Pacing is re-baselined after the picker, as for floppies; a
         // successful load re-anchors again to the restored timeline inside
         // Emulator::load_state.
-        let dialog =
-            PickRequest::file("Load save state").filter("Copperline save states", &["clstate"]);
+        let dialog = PickRequest::file("Load save state")
+            .filter("Copperline save states", &["clstate"])
+            .remember(PickDir::State);
         self.pick_path(dialog, |app, picked| {
             if let Some(path) = picked {
                 app.load_state_from_path(&path);
@@ -991,13 +992,15 @@ impl App {
     /// On any error the running machine keeps its current ROM.
     pub(super) fn load_rom_from_dialog(&mut self) {
         let dialog = PickRequest::file("Load Kickstart ROM (512 or 256 KiB)")
-            .filter("Amiga ROM images", &["rom", "bin"]);
+            .filter("Amiga ROM images", &["rom", "bin"])
+            .remember(PickDir::Rom);
         self.pick_path(dialog, |app, picked| {
             let Some(main_path) = picked else { return };
             // Offer an optional extended ROM (AROS/CDTV/CD32). Cancelling skips it
             // and removes any extended ROM currently fitted.
             let dialog = PickRequest::file("Load extended ROM (optional; Cancel to skip)")
-                .filter("Amiga ROM images", &["rom", "bin"]);
+                .filter("Amiga ROM images", &["rom", "bin"])
+                .remember(PickDir::Rom);
             app.pick_path(dialog, move |app, ext_path| {
                 app.fit_rom(main_path, ext_path)
             });

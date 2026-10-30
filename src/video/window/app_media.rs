@@ -33,7 +33,8 @@ impl App {
         // freshly inserted disk. insert_disk_image -> bus floppy
         // insert_disk_image already asserts the disk-change/eject signal.
         let dialog = PickRequest::files(format!("Load DF{drive_idx} disk image(s)"))
-            .filter("Amiga disk images", crate::floppy::IMAGE_EXTENSIONS);
+            .filter("Amiga disk images", crate::floppy::IMAGE_EXTENSIONS)
+            .remember(PickDir::Floppy);
         self.pick_paths(dialog, move |app, picked| {
             if let Some(paths) = picked {
                 app.insert_disk_playlist(drive_idx, paths);
@@ -128,8 +129,9 @@ impl App {
     /// ejecting any current disc first.
     pub(super) fn load_cd_from_dialog(&mut self) {
         // Pacing is re-baselined after the picker, as for floppies.
-        let dialog =
-            PickRequest::file("Load CD image").filter("CD images", &["cue", "iso", "nrg", "chd"]);
+        let dialog = PickRequest::file("Load CD image")
+            .filter("CD images", &["cue", "iso", "nrg", "chd"])
+            .remember(PickDir::Cd);
         self.pick_path(dialog, |app, picked| {
             if let Some(path) = picked {
                 app.insert_cd_image_from_path(&path);
@@ -164,7 +166,8 @@ impl App {
             return;
         }
         let dialog = PickRequest::file("Insert PCMCIA CF card image")
-            .filter("Hard-disk images", crate::harddrive::IMAGE_EXTENSIONS);
+            .filter("Hard-disk images", crate::harddrive::IMAGE_EXTENSIONS)
+            .remember(PickDir::HardDrive);
         self.pick_path(dialog, |app, picked| {
             let Some(path) = picked else { return };
             match crate::pcmcia::CfCard::open(&path) {
