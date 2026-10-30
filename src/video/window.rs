@@ -874,11 +874,14 @@ pub struct GifCaptureSpec {
     pub path: PathBuf,
 }
 
+/// A scheduled floppy media change: `--insert-disk-after` /
+/// `--defer-disk-insert` insert `path`, `--eject-disk-after` (`path` of
+/// `None`) ejects whatever is in the drive and leaves it empty.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DiskInsertSpec {
     pub secs: f32,
     pub drive_idx: usize,
-    pub path: PathBuf,
+    pub path: Option<PathBuf>,
     pub write_protected: bool,
 }
 
@@ -1813,7 +1816,8 @@ struct ScheduledJoy {
 struct ScheduledDiskInsert {
     insert_at_emulated_secs: f64,
     drive_idx: usize,
-    path: PathBuf,
+    /// `None` ejects the drive's disk.
+    path: Option<PathBuf>,
     write_protected: bool,
 }
 
@@ -4294,12 +4298,18 @@ impl App {
         }
         for insert in self.pending_auto_disk_inserts.drain(..) {
             let insert_at_emulated_secs = insert.secs.max(0.0) as f64;
-            info!(
-                "auto-disk armed: df{} insert {} at {:.1}s emulated time",
-                insert.drive_idx,
-                insert.path.display(),
-                insert.secs
-            );
+            match &insert.path {
+                Some(path) => info!(
+                    "auto-disk armed: df{} insert {} at {:.1}s emulated time",
+                    insert.drive_idx,
+                    path.display(),
+                    insert.secs
+                ),
+                None => info!(
+                    "auto-disk armed: df{} eject at {:.1}s emulated time",
+                    insert.drive_idx, insert.secs
+                ),
+            }
             self.auto_disk_inserts.push(ScheduledDiskInsert {
                 insert_at_emulated_secs,
                 drive_idx: insert.drive_idx,
@@ -4476,8 +4486,20 @@ impl App {
                 true
             }
         });
+        // Several changes can come due in one step (an eject and an insert
+        // a few milliseconds apart); apply them in timestamp order. The sort
+        // is stable, so equal timestamps keep their command-line order.
+        disk_inserts.sort_by(|a, b| {
+            a.insert_at_emulated_secs
+                .total_cmp(&b.insert_at_emulated_secs)
+        });
         for insert in disk_inserts {
-            self.insert_disk_image(insert.drive_idx, insert.path, insert.write_protected);
+            match insert.path {
+                Some(path) => {
+                    self.insert_disk_image(insert.drive_idx, path, insert.write_protected);
+                }
+                None => self.eject_drive_disk(insert.drive_idx),
+            }
         }
         // Fire any scheduled --insert-cd-after swaps (one-shot each).
         let mut cd_inserts = Vec::new();

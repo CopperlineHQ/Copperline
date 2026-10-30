@@ -163,8 +163,9 @@ pub struct CliArgs {
     /// file to PATH on exit (the windowed toggle is the host shortcut
     /// modifier plus Shift+R).
     pub record_input: Option<PathBuf>,
-    /// Scripted floppy image insertion. This supports both explicit
-    /// paths and deferring a disk image already configured in the TOML.
+    /// Scripted floppy media changes: inserts of explicit paths, deferring
+    /// a disk image already configured in the TOML, and ejects
+    /// (`--eject-disk-after`, an `Explicit` spec with no path).
     pub disk_insert_after: Vec<CliDiskInsert>,
     /// Scripted CD swaps: (SECS, image path) pairs from --insert-cd-after,
     /// landing in whichever CD drive the machine has (CDTV, CD32, or a
@@ -255,7 +256,7 @@ pub fn parse_args() -> Result<CliArgs> {
 /// the flag names (without the leading dashes) whose effects accumulate;
 /// anything else in a script is an error so a typo cannot silently change
 /// emulator configuration.
-const SCRIPT_DIRECTIVES: [&str; 16] = [
+const SCRIPT_DIRECTIVES: [&str; 17] = [
     "press-after",
     "key-after",
     "type",
@@ -270,6 +271,7 @@ const SCRIPT_DIRECTIVES: [&str; 16] = [
     "pen-after",
     "insert-disk-after",
     "defer-disk-insert",
+    "eject-disk-after",
     "insert-cd-after",
     "freeze-after",
 ];
@@ -1263,7 +1265,7 @@ where
                 disk_insert_after.push(CliDiskInsert::Explicit(DiskInsertSpec {
                     secs,
                     drive_idx,
-                    path: PathBuf::from(path),
+                    path: Some(PathBuf::from(path)),
                     write_protected: true,
                 }));
             }
@@ -1277,6 +1279,19 @@ where
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 let drive_idx = parse_floppy_drive_idx(&drive_s, "--defer-disk-insert")?;
                 disk_insert_after.push(CliDiskInsert::Configured { secs, drive_idx });
+            }
+            "--eject-disk-after" => {
+                const USAGE: &str = "--eject-disk-after requires SECS DFN";
+                let secs: f32 =
+                    next_arg(&mut args, USAGE, "--eject-disk-after SECS must be a number")?;
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let drive_idx = parse_floppy_drive_idx(&drive_s, "--eject-disk-after")?;
+                disk_insert_after.push(CliDiskInsert::Explicit(DiskInsertSpec {
+                    secs,
+                    drive_idx,
+                    path: None,
+                    write_protected: true,
+                }));
             }
             "--insert-cd-after" => {
                 const USAGE: &str = "--insert-cd-after requires SECS PATH";
@@ -2193,6 +2208,8 @@ fn print_help() {
          \x20                            insert PATH into DFN after SECS seconds\n  \
          --defer-disk-insert SECS DFN   start with configured DFN empty, then insert\n  \
          \x20                            its configured disk image after SECS seconds\n  \
+         --eject-disk-after SECS DFN    eject the disk in DFN after SECS seconds, leaving\n  \
+         \x20                            the drive empty (as the status-bar eject button)\n  \
          --insert-cd-after SECS PATH    swap the CD image (cue/iso/nrg/chd) in the machine's CD\n  \
          \x20                            drive (CDTV, CD32, or a SCSI CD-ROM unit) after\n  \
          \x20                            SECS seconds\n  \

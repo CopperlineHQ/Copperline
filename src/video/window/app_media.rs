@@ -110,13 +110,26 @@ impl App {
             }
             return;
         }
+        if !self.emu.bus().floppy.drive_connected(drive_idx) {
+            warn!("floppy.df{drive_idx} eject ignored: drive is not connected");
+            self.show_osd(format!("DF{drive_idx}: no drive"));
+            return;
+        }
         if !self.emu.bus().floppy.disk_inserted(drive_idx) {
+            warn!("floppy.df{drive_idx} eject ignored: no disk in the drive");
             self.show_osd(format!("DF{drive_idx}: no disk"));
             return;
         }
         match self.emu.bus_mut().floppy.eject_disk_image(drive_idx) {
             Ok(()) => {
+                self.last_fdd_track = None;
                 info!("floppy.df{drive_idx} ejected");
+                if let Some(rec) = self.input_recorder.as_mut() {
+                    rec.record_disk_eject(drive_idx, self.emu.bus().emulated_seconds());
+                }
+                // Reverse-debug: mark the media change, as for an insert.
+                self.emu
+                    .tt_note_input(crate::inputsched::ReplayAction::DiskChange);
                 self.show_osd(format!("DF{drive_idx}: ejected"));
                 self.request_redraw();
             }

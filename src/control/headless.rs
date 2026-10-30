@@ -643,9 +643,12 @@ impl Session {
     /// reverse replay and record it in the input recording.
     fn note_media_change(&mut self, drive: usize, inserted: Option<&std::path::Path>) {
         self.emu.tt_note_input(ReplayAction::DiskChange);
-        if let (Some(rec), Some(path)) = (self.input.recorder.as_mut(), inserted) {
+        if let Some(rec) = self.input.recorder.as_mut() {
             let secs = self.emu.bus().emulated_seconds();
-            rec.record_disk_insert(drive, path, secs);
+            match inserted {
+                Some(path) => rec.record_disk_insert(drive, path, secs),
+                None => rec.record_disk_eject(drive, secs),
+            }
         }
     }
 

@@ -117,6 +117,7 @@ repeat.
 | `--pot-after SECS X Y [PORT]` | Analogue stick/paddle position, 0-255 per axis (default port 2) |
 | `--pen-after SECS X Y [PORT]` | Hold the light pen over pixel (X, Y) of a `--screenshot-after` capture (negative lifts it off); `--joy-after ... red` is its switch |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
+| `--eject-disk-after SECS DFN` | Eject the disk in `df0`..`df3`, leaving the drive empty (as the status-bar eject button) |
 | `--insert-cd-after SECS PATH` | Swap the CD image in the machine's CD drive (CDTV/CD32/SCSI CD-ROM) |
 | `--expect-screenshot SECS PATH [TOL]` | Compare the frame at SECS with the PNG at PATH (TOL = fraction or pixel count); mismatch writes `<stem>.actual.png` + `<stem>.diff.png`, exit status 3 at run end |
 | `--script FILE` | Same directives from a file, one per line, no leading dashes (`type SECS TEXT`, `expect-screenshot ...` included) |

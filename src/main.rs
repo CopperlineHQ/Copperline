@@ -41,7 +41,9 @@ fn resolve_disk_insert_after(
     for insert in disk_insert_after {
         match insert {
             CliDiskInsert::Explicit(spec) => {
-                if !cfg.floppy_connected[spec.drive_idx] {
+                // An eject of a drive that is not wired is harmless: it is
+                // reported in the log when it comes due instead.
+                if spec.path.is_some() && !cfg.floppy_connected[spec.drive_idx] {
                     return Err(anyhow!(
                         "--insert-disk-after df{} needs a connected drive; \
                          use --floppy-drives {} or configure floppy.df{}",
@@ -63,7 +65,7 @@ fn resolve_disk_insert_after(
                 out.push(DiskInsertSpec {
                     secs,
                     drive_idx,
-                    path: drive.path,
+                    path: Some(drive.path),
                     write_protected: drive.write_protected,
                 });
             }
@@ -1346,11 +1348,21 @@ fn main() -> Result<()> {
             .partition(|disk| disk.secs == 0.0);
         disk_insert_after = later;
         for disk in boot {
-            emu.bus_mut().floppy.insert_disk_image(
-                disk.drive_idx,
-                disk.path,
-                disk.write_protected,
-            )?;
+            match disk.path {
+                Some(path) => emu.bus_mut().floppy.insert_disk_image(
+                    disk.drive_idx,
+                    path,
+                    disk.write_protected,
+                )?,
+                None if emu.bus().floppy.disk_inserted(disk.drive_idx) => {
+                    emu.bus_mut().floppy.eject_disk_image(disk.drive_idx)?;
+                    info!("floppy.df{} ejected", disk.drive_idx);
+                }
+                None => warn!(
+                    "floppy.df{} eject ignored: no disk in the drive",
+                    disk.drive_idx
+                ),
+            }
         }
         let session = copperline::netplay::Session::new(options, &mut emu, &cfg)?;
         #[cfg(feature = "netplay-internet")]
@@ -2549,7 +2561,8 @@ mod tests {
              joy-after 60.0 red 300 1\n\
              mouse-after 1.020 -3 10 2\n\
              pot-after 12.0 50 200\n\
-             insert-disk-after 30.0 df1 \"/tmp/with space.adf\"\n",
+             insert-disk-after 30.0 df1 \"/tmp/with space.adf\"\n\
+             eject-disk-after 40.0 df1\n",
         );
         let args = parse(&["--script", path.to_str().unwrap()])?;
         assert_eq!(args.press_after.len(), 2);
@@ -2560,12 +2573,20 @@ mod tests {
         assert_eq!(args.pot_after, vec![(12.0, 50, 200, 1)]);
         assert_eq!(
             args.disk_insert_after,
-            vec![CliDiskInsert::Explicit(DiskInsertSpec {
-                secs: 30.0,
-                drive_idx: 1,
-                path: PathBuf::from("/tmp/with space.adf"),
-                write_protected: true,
-            })]
+            vec![
+                CliDiskInsert::Explicit(DiskInsertSpec {
+                    secs: 30.0,
+                    drive_idx: 1,
+                    path: Some(PathBuf::from("/tmp/with space.adf")),
+                    write_protected: true,
+                }),
+                CliDiskInsert::Explicit(DiskInsertSpec {
+                    secs: 40.0,
+                    drive_idx: 1,
+                    path: None,
+                    write_protected: true,
+                }),
+            ]
         );
         let _ = std::fs::remove_file(&path);
         Ok(())
@@ -2756,6 +2777,7 @@ mod tests {
         input.ports[0].fire = false;
         rec.observe(&input, 2.5, Some);
         rec.record_disk_insert(0, Path::new("/tmp/demo.adf"), 3.0);
+        rec.record_disk_eject(0, 4.0);
         let path = temp_script("roundtrip", &rec.finish());
 
         let args = parse(&["--script", path.to_str().unwrap()])?;
@@ -2764,7 +2786,7 @@ mod tests {
         assert_eq!(args.press_after[0].hold_ms, 250);
         assert_eq!(args.mouse_after, vec![(2.0, 5, 0, 0)]);
         assert_eq!(args.click_after, vec![(2.0, MouseButtonKind::Left, 500, 0)]);
-        assert_eq!(args.disk_insert_after.len(), 1);
+        assert_eq!(args.disk_insert_after.len(), 2);
         let _ = std::fs::remove_file(&path);
         Ok(())
     }
@@ -3137,10 +3159,44 @@ mod tests {
             vec![CliDiskInsert::Explicit(DiskInsertSpec {
                 secs: 10.0,
                 drive_idx: 0,
-                path: PathBuf::from("demo-disk.adf"),
+                path: Some(PathBuf::from("demo-disk.adf")),
                 write_protected: true,
             })]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn eject_disk_after_parses_drive_and_orders_with_inserts() -> Result<()> {
+        let args = parse(&[
+            "--eject-disk-after",
+            "75",
+            "df1",
+            "--insert-disk-after",
+            "85",
+            "df1:",
+            "other.adf",
+        ])?;
+        assert_eq!(
+            args.disk_insert_after,
+            vec![
+                CliDiskInsert::Explicit(DiskInsertSpec {
+                    secs: 75.0,
+                    drive_idx: 1,
+                    path: None,
+                    write_protected: true,
+                }),
+                CliDiskInsert::Explicit(DiskInsertSpec {
+                    secs: 85.0,
+                    drive_idx: 1,
+                    path: Some(PathBuf::from("other.adf")),
+                    write_protected: true,
+                }),
+            ]
+        );
+        assert!(parse(&["--eject-disk-after", "75"]).is_err());
+        assert!(parse(&["--eject-disk-after", "x", "df1"]).is_err());
+        assert!(parse(&["--eject-disk-after", "75", "df4"]).is_err());
         Ok(())
     }
 
@@ -3214,7 +3270,7 @@ mod tests {
             vec![DiskInsertSpec {
                 secs: 10.0,
                 drive_idx: 0,
-                path: PathBuf::from("demo-disk.adf"),
+                path: Some(PathBuf::from("demo-disk.adf")),
                 write_protected: true,
             }]
         );
@@ -3229,7 +3285,7 @@ mod tests {
             vec![CliDiskInsert::Explicit(DiskInsertSpec {
                 secs: 10.0,
                 drive_idx: 1,
-                path: PathBuf::from("demo-disk.adf"),
+                path: Some(PathBuf::from("demo-disk.adf")),
                 write_protected: true,
             })],
         )
@@ -3242,12 +3298,28 @@ mod tests {
             vec![CliDiskInsert::Explicit(DiskInsertSpec {
                 secs: 10.0,
                 drive_idx: 1,
-                path: PathBuf::from("demo-disk.adf"),
+                path: Some(PathBuf::from("demo-disk.adf")),
                 write_protected: true,
             })],
         )
         .unwrap();
         assert_eq!(inserts[0].drive_idx, 1);
+    }
+
+    #[test]
+    fn scheduled_disk_eject_of_unconnected_drive_is_kept_for_a_runtime_warning() {
+        let mut cfg = Config::default();
+        let ejects = resolve_disk_insert_after(
+            &mut cfg,
+            vec![CliDiskInsert::Explicit(DiskInsertSpec {
+                secs: 10.0,
+                drive_idx: 3,
+                path: None,
+                write_protected: true,
+            })],
+        )
+        .unwrap();
+        assert_eq!(ejects[0].path, None);
     }
 
     #[test]

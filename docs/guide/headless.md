@@ -247,6 +247,7 @@ timestamps. Every flag repeats:
 | `--pen-after SECS X Y [PORT]` | Hold the light pen over pixel (X, Y) of a `--screenshot-after` capture, as `--mouse-to-after` takes; a negative coordinate lifts it off (default: the port with the pen) |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
 | `--defer-disk-insert SECS DFN` | Start with DFN empty and insert its configured disk at SECS |
+| `--eject-disk-after SECS DFN` | Eject the disk in DFN at SECS, leaving the drive empty ([below](#ejecting-floppy-disks)) |
 | `--insert-cd-after SECS PATH` | Swap the CD image (`.cue`, `.iso`, `.nrg`, `.chd`) in the machine's CD drive |
 | `--freeze-after SECS` | Press the freezer cartridge's button (`--cartridge hrtmon`): HRTMon takes over at SECS |
 | `--expect-screenshot SECS PATH [TOLERANCE]` | Compare the frame at SECS with a PNG ([above](#screenshot-expectations)) |
@@ -325,6 +326,32 @@ Later `--screenshot-after` captures show the monitor screen, and a
 `--save-state-after` snapshot taken inside the monitor resumes inside it.
 Input recordings store freeze events as `freeze-after SECS`.
 
+(ejecting-floppy-disks)=
+### Ejecting floppy disks
+
+`--eject-disk-after SECS DFN` takes the disk out of `df0`..`df3` at SECS and
+leaves the drive empty, exactly as the status bar's eject button does: the
+drive latches `/CHNG` low and reports no disk until another one goes in, so
+the guest's disk-change polling sees the removal. Writes the guest made to
+the image were already saved as each track was written, so an eject loses
+nothing. The log records `floppy.dfN ejected`; ejecting a drive that holds
+no disk, or one that is not connected, logs a warning and the run carries
+on.
+
+Ejects share one schedule with `--insert-disk-after` and
+`--defer-disk-insert`, applied in timestamp order, so a removal followed by
+a different disk is two flags:
+
+```sh
+./target/release/copperline --config a500-2drives.toml --noaudio \
+  --eject-disk-after 75 df1 \
+  --insert-disk-after 85 df1 other.adf \
+  --screenshot-after 95 /tmp/out.png
+```
+
+Scripts take `eject-disk-after SECS DFN`, and `--record-input` writes that
+line for each eject (status bar or `media.floppy.eject`).
+
 (input-recording-and-script-files)=
 ### Input scripts and recording
 
@@ -336,6 +363,7 @@ the flags without their leading dashes:
 joy-after 60.0 red 300
 key-after 75.0 f1 200
 type 80.0 "dir df1:\n"
+eject-disk-after 88.0 df1
 insert-disk-after 90.0 df1 "disk2.adf"
 joy-after 95.0 red 300 1
 expect-screenshot 100.0 "expected/level.png" 0.001
@@ -345,7 +373,7 @@ freeze-after 120.0
 The accepted directives are `press-after`, `key-after` (also spelled
 `hold-key-after`), `type` (also `type-after`), `click-after`, `joy-after`,
 `mouse-after`, `mouse-to-after`, `pot-after`, `pen-after`,
-`insert-disk-after`, `defer-disk-insert`, `insert-cd-after`,
+`insert-disk-after`, `defer-disk-insert`, `eject-disk-after`, `insert-cd-after`,
 `freeze-after` and `expect-screenshot`, each taking the same arguments as
 its flag. Other flags, including `--screenshot-after` and
 `--save-state-after`, are not accepted in a script, and a script cannot

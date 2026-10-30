@@ -13,7 +13,8 @@
 //!
 //! - Direct hooks for events with identity the bus state cannot expose
 //!   afterwards: Amiga key transitions (`record_key`, from
-//!   `handle_amiga_key_event`) and floppy inserts (`record_disk_insert`).
+//!   `handle_amiga_key_event`) and floppy inserts and ejects
+//!   (`record_disk_insert`, `record_disk_eject`).
 //! - A once-per-quantum `observe` of the live `InputState`, which diffs
 //!   each controller port according to the device plugged into it: mouse
 //!   buttons and quadrature counters (wrapped u8 deltas become
@@ -208,6 +209,14 @@ impl InputRecorder {
         self.lines.push((
             secs,
             format!("insert-disk-after {} df{drive_idx} {path}", fmt_secs(secs)),
+        ));
+    }
+
+    /// Record a floppy eject that succeeded.
+    pub fn record_disk_eject(&mut self, drive_idx: usize, secs: f64) {
+        self.lines.push((
+            secs,
+            format!("eject-disk-after {} df{drive_idx}", fmt_secs(secs)),
         ));
     }
 
@@ -564,6 +573,14 @@ mod tests {
         rec.record_key(0x35, false, 1.0);
         let script = rec.finish();
         assert!(script.contains("key-after 1.000 0x35 20"), "{script}");
+    }
+
+    #[test]
+    fn disk_ejects_record_the_drive() {
+        let mut rec = InputRecorder::new(0.0);
+        rec.record_disk_eject(1, 75.0);
+        let script = rec.finish();
+        assert!(script.contains("eject-disk-after 75.000 df1"), "{script}");
     }
 
     #[test]

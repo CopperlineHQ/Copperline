@@ -432,7 +432,8 @@ The host uses the status bar's load, next-disk and eject buttons for DF0-DF3.
 The load picker can select a playlist; Cmd+D on macOS or Alt+D elsewhere cycles
 it. Dropping floppy images loads a playlist into the first connected drive.
 The guest's media controls are disabled. The host can schedule a replacement
-with `--insert-disk-after SECS dfN PATH` at a nonzero emulated time.
+with `--insert-disk-after SECS dfN PATH` at a nonzero emulated time, or an
+eject with `--eject-disk-after SECS dfN`.
 
 Both peers stop at a confirmed frame, verify and transfer the replacement,
 apply it together, then resume. A bad local file leaves the current game
@@ -567,7 +568,7 @@ other scheduled work is refused under netplay: `--save-state-after`,
 `--gif-after`, `--audio-wav`, `--audio-stems`, `--record-input`,
 `--insert-cd-after`, `--freeze-after`, the scripted mouse, pointer,
 analogue and light-pen flags, `--warp-boot`/`--warp-until`, and a guest's
-`--insert-disk-after`.
+`--insert-disk-after` or `--eject-disk-after`.
 
 The local smoke check starts every peer, schedules a button press on each,
 and compares confirmed PNGs and checkpoint logs. `--players N` runs a
