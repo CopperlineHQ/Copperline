@@ -548,6 +548,17 @@ refreshed (or a count sitting on an 8-iteration display-bucket edge flips a
 whole bar word). Hardware timing fixes can move the bootblock handoff phase
 too. Re-bless and review the diff after either kind of change.
 
+Two later probes depend on the handoff in the same way. `a500-cia-request`
+records the beam position after each E-clock-synchronised CIA sample, and
+its ICR column includes CIA-A timer B, which the probe never programs and
+the ROM leaves running. `jit-bus-boundary` places its markers by native
+delay loops whose phase against the beam follows the handoff instant. With
+the 2026-10-30 AROS ROM refresh, the old ROM reproduced the new
+`jit-bus-boundary` render exactly when the probe disk was inserted 14.6 s
+into the boot. With the disk inserted at 32.8 s, it reproduced the new
+`a500-cia-request` beam samples and three of its four timer-B flips. INTREQR, PB6
+and the timer-A ICR bit, the behaviour that probe covers, stayed identical.
+
 The OneROM A500 CIA/interrupt timing corrections refresh these two references:
 the timing table changes with the corrected CIA transfer, START/STOP,
 running FORCE LOAD hold, interrupt timing and fixed-DMA starvation counting;

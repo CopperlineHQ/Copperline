@@ -1301,6 +1301,7 @@ COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
 The two probes that display live E-clock-referenced counts (`timing-test`
 itself and `bltprobe-pace`) also move whenever the bundled AROS ROM is
 refreshed, because their phase depends on how long the ROM takes to boot.
+`a500-cia-request` and `jit-bus-boundary` can move for the same reason.
 `timing-test/README.md` ("CI golden renders") has the details, including
 the vAmiga cross-checks behind individual probes.
 

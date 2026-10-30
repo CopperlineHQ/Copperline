@@ -260,6 +260,15 @@ fn a2091_open_rom_boots_under_aros() -> Result<(), Box<dyn std::error::Error>> {
     ));
     std::fs::create_dir_all(&temp)?;
     let volume = make_directory_volume(&temp, "aros-volume")?;
+    // The volume's Startup-Sequence runs a uaelib ExitEmu probe, so the
+    // session ends before the screenshot only if AROS booted through the
+    // A2091 ROM's scsi.device.
+    std::fs::copy(
+        repo_root().join("guest/uaelib-test/exitemu"),
+        volume.join("exitemu"),
+    )?;
+    std::fs::create_dir_all(volume.join("S"))?;
+    std::fs::write(volume.join("S/Startup-Sequence"), "exitemu\n")?;
     let cfg = temp.join("config.toml");
     std::fs::write(
         &cfg,
@@ -293,8 +302,6 @@ unit0 = "{}"
         .arg("--config")
         .arg(&cfg)
         .arg("--noaudio")
-        .arg("--serial")
-        .arg("stdout")
         .arg("--screenshot-after")
         .arg("35")
         .arg(&png)
@@ -306,14 +313,11 @@ unit0 = "{}"
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let serial = String::from_utf8_lossy(&output.stdout);
     assert!(
-        serial.contains("mfg=514 prod=3")
-            && serial.contains("InitResident")
-            && serial.contains("Copperline A2091 scsidisk 42.41"),
-        "AROS did not initialise the bundled A2091 resident:\n{serial}"
+        !png.exists(),
+        "AROS did not boot the A2091 volume: its Startup-Sequence never \
+         reached ExitEmu before the 35 s screenshot"
     );
-    assert!(distinct_colors(&png)? >= 3, "AROS boot screenshot is blank");
 
     std::fs::remove_dir_all(&temp).ok();
     Ok(())
