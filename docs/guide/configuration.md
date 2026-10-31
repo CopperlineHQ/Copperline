@@ -2824,6 +2824,17 @@ both the V36 boot-node protocol and V34's own autoboot and handler
 startup conventions). Kickstart 1.2 and older lack the expansion-ROM
 hook entirely and never see the mounts.
 
+File and directory dates are the host files' own timestamps, but the
+volume itself has no creation date on the host, so every mount reports a
+fixed one: 1 January 1978, the AmigaDOS epoch. That matters on a machine
+with no battery clock fitted (the A500 and A1200 profiles, among others),
+whose OS sets its system time from the boot volume's date: booting from a
+host directory starts the guest clock at 1 January 1978, as a clockless
+Amiga does from undated media, and a headless run boots to the same
+moment every time. Fit a clock (`[machine] rtc = true`) for the guest to
+read the host's time instead, or seed one with `rtc_time` for a fixed
+date.
+
 (clipboard)=
 
 ## `[clipboard]` -- host clipboard sharing

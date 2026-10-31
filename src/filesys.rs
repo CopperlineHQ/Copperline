@@ -889,6 +889,23 @@ impl FilesysBoard {
     }
 }
 
+/// The `dol_VolumeDate` of mount `unit`'s volume node.
+///
+/// A real volume's date is a property of the medium, written when it was
+/// formatted; a host directory has none, so the handler supplies one, and it
+/// must not come from the host clock. With no battery clock fitted the OS
+/// sets the system time from the boot volume's date (the bundled AROS ROM
+/// does, as Kickstart does from the boot disk), so a wall-clock stamp here
+/// started the guest's clock -- and every timer.device alarm scheduled from
+/// it -- at a different sub-second phase on every run, and identical
+/// headless runs drifted apart by a few E-clock ticks. Every unit instead
+/// carries the AmigaDOS epoch (1 January 1978, what a clockless Amiga reads
+/// from undated media), one tick apart per unit so two mounts sharing a
+/// volume name still read as different disks.
+fn volume_date(unit: usize) -> DateStamp {
+    (0, 0, unit as u32)
+}
+
 impl FilesysUnit {
     /// Build this unit's volume DosList node in the board window; the guest
     /// handler AddDosEntry's it (only guest code may take the DosList
@@ -896,7 +913,7 @@ impl FilesysUnit {
     fn build_volume_node(&mut self, bus: &mut dyn AddressBus, board_base: u32) -> u32 {
         let vol = board_base + VOLUMES_OFFSET + self.index as u32 * VOLUME_SLOT_SIZE;
         let fixed = std::mem::size_of::<VolumeNode>() as u32;
-        let (days, mins, ticks) = amiga_datestamp(Some(std::time::SystemTime::now()));
+        let (days, mins, ticks) = volume_date(self.index);
         let node = VolumeNode {
             next: long(0),
             r#type: long(2), // DLT_VOLUME
@@ -2794,6 +2811,44 @@ mod tests {
         assert_eq!(board.units[0].port, None);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// With no battery clock the OS sets its system time from the boot
+    /// volume's date, so a volume node stamped from the host clock started
+    /// the guest clock at a different sub-second phase on every run and two
+    /// identical headless runs drifted apart (the hdbench repeat in
+    /// tests/hd_timing.rs). The date is fixed per unit instead: the AmigaDOS
+    /// epoch, a tick apart so same-named mounts remain different disks.
+    #[test]
+    fn volume_node_date_is_fixed_per_unit_not_the_host_clock() {
+        let mount = |volume: &str| MountSpec {
+            path: "/nonexistent".into(),
+            volume: volume.into(),
+            boot_pri: -128,
+            readonly: false,
+        };
+        let mut board = FilesysBoard::default();
+        board.set_mounts(vec![mount("Same"), mount("Same")]);
+        let mut bus = RamBus(vec![0u8; 0x2_0000]);
+        let date_at = std::mem::offset_of!(VolumeNode, volume_date) as u32;
+        let mut dates = Vec::new();
+        for unit in 0..2 {
+            // An all-zero packet is the V34-shaped startup packet: dp_Type 0,
+            // no DeviceNode to patch.
+            let mut guest_op = None;
+            board.units[unit].handle_packet(
+                &mut bus,
+                FsTester::BOARD_BASE,
+                FsTester::PORT,
+                FsTester::PKT,
+                &mut guest_op,
+            );
+            let Some(GuestOp::AddVolume(vol)) = guest_op else {
+                panic!("unit {unit}: startup packet built no volume node");
+            };
+            dates.push([0, 4, 8].map(|off| bus.read_long(vol + date_at + off)));
+        }
+        assert_eq!(dates, [[0, 0, 0], [0, 0, 1]]);
     }
 
     // Every register write below goes through this: high word first, then
