@@ -24,26 +24,34 @@ use copperline::emulator::Emulator;
 use copperline::floppy::FloppyController;
 use copperline::memory::Memory;
 use copperline::serial::StdoutSink;
-use copperline::video::window::{App, DiskInsertSpec, GifCaptureSpec};
+use copperline::video::window::{App, DiskChange, DiskChangeSpec, GifCaptureSpec};
 use copperline::video::HOST_SHORTCUT_MODIFIER_LABEL;
 
 mod cli;
 
 #[cfg(test)]
 use cli::parse_args_from;
-use cli::{parse_args, CliArgs, CliDiskInsert};
+use cli::{parse_args, CliArgs, CliDiskChange};
 
-fn resolve_disk_insert_after(
+fn resolve_disk_change_after(
     cfg: &mut Config,
-    disk_insert_after: Vec<CliDiskInsert>,
-) -> Result<Vec<DiskInsertSpec>> {
+    disk_change_after: Vec<CliDiskChange>,
+) -> Result<Vec<DiskChangeSpec>> {
     let mut out = Vec::new();
-    for insert in disk_insert_after {
-        match insert {
-            CliDiskInsert::Explicit(spec) => {
+    for change in disk_change_after {
+        match change {
+            CliDiskChange::Explicit(spec) => {
+                // Drive wiring is fixed when the machine is built, so a
+                // change aimed at a drive that is not connected could never
+                // happen: refuse it up front rather than as a log line deep
+                // into a long headless run.
                 if !cfg.floppy_connected[spec.drive_idx] {
+                    let flag = match spec.change {
+                        DiskChange::Insert { .. } => "--insert-disk-after",
+                        DiskChange::Eject => "--eject-disk-after",
+                    };
                     return Err(anyhow!(
-                        "--insert-disk-after df{} needs a connected drive; \
+                        "{flag} df{} needs a connected drive; \
                          use --floppy-drives {} or configure floppy.df{}",
                         spec.drive_idx,
                         spec.drive_idx + 1,
@@ -52,7 +60,7 @@ fn resolve_disk_insert_after(
                 }
                 out.push(spec);
             }
-            CliDiskInsert::Configured { secs, drive_idx } => {
+            CliDiskChange::Configured { secs, drive_idx } => {
                 let Some(drive) = cfg.floppy.drives[drive_idx].take() else {
                     return Err(anyhow!(
                         "--defer-disk-insert df{} requires configured floppy.df{}",
@@ -60,11 +68,13 @@ fn resolve_disk_insert_after(
                         drive_idx
                     ));
                 };
-                out.push(DiskInsertSpec {
+                out.push(DiskChangeSpec {
                     secs,
                     drive_idx,
-                    path: drive.path,
-                    write_protected: drive.write_protected,
+                    change: DiskChange::Insert {
+                        path: drive.path,
+                        write_protected: drive.write_protected,
+                    },
                 });
             }
         }
@@ -130,9 +140,9 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
             "--benchmark-until cannot be combined with --record-input"
         ));
     }
-    if !cli.disk_insert_after.is_empty() || !cli.cd_insert_after.is_empty() {
+    if !cli.disk_change_after.is_empty() || !cli.cd_insert_after.is_empty() {
         return Err(anyhow!(
-            "--benchmark-until cannot be combined with scheduled disk or CD inserts"
+            "--benchmark-until cannot be combined with scheduled disk or CD changes"
         ));
     }
 
@@ -233,9 +243,9 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
     if cli.record_input.is_some() {
         return Err(anyhow!("--gdb cannot be combined with --record-input"));
     }
-    if !cli.disk_insert_after.is_empty() || !cli.cd_insert_after.is_empty() {
+    if !cli.disk_change_after.is_empty() || !cli.cd_insert_after.is_empty() {
         return Err(anyhow!(
-            "--gdb cannot be combined with scheduled disk or CD inserts"
+            "--gdb cannot be combined with scheduled disk or CD changes"
         ));
     }
     // The stub owns the run loop and never watches the --run completion
@@ -315,9 +325,9 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
              and cartridge.freeze)"
         ));
     }
-    if !cli.disk_insert_after.is_empty() || !cli.cd_insert_after.is_empty() {
+    if !cli.disk_change_after.is_empty() || !cli.cd_insert_after.is_empty() {
         return Err(anyhow!(
-            "--control cannot be combined with scheduled disk or CD inserts (use media.*)"
+            "--control cannot be combined with scheduled disk or CD changes (use media.*)"
         ));
     }
     // Like --gdb, the server never watches the --run completion marker.
@@ -1061,10 +1071,10 @@ fn main() -> Result<()> {
     } else {
         config::resolve_bundled_rom(&mut cfg)?;
     }
-    let mut disk_insert_after = if netplay_guest {
+    let mut disk_change_after = if netplay_guest {
         Vec::new()
     } else {
-        resolve_disk_insert_after(&mut cfg, cli.disk_insert_after)?
+        resolve_disk_change_after(&mut cfg, cli.disk_change_after)?
     };
 
     // Name the boot ROM in the banner: a Kickstart image is identified by
@@ -1341,16 +1351,32 @@ fn main() -> Result<()> {
         )
     };
     let netplay = if let Some(options) = cli.netplay {
-        let (boot, later): (Vec<_>, Vec<_>) = std::mem::take(&mut disk_insert_after)
+        let (boot, later): (Vec<_>, Vec<_>) = std::mem::take(&mut disk_change_after)
             .into_iter()
             .partition(|disk| disk.secs == 0.0);
-        disk_insert_after = later;
+        disk_change_after = later;
         for disk in boot {
-            emu.bus_mut().floppy.insert_disk_image(
-                disk.drive_idx,
-                disk.path,
-                disk.write_protected,
-            )?;
+            match disk.change {
+                DiskChange::Insert {
+                    path,
+                    write_protected,
+                } => {
+                    emu.bus_mut()
+                        .floppy
+                        .insert_disk_image(disk.drive_idx, path, write_protected)?
+                }
+                // The drive is known to be connected
+                // (resolve_disk_change_after refuses the rest); only whether
+                // it holds a disk is left to check.
+                DiskChange::Eject if emu.bus().floppy.disk_inserted(disk.drive_idx) => {
+                    emu.bus_mut().floppy.eject_disk_image(disk.drive_idx)?;
+                    info!("floppy.df{} ejected", disk.drive_idx);
+                }
+                DiskChange::Eject => warn!(
+                    "floppy.df{} eject ignored: no disk in the drive",
+                    disk.drive_idx
+                ),
+            }
         }
         let session = copperline::netplay::Session::new(options, &mut emu, &cfg)?;
         #[cfg(feature = "netplay-internet")]
@@ -1430,7 +1456,7 @@ fn main() -> Result<()> {
         cli.mouse_to_after,
         cli.pot_after,
         cli.pen_after,
-        disk_insert_after,
+        disk_change_after,
         cli.cd_insert_after,
         cli.freeze_after,
         cli.record_input,
@@ -1740,7 +1766,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.pot_after.is_empty()
         && cli.pen_after.is_empty()
         && cli.freeze_after.is_empty()
-        && cli.disk_insert_after.is_empty()
+        && cli.disk_change_after.is_empty()
         && cli.record_input.is_none()
         && cli.audio_wav.is_none()
         && cli.audio_live
@@ -2549,7 +2575,8 @@ mod tests {
              joy-after 60.0 red 300 1\n\
              mouse-after 1.020 -3 10 2\n\
              pot-after 12.0 50 200\n\
-             insert-disk-after 30.0 df1 \"/tmp/with space.adf\"\n",
+             insert-disk-after 30.0 df1 \"/tmp/with space.adf\"\n\
+             eject-disk-after 40.0 df1\n",
         );
         let args = parse(&["--script", path.to_str().unwrap()])?;
         assert_eq!(args.press_after.len(), 2);
@@ -2559,13 +2586,22 @@ mod tests {
         assert_eq!(args.mouse_after, vec![(1.02, -3, 10, 1)]);
         assert_eq!(args.pot_after, vec![(12.0, 50, 200, 1)]);
         assert_eq!(
-            args.disk_insert_after,
-            vec![CliDiskInsert::Explicit(DiskInsertSpec {
-                secs: 30.0,
-                drive_idx: 1,
-                path: PathBuf::from("/tmp/with space.adf"),
-                write_protected: true,
-            })]
+            args.disk_change_after,
+            vec![
+                CliDiskChange::Explicit(DiskChangeSpec {
+                    secs: 30.0,
+                    drive_idx: 1,
+                    change: DiskChange::Insert {
+                        path: PathBuf::from("/tmp/with space.adf"),
+                        write_protected: true,
+                    },
+                }),
+                CliDiskChange::Explicit(DiskChangeSpec {
+                    secs: 40.0,
+                    drive_idx: 1,
+                    change: DiskChange::Eject,
+                }),
+            ]
         );
         let _ = std::fs::remove_file(&path);
         Ok(())
@@ -2756,6 +2792,7 @@ mod tests {
         input.ports[0].fire = false;
         rec.observe(&input, 2.5, Some);
         rec.record_disk_insert(0, Path::new("/tmp/demo.adf"), 3.0);
+        rec.record_disk_eject(0, 4.0);
         let path = temp_script("roundtrip", &rec.finish());
 
         let args = parse(&["--script", path.to_str().unwrap()])?;
@@ -2764,7 +2801,7 @@ mod tests {
         assert_eq!(args.press_after[0].hold_ms, 250);
         assert_eq!(args.mouse_after, vec![(2.0, 5, 0, 0)]);
         assert_eq!(args.click_after, vec![(2.0, MouseButtonKind::Left, 500, 0)]);
-        assert_eq!(args.disk_insert_after.len(), 1);
+        assert_eq!(args.disk_change_after.len(), 2);
         let _ = std::fs::remove_file(&path);
         Ok(())
     }
@@ -2919,6 +2956,7 @@ mod tests {
     #[test]
     fn server_and_benchmark_modes_refuse_work_they_would_drop() -> Result<()> {
         let cd = ["--insert-cd-after", "5", "game.cue"];
+        let eject = ["--eject-disk-after", "5", "df0"];
         let ret = ["--run", "prog", "--exit-on-return"];
         let shot = ["--expect-screenshot", "5", "ref.png"];
         for (mode, validate) in [
@@ -2930,7 +2968,8 @@ mod tests {
             (["--control", ":7710"], validate_control_args),
         ] {
             for (extra, named) in [
-                (&cd[..], "CD inserts"),
+                (&cd[..], "disk or CD changes"),
+                (&eject[..], "disk or CD changes"),
                 (&ret[..], "--exit-on-return"),
                 (&shot[..], "--expect-screenshot"),
             ] {
@@ -3133,14 +3172,51 @@ mod tests {
     fn insert_disk_after_parses_explicit_drive_and_path() -> Result<()> {
         let args = parse(&["--insert-disk-after", "10", "df0", "demo-disk.adf"])?;
         assert_eq!(
-            args.disk_insert_after,
-            vec![CliDiskInsert::Explicit(DiskInsertSpec {
+            args.disk_change_after,
+            vec![CliDiskChange::Explicit(DiskChangeSpec {
                 secs: 10.0,
                 drive_idx: 0,
-                path: PathBuf::from("demo-disk.adf"),
-                write_protected: true,
+                change: DiskChange::Insert {
+                    path: PathBuf::from("demo-disk.adf"),
+                    write_protected: true,
+                },
             })]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn eject_disk_after_parses_drive_and_orders_with_inserts() -> Result<()> {
+        let args = parse(&[
+            "--eject-disk-after",
+            "75",
+            "df1",
+            "--insert-disk-after",
+            "85",
+            "df1:",
+            "other.adf",
+        ])?;
+        assert_eq!(
+            args.disk_change_after,
+            vec![
+                CliDiskChange::Explicit(DiskChangeSpec {
+                    secs: 75.0,
+                    drive_idx: 1,
+                    change: DiskChange::Eject,
+                }),
+                CliDiskChange::Explicit(DiskChangeSpec {
+                    secs: 85.0,
+                    drive_idx: 1,
+                    change: DiskChange::Insert {
+                        path: PathBuf::from("other.adf"),
+                        write_protected: true,
+                    },
+                }),
+            ]
+        );
+        assert!(parse(&["--eject-disk-after", "75"]).is_err());
+        assert!(parse(&["--eject-disk-after", "x", "df1"]).is_err());
+        assert!(parse(&["--eject-disk-after", "75", "df4"]).is_err());
         Ok(())
     }
 
@@ -3183,8 +3259,8 @@ mod tests {
     fn defer_disk_insert_parses_configured_drive() -> Result<()> {
         let args = parse(&["--defer-disk-insert", "10", "df0:"])?;
         assert_eq!(
-            args.disk_insert_after,
-            vec![CliDiskInsert::Configured {
+            args.disk_change_after,
+            vec![CliDiskChange::Configured {
                 secs: 10.0,
                 drive_idx: 0,
             }]
@@ -3200,9 +3276,9 @@ mod tests {
             write_protected: true,
         });
 
-        let inserts = resolve_disk_insert_after(
+        let inserts = resolve_disk_change_after(
             &mut cfg,
-            vec![CliDiskInsert::Configured {
+            vec![CliDiskChange::Configured {
                 secs: 10.0,
                 drive_idx: 0,
             }],
@@ -3211,11 +3287,13 @@ mod tests {
         assert!(cfg.floppy.drives[0].is_none());
         assert_eq!(
             inserts,
-            vec![DiskInsertSpec {
+            vec![DiskChangeSpec {
                 secs: 10.0,
                 drive_idx: 0,
-                path: PathBuf::from("demo-disk.adf"),
-                write_protected: true,
+                change: DiskChange::Insert {
+                    path: PathBuf::from("demo-disk.adf"),
+                    write_protected: true,
+                },
             }]
         );
         Ok(())
@@ -3224,30 +3302,57 @@ mod tests {
     #[test]
     fn scheduled_disk_insert_requires_connected_drive() {
         let mut cfg = Config::default();
-        let err = resolve_disk_insert_after(
+        let err = resolve_disk_change_after(
             &mut cfg,
-            vec![CliDiskInsert::Explicit(DiskInsertSpec {
+            vec![CliDiskChange::Explicit(DiskChangeSpec {
                 secs: 10.0,
                 drive_idx: 1,
-                path: PathBuf::from("demo-disk.adf"),
-                write_protected: true,
+                change: DiskChange::Insert {
+                    path: PathBuf::from("demo-disk.adf"),
+                    write_protected: true,
+                },
             })],
         )
         .unwrap_err();
         assert!(err.to_string().contains("connected drive"), "{err:#}");
 
         cfg.floppy_connected[1] = true;
-        let inserts = resolve_disk_insert_after(
+        let inserts = resolve_disk_change_after(
             &mut cfg,
-            vec![CliDiskInsert::Explicit(DiskInsertSpec {
+            vec![CliDiskChange::Explicit(DiskChangeSpec {
                 secs: 10.0,
                 drive_idx: 1,
-                path: PathBuf::from("demo-disk.adf"),
-                write_protected: true,
+                change: DiskChange::Insert {
+                    path: PathBuf::from("demo-disk.adf"),
+                    write_protected: true,
+                },
             })],
         )
         .unwrap();
         assert_eq!(inserts[0].drive_idx, 1);
+    }
+
+    #[test]
+    fn scheduled_disk_eject_requires_connected_drive() {
+        let mut cfg = Config::default();
+        let eject = || {
+            vec![CliDiskChange::Explicit(DiskChangeSpec {
+                secs: 10.0,
+                drive_idx: 2,
+                change: DiskChange::Eject,
+            })]
+        };
+        let err = resolve_disk_change_after(&mut cfg, eject()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--eject-disk-after df2 needs a connected drive"),
+            "{err:#}"
+        );
+        assert!(err.to_string().contains("--floppy-drives 3"), "{err:#}");
+
+        cfg.floppy_connected[2] = true;
+        let ejects = resolve_disk_change_after(&mut cfg, eject()).unwrap();
+        assert_eq!(ejects[0].change, DiskChange::Eject);
     }
 
     #[test]

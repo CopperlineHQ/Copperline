@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use copperline::config::ConfigOverrides;
 use copperline::expect::{ExpectShotSpec, Tolerance};
 use copperline::video::window::{
-    parse_amiga_key, DiskInsertSpec, FrameDumpSpec, KeyPressSpec, DEFAULT_KEY_HOLD_MS,
+    parse_amiga_key, DiskChange, DiskChangeSpec, FrameDumpSpec, KeyPressSpec, DEFAULT_KEY_HOLD_MS,
 };
 use copperline::video::HOST_SHORTCUT_MODIFIER_LABEL;
 
@@ -163,9 +163,10 @@ pub struct CliArgs {
     /// file to PATH on exit (the windowed toggle is the host shortcut
     /// modifier plus Shift+R).
     pub record_input: Option<PathBuf>,
-    /// Scripted floppy image insertion. This supports both explicit
-    /// paths and deferring a disk image already configured in the TOML.
-    pub disk_insert_after: Vec<CliDiskInsert>,
+    /// Scripted floppy media changes: inserts of explicit paths, deferring
+    /// a disk image already configured in the TOML, and ejects
+    /// (`--eject-disk-after`).
+    pub disk_change_after: Vec<CliDiskChange>,
     /// Scripted CD swaps: (SECS, image path) pairs from --insert-cd-after,
     /// landing in whichever CD drive the machine has (CDTV, CD32, or a
     /// SCSI CD-ROM unit).
@@ -242,8 +243,8 @@ pub struct CliArgs {
 use copperline::video::window::{JoyButtonKind, MouseButtonKind};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum CliDiskInsert {
-    Explicit(DiskInsertSpec),
+pub enum CliDiskChange {
+    Explicit(DiskChangeSpec),
     Configured { secs: f32, drive_idx: usize },
 }
 
@@ -255,7 +256,7 @@ pub fn parse_args() -> Result<CliArgs> {
 /// the flag names (without the leading dashes) whose effects accumulate;
 /// anything else in a script is an error so a typo cannot silently change
 /// emulator configuration.
-const SCRIPT_DIRECTIVES: [&str; 16] = [
+const SCRIPT_DIRECTIVES: [&str; 17] = [
     "press-after",
     "key-after",
     "type",
@@ -270,6 +271,7 @@ const SCRIPT_DIRECTIVES: [&str; 16] = [
     "pen-after",
     "insert-disk-after",
     "defer-disk-insert",
+    "eject-disk-after",
     "insert-cd-after",
     "freeze-after",
 ];
@@ -468,7 +470,7 @@ where
     let mut wave_trigger: Option<copperline::waveform::Trigger> = None;
     let mut wave_duration: Option<copperline::waveform::WaveDuration> = None;
     let mut wave_signals: Option<copperline::waveform::SignalSet> = None;
-    let mut disk_insert_after: Vec<CliDiskInsert> = Vec::new();
+    let mut disk_change_after: Vec<CliDiskChange> = Vec::new();
     let mut cd_insert_after: Vec<(f32, PathBuf)> = Vec::new();
     let mut freeze_after: Vec<f32> = Vec::new();
     let mut factory = false;
@@ -1260,11 +1262,13 @@ where
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 let drive_idx = parse_floppy_drive_idx(&drive_s, "--insert-disk-after")?;
                 let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
-                disk_insert_after.push(CliDiskInsert::Explicit(DiskInsertSpec {
+                disk_change_after.push(CliDiskChange::Explicit(DiskChangeSpec {
                     secs,
                     drive_idx,
-                    path: PathBuf::from(path),
-                    write_protected: true,
+                    change: DiskChange::Insert {
+                        path: PathBuf::from(path),
+                        write_protected: true,
+                    },
                 }));
             }
             "--defer-disk-insert" => {
@@ -1276,7 +1280,19 @@ where
                 )?;
                 let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 let drive_idx = parse_floppy_drive_idx(&drive_s, "--defer-disk-insert")?;
-                disk_insert_after.push(CliDiskInsert::Configured { secs, drive_idx });
+                disk_change_after.push(CliDiskChange::Configured { secs, drive_idx });
+            }
+            "--eject-disk-after" => {
+                const USAGE: &str = "--eject-disk-after requires SECS DFN";
+                let secs: f32 =
+                    next_arg(&mut args, USAGE, "--eject-disk-after SECS must be a number")?;
+                let drive_s = args.next().ok_or_else(|| anyhow!(USAGE))?;
+                let drive_idx = parse_floppy_drive_idx(&drive_s, "--eject-disk-after")?;
+                disk_change_after.push(CliDiskChange::Explicit(DiskChangeSpec {
+                    secs,
+                    drive_idx,
+                    change: DiskChange::Eject,
+                }));
             }
             "--insert-cd-after" => {
                 const USAGE: &str = "--insert-cd-after requires SECS PATH";
@@ -1871,7 +1887,7 @@ where
             || !mouse_to_after.is_empty()
             || !pot_after.is_empty()
             || !pen_after.is_empty()
-            || (role != Role::Host && !disk_insert_after.is_empty())
+            || (role != Role::Host && !disk_change_after.is_empty())
             || joy_after
                 .iter()
                 .any(|j| Some(usize::from(j.3)) != local_port)
@@ -1927,7 +1943,7 @@ where
         pot_after,
         pen_after,
         record_input,
-        disk_insert_after,
+        disk_change_after,
         cd_insert_after,
         freeze_after,
         audio_live,
@@ -2193,6 +2209,8 @@ fn print_help() {
          \x20                            insert PATH into DFN after SECS seconds\n  \
          --defer-disk-insert SECS DFN   start with configured DFN empty, then insert\n  \
          \x20                            its configured disk image after SECS seconds\n  \
+         --eject-disk-after SECS DFN    eject the disk in DFN after SECS seconds, leaving\n  \
+         \x20                            the drive empty (as the status-bar eject button)\n  \
          --insert-cd-after SECS PATH    swap the CD image (cue/iso/nrg/chd) in the machine's CD\n  \
          \x20                            drive (CDTV, CD32, or a SCSI CD-ROM unit) after\n  \
          \x20                            SECS seconds\n  \

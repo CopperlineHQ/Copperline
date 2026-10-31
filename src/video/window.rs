@@ -874,12 +874,24 @@ pub struct GifCaptureSpec {
     pub path: PathBuf,
 }
 
+/// What a scheduled floppy media change does to its drive.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DiskInsertSpec {
+pub enum DiskChange {
+    /// `--insert-disk-after` / `--defer-disk-insert`: mount `path`.
+    Insert {
+        path: PathBuf,
+        write_protected: bool,
+    },
+    /// `--eject-disk-after`: take the disk out and leave the drive empty.
+    Eject,
+}
+
+/// A floppy media change scheduled at `secs` emulated seconds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiskChangeSpec {
     pub secs: f32,
     pub drive_idx: usize,
-    pub path: PathBuf,
-    pub write_protected: bool,
+    pub change: DiskChange,
 }
 
 use anyhow::{anyhow, Context, Result};
@@ -1309,8 +1321,8 @@ pub struct App {
     /// Scheduled analogue pot positions from --pot-after (one-shot each).
     auto_pots: Vec<(f64, u8, u8, u8)>,
     pending_auto_pots: Vec<(f32, u8, u8, u8)>,
-    auto_disk_inserts: Vec<ScheduledDiskInsert>,
-    pending_auto_disk_inserts: Vec<DiskInsertSpec>,
+    auto_disk_changes: Vec<ScheduledDiskChange>,
+    pending_auto_disk_changes: Vec<DiskChangeSpec>,
     /// Scheduled CD swaps from --insert-cd-after (one-shot each);
     /// (at_emulated_secs, image path).
     auto_cd_inserts: Vec<(f64, PathBuf)>,
@@ -1819,11 +1831,10 @@ struct ScheduledJoy {
 }
 
 #[derive(Debug, Clone)]
-struct ScheduledDiskInsert {
-    insert_at_emulated_secs: f64,
+struct ScheduledDiskChange {
+    change_at_emulated_secs: f64,
     drive_idx: usize,
-    path: PathBuf,
-    write_protected: bool,
+    change: DiskChange,
 }
 
 #[derive(Debug, Clone)]
@@ -2783,7 +2794,7 @@ impl App {
         mouse_to_after: Vec<(f32, i32, i32, u8)>,
         pot_after: Vec<(f32, u8, u8, u8)>,
         pen_after: Vec<(f32, i32, i32, Option<u8>)>,
-        disk_insert_after: Vec<DiskInsertSpec>,
+        disk_change_after: Vec<DiskChangeSpec>,
         cd_insert_after: Vec<(f32, PathBuf)>,
         freeze_after: Vec<f32>,
         record_input: Option<PathBuf>,
@@ -2984,8 +2995,8 @@ impl App {
             active_mouse_to: None,
             auto_pots: Vec::new(),
             pending_auto_pots: pot_after,
-            auto_disk_inserts: Vec::new(),
-            pending_auto_disk_inserts: disk_insert_after,
+            auto_disk_changes: Vec::new(),
+            pending_auto_disk_changes: disk_change_after,
             auto_cd_inserts: Vec::new(),
             pending_auto_cd_inserts: cd_insert_after,
             auto_freezes: Vec::new(),
@@ -4303,21 +4314,34 @@ impl App {
                 pressed: false,
             });
         }
-        for insert in self.pending_auto_disk_inserts.drain(..) {
-            let insert_at_emulated_secs = insert.secs.max(0.0) as f64;
-            info!(
-                "auto-disk armed: df{} insert {} at {:.1}s emulated time",
-                insert.drive_idx,
-                insert.path.display(),
-                insert.secs
-            );
-            self.auto_disk_inserts.push(ScheduledDiskInsert {
-                insert_at_emulated_secs,
-                drive_idx: insert.drive_idx,
-                path: insert.path,
-                write_protected: insert.write_protected,
+        for spec in self.pending_auto_disk_changes.drain(..) {
+            match &spec.change {
+                DiskChange::Insert { path, .. } => info!(
+                    "auto-disk armed: df{} insert {} at {:.1}s emulated time",
+                    spec.drive_idx,
+                    path.display(),
+                    spec.secs
+                ),
+                DiskChange::Eject => info!(
+                    "auto-disk armed: df{} eject at {:.1}s emulated time",
+                    spec.drive_idx, spec.secs
+                ),
+            }
+            self.auto_disk_changes.push(ScheduledDiskChange {
+                change_at_emulated_secs: spec.secs.max(0.0) as f64,
+                drive_idx: spec.drive_idx,
+                change: spec.change,
             });
         }
+        // Keep the queue in timestamp order: `fire_scheduled_events` takes
+        // due entries front to back (one per step under netplay), so an
+        // eject and a later insert apply in time order whatever order the
+        // flags came in. The sort is stable, so equal timestamps keep their
+        // command-line order.
+        self.auto_disk_changes.sort_by(|a, b| {
+            a.change_at_emulated_secs
+                .total_cmp(&b.change_at_emulated_secs)
+        });
         for (secs, path) in self.pending_auto_cd_inserts.drain(..) {
             info!(
                 "auto-cd armed: insert {} at {secs:.1}s emulated time",
@@ -4474,11 +4498,11 @@ impl App {
         for (_, x, y, port) in pen_sets {
             self.apply_scheduled_pen_target(x, y, port);
         }
-        let mut disk_inserts = Vec::new();
+        let mut disk_changes = Vec::new();
         let mut disk_change_available = self.netplay.as_ref().is_none_or(|s| s.can_change_disk());
-        self.auto_disk_inserts.retain(|insert| {
-            if disk_change_available && emu_secs >= insert.insert_at_emulated_secs {
-                disk_inserts.push(insert.clone());
+        self.auto_disk_changes.retain(|change| {
+            if disk_change_available && emu_secs >= change.change_at_emulated_secs {
+                disk_changes.push(change.clone());
                 if self.netplay.is_some() {
                     disk_change_available = false;
                 }
@@ -4487,8 +4511,16 @@ impl App {
                 true
             }
         });
-        for insert in disk_inserts {
-            self.insert_disk_image(insert.drive_idx, insert.path, insert.write_protected);
+        for scheduled in disk_changes {
+            match scheduled.change {
+                DiskChange::Insert {
+                    path,
+                    write_protected,
+                } => {
+                    self.insert_disk_image(scheduled.drive_idx, path, write_protected);
+                }
+                DiskChange::Eject => self.eject_drive_disk(scheduled.drive_idx),
+            }
         }
         // Fire any scheduled --insert-cd-after swaps (one-shot each).
         let mut cd_inserts = Vec::new();
