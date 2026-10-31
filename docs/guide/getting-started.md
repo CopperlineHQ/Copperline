@@ -28,8 +28,12 @@ The repository doubles as a Homebrew tap:
 
 ```sh
 brew tap copperlinehq/copperline https://github.com/CopperlineHQ/Copperline
+brew trust copperlinehq/copperline
 brew install copperline
 ```
+
+Homebrew 7 and later load formulae only from taps you have trusted, which is
+what `brew trust` records; on an older Homebrew, leave that line out.
 
 To build directly from the latest development commit:
 
