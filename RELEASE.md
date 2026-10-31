@@ -204,7 +204,11 @@ brew style ./Formula/copperline.rb
 
 After pushing the formula update, refresh the tap and smoke-test the named
 formula. Recent Homebrew releases reject path-based formula audit/install
-commands unless the formula is loaded from a tap.
+commands unless the formula is loaded from a tap, and Homebrew 7 also
+refuses a tap until `brew trust copperlinehq/copperline` has trusted it.
+A machine that already trusts the tap does not show that refusal, so the
+`Homebrew formula` workflow, which taps afresh, is what checks a new user's
+install path.
 
 ```sh
 brew update

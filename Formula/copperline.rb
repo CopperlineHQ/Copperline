@@ -6,7 +6,11 @@
 # ever needed. Install with:
 #
 #   brew tap copperlinehq/copperline https://github.com/CopperlineHQ/Copperline
+#   brew trust copperlinehq/copperline
 #   brew install copperline
+#
+# Homebrew 7 and later load formulae only from taps you have trusted, which
+# is what `brew trust` records; older releases have no such command.
 #
 # or build the in-development tree directly:
 #

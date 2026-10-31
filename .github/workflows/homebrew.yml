@@ -31,11 +31,13 @@ jobs:
       - name: Style
         run: brew style "$GITHUB_WORKSPACE/Formula/copperline.rb"
       - name: Audit
-        # Tap the checked-out commit by name, then audit it. --online checks
-        # that the release tarball is reachable and its sha256 matches; this
-        # is the part `brew style` alone cannot catch.
+        # Tap the checked-out commit by name, trust it as users must (Homebrew
+        # 7 refuses to load formulae from a tap nobody has trusted), then audit
+        # it. --online checks that the release tarball is reachable and its
+        # sha256 matches; this is the part `brew style` alone cannot catch.
         run: |
           brew tap copperlinehq/copperline "$GITHUB_WORKSPACE"
+          brew trust copperlinehq/copperline
           brew audit --strict --online copperlinehq/copperline/copperline
       - name: Install from source
         # Audit validates metadata but does not execute `def install`. Build
