@@ -60,6 +60,11 @@
   <content_rating type="oars-1.1" />
 
   <releases>
+    <release version="1.1.0" date="2026-10-31">
+      <description>
+        <p>The first feature release for Copperline 1.x. Hard drives can be timed like the period drives each Amiga shipped with, with 22 built-in drive profiles for IDE and SCSI. The MMU-less 68EC030, 68EC040 and 68EC060 join the CPU choices, and the JIT gains a "fastest" speed that adapts the CPU clock to the host, along with large speed-ups for code in fast RAM and ROM and for heavy hard-disk I/O. A500 CIA, interrupt, bus and collision timing are corrected against measurements of a real A500. A copperline.toml kept beside the executable boots on its own, relative ROM and disk paths are found in the media folders, the launcher has a Save button and file dialogs remember their folders. RTG screens scale to whole multiples of the display, the captured mouse keeps the same speed at any window size, Windows has installers, and floppies can be ejected on a schedule in headless runs. Fixes include AGA wide-fetch scrolling, HOSTFS volumes offered as boot devices, old-format NRG CD images, A2065 address decoding and byte order, and keys held across a window switch. The bundled AROS ROM is refreshed.</p>
+      </description>
+    </release>
     <release version="1.0.1" date="2026-10-18">
       <description>
         <p>A maintenance release for Copperline 1.0. AGA machines now keep the $D8 bitplane fetch stop as the real chipset does, which fixes sheared pictures such as Pacmania on the A1200, and the blitter no longer loses its last word when a fast CPU sets up the next blit early. Warm reboots on the A3000 and A4000 no longer look like cold starts, so the Kickstart 3.2 boot menu works, and the 68060 starts with its FPU disabled as real boards do. The copperhf hard-disk driver works with HDToolBox and under the JIT, A2065 Ethernet honours receive filters, dropped ZIP floppy images load, fast host mice no longer move backwards, and resizing the window no longer hangs on some Windows systems. Settings changed from the menu are now remembered, screenshots save the picture as it is displayed, the drive counter can show cylinder and side, and WinUAE floppy sound sets can be used. WHDLoad 20.1 and security updates to bundled libraries are included.</p>
