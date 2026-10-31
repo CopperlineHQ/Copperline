@@ -761,6 +761,14 @@ live, and `REG_RESULT`/`REG_ARG` tell the handler what to do with the
 packet it just rang in (reply it, `AddDosEntry` a host-built volume
 DosList node, or exit on `ACTION_DIE`). One handler process runs per
 unit against its own bank, so mounts never synchronize with each other.
+The volume node's `dol_VolumeDate` is fixed per unit (the AmigaDOS epoch,
+one tick apart per unit so same-named mounts stay distinct disks), never
+the host clock: with no battery clock the OS sets its system time from
+the boot volume's date, so a wall-clock stamp gave the guest's
+timer.device a different sub-second phase on every run, and two identical
+headless runs drifted apart by a few E-clock ticks
+(`volume_node_date_is_fixed_per_unit_not_the_host_clock`, and the repeat
+checks in `tests/hd_timing.rs`).
 A single global `DIAG_DOORBELL` strobe carries the expansion-init work,
 which runs before any handler process exists. That init strobe is also
 where `[machine] rom_scsi_device_disable` takes effect: the board's

@@ -181,7 +181,11 @@ fn a2091_drives_run_at_their_mechanisms_pace() {
     within("st125n", "512 B reads KB/s", st125n.seq[0], 20.0..=45.0);
     within("st125n", "random 4 KiB ms", st125n.random_ms, 40.0..=90.0);
 
-    // Deterministic: the same machine measures the same ticks again.
+    // Deterministic: the same machine measures the same ticks again. The
+    // instant drive is the sharper check: no media timing absorbs a shift
+    // in when the guest issues its requests, so any host state reaching the
+    // guest's timers (a volume date taken from the host clock, once) shows
+    // in its figures first.
     let again = bench(
         "a2091-prodrive-again",
         "scsi.device",
@@ -190,6 +194,11 @@ fn a2091_drives_run_at_their_mechanisms_pace() {
     );
     assert_eq!(
         again.words, prodrive.words,
+        "timed runs must repeat exactly"
+    );
+    let instant_again = bench("a2091-instant-again", "scsi.device", None, a2091("instant"));
+    assert_eq!(
+        instant_again.words, instant.words,
         "timed runs must repeat exactly"
     );
 }
