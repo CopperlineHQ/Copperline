@@ -157,6 +157,7 @@ project:
         - debugger/dap.md
         - debugger/diverge.md
         - debugger/control.md
+        - debugger/disk-fault.md
         - debugger/workflows.md
         - internals/architecture.md
         - internals/timing.md
