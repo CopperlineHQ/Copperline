@@ -1251,7 +1251,8 @@ extents, like a CHD's gaps) for both machines and the SCSI/ATAPI drives,
 and lays every `FILE` out as a run of extents over a byte-addressed
 source. Nero NRG images use the same extent model after their 32- or
 64-bit CUE/DAO or ETN footer has supplied the track offsets and stored
-pregaps. A raw read from a cooked MODE1/2048 source synthesizes the complete
+pregaps (the older `CUES` chunk addresses each index as an absolute BCD
+MSF, as the Q sub-channel does; the newer `CUEX` stores a signed LBA). A raw read from a cooked MODE1/2048 source synthesizes the complete
 2352-byte frame: sync and BCD MSF header, EDC, the reserved bytes, and both
 Reed-Solomon P/Q parity fields. MODE2/2336 similarly gains its omitted sync,
 BCD MSF, and mode header without disturbing the stored XA subheader, payload,
