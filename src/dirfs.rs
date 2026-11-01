@@ -47,6 +47,22 @@ const ST_FILE: u32 = 0xFFFF_FFFD; // -3
 /// Seconds between the Unix epoch and the AmigaDOS epoch (1978-01-01).
 const AMIGA_EPOCH_OFFSET: u64 = 252_460_800;
 
+/// The root block's dates (root change, disk change, creation) when the
+/// caller fixes none.
+///
+/// A real volume's dates are written by Format and then by the filesystem
+/// as the disk changes; a host directory has neither, so the builder
+/// supplies them, and they must not come from the host clock. With no
+/// battery clock fitted the OS sets its system time from the boot volume's
+/// date (Kickstart does from the boot disk, and so does the bundled AROS
+/// ROM), so a wall-clock stamp here started the guest's clock at the host's
+/// time and identical headless runs booted to different moments. The
+/// volume instead carries the AmigaDOS epoch (1 January 1978), what a
+/// clockless Amiga reads from undated media, as the `[[filesys]]` volume
+/// node does. The builder has no drive identity to spread the date per unit
+/// the way that node does, so same-named directory mounts share a date.
+const UNDATED_VOLUME: (u32, u32, u32) = (0, 0, 0);
+
 /// Refuse to build images larger than this; the whole image lives in RAM.
 const MAX_IMAGE_BYTES: u64 = 2 << 30;
 
@@ -146,7 +162,7 @@ fn build_image_with_time(
         total as usize,
         volume_name,
         filesystem,
-        timestamp.unwrap_or_else(SystemTime::now),
+        timestamp.map_or(UNDATED_VOLUME, amiga_datestamp),
     );
     b.write_tree(dir, &entries, b.root_key)?;
     Ok(b.finish())
@@ -327,7 +343,8 @@ fn scan_tree(dir: &Path) -> anyhow::Result<Vec<EntryPlan>> {
 }
 
 struct Builder {
-    root_time: SystemTime,
+    /// AmigaDOS DateStamp (days, minutes, ticks) for the root block's dates.
+    root_date: (u32, u32, u32),
     image: Vec<u8>,
     total_blocks: usize,
     /// Block-in-use map mirrored into the on-disk bitmap at finish.
@@ -350,17 +367,17 @@ impl Builder {
         volume_name: &str,
         filesystem: crate::diskimage::FileSystem,
     ) -> Self {
-        Self::new_at(total_blocks, volume_name, filesystem, SystemTime::now())
+        Self::new_at(total_blocks, volume_name, filesystem, UNDATED_VOLUME)
     }
 
     fn new_at(
         total_blocks: usize,
         volume_name: &str,
         filesystem: crate::diskimage::FileSystem,
-        root_time: SystemTime,
+        root_date: (u32, u32, u32),
     ) -> Self {
         let mut b = Builder {
-            root_time,
+            root_date,
             image: vec![0u8; total_blocks * BSIZE],
             total_blocks,
             used: vec![false; total_blocks],
@@ -436,7 +453,7 @@ impl Builder {
     }
 
     fn write_root(&mut self, volume_name: &str) {
-        let now = amiga_datestamp(self.root_time);
+        let date = self.root_date;
         let root = self.root_key;
         self.put32(root, 0, T_HEADER);
         self.put32(root, 12, HT_SIZE as u32);
@@ -455,7 +472,7 @@ impl Builder {
         if let Some(&first_ext) = self.bmext_keys.first() {
             self.put32(root, BSIZE - 96, first_ext);
         }
-        self.write_datestamp(root, BSIZE - 92, now); // last root change
+        self.write_datestamp(root, BSIZE - 92, date); // last root change
         let name: Vec<u8> = volume_name.bytes().take(30).collect();
         let name = if name.is_empty() {
             b"DH0".to_vec()
@@ -463,8 +480,8 @@ impl Builder {
             name
         };
         self.write_name(root, &name);
-        self.write_datestamp(root, BSIZE - 40, now); // last disk change
-        self.write_datestamp(root, BSIZE - 28, now); // creation
+        self.write_datestamp(root, BSIZE - 40, date); // last disk change
+        self.write_datestamp(root, BSIZE - 28, date); // creation
         self.put32(root, BSIZE - 4, ST_ROOT);
         self.meta_blocks.push(root);
     }
@@ -690,6 +707,49 @@ mod tests {
             assert!(reader.checksum_ok(reader.root_key(), 20));
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn undated_volume_root_is_the_amigados_epoch_not_the_host_clock() {
+        use crate::diskimage::FileSystem;
+        let dir = temp_tree();
+        // 2000-01-01 00:00:00 UTC: AmigaDOS day 8035, far from both the
+        // epoch and today, so neither date can stand in for the other.
+        let mtime = UNIX_EPOCH + std::time::Duration::from_secs(946_684_800);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("ReadMe.txt"))
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        for (filesystem, floppy) in [
+            (FileSystem::FFS, false),
+            (FileSystem::OFS, false),
+            (FileSystem::OFS, true),
+        ] {
+            let image = if floppy {
+                build_floppy_image(&dir, "TestVol", filesystem, true)
+            } else {
+                build_image(&dir, "TestVol", filesystem)
+            }
+            .unwrap();
+            let r = Reader {
+                image: &image,
+                filesystem,
+            };
+            let root = r.root_key();
+            let date = |block: u32, at: usize| [0, 4, 8].map(|off| r.get32(block, at + off));
+            // Root change, disk change, creation: the OS seeds a clockless
+            // machine's system time from these, so none may be wall-clock.
+            for at in [BSIZE - 92, BSIZE - 40, BSIZE - 28] {
+                assert_eq!(date(root, at), [0, 0, 0], "root date at offset {at}");
+            }
+            assert!(r.checksum_ok(root, 20));
+            // Entries still carry their host file's own mtime.
+            let readme = r.lookup(root, b"ReadMe.txt").expect("ReadMe.txt");
+            assert_eq!(date(readme, BSIZE - 92), [8035, 0, 0]);
+        }
+        std::fs::remove_dir_all(dir).ok();
     }
 
     /// Minimal FFS/OFS reader used to verify built images.

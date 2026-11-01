@@ -414,9 +414,11 @@ snapshot:
   `[machine] rtc_time` / `--rtc-time`. A seed advances in emulated time;
   `--rtc-frozen` holds it constant. `COPPERLINE_RTC_FIXED_SECS` is the
   older fixed-UTC override.
-- Live host-directory mounts expose file contents and timestamps. The
-  volume's own date is fixed rather than read from the host clock, because a
-  machine without an RTC sets its system time from the boot volume
+- Live host-directory mounts expose file contents and timestamps, and a
+  directory given to an `[ide]`/`[scsi]` drive is built into an image with
+  its files' timestamps. In both cases the volume's own date is fixed
+  rather than read from the host clock, because a machine without an RTC
+  sets its system time from the boot volume
   ([host filesystem service](peripherals.md)). File-backed hard disks and
   physical disks retain writes made after a snapshot.
 - Network, serial, MIDI, and sampler input can depend on external devices
