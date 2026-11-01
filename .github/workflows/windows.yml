@@ -287,7 +287,9 @@ jobs:
         with:
           name: copperline-windows-installer-${{ matrix.arch }}
           path: packages
-      - name: Install, boot, reinstall and uninstall
+      - name: Install, boot, reinstall and uninstall (per-user and all-users)
+        # Hosted runners are elevated, so the all-users leg installs into
+        # Program Files without a UAC prompt.
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"

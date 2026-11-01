@@ -6,14 +6,18 @@ Copperline is a cycle-driven Amiga emulator (OCS/ECS/AGA).
 Running
 -------
 The installer adds a Start menu shortcut and an optional desktop shortcut.
-By default, it installs into %LOCALAPPDATA%\Programs\Copperline for the
-current user. Run a newer installer to update it. Remove it through Windows
-Settings -> Apps (Installed apps on Windows 11, Apps & features on Windows 10);
-settings, saves and media you added are preserved.
+It asks whether to install for you only, into
+%LOCALAPPDATA%\Programs\Copperline with no administrator rights (the
+default), or for all users, into C:\Program Files\Copperline with
+administrator rights. /CURRENTUSER or /ALLUSERS on the setup command line
+answers that in advance. Run a newer installer to update it; it reuses the
+earlier choice. Remove it through Windows Settings -> Apps (Installed apps on
+Windows 11, Apps & features on Windows 10); settings, saves and media you
+added are preserved.
 
 The ZIP is portable: unzip the whole archive anywhere and run copperline.exe.
-Both packages need no administrator rights and no Visual C++ Redistributable
-(the C runtime is linked statically into the executable).
+It needs no administrator rights. Neither package needs the Visual C++
+Redistributable (the C runtime is linked statically into the executable).
 
 On first launch Windows SmartScreen may show "Windows protected your PC"
 because the installer and executables are not code-signed. Click "More info",
@@ -67,7 +71,9 @@ folder. To keep them inside this folder instead, create an empty file named
 portable.txt next to copperline.exe and restart Copperline. Quick-save slots
 will then be in the states subfolder; controller mappings, WHDLoad data and
 other host preferences will also stay here. Delete portable.txt to return to
-Documents; existing files are not moved automatically.
+Documents; existing files are not moved automatically. The folder must be one
+you can write to, so use the ZIP or a per-user install for this, not an
+all-users install in Program Files.
 
 Bridged Ethernet
 ----------------
