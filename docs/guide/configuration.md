@@ -2214,6 +2214,17 @@ stock A1200/A600 Kickstart `scsi.device` only probes the IDE master; a
 slave drive needs a guest OS or driver that supports two units (Kickstart
 3.1.4, for example).
 
+Files and subdirectories keep their host modification times, but the
+volume's own dates (creation and last change) are fixed at 1 January
+1978, the AmigaDOS epoch, rather than taken from the host clock when the
+volume is built. On a machine with no battery clock fitted the OS sets its
+system time from the boot volume's date, so booting from a directory
+starts the guest clock at 1 January 1978, as a clockless Amiga does from
+undated media, and a headless run boots to the same moment every time --
+the same as a [`[[filesys]]` mount](#filesys-mounts). Fit a clock
+(`[machine] rtc = true`) for the guest to read the host's time instead, or
+seed one with `rtc_time` for a fixed date.
+
 To override the volume name (instead of inheriting the directory name),
 the boot priority, or the filesystem, give the drive as a table with
 `path` plus `name`, `bootpri`, and/or `filesystem`:

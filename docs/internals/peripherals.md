@@ -326,7 +326,17 @@ into in-memory FFS or OFS volumes by
 the one every Kickstart from 1.2 onward can read with no guest-side
 setup -- FFS needs a handler loaded from disk or an RDB `FileSystemHeader`
 chain, neither of which Copperline bundles). The volume label defaults to
-the directory name, or a `name` override configured on the drive. The
+the directory name, or a `name` override configured on the drive. Entries
+carry their host files' mtimes, but the root block's dates (root change,
+disk change, creation) are the AmigaDOS epoch, never the host clock: with
+no battery clock the OS sets its system time from the boot volume's date,
+so a build-time wall-clock stamp started the guest clock at a different
+moment on every run, the same leak the `[[filesys]]` volume node had
+(below). `dirfs.rs` reads no clock at all, so the floppy image
+`copperline-ctl exe2adf` writes through the same builder is dated the same
+way; only `build_image_at`, which portable frontends use to stamp every
+entry and the root with one caller-chosen date, overrides it
+(`undated_volume_root_is_the_amigados_epoch_not_the_host_clock`). The
 SCSI-2 disk target in `scsi.rs` answers INQUIRY, REQUEST SENSE, MODE
 SENSE(6)/(10) (pages 3 and 4, or all), MODE SELECT, READ CAPACITY(10)/(16),
 READ/WRITE(6)/(10)/(12)/(16), VERIFY, SYNCHRONIZE CACHE, READ DEFECT DATA,
