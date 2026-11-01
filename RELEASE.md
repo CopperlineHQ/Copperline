@@ -246,7 +246,12 @@ The zips are self-contained: the MSVC C runtime is linked statically (see
 `.cargo/config.toml`) so they need no Visual C++ Redistributable, and the
 bundled AROS ROM sits in a sibling `aros\` folder that `romsearch.rs` probes
 first; the other bundled ROM assets (`fmv\`, `a4091\`, `a2091\`, `lide\`,
-`hrtmon\`) are staged beside it the same way. To build one by hand on a
+`hrtmon\`) are staged beside it the same way. Each shipped `.exe` carries
+Windows version details (product name, publisher, file description and
+version, shown in Explorer's **Properties -> Details**) that `build.rs`
+generates from the Cargo version, so a version bump needs nothing extra
+here; a new shipped executable needs an entry in `build.rs`'s
+`WINDOWS_EXECUTABLES`, which the zip smoke checks. To build one by hand on a
 Windows host (add
 `-Target aarch64-pc-windows-msvc` for the ARM64 zip):
 
