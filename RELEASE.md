@@ -246,7 +246,12 @@ The zips are self-contained: the MSVC C runtime is linked statically (see
 `.cargo/config.toml`) so they need no Visual C++ Redistributable, and the
 bundled AROS ROM sits in a sibling `aros\` folder that `romsearch.rs` probes
 first; the other bundled ROM assets (`fmv\`, `a4091\`, `a2091\`, `lide\`,
-`hrtmon\`) are staged beside it the same way. To build one by hand on a
+`hrtmon\`) are staged beside it the same way. Each shipped `.exe` carries
+Windows version details (product name, publisher, file description and
+version, shown in Explorer's **Properties -> Details**) that `build.rs`
+generates from the Cargo version, so a version bump needs nothing extra
+here; a new shipped executable needs an entry in `build.rs`'s
+`WINDOWS_EXECUTABLES`, which the zip smoke checks. To build one by hand on a
 Windows host (add
 `-Target aarch64-pc-windows-msvc` for the ARM64 zip):
 
@@ -263,16 +268,22 @@ packaging/windows/build-installer.ps1
 packaging/windows/build-installer.ps1 -ZipPath Copperline-X.Y.Z-win-x64.zip
 ```
 
-Pass `-Target aarch64-pc-windows-msvc` for ARM64. The installer is per-user,
-defaults to `%LOCALAPPDATA%\Programs\Copperline`, adds Start menu and optional
-desktop shortcuts, and registers an uninstaller. Its stable Inno `AppId`
-allows later installers to update the same installation. Uninstall removes
+Pass `-Target aarch64-pc-windows-msvc` for ARM64. The installer opens with
+Inno's install-mode dialog: per-user (the recommended default, no elevation,
+`%LOCALAPPDATA%\Programs\Copperline`) or all users (elevated,
+`C:\Program Files\Copperline`, shared shortcuts, HKLM uninstall entry);
+`/CURRENTUSER` and `/ALLUSERS` answer it on the command line. It adds Start
+menu and optional desktop shortcuts and registers an uninstaller. Its stable
+Inno `AppId` allows later installers to update the same installation, in the
+mode it was installed in, without asking again. Uninstall removes
 only shipped files and shortcuts, preserving user-created configuration,
 saves and media. The installer is unsigned, like the portable executables.
 
-CI silently installs each architecture on its native runner, checks every
-installed payload file against the ZIP, verifies shortcuts, reinstalls to
-restore a missing tool while preserving user files, boots the installed
+CI silently installs each architecture on its native runner, once with
+Setup's default per-user mode and once with `/ALLUSERS`, checks every
+installed payload file against the ZIP, verifies shortcuts and the uninstall
+registration, reinstalls with no mode flag (which must reuse the earlier
+mode) to restore a missing tool while preserving user files, boots the installed
 emulator on the bundled AROS ROM from outside the checkout, starts both
 command-line tools, then uninstalls and checks removal and data preservation.
 Logs and the boot screenshot are workflow artifacts. The release job waits
@@ -296,8 +307,10 @@ pwsh -File packaging/windows/test-installer.ps1 `
   -WorkDir "$env:TEMP\copperline-installer-smoke"
 ```
 
-The test refuses an existing installation and keeps logs, the screenshot
-and preserved user-file fixtures for inspection.
+Run it from an elevated prompt: the all-users leg installs into Program
+Files. Add `-Mode CurrentUser` to run only the per-user leg without
+elevation. The test refuses an existing installation in either mode and
+keeps logs, the screenshots and preserved user-file fixtures for inspection.
 
 ## macOS disk image
 
