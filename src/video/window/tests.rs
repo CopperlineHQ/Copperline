@@ -15041,14 +15041,10 @@ fn netplay_gui_peers_connect_and_can_return_to_setup_and_retry() -> anyhow::Resu
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| -> anyhow::Result<()> {
+            use crate::netplay::reserved_sockets;
             use crate::video::launcher::{LauncherField as F, LauncherTab};
-            use std::net::UdpSocket;
-            let reserved = [
-                UdpSocket::bind("127.0.0.1:0")?,
-                UdpSocket::bind("127.0.0.1:0")?,
-            ];
-            let addresses = [reserved[0].local_addr()?, reserved[1].local_addr()?];
-            drop(reserved);
+            use anyhow::Context as _;
+            let addresses = reserved_sockets::addresses(2)?;
             let mut apps = [test_app(), test_app()];
             for (player, app) in apps.iter_mut().enumerate() {
                 app.machine_config.audio.output_enabled = Some(false);
@@ -15103,13 +15099,22 @@ fn netplay_gui_peers_connect_and_can_return_to_setup_and_retry() -> anyhow::Resu
                 apps[0].emu.netplay_snapshot()?,
                 apps[1].emu.netplay_snapshot()?
             );
+            // Leaving must close the session's socket: reserving its address
+            // straight afterwards fails while anything still holds it, and
+            // the reservation then carries the port to the retry below.
+            let release = |address| {
+                reserved_sockets::at(address)
+                    .with_context(|| format!("leaving netplay must release {address}"))
+            };
             apps[0].leave_netplay(None);
+            release(addresses[0])?;
             let state = apps[0].launcher_state().unwrap();
             assert_eq!(state.tab, LauncherTab::Netplay);
             assert_eq!(state.netplay.peer, addresses[1].to_string());
             assert!(apps[0].paused);
             assert!(apps[0].netplay.is_none());
             apps[1].leave_netplay(Some("peer timed out".into()));
+            release(addresses[1])?;
             assert!(apps[1]
                 .launcher_state()
                 .unwrap()
@@ -15122,7 +15127,7 @@ fn netplay_gui_peers_connect_and_can_return_to_setup_and_retry() -> anyhow::Resu
                 app.launcher_run();
                 assert!(
                     app.netplay.is_some(),
-                    "retry must release and rebind the socket"
+                    "retry must rebind the retained address"
                 );
                 assert_eq!(app.emu.bus().emulated_cck(), 0);
                 assert!(!app.paused);
@@ -15138,16 +15143,10 @@ fn netplay_continuous_mouse_corrections_present_every_frame() -> anyhow::Result<
     std::thread::Builder::new()
         .stack_size(16 * 1024 * 1024)
         .spawn(|| -> anyhow::Result<()> {
-            use crate::netplay::{Options, Session};
-            use std::net::UdpSocket;
+            use crate::netplay::{reserved_sockets, Options, Session};
             use std::time::{Duration, Instant};
 
-            let reserved = [
-                UdpSocket::bind("127.0.0.1:0")?,
-                UdpSocket::bind("127.0.0.1:0")?,
-            ];
-            let addresses = [reserved[0].local_addr()?, reserved[1].local_addr()?];
-            drop(reserved);
+            let addresses = reserved_sockets::addresses(2)?;
             // Read the remote mouse's JOYDAT into COLOR00, then repeat. The
             // framebuffer must change as delayed movement corrects prediction.
             let program = [0x33f9, 0x00df, 0xf00c, 0x00df, 0xf180, 0x60f4];
@@ -15399,17 +15398,9 @@ fn netplay_gui_spectator_follows_the_players_without_input_or_disk_controls() ->
     std::thread::Builder::new()
         .stack_size(48 * 1024 * 1024)
         .spawn(|| -> anyhow::Result<()> {
-            use crate::netplay::Role;
+            use crate::netplay::{reserved_sockets, Role};
             use crate::video::launcher::{LauncherField as F, LauncherTab};
-            use std::net::UdpSocket;
-            let reserved: Vec<_> = (0..3)
-                .map(|_| UdpSocket::bind("127.0.0.1:0"))
-                .collect::<std::io::Result<_>>()?;
-            let addresses: Vec<_> = reserved
-                .iter()
-                .map(|s| s.local_addr())
-                .collect::<std::io::Result<_>>()?;
-            drop(reserved);
+            let addresses = reserved_sockets::addresses(3)?;
             let mut apps = [test_app(), test_app(), test_app()];
             for (player, app) in apps.iter_mut().take(2).enumerate() {
                 app.machine_config.audio.output_enabled = Some(false);

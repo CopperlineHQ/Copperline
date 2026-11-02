@@ -26,6 +26,8 @@ pub use spectate::{Feed, FeedCursor, Spectator, SwapRecord};
 mod tests;
 mod transport;
 mod wire;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) use transport::reserved_sockets;
 #[cfg(not(target_arch = "wasm32"))]
 use transport::{NativeTransport, UdpTransport};
 pub use transport::{PacketQueue, Transport};

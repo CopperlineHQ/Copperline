@@ -2641,12 +2641,9 @@ mod tests {
 
     #[test]
     fn tcp_dial_refused_reports_busy() {
-        let addr = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap()
-        };
+        let refusing = crate::serial::RefusingLoopbackPort::new();
         let mut sink = ModemSerialSink::with_transport(Box::new(TcpModemTransport::new()));
-        type_line(&mut sink, &format!("ATD{addr}"), 0);
+        type_line(&mut sink, &format!("ATD{}", refusing.addr()), 0);
         let out = drain_str(&mut sink);
         assert!(out.contains("BUSY"), "{out:?}");
     }
