@@ -345,10 +345,12 @@ The artifact configurations live in `packaging/windows/signpath/` for
 review, but SignPath reads its own copies: after changing one, paste it into
 the SignPath project's artifact configuration of the same slug. They sign
 only executables whose version details say product Copperline, publisher
-CopperlineHQ and the Cargo version as product version; `build.rs` and
-`copperline.iss` write those, and the zip and installer smoke tests check
-them on every pull request, so a mismatch shows up long before release
-signing.
+CopperlineHQ and the Cargo version as product version, matched exactly;
+`build.rs` and `copperline.iss` write those, and the zip and installer smoke
+tests check them on every pull request, so a mismatch shows up long before
+release signing. Inno Setup pads Setup's version strings with spaces to
+fixed widths, which would never match, so `build-installer.ps1` removes the
+padding after compiling.
 
 The workflow reads the SignPath organization ID from the repository variable
 `SIGNPATH_ORGANIZATION_ID` and an API token for a SignPath user with
