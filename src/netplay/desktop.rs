@@ -1624,18 +1624,10 @@ mod tests {
         Ok(())
     }
 
-    /// Addresses for `count` peers, reserved together and released before
-    /// the sessions bind them.
+    /// Addresses for `count` peers, each held open until the session that
+    /// binds it adopts the socket (see `transport::reserved_sockets`).
     pub(super) fn addresses(count: usize) -> Result<Vec<std::net::SocketAddr>> {
-        let reserve: Vec<_> = (0..count)
-            .map(|_| std::net::UdpSocket::bind("127.0.0.1:0"))
-            .collect::<std::io::Result<_>>()?;
-        let addresses: Vec<_> = reserve
-            .iter()
-            .map(|s| s.local_addr())
-            .collect::<std::io::Result<_>>()?;
-        drop(reserve);
-        Ok(addresses)
+        Ok(super::super::reserved_sockets::addresses(count)?)
     }
 
     /// Direct-UDP options for one player of a `players`-player session. The
