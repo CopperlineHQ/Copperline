@@ -49,8 +49,16 @@ OutputBaseFilename=Copperline-{#AppVersion}-win-{#AppArch}-setup
 SetupIconFile=..\..\assets\brand\copperline.ico
 UninstallDisplayIcon={app}\copperline.exe
 InfoBeforeFile={#PayloadDir}\LICENSE.txt
+; Spelled out rather than left to Inno's defaults: the SignPath artifact
+; configuration (signpath/windows-installer.xml) only signs a Setup whose
+; product name, publisher and product version match these, and the Windows
+; CI installer smoke checks them. Inno pads each value with spaces to a fixed
+; width; build-installer.ps1 removes that padding after compiling.
 VersionInfoVersion={#AppVersionNumeric}
 VersionInfoTextVersion={#AppVersion}
+VersionInfoProductName=Copperline
+VersionInfoCompany=CopperlineHQ
+VersionInfoProductTextVersion={#AppVersion}
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes

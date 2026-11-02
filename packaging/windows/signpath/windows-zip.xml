@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration "windows-zip": signs the three executables
+  inside a portable Windows ZIP (packaging/windows/build-zip.ps1). The Windows
+  workflow submits one ZIP per architecture and builds the installer from the
+  signed ZIP, so the installed executables are signed too.
+
+  SignPath reads this from the project's Artifact Configurations page, not
+  from the repository: after changing it, paste it there (same slug). Keep
+  the two in step; this copy is the one that gets reviewed.
+
+  actions/upload-artifact wraps the uploaded ZIP in a ZIP of its own, hence
+  the outer zip-file. The workflow passes the Cargo version as "version";
+  the metadata restrictions match the VERSIONINFO strings build.rs writes
+  into every shipped executable (ProductVersion is the full Cargo version,
+  prerelease suffix included). Everything else in the ZIP (ROMs, WHDLoad
+  archives, text files) is passed through unchanged.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <zip-file path="Copperline-${version}-win-*.zip">
+      <directory path="Copperline-${version}-win-*">
+        <pe-file-set product-name="Copperline" product-version="${version}"
+                     company-name="CopperlineHQ" original-filename="${file.name}">
+          <include path="copperline.exe" />
+          <include path="copperline-ctl.exe" />
+          <include path="copperline-import-uae.exe" />
+          <for-each>
+            <authenticode-sign />
+          </for-each>
+        </pe-file-set>
+      </directory>
+    </zip-file>
+  </zip-file>
+</artifact-configuration>

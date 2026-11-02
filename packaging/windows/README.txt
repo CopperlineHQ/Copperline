@@ -19,9 +19,12 @@ The ZIP is portable: unzip the whole archive anywhere and run copperline.exe.
 It needs no administrator rights. Neither package needs the Visual C++
 Redistributable (the C runtime is linked statically into the executable).
 
-On first launch Windows SmartScreen may show "Windows protected your PC"
-because the installer and executables are not code-signed. Click "More info",
-then "Run anyway" to start it.
+The installer and executables are code-signed, with SignPath Foundation as
+the publisher: free code signing provided by SignPath.io, certificate by
+SignPath Foundation (code signing policy: https://copperline.dev/code-signing/).
+Shortly after a release, SmartScreen may still show "Windows protected your
+PC" while the download builds up reputation. Click "More info" to see the
+publisher, then "Run anyway".
 
 Boot ROM
 --------
