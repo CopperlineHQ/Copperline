@@ -80,21 +80,38 @@ For virtual machines or older hardware, install the software Vulkan driver (lava
 Download `Copperline-X.Y.Z-win-x64-setup.exe` or
 `Copperline-X.Y.Z-win-arm64-setup.exe`
 from the [releases page](https://github.com/CopperlineHQ/Copperline/releases),
-matching your Windows architecture. The installer puts Copperline, its
-command-line tools and bundled ROMs in
-`%LOCALAPPDATA%\Programs\Copperline` by default, without administrator rights.
-It creates a Start menu shortcut and offers an optional desktop shortcut.
-Start Copperline from either shortcut.
+matching your Windows architecture. The installer first asks who Copperline
+is for:
 
-Run a newer installer to update the same installation. Remove it through
+- **Install for me only** (recommended) needs no administrator rights and
+  puts Copperline, its command-line tools and bundled ROMs in
+  `%LOCALAPPDATA%\Programs\Copperline`.
+- **Install for all users** asks for administrator rights and installs into
+  `C:\Program Files\Copperline`, with shortcuts for every account on the PC.
+
+Either way it creates a Start menu shortcut and offers an optional desktop
+shortcut. Start Copperline from either shortcut. Each user's settings and
+saves stay in their own Documents folder, whichever you choose. For an
+unattended install, pass `/CURRENTUSER` or `/ALLUSERS` to the setup program
+to answer the question in advance.
+
+Run a newer installer to update the same installation; it remembers the
+earlier choice and does not ask again. To switch between a per-user and an
+all-users installation, uninstall the existing one first. Remove it through
 **Settings -> Apps** (**Installed apps** on Windows 11, **Apps & features**
 on Windows 10); uninstalling removes the shipped program files and shortcuts
 while preserving your settings, saves and any media you added. By default,
 user data is in
 `%USERPROFILE%\Documents\Copperline`; see [portable data](ui.md#where-files-go).
 
-The installer and executables are unsigned, so Windows SmartScreen may show
-**Windows protected your PC**. Choose **More info -> Run anyway** to proceed.
+The installer and executables are code-signed, and Windows names **SignPath
+Foundation** as their publisher: free code signing provided by
+[SignPath.io](https://signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/). See the
+[code signing policy](https://copperline.dev/code-signing/). SmartScreen
+also weighs how widely a download has been seen, so shortly after a release
+it may still show **Windows protected your PC**. **More info** shows the
+publisher; **Run anyway** proceeds.
 
 For a portable installation, download `Copperline-X.Y.Z-win-x64.zip` or
 `Copperline-X.Y.Z-win-arm64.zip`. Extract the whole archive and run
@@ -125,7 +142,7 @@ converter](import-uae.md). Where they land depends on the package:
 |---|---|
 | Homebrew | On PATH, next to `copperline`. |
 | macOS dmg | Inside the bundle, `Copperline.app/Contents/MacOS/`. Add that directory to PATH or name the files in the VS Code settings. |
-| Windows installer or ZIP | Next to `copperline.exe`, normally in `%LOCALAPPDATA%\Programs\Copperline` for the installer or in the extracted ZIP folder. Add that folder to PATH or name the `.exe` files in the VS Code settings. |
+| Windows installer or ZIP | Next to `copperline.exe`: `%LOCALAPPDATA%\Programs\Copperline` for a per-user install, `C:\Program Files\Copperline` for an all-users install, or the extracted ZIP folder. Add that folder to PATH or name the `.exe` files in the VS Code settings. |
 | AppImage | The separate `Copperline-X.Y.Z-<arch>-tools.tar.gz` release asset. Unpack it anywhere; set `COPPERLINE_BIN` to the AppImage path so `copperline-ctl` can launch the emulator. |
 
 `copperline-ctl` launches the `copperline` beside it when one is there; the

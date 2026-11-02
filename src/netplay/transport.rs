@@ -342,6 +342,53 @@ impl SlotTable {
     }
 }
 
+/// Loopback sockets a test bound and keeps open until a session binds the
+/// same address, which then adopts the open socket instead of binding the
+/// address again.
+///
+/// Peers name each other's addresses before any of them binds, so a test
+/// has to choose them up front. Choosing them by binding port 0 and closing
+/// the socket leaves a window in which a test running in parallel can be
+/// handed the closed port, and the session's own bind then fails; an
+/// address reserved here is never closed before its session owns it.
+/// Reservations are per thread, so a test reserves on the thread that
+/// builds its sessions; any it never uses close when that thread ends.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) mod reserved_sockets {
+    use std::cell::RefCell;
+    use std::net::{SocketAddr, UdpSocket};
+
+    thread_local! {
+        static SOCKETS: RefCell<Vec<UdpSocket>> = const { RefCell::new(Vec::new()) };
+    }
+
+    /// Reserve `count` free loopback addresses.
+    pub(crate) fn addresses(count: usize) -> std::io::Result<Vec<SocketAddr>> {
+        (0..count)
+            .map(|_| at(SocketAddr::from(([127, 0, 0, 1], 0))))
+            .collect()
+    }
+
+    /// Reserve `addr` itself, failing while anything else still holds it.
+    pub(crate) fn at(addr: SocketAddr) -> std::io::Result<SocketAddr> {
+        let socket = UdpSocket::bind(addr)?;
+        let bound = socket.local_addr()?;
+        SOCKETS.with(|sockets| sockets.borrow_mut().push(socket));
+        Ok(bound)
+    }
+
+    /// Hand over this thread's reservation for `addr`, if it holds one.
+    pub(super) fn take(addr: SocketAddr) -> Option<UdpSocket> {
+        SOCKETS.with(|sockets| {
+            let mut sockets = sockets.borrow_mut();
+            let index = sockets
+                .iter()
+                .position(|socket| socket.local_addr().ok() == Some(addr))?;
+            Some(sockets.swap_remove(index))
+        })
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub struct UdpTransport {
     pub(super) socket: UdpSocket,
@@ -427,7 +474,16 @@ impl UdpTransport {
         options: super::ConnectionOptions,
     ) -> Result<Self> {
         use anyhow::Context;
-        let socket = UdpSocket::bind(bind).context("binding netplay UDP socket")?;
+        // A test's reserved socket for this address, adopted while still
+        // open (see `reserved_sockets`).
+        #[cfg(test)]
+        let socket = reserved_sockets::take(bind);
+        #[cfg(not(test))]
+        let socket = None;
+        let socket = match socket {
+            Some(socket) => socket,
+            None => UdpSocket::bind(bind).context("binding netplay UDP socket")?,
+        };
         socket.set_nonblocking(true)?;
         Ok(Self {
             socket,

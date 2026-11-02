@@ -936,6 +936,53 @@ impl SerialSink for StdoutSink {
     }
 }
 
+/// A loopback TCP address that refuses connections for as long as this
+/// value lives, for tests that need a dial to be refused.
+///
+/// Binding a listener on port 0 and dropping it is not enough: a parallel
+/// test can be handed the freed port for its own listener, and the dial
+/// then connects to that instead. A socket that is bound but never listens
+/// does not work either, because macOS silently drops a SYN aimed at one,
+/// so the dial times out rather than being refused. The address here is
+/// the local end of an established loopback connection: no listener can
+/// stand behind it, so Linux, macOS and Windows all answer a dial with a
+/// reset, and their port-0 allocation never hands out a port that a live
+/// connection still owns. The client end is bound before it connects so
+/// Linux also keeps the dialling socket's own ephemeral port off this one:
+/// Linux lets a connect share a port another connect picked, which here
+/// would make the dial connect to itself.
+#[cfg(test)]
+pub(crate) struct RefusingLoopbackPort {
+    addr: std::net::SocketAddr,
+    _client: socket2::Socket,
+    _server: std::net::TcpStream,
+}
+
+#[cfg(test)]
+impl RefusingLoopbackPort {
+    pub(crate) fn new() -> Self {
+        let any_port: std::net::SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = std::net::TcpListener::bind(any_port).unwrap();
+        let client =
+            socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).unwrap();
+        client.bind(&any_port.into()).unwrap();
+        client
+            .connect(&listener.local_addr().unwrap().into())
+            .unwrap();
+        let (server, _) = listener.accept().unwrap();
+        let addr = client.local_addr().unwrap().as_socket().unwrap();
+        Self {
+            addr,
+            _client: client,
+            _server: server,
+        }
+    }
+
+    pub(crate) fn addr(&self) -> std::net::SocketAddr {
+        self.addr
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1105,12 +1152,8 @@ mod tests {
 
     #[test]
     fn tcp_connect_to_nothing_is_an_error() {
-        // Bind-then-drop yields a port with no listener behind it.
-        let addr = {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.local_addr().unwrap()
-        };
-        assert!(TcpSerialSink::connect(&addr.to_string()).is_err());
+        let refusing = RefusingLoopbackPort::new();
+        assert!(TcpSerialSink::connect(&refusing.addr().to_string()).is_err());
     }
 
     #[test]

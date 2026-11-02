@@ -61,9 +61,10 @@ chmod +x Copperline-*.AppImage
 Download `Copperline-X.Y.Z-win-x64-setup.exe` or
 `Copperline-X.Y.Z-win-arm64-setup.exe` from the
 [releases page](https://github.com/CopperlineHQ/Copperline/releases), matching
-your PC's architecture. The installer needs no administrator rights and adds
-a Start menu shortcut. Run a newer installer to update; uninstall through
-Windows Settings. Your settings and saves are preserved.
+your PC's architecture. The installer installs for just you (no
+administrator rights) or for all users in Program Files, and adds a Start
+menu shortcut. Run a newer installer to update; uninstall through Windows
+Settings. Your settings and saves are preserved.
 
 Portable ZIPs remain available for both architectures; extract the whole
 archive and run `copperline.exe`. See the [Windows installation

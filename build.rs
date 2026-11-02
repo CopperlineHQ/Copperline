@@ -21,6 +21,8 @@ fn main() {
         println!("cargo:rerun-if-changed={git_common_dir}/refs/tags");
     }
 
+    embed_windows_resources(&package_version);
+
     let display_version = if exact_tagged_head() {
         package_version
     } else if let Some(short_hash) = git_output(["rev-parse", "--short=8", "HEAD"]) {
@@ -33,32 +35,139 @@ fn main() {
 
     generate_custom_register_docs();
     set_windows_main_thread_stack();
-    embed_windows_icon();
 }
 
-/// Link the application icon into `copperline.exe` as a Win32 resource, which
-/// is where Explorer, the taskbar, the Start menu and the Store package look
-/// for it -- winit's `with_window_icon` dresses the window at runtime but says
-/// nothing about the file on disk.
+/// The executables the Windows packages ship, with the FileDescription each
+/// one's version details carry and whether it wears the application icon.
+/// Task Manager and "Open with" show the description as the program's name,
+/// hence plain "Copperline" for the emulator itself. A binary added to the
+/// ZIP needs an entry here; the Windows CI zip smoke checks every shipped
+/// `.exe` has version details.
+const WINDOWS_EXECUTABLES: &[(&str, &str, bool)] = &[
+    ("copperline", "Copperline", true),
+    ("copperline-ctl", "Copperline control client", false),
+    (
+        "copperline-import-uae",
+        "Copperline UAE config importer",
+        false,
+    ),
+];
+
+/// Link Win32 resources into each shipped Windows executable: a VERSIONINFO
+/// block, which is where Explorer's Properties > Details, Task Manager,
+/// SmartScreen and code-signing services read the product name, publisher
+/// and version; and in `copperline.exe` alone the application icon, which is
+/// where Explorer, the taskbar, the Start menu and the Store package look for
+/// it -- winit's `with_window_icon` dresses the window at runtime but says
+/// nothing about the file on disk. The command-line tools shipped beside it
+/// are not the app and should not wear its icon.
 ///
-/// Scoped to the one binary that is the app: the command-line tools shipped
-/// beside it are not Copperline and should not wear its icon.
-fn embed_windows_icon() {
+/// The scripts are generated into OUT_DIR so the version comes from Cargo,
+/// not from a second copy that has to be kept in step at every release.
+fn embed_windows_resources(package_version: &str) {
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    println!("cargo:rerun-if-changed=assets/brand/copperline.rc");
     println!("cargo:rerun-if-changed=assets/brand/copperline.ico");
-    // Never fatal: a toolchain without a resource compiler should still build
-    // a working emulator, just one with the default executable icon.
-    let result = embed_resource::compile_for(
-        "assets/brand/copperline.rc",
-        ["copperline"],
-        embed_resource::ParamsIncludeDirs(["assets/brand"]),
-    );
-    if let Err(error) = result.manifest_optional() {
-        println!("cargo:warning=executable icon not embedded: {error}");
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
+    let icon_file = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/brand/copperline.ico");
+    for &(bin, description, icon) in WINDOWS_EXECUTABLES {
+        // The stem names the compiled resource file, so it must differ per
+        // binary.
+        let script = out_dir.join(format!("{bin}-resources.rc"));
+        let icon = icon.then_some(icon_file.as_path());
+        let source = windows_resource_script(bin, description, icon, package_version);
+        std::fs::write(&script, source)
+            .unwrap_or_else(|error| panic!("writing {}: {error}", script.display()));
+        // Never fatal: a toolchain without a resource compiler should still
+        // build a working program, just one with the default executable icon
+        // and no version details.
+        let result = embed_resource::compile_for(&script, [bin], embed_resource::NONE);
+        if let Err(error) = result.manifest_optional() {
+            println!("cargo:warning={bin}.exe resources not embedded: {error}");
+        }
     }
+}
+
+/// The resource script for one executable. Numeric constants stand in for
+/// the `winver.h` names (VOS_NT_WINDOWS32 = 0x40004, VFT_APP = 0x1,
+/// VS_FFI_FILEFLAGSMASK = 0x3F) because not every resource compiler
+/// embed-resource drives has the Windows SDK headers to hand.
+fn windows_resource_script(
+    bin: &str,
+    description: &str,
+    icon: Option<&Path>,
+    version: &str,
+) -> String {
+    let numeric = windows_numeric_version(version);
+    let mut script = String::new();
+    if let Some(icon) = icon {
+        // Resource id 1: the lowest icon id in a binary is the one Explorer,
+        // the taskbar and the Start menu draw for it. This is the same
+        // multi-size .ico the window itself loads at runtime, so the file on
+        // disk and the window it opens agree. Named by absolute path, as
+        // resource compilers differ on where they search for a bare name
+        // (llvm-rc ignores include directories), and with forward slashes,
+        // which every one of them accepts unescaped.
+        let icon = icon.display().to_string().replace('\\', "/");
+        writeln!(script, "1 ICON \"{icon}\"\n").expect("write to String");
+    }
+    // Id 1 is VS_VERSION_INFO. The strings keep the complete Cargo version,
+    // prerelease suffix included, as the installer's version details do.
+    write!(
+        script,
+        r#"1 VERSIONINFO
+FILEVERSION {numeric}
+PRODUCTVERSION {numeric}
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "CopperlineHQ"
+            VALUE "FileDescription", "{description}"
+            VALUE "FileVersion", "{version}"
+            VALUE "InternalName", "{bin}"
+            VALUE "LegalCopyright", "Copperline is licensed under GPL-3.0-or-later."
+            VALUE "OriginalFilename", "{bin}.exe"
+            VALUE "ProductName", "Copperline"
+            VALUE "ProductVersion", "{version}"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
+"#
+    )
+    .expect("write to String");
+    script
+}
+
+/// `1.2.3-rc.1` -> `1,2,3,0`: a Windows file version is four 16-bit numbers,
+/// with no room for the prerelease or build suffix only the strings carry.
+fn windows_numeric_version(version: &str) -> String {
+    let core = version.split(['-', '+']).next().unwrap_or(version);
+    let mut parts: Vec<u16> = core
+        .split('.')
+        .map(|part| {
+            part.parse().unwrap_or_else(|_| {
+                panic!("version {version}: {part:?} does not fit a Windows file version")
+            })
+        })
+        .collect();
+    parts.resize(4, 0);
+    parts
+        .iter()
+        .map(u16::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Compile the checked-in, human-readable register pages into the one table

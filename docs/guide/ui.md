@@ -1438,7 +1438,9 @@ of the folders above -- plus gamepad calibration, keyboard mappings, the
 default WHDLoad library and other per-user host data -- live inside it, so
 the whole installation moves as one folder. Delete `portable.txt` to return
 to the platform location above; Copperline does not move existing files in
-either direction. An installation can also carry its own machine: a
+either direction. The folder must be writable by you, so on Windows use the
+ZIP or a per-user install for this, not an all-users install in Program
+Files. An installation can also carry its own machine: a
 `copperline.toml` in the same folder boots straight into that machine,
 skipping the configuration screen (see [](configuration.md)).
 
