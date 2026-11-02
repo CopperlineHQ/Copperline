@@ -354,7 +354,11 @@ The workflow reads the SignPath organization ID from the repository variable
 `SIGNPATH_ORGANIZATION_ID` and an API token for a SignPath user with
 submitter rights from the secret `SIGNPATH_API_TOKEN`; the project, policy
 and configuration slugs are written into `.github/workflows/windows.yml`.
-Without both settings, a tag build fails instead of releasing unsigned
+SignPath's connector also reads the run and its artifacts through the
+[SignPath GitHub App](https://github.com/apps/signpath), which must stay
+installed on the repository; without it every signing request fails with
+"Failed to retrieve GitHub App token".
+Without the variable and the secret, a tag build fails instead of releasing unsigned
 packages. To release unsigned packages anyway (for example while SignPath is
 unavailable), run the `Windows` workflow by hand with `release_tag` set and
 `signing: none`.
