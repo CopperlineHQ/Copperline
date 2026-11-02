@@ -25,19 +25,20 @@ Patrons whose tier includes a credit are thanked by name in
 
 ## First goal: signed binaries
 
-Today the macOS disk image is only ad-hoc signed, and the Windows build is
-not signed at all. Both work, but both make the operating system tell you
-they might not be safe: macOS Gatekeeper refuses the first launch until you
-right-click-Open, and Windows SmartScreen puts up a "More info" wall. That
-is a poor first impression of a project whose whole pitch is that it boots
-straight to a working Amiga.
+Windows is done: release builds are signed through the SignPath
+Foundation's open-source programme (free code signing provided by
+[SignPath.io](https://about.signpath.io/), certificate by
+[SignPath Foundation](https://signpath.org/)).
+
+The macOS disk image is still only ad-hoc signed. It works, but Gatekeeper
+refuses the first launch until you right-click-Open. That is a poor first
+impression of a project whose whole pitch is that it boots straight to a
+working Amiga.
 
 Fixing it is not a code problem, it is a subscription problem. Signing and
-notarizing on macOS needs Apple Developer Program membership (USD 99/year),
-and clearing SmartScreen on Windows needs a code-signing certificate from a
-commercial CA, which since the move to hardware-backed keys runs to a few
-hundred a year on top. Recurring support is what makes committing to those
-sensible, which is why Patreon is the tier that moves this along fastest.
+notarizing on macOS needs Apple Developer Program membership (USD 99/year).
+Recurring support is what makes committing to that sensible, which is why
+Patreon is the tier that moves this along fastest.
 
 Reaching it means downloads that open on a double-click, on every platform,
 with no quarantine incantations in the README.

@@ -277,7 +277,8 @@ menu and optional desktop shortcuts and registers an uninstaller. Its stable
 Inno `AppId` allows later installers to update the same installation, in the
 mode it was installed in, without asking again. Uninstall removes
 only shipped files and shortcuts, preserving user-created configuration,
-saves and media. The installer is unsigned, like the portable executables.
+saves and media. Release builds sign the installer and the portable
+executables; see [Code signing](#code-signing).
 
 CI silently installs each architecture on its native runner, once with
 Setup's default per-user mode and once with `/ALLUSERS`, checks every
@@ -311,6 +312,65 @@ Run it from an elevated prompt: the all-users leg installs into Program
 Files. Add `-Mode CurrentUser` to run only the per-user leg without
 elevation. The test refuses an existing installation in either mode and
 keeps logs, the screenshots and preserved user-file fixtures for inspection.
+
+### Code signing
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/),
+certificate by [SignPath Foundation](https://signpath.org/), through its
+open-source programme; Windows names SignPath Foundation as the publisher.
+The programme's terms require a public code signing policy, published at
+<https://copperline.dev/code-signing/> (`code-signing/index.html` in the
+website repository), and the words "Code signing policy" on the download and
+release pages: keep the site's footer and Windows download links, and end
+each GitHub release's notes with a link to the policy.
+
+On a `v*` tag push, each architecture's build job makes two signing requests
+in turn:
+
+1. `windows-zip` signs `copperline.exe`, `copperline-ctl.exe` and
+   `copperline-import-uae.exe` inside the portable ZIP.
+2. `windows-installer` signs the installer, which is built from the signed
+   ZIP so the installed executables carry the same signatures.
+
+Each release-signing request waits up to an hour for an approver to approve
+it in SignPath, so a release needs four approvals: both architectures' ZIP
+requests arrive together, then both installer requests.
+`packaging/windows/check-signatures.ps1` requires a trusted, timestamped
+signature on every executable before the signed file replaces the unsigned
+one, so the smoke tests and the release attach all work on the signed files.
+A request that is rejected or times out fails its build job; re-run the
+failed jobs to submit it again.
+
+The artifact configurations live in `packaging/windows/signpath/` for
+review, but SignPath reads its own copies: after changing one, paste it into
+the SignPath project's artifact configuration of the same slug. They sign
+only executables whose version details say product Copperline, publisher
+CopperlineHQ and the Cargo version as product version; `build.rs` and
+`copperline.iss` write those, and the zip and installer smoke tests check
+them on every pull request, so a mismatch shows up long before release
+signing.
+
+The workflow reads the SignPath organization ID from the repository variable
+`SIGNPATH_ORGANIZATION_ID` and an API token for a SignPath user with
+submitter rights from the secret `SIGNPATH_API_TOKEN`; the project, policy
+and configuration slugs are written into `.github/workflows/windows.yml`.
+Without both settings, a tag build fails instead of releasing unsigned
+packages. To release unsigned packages anyway (for example while SignPath is
+unavailable), run the `Windows` workflow by hand with `release_tag` set and
+`signing: none`.
+
+To try the whole signing path without an approval, run the `Windows`
+workflow by hand on a branch with `signing: test-signing`. SignPath then signs
+with its test certificate, which Windows does not trust, and the run attaches
+nothing. Do this after changing an artifact configuration or the signing
+steps.
+
+Inno Setup's uninstaller (`unins000.exe` in the install folder) is not
+signed. Inno signs it only by running a sign tool in the middle of
+compiling, and SignPath signs only files a workflow step has already
+uploaded as an artifact. It runs from the local disk, so
+SmartScreen never checks it, but uninstalling an all-users installation
+shows a UAC prompt without a verified publisher.
 
 ## macOS disk image
 

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SignPath artifact configuration "windows-installer": signs the Inno Setup
+  installer (packaging/windows/build-installer.ps1), which the Windows
+  workflow builds from the already signed portable ZIP (see windows-zip.xml).
+
+  SignPath reads this from the project's Artifact Configurations page, not
+  from the repository: after changing it, paste it there (same slug).
+
+  actions/upload-artifact wraps the uploaded installer in a ZIP, hence the
+  outer zip-file. The metadata restrictions match the version details
+  copperline.iss sets on Setup; "version" is the Cargo version the workflow
+  passes in.
+-->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file path="Copperline-${version}-win-*-setup.exe" product-name="Copperline"
+             product-version="${version}" company-name="CopperlineHQ">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
