@@ -53,7 +53,7 @@ on:
         required: false
         default: ""
       signing:
-        description: "SignPath signing. auto release-signs when release_tag is set and builds unsigned otherwise; test-signing tries the whole signing path with SignPath's test certificate and no approval."
+        description: "SignPath signing. auto release-signs when the run attaches to a release (release_tag set, or run on a v* tag) and builds unsigned otherwise; test-signing tries the whole signing path with SignPath's test certificate and no approval, and is refused for a release."
         type: choice
         options: [auto, none, test-signing, release-signing]
         default: auto
@@ -125,10 +125,12 @@ jobs:
           "version=$($zip.BaseName -replace '^Copperline-(.+)-win-${{ matrix.arch }}$', '$1')" >> $env:GITHUB_OUTPUT
       - name: Choose the signing policy
         id: signing
-        # A v* tag push is release-signed, which waits for a person to
-        # approve each request in SignPath. A manual run picks its policy
-        # (the signing input). Pull requests and branch pushes build
-        # unsigned. Signing needs the SIGNPATH_ORGANIZATION_ID variable and
+        # A run that attaches to a release is release-signed, which waits
+        # for a person to approve each request in SignPath: a v* tag push,
+        # or a manual run on a v* tag or with release_tag set (the release
+        # job's own condition). A manual run picks its policy (the signing
+        # input), but never test-signing for a release. Pull requests and
+        # branch pushes build unsigned. Signing needs the SIGNPATH_ORGANIZATION_ID variable and
         # the SIGNPATH_API_TOKEN secret: without them a release fails here,
         # except in a fork, which has no SignPath project and builds
         # unsigned with a warning.
@@ -140,16 +142,17 @@ jobs:
           HAS_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
         run: |
           $ErrorActionPreference = "Stop"
+          $releasing = $env:GITHUB_REF -like "refs/tags/v*" -or [bool]$env:RELEASE_TAG
           $policy = "none"
-          if ($env:GITHUB_EVENT_NAME -eq "push" -and $env:GITHUB_REF -like "refs/tags/v*") {
-            $policy = "release-signing"
-          } elseif ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
             $policy = $env:REQUESTED
             if ($policy -eq "auto") {
-              $policy = if ($env:RELEASE_TAG) { "release-signing" } else { "none" }
-            } elseif ($policy -eq "test-signing" -and $env:RELEASE_TAG) {
+              $policy = if ($releasing) { "release-signing" } else { "none" }
+            } elseif ($policy -eq "test-signing" -and $releasing) {
               throw "test-signed packages must not be attached to a release"
             }
+          } elseif ($env:GITHUB_EVENT_NAME -eq "push" -and $releasing) {
+            $policy = "release-signing"
           }
           if ($policy -ne "none" -and (-not $env:ORGANIZATION_ID -or $env:HAS_TOKEN -ne "true")) {
             $missing = "the SIGNPATH_ORGANIZATION_ID variable or the SIGNPATH_API_TOKEN secret is not set"
