@@ -27,7 +27,7 @@ Patrons whose tier includes a credit are thanked by name in
 
 Windows is done: release builds are signed through the SignPath
 Foundation's open-source programme (free code signing provided by
-[SignPath.io](https://about.signpath.io/), certificate by
+[SignPath.io](https://signpath.io/), certificate by
 [SignPath Foundation](https://signpath.org/)).
 
 The macOS disk image is still only ad-hoc signed. It works, but Gatekeeper

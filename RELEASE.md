@@ -315,7 +315,7 @@ keeps logs, the screenshots and preserved user-file fixtures for inspection.
 
 ### Code signing
 
-Free code signing provided by [SignPath.io](https://about.signpath.io/),
+Free code signing provided by [SignPath.io](https://signpath.io/),
 certificate by [SignPath Foundation](https://signpath.org/), through its
 open-source programme; Windows names SignPath Foundation as the publisher.
 The programme's terms require a public code signing policy, published at

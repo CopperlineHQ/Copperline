@@ -106,7 +106,7 @@ user data is in
 
 The installer and executables are code-signed, and Windows names **SignPath
 Foundation** as their publisher: free code signing provided by
-[SignPath.io](https://about.signpath.io/), certificate by
+[SignPath.io](https://signpath.io/), certificate by
 [SignPath Foundation](https://signpath.org/). See the
 [code signing policy](https://copperline.dev/code-signing/). SmartScreen
 also weighs how widely a download has been seen, so shortly after a release
