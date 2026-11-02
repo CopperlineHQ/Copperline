@@ -453,6 +453,10 @@ syn = { version = "3", features = ["full", "visit"] }
 # Compile WAT to wasm bytes in the WASM-plugin-host tests, so golden test
 # plugins live as readable text in the tests rather than checked-in binaries.
 wat = "1"
+# Bind a client socket before it connects (no std API for that), so the
+# serial and modem TCP tests can hold a loopback port that refuses dials
+# (RefusingLoopbackPort in src/serial.rs).
+socket2 = "0.6"
 
 [patch.crates-io]
 # pixels 0.17.2's render_with retries a failed surface acquire in a loop with
