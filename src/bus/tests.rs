@@ -15717,3 +15717,5 @@ fn timed_scsi_completions_cap_the_stop_horizon() {
 }
 
 mod playfield_modes;
+
+mod video_slot;

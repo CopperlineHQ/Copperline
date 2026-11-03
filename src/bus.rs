@@ -778,6 +778,15 @@ pub struct Bus {
     /// therefore survives save-state loads like Paula's audio/serial sinks.
     #[serde(skip, default = "crate::parallel::null_parallel_port")]
     parallel_port: Box<dyn crate::parallel::ParallelPort>,
+    /// Card in the video slot (`crate::videoslot`), watching Denise's
+    /// output and optionally driving the parallel data pins. Host-attached
+    /// like the parallel peripheral, so it survives save-state loads.
+    #[serde(skip)]
+    video_slot: Option<Box<dyn crate::videoslot::VideoSlotDevice>>,
+    #[serde(skip)]
+    video_slot_live: crate::videoslot::LiveFieldCache,
+    #[serde(skip)]
+    video_slot_fb: Vec<u32>,
     pub rtc: Rtc,
     /// Whether the $DC0000 RTC is fitted (machine-profile flag; the base
     /// A600 shipped without one). The CPU memory map consults this before
@@ -3755,6 +3764,9 @@ impl Bus {
             blitter: Blitter::new(),
             floppy,
             parallel_port: crate::parallel::null_parallel_port(),
+            video_slot: None,
+            video_slot_live: Default::default(),
+            video_slot_fb: Vec::new(),
             rtc: Rtc::default(),
             rtc_present: true,
             gayle: None,
@@ -6313,6 +6325,7 @@ impl Bus {
         );
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
         std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
+        std::mem::swap(&mut self.video_slot, &mut live.video_slot);
         self.blitter_trace = live.blitter_trace.take();
         self.paula.adopt_host_taps(&mut live.paula);
         // Bus-event subscriptions belong to live control connections, not to
@@ -6390,6 +6403,9 @@ impl Bus {
         }
         if !self.parallel_port.runahead_safe() {
             return Some("parallel host peripheral");
+        }
+        if self.video_slot.as_ref().is_some_and(|d| !d.runahead_safe()) {
+            return Some("video-slot card");
         }
         if self.wave_on {
             return Some("waveform capture");
@@ -6636,6 +6652,96 @@ impl Bus {
     /// Attach a Centronics peripheral to CIA-A port B. The default is a null
     /// peripheral (unplugged cable), so attaching one is an explicit host-side
     /// choice and does not change ordinary machine behavior.
+    /// Fit a card in the video slot, replacing any fitted one.
+    pub fn attach_video_slot(&mut self, device: Box<dyn crate::videoslot::VideoSlotDevice>) {
+        self.video_slot = Some(device);
+        self.video_slot_live = Default::default();
+    }
+
+    /// Remove the video-slot card, returning it.
+    pub fn detach_video_slot(&mut self) -> Option<Box<dyn crate::videoslot::VideoSlotDevice>> {
+        self.video_slot.take()
+    }
+
+    pub fn video_slot(&self) -> Option<&dyn crate::videoslot::VideoSlotDevice> {
+        self.video_slot.as_deref()
+    }
+
+    pub fn video_slot_mut(
+        &mut self,
+    ) -> Option<&mut (dyn crate::videoslot::VideoSlotDevice + 'static)> {
+        self.video_slot.as_deref_mut()
+    }
+
+    /// Live in-progress renders the video-slot tap has performed.
+    pub fn video_slot_live_renders(&self) -> u64 {
+        self.video_slot_live.renders
+    }
+
+    fn video_slot_beam(&self) -> crate::videoslot::BeamPos {
+        crate::videoslot::BeamPos {
+            vpos: self.agnus.vpos,
+            hpos: self.agnus.hpos,
+            cck: self.emulated_cck,
+            long_frame: self.agnus.lof,
+            frame: self.emulated_frames,
+        }
+    }
+
+    /// Frame-wrap hook: hand the just-completed field to the video-slot
+    /// card. Called after `begin_new_beam_frame` promoted the capture, so
+    /// the `frame_*` accessors describe that field.
+    pub(super) fn notify_video_slot_field_complete(&mut self) {
+        let Some(mut device) = self.video_slot.take() else {
+            return;
+        };
+        if device.wants_completed_fields() && self.last_frame_render_base.is_some() {
+            let mut fb = std::mem::take(&mut self.video_slot_fb);
+            let (rows, width, start, scale, laced) =
+                crate::video::bitplane::render_completed_for_slot(self, &mut fb);
+            // LOF has already toggled for the new field on a laced screen;
+            // the completed field was the other one.
+            let long_frame = if laced {
+                !self.agnus.lof
+            } else {
+                self.agnus.lof
+            };
+            let field = crate::videoslot::FieldPixels {
+                pixels: &fb,
+                width,
+                rows,
+                visible_start_vpos: start,
+                canvas_scale: scale,
+                long_frame,
+                interlaced: laced,
+                valid_rows: rows,
+            };
+            device.field_complete(&field, self.video_slot_beam());
+            self.video_slot_fb = fb;
+        }
+        self.video_slot = Some(device);
+    }
+
+    /// `$BFE101` read hook: let the video-slot card drive the data pins.
+    fn video_slot_parallel_read(&mut self) -> Option<u8> {
+        let mut device = self.video_slot.take()?;
+        let mut cache = std::mem::take(&mut self.video_slot_live);
+        let ddrb = self.cia_a.port_b_ddr();
+        let beam = self.video_slot_beam();
+        let byte = {
+            let mut live = crate::videoslot::LiveField {
+                bus: self,
+                cache: &mut cache,
+                beam,
+            };
+            device.parallel_read(&mut live, ddrb)
+        };
+        self.video_slot_live = cache;
+        self.video_slot = Some(device);
+        // Output pins stay CIA-driven whatever the card does.
+        byte.map(|b| (b & !ddrb) | (self.cia_a.port_b_pins() & ddrb))
+    }
+
     pub fn attach_parallel_port(&mut self, port: Box<dyn crate::parallel::ParallelPort>) {
         self.parallel_port = port;
     }
@@ -9564,6 +9670,45 @@ impl Bus {
         }
     }
 
+    /// Every render-input part of the frame the beam is in now, taken from
+    /// the capture side whether or not a completed frame is waiting for the
+    /// renderer (the `else` arms of the `frame_*` accessors, which already
+    /// describe the in-progress frame before the first wrap). Used by the
+    /// video-slot tap ([`crate::videoslot::LiveField`]); only the lines the
+    /// beam has passed are final.
+    pub(crate) fn in_progress_render_parts(&self) -> InProgressRenderParts<'_> {
+        let chip_ram = if self.current_frame_display_snapshot_taken
+            && self.current_frame_chip_ram.len() == self.mem.chip_ram.len()
+        {
+            &self.current_frame_chip_ram[..]
+        } else {
+            &self.mem.chip_ram[..]
+        };
+        InProgressRenderParts {
+            geometry: self.current_frame_geometry,
+            presentation_h_window: self.current_frame_presentation_h_window,
+            presentation_v_window: self.current_frame_presentation_v_window,
+            visible_start_vpos: self.current_frame_visible_start_vpos,
+            palette_split: (
+                self.beam_top_palette,
+                self.beam_bottom_palette,
+                self.beam_bottom_palette_valid,
+            ),
+            render_base: self.current_frame_render_base,
+            render_events: &self.current_frame_render_events,
+            bottom_palette_events: &self.beam_bottom_palette_events,
+            top_palette_end: self.beam_top_palette,
+            chip_ram,
+            chip_ram_writes: &self.current_frame_chip_ram_writes,
+            captured_bitplane_rows: &self.current_frame_bitplane_rows,
+            captured_sprite_lines: &self.current_frame_sprite_lines,
+            held_sprites: self.current_frame_held_sprites,
+            sprite_display_enable_x_by_y: &self.current_frame_sprite_display_enable_x_by_y,
+            sprite_dma_observed: self.current_frame_sprite_dma_observed,
+            frame_lines: self.agnus.current_frame_lines(),
+        }
+    }
+
     pub fn frame_held_sprites(&self) -> [Option<HeldSpriteLine>; 8] {
         if crate::envcfg::flag("COPPERLINE_RENDER_LIVE_CHIP_RAM") {
             return [None; 8];
@@ -9668,7 +9813,9 @@ impl Bus {
             // The parallel data pins are CIA-A port B. An input peripheral (an
             // audio sampler digitizing the data lines) drives them, so let it
             // override the byte the guest reads back from $BFE101.
-            if let Some(byte) = self.parallel_port.read_data(self.emulated_cck) {
+            if let Some(byte) = self.video_slot_parallel_read() {
+                v = byte;
+            } else if let Some(byte) = self.parallel_port.read_data(self.emulated_cck) {
                 v = byte;
             }
             // The four-player adapter's direction switches short data pins
@@ -13394,3 +13541,24 @@ mod wave;
 
 #[cfg(test)]
 mod tests;
+
+/// Borrowed in-progress frame capture; see [`Bus::in_progress_render_parts`].
+pub(crate) struct InProgressRenderParts<'a> {
+    pub geometry: FrameGeometry,
+    pub presentation_h_window: Option<(i32, u32)>,
+    pub presentation_v_window: Option<(i32, u32)>,
+    pub visible_start_vpos: u32,
+    pub palette_split: (Palette, Palette, bool),
+    pub render_base: RenderRegisterSnapshot,
+    pub render_events: &'a [BeamRegisterWrite],
+    pub bottom_palette_events: &'a [BeamRegisterWrite],
+    pub top_palette_end: Palette,
+    pub chip_ram: &'a [u8],
+    pub chip_ram_writes: &'a [BeamChipRamWrite],
+    pub captured_bitplane_rows: &'a [Option<CapturedBitplaneRow>],
+    pub captured_sprite_lines: &'a [CapturedSpriteLine],
+    pub held_sprites: [Option<HeldSpriteLine>; 8],
+    pub sprite_display_enable_x_by_y: &'a [Option<usize>],
+    pub sprite_dma_observed: bool,
+    pub frame_lines: u32,
+}

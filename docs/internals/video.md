@@ -622,6 +622,40 @@ made the conservative pre-render key reject the frame. Recording still emits
 the duplicate video frame, and status/UI changes still redraw over a held
 Amiga picture.
 
+## Video-slot tap (`videoslot.rs`)
+
+A card in the A2000/A3000/A4000 video slot watches Denise's digital output
+as it is generated, which the replay architecture above does not provide by
+itself. The tap gives such a card (the NewTek Video Toaster is the
+motivating case) two views of the picture, both side-effect free and both
+painted by the same `render_from_input` the display uses:
+
+- **Completed fields.** At each frame wrap, after `begin_new_beam_frame` has
+  promoted the capture, `Bus::notify_video_slot_field_complete` renders the
+  finished field once more on the main thread and passes it to
+  `VideoSlotDevice::field_complete`. A card that does not need it opts out
+  with `wants_completed_fields`, which skips the extra render.
+- **The field in progress.** A card that reacts within the same field gets
+  a `LiveField` on every guest read of `$BFE101`. Its first `pixels()` call
+  in a field renders a `RenderInput` built from the capture side
+  (`RenderInput::from_bus_in_progress`, the in-progress halves of the
+  `frame_*`/`last_frame_*` pairs: the frame-start chip-RAM snapshot and its
+  beam-timed write log, captured bitplane rows and sprite lines, and the
+  frame's register events so far). Rows above the beam are final; the render
+  is reused until the beam moves onto a line it did not cover.
+
+Both views use framebuffer coordinates: row 0 is the field's
+`visible_start_vpos`, column 0 is colour clock `$28`, four hi-res pixels per
+colour clock times the canvas scale. `FieldPixels::pixel_at_beam` and
+`rgb12_at_beam` do the mapping.
+
+The card can also drive the parallel data pins (`parallel_read`), ahead of
+the Centronics peripheral and the joystick adapter; pins the guest has made
+outputs (DDRB set) stay CIA-driven. A fitted card blocks run-ahead, since
+it holds state run-ahead cannot rewind. Like the parallel peripheral it is
+host-attached (`Bus::attach_video_slot`) and survives save-state loads; it
+is not itself serialised.
+
 ## Interlace (`video/deinterlace.rs`)
 
 Interlaced (LACE) content is presented through a motion-adaptive

@@ -749,6 +749,7 @@ impl Bus {
         for _ in 0..tick.new_frames {
             self.emulated_frames = self.emulated_frames.saturating_add(1);
             self.begin_new_beam_frame();
+            self.notify_video_slot_field_complete();
         }
         if tick.new_frames != 0 {
             // A wrap that came earlier than the bound assumed (a frame

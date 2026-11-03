@@ -10,7 +10,7 @@
 use super::FrameGeometry;
 #[cfg(test)]
 use super::FB_PIXELS;
-use super::{FB_HEIGHT, FB_WIDTH, MAX_VISIBLE_LINES};
+use super::{FB_HEIGHT, FB_WIDTH, MAX_CANVAS_PIXELS, MAX_VISIBLE_LINES};
 use crate::bus::{
     BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, Bus, CapturedBitplaneRow,
     CapturedSpriteLine, HeldSpriteLine, RenderRegisterSnapshot, VideoRenderFrameTiming,
@@ -4202,6 +4202,44 @@ impl RenderInput {
         }
     }
 
+    /// Snapshot the frame the beam is in now (see
+    /// [`Bus::in_progress_render_parts`]). Rows above the beam render exactly
+    /// as the completed frame later will; rows at or below it are partial.
+    pub(crate) fn from_bus_in_progress(bus: &Bus) -> Self {
+        let parts = bus.in_progress_render_parts();
+        Self {
+            geometry: parts.geometry,
+            presentation_h_window: parts.presentation_h_window,
+            presentation_v_window: parts.presentation_v_window,
+            visible_start_vpos: parts.visible_start_vpos,
+            palette_split: parts.palette_split,
+            render_base: parts.render_base,
+            frame_render_events: parts.render_events.to_vec(),
+            // Nothing of the following frame exists yet.
+            current_render_base: parts.render_base,
+            current_render_events: Vec::new(),
+            bottom_palette_events: parts.bottom_palette_events.to_vec(),
+            top_palette_end: parts.top_palette_end,
+            chip_ram: std::sync::Arc::new(parts.chip_ram.to_vec()),
+            chip_ram_writes: parts.chip_ram_writes.to_vec(),
+            captured_bitplane_rows: std::sync::Arc::new(parts.captured_bitplane_rows.to_vec()),
+            captured_sprite_lines: parts.captured_sprite_lines.to_vec(),
+            held_sprites: parts.held_sprites,
+            sprite_display_enable_x_by_y: parts.sprite_display_enable_x_by_y.to_vec(),
+            sprite_dma_observed: parts.sprite_dma_observed,
+            frame_lines: parts.frame_lines,
+            programmable_vertical_blank: bus.agnus.programmable_vertical_blank(),
+            programmable_horizontal_blank: bus.agnus.programmable_horizontal_blank(),
+            emulated_seconds: bus.emulated_seconds(),
+            emulated_frames: bus.emulated_frames(),
+            // A peripheral sees the real picture, never debugger masking.
+            debug_plane_mask: 0xFF,
+            debug_sprite_mask: 0xFF,
+            #[cfg(feature = "cd32-fmv")]
+            fmv: None,
+        }
+    }
+
     /// Re-snapshot the just-finished frame into this bundle, reusing the
     /// vector allocations left over from a previous frame (the chip-RAM
     /// copy alone is up to 2 MiB per frame). Field-for-field this must
@@ -4622,6 +4660,57 @@ pub fn render_display_only_with_content(bus: &Bus, fb: &mut [u32]) -> Option<Con
             .release_shared_frame_data();
         content
     })
+}
+
+/// Render the frame the beam is currently in, side-effect free, into `fb`
+/// (resized as needed). Returns (rows, row stride, beam line of row 0,
+/// canvas scale, laced). Only rows above the beam are final. This is the
+/// video-slot tap's live view ([`crate::videoslot::LiveField`]); the normal
+/// display path never calls it.
+pub(crate) fn render_in_progress(bus: &Bus, fb: &mut Vec<u32>) -> (usize, usize, u32, usize, bool) {
+    let input = RenderInput::from_bus_in_progress(bus);
+    let scale = canvas_scale_for(
+        input.geometry.programmable,
+        input.render_base.bplcon0,
+        &input.frame_render_events,
+    );
+    if fb.len() < MAX_CANVAS_PIXELS {
+        fb.resize(MAX_CANVAS_PIXELS, 0);
+    }
+    let _ = render_from_input(&input, fb);
+    (
+        input.geometry.visible_lines,
+        FB_WIDTH * scale,
+        input.visible_start_vpos,
+        scale,
+        input.geometry.lace,
+    )
+}
+
+/// Render the just-completed frame for the video-slot tap. Like
+/// [`render_display_only`] (no collision or timing feedback), but also
+/// reports the geometry the device needs to map beam positions.
+pub(crate) fn render_completed_for_slot(
+    bus: &Bus,
+    fb: &mut Vec<u32>,
+) -> (usize, usize, u32, usize, bool) {
+    let input = RenderInput::from_bus(bus);
+    let scale = canvas_scale_for(
+        input.geometry.programmable,
+        input.render_base.bplcon0,
+        &input.frame_render_events,
+    );
+    if fb.len() < MAX_CANVAS_PIXELS {
+        fb.resize(MAX_CANVAS_PIXELS, 0);
+    }
+    let _ = render_from_input(&input, fb);
+    (
+        input.geometry.visible_lines,
+        FB_WIDTH * scale,
+        input.visible_start_vpos,
+        scale,
+        input.geometry.lace,
+    )
 }
 
 /// Side-effect-free display render with final Denise/Lisa output provenance.
