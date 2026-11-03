@@ -50,6 +50,7 @@ fn repeated_frame_test_input() -> RenderInput {
         emulated_frames: 50,
         debug_plane_mask: 0xFF,
         debug_sprite_mask: 0xFF,
+        canvas_origin_cck: 0,
         #[cfg(feature = "cd32-fmv")]
         fmv: None,
     }

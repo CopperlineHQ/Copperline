@@ -6031,7 +6031,7 @@ fn ocs_display_window_zero_start_opens_from_beam_zero() {
     let implicit = DiwHigh::ocs_implicit();
 
     assert_eq!(
-        visible_start_vpos_for_diw(0x0000, 0x2CC1, implicit),
+        visible_start_vpos_for_diw(0x0000, 0x2CC1, implicit, RENDER_MIN_OVERSCAN_START_VPOS),
         RENDER_MIN_OVERSCAN_START_VPOS
     );
     assert_eq!(
@@ -6054,7 +6054,7 @@ fn ocs_display_window_zero_start_opens_from_beam_zero() {
         (0, (0x01C1 - RENDER_DIW_HSTART_FB0) * 2)
     );
     assert_eq!(
-        visible_start_vpos_for_diw(0x0000, 0x0000, implicit),
+        visible_start_vpos_for_diw(0x0000, 0x0000, implicit, RENDER_MIN_OVERSCAN_START_VPOS),
         RENDER_VISIBLE_START_VPOS
     );
 }

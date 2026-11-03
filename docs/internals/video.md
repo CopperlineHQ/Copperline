@@ -636,18 +636,37 @@ painted by the same `render_from_input` the display uses:
   `VideoSlotDevice::field_complete`. A card that does not need it opts out
   with `wants_completed_fields`, which skips the extra render.
 - **The field in progress.** A card that reacts within the same field gets
-  a `LiveField` on every guest read of `$BFE101`. Its first `pixels()` call
-  in a field renders a `RenderInput` built from the capture side
+  a `LiveField` on every guest read of `$BFE101`. Its `pixels()` call
+  renders a `RenderInput` built from the capture side
   (`RenderInput::from_bus_in_progress`, the in-progress halves of the
   `frame_*`/`last_frame_*` pairs: the frame-start chip-RAM snapshot and its
   beam-timed write log, captured bitplane rows and sprite lines, and the
-  frame's register events so far). Rows above the beam are final; the render
-  is reused until the beam moves onto a line it did not cover.
+  frame's register events so far) down to the beam's own line, whose
+  captured words reach the beam; the render is reused while the beam stays
+  put.
 
-Both views use framebuffer coordinates: row 0 is the field's
-`visible_start_vpos`, column 0 is colour clock `$28`, four hi-res pixels per
-colour clock times the canvas scale. `FieldPixels::pixel_at_beam` and
-`rgb12_at_beam` do the mapping.
+Both views paint a line wider than the display framebuffer. A video card
+samples the whole active line -- the Toaster's 768 pixels start at lo-res
+`$5C`, left of the capture's `$62`, and run past the capture's right edge --
+so `bitplane::render_wide` paints colour clocks `SLOT_FIRST_CCK` (`$24`)
+onwards for `SLOT_LINE_CCK` clocks, stitched from origin-shifted renders of
+the same field. The shift is `RenderInput::canvas_origin_cck`, installed as
+the thread-local `ACTIVE_CANVAS_ORIGIN_CCK` for the render: every
+beam-to-column anchor (`DIW_HSTART_FB0`, `COPPER_WAIT_HPOS_FB0`,
+`COLOR_WRITE_HPOS_FB0`, `SPRITE_PALETTE_CONTROL_HPOS_FB0`, the H-counter
+framebuffer start tick) is read through a function that adds it, so
+comparator-anchored and beam-anchored positions move together and the
+picture slides on the canvas. Display renders use 0 and keep the calibrated
+constants bit-for-bit. The per-line sprite display enable column is recorded
+in display coordinates, clamped at the capture's edge; a clamped 0 stays
+"from the canvas start" on a shifted render.
+
+Rows start at the capture's first line. With a card fitted the capture
+starts at the first line sprite DMA can run on (`Bus::capture_start_vpos`:
+NTSC `$14`, PAL `$19`) instead of the deep-overscan `$1C`, because the
+Toaster's line headers are sprites on lines from `$15`.
+`FieldPixels::column_for_hpos`, `column_for_lores`, `pixel_at_beam` and
+`rgb12_at_beam` map beam positions to the canvas.
 
 The card can also drive the parallel data pins (`parallel_read`), ahead of
 the Centronics peripheral and the joystick adapter; pins the guest has made

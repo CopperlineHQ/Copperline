@@ -798,7 +798,7 @@ fn sprite_register_write_pipeline_cck(copper: bool) -> u32 {
 
 pub(super) fn sprite_position_write_framebuffer_x_from(hpos: u32, copper: bool) -> usize {
     let hpos = hpos.saturating_sub(sprite_register_write_pipeline_cck(copper));
-    ((hpos as i32 * 2 - DIW_HSTART_FB0) * 2).clamp(0, FB_WIDTH as i32) as usize
+    ((hpos as i32 * 2 - diw_hstart_fb0()) * 2).clamp(0, FB_WIDTH as i32) as usize
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1719,7 +1719,7 @@ fn sprite_base_framebuffer_x_resolved(
     // horizontal comparator match (crate::bus::SPRITE_OUTPUT_DELAY_LORES,
     // ruler-probed against FS-UAE and vAmiga). The anchor carries the
     // active canvas shift like every comparator mapping.
-    let base_x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0
+    let base_x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - diw_hstart_fb0()
         + active_canvas_shift_h())
         * 2;
     let sample_x = base_x.clamp(0, FB_WIDTH.saturating_sub(1) as i32) as usize;
@@ -1734,7 +1734,8 @@ pub(super) fn sprite_nominal_base_framebuffer_x(
     fmode: u16,
 ) -> i32 {
     let hstart = crate::bus::sprite_hstart_for_fmode(sprite_hstart(pos, ctl), fmode);
-    (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0 + active_canvas_shift_h()) * 2
+    (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - diw_hstart_fb0() + active_canvas_shift_h())
+        * 2
         + i32::from(sprite_hsub_70ns(ctl) && bplcon0 & BPLCON0_SHRES != 0)
 }
 
@@ -1742,11 +1743,24 @@ pub(super) fn sprite_display_enable_x_for_y(
     sprite_display_enable_x_by_y: &[Option<usize>],
     y: usize,
 ) -> Option<usize> {
-    if y < sprite_display_enable_x_by_y.len() {
+    let enable_x = if y < sprite_display_enable_x_by_y.len() {
         sprite_display_enable_x_by_y[y]
     } else {
         Some(0)
-    }
+    };
+    // The capture records the enable column in display-framebuffer
+    // coordinates, clamped at the capture's left edge. On an origin-shifted
+    // canvas a recorded column maps across exactly; a clamped 0 says only
+    // that the enable came at or before the display capture's edge, so it
+    // stays "from the canvas start".
+    let shift = super::active_canvas_origin_cck() * 4;
+    enable_x.map(|x| {
+        if x == 0 || shift == 0 {
+            x
+        } else {
+            (x as i32 - shift).max(0) as usize
+        }
+    })
 }
 
 pub(super) fn sprite_pixel_inside_display_window(

@@ -241,3 +241,182 @@ fn configured_genlock_outlives_a_sync_card() {
     bus.advance_devices(64);
     assert_ne!(vhposr(&mut bus), a);
 }
+
+/// One grabbed row: the field's start line, row stride, first colour clock
+/// and the pixels.
+type GrabbedRow = (u32, usize, i32, Vec<u32>);
+
+/// Collects one row of every completed field.
+struct RowGrab {
+    rows: Arc<Mutex<Vec<GrabbedRow>>>,
+    vpos: u32,
+}
+
+impl VideoSlotDevice for RowGrab {
+    fn name(&self) -> &'static str {
+        "rowgrab"
+    }
+
+    fn field_complete(&mut self, field: &FieldPixels<'_>, _at: BeamPos) {
+        if let Some(row) = field.row(self.vpos) {
+            self.rows.lock().unwrap().push((
+                field.visible_start_vpos,
+                field.width,
+                field.first_cck,
+                row.to_vec(),
+            ));
+        }
+    }
+}
+
+fn red_columns(row: &[u32]) -> Vec<usize> {
+    row.iter()
+        .enumerate()
+        .filter(|(_, p)| (**p & 0xFF) >= 0xF0 && ((**p >> 8) & 0xFF) < 0x10)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The Toaster's per-line header is sprite 0 at HSTART $5B, seven lo-res
+/// pixels left of the display framebuffer's first column: the slot canvas
+/// starts further left and shows it.
+#[test]
+fn slot_canvas_shows_a_sprite_left_of_the_display_capture() {
+    let mut bus = empty_bus();
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    bus.attach_video_slot(Box::new(RowGrab {
+        rows: Arc::clone(&rows),
+        vpos: 0x40,
+    }));
+    advance_to_next_frame(&mut bus);
+    set_color0(&mut bus, 0);
+    assert!(!bus.custom_write(0x08E, 2, 0x2C40)); // DIWSTRT
+    assert!(!bus.custom_write(0x090, 2, 0x2CD1)); // DIWSTOP
+    assert!(!bus.custom_write(0x100, 2, 0x0200)); // BPLCON0: colour on
+    assert!(!bus.custom_write(0x1A2, 2, 0x0F00)); // COLOR17 red
+    advance_to(&mut bus, 0x3F, 0x10);
+    // Manual sprite 0: vstart $40, vstop $41, hstart $5B.
+    assert!(!bus.custom_write(0x140, 2, 0x402D));
+    assert!(!bus.custom_write(0x142, 2, 0x4101));
+    assert!(!bus.custom_write(0x146, 2, 0x0000));
+    assert!(!bus.custom_write(0x144, 2, 0x8001)); // leftmost and rightmost pixel
+                                                  // Denise shows a line's sprites only once its first BPL1DAT access
+                                                  // has happened (the Toaster opens its display window on the sprite
+                                                  // table's first line for this reason); a manual write stands in.
+    advance_to(&mut bus, 0x40, 0x08);
+    assert!(!bus.custom_write(0x110, 2, 0x0000));
+    advance_to_next_frame(&mut bus);
+
+    let rows = rows.lock().unwrap();
+    let (_, width, first_cck, row) = rows.last().expect("a completed field");
+    let field = FieldPixels {
+        pixels: row,
+        width: *width,
+        rows: 1,
+        visible_start_vpos: 0x40,
+        first_cck: *first_cck,
+        canvas_scale: 1,
+        long_frame: false,
+        interlaced: false,
+        valid_rows: 1,
+    };
+    let red = red_columns(row);
+    let left = field.column_for_lores(0x5B);
+    let display_left = field.column_for_lores(0x62);
+    assert!(
+        left < display_left,
+        "the header starts left of the display capture"
+    );
+    assert_eq!(
+        red.len(),
+        4,
+        "two lo-res pixels of sprite, two hi-res columns each: {red:?}"
+    );
+    // The serializer's first pixel lands one lo-res pixel after the
+    // comparator match (SPRITE_OUTPUT_DELAY_LORES).
+    let delay = 2 * crate::bus::SPRITE_OUTPUT_DELAY_LORES as usize;
+    assert_eq!(red[0], left as usize + delay);
+    assert_eq!(red[2], left as usize + delay + 30);
+}
+
+/// A colour change late on the line, past the display framebuffer's right
+/// edge, still reaches the slot canvas.
+#[test]
+fn slot_canvas_extends_past_the_display_captures_right_edge() {
+    let mut bus = empty_bus();
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    bus.attach_video_slot(Box::new(RowGrab {
+        rows: Arc::clone(&rows),
+        vpos: 0x60,
+    }));
+    advance_to_next_frame(&mut bus);
+    set_color0(&mut bus, 0);
+    advance_to(&mut bus, 0x60, 0xE0);
+    set_color0(&mut bus, RED);
+    advance_to(&mut bus, 0x61, 0x10);
+    set_color0(&mut bus, 0);
+    advance_to_next_frame(&mut bus);
+
+    let rows = rows.lock().unwrap();
+    let (_, width, first_cck, row) = rows.last().expect("a completed field");
+    let field = FieldPixels {
+        pixels: row,
+        width: *width,
+        rows: 1,
+        visible_start_vpos: 0x60,
+        first_cck: *first_cck,
+        canvas_scale: 1,
+        long_frame: false,
+        interlaced: false,
+        valid_rows: 1,
+    };
+    assert!(
+        *width as i64 > field.column_for_hpos(0xE8),
+        "the canvas reaches clock $E8"
+    );
+    let red = red_columns(row);
+    eprintln!(
+        "width {} red {:?}..{:?} n={}",
+        width,
+        red.first(),
+        red.last(),
+        red.len()
+    );
+    assert_eq!(field.rgb12_at_beam(0x60, 0xD0, 0), Some(0));
+    assert_eq!(field.rgb12_at_beam(0x60, 0xF0, 0), Some(RED));
+}
+
+/// A fitted card moves the capture up to the first line sprite DMA runs
+/// on, so the line headers software puts there are captured.
+#[test]
+fn fitting_a_card_captures_from_the_first_sprite_line() {
+    let mut bus = empty_bus();
+    bus.set_video_standard(crate::chipset::agnus::VideoStandard::Ntsc);
+    advance_to_next_frame(&mut bus);
+    advance_to_next_frame(&mut bus);
+    assert_eq!(
+        bus.frame_visible_start_vpos(),
+        0x1C,
+        "deep-overscan default"
+    );
+
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    bus.attach_video_slot(Box::new(RowGrab {
+        rows: Arc::clone(&rows),
+        vpos: 0x16,
+    }));
+    advance_to_next_frame(&mut bus);
+    advance_to_next_frame(&mut bus);
+    assert_eq!(bus.frame_visible_start_vpos(), 0x14);
+    let rows = rows.lock().unwrap();
+    assert_eq!(
+        rows.last().map(|r| r.0),
+        Some(0x14),
+        "the field reports its start"
+    );
+
+    bus.detach_video_slot();
+    advance_to_next_frame(&mut bus);
+    advance_to_next_frame(&mut bus);
+    assert_eq!(bus.frame_visible_start_vpos(), 0x1C);
+}

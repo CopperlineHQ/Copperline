@@ -787,6 +787,8 @@ pub struct Bus {
     video_slot_live: crate::videoslot::LiveFieldCache,
     #[serde(skip)]
     video_slot_fb: Vec<u32>,
+    #[serde(skip)]
+    video_slot_scratch: Vec<u32>,
     /// `[chipset] genlock`: a stand-alone genlock is fitted.
     #[serde(default)]
     genlock_configured: bool,
@@ -3770,6 +3772,7 @@ impl Bus {
             video_slot: None,
             video_slot_live: Default::default(),
             video_slot_fb: Vec::new(),
+            video_slot_scratch: Vec::new(),
             genlock_configured: false,
             rtc: Rtc::default(),
             rtc_present: true,
@@ -6582,8 +6585,8 @@ impl Bus {
         if self.current_frame_geometry.programmable {
             self.current_frame_visible_start_vpos = self.current_frame_geometry.visible_start_vpos;
         } else {
-            self.current_frame_visible_start_vpos = RENDER_MIN_OVERSCAN_START_VPOS;
-            self.current_frame_geometry.visible_start_vpos = RENDER_MIN_OVERSCAN_START_VPOS;
+            self.current_frame_visible_start_vpos = self.capture_start_vpos();
+            self.current_frame_geometry.visible_start_vpos = self.current_frame_visible_start_vpos;
         }
         self.last_frame_visible_start_vpos = self.current_frame_visible_start_vpos;
         self.last_frame_geometry.visible_start_vpos = self.current_frame_visible_start_vpos;
@@ -6697,6 +6700,20 @@ impl Bus {
         self.video_slot_live.renders
     }
 
+    /// First beam line the frame capture keeps on a standard scan: the
+    /// deep-overscan minimum, or with a video-slot card fitted the first
+    /// line sprite DMA can run on (NTSC `$14`, PAL `$19`), since a card
+    /// reads the line headers software puts on those lines (the Toaster's
+    /// sprite table starts at line `$15`).
+    pub(crate) fn capture_start_vpos(&self) -> u32 {
+        if self.video_slot.is_some() {
+            sprite_dma_first_active_vpos(self.agnus.video_standard())
+                .min(RENDER_MIN_OVERSCAN_START_VPOS)
+        } else {
+            RENDER_MIN_OVERSCAN_START_VPOS
+        }
+    }
+
     fn video_slot_beam(&self) -> crate::videoslot::BeamPos {
         crate::videoslot::BeamPos {
             vpos: self.agnus.vpos,
@@ -6716,27 +6733,37 @@ impl Bus {
         };
         if device.wants_completed_fields() && self.last_frame_render_base.is_some() {
             let mut fb = std::mem::take(&mut self.video_slot_fb);
-            let (rows, width, start, scale, laced) =
-                crate::video::bitplane::render_completed_for_slot(self, &mut fb);
+            let mut scratch = std::mem::take(&mut self.video_slot_scratch);
+            let mut input = crate::video::bitplane::RenderInput::from_bus(self);
+            let wide = crate::video::bitplane::render_wide(
+                &mut input,
+                crate::videoslot::SLOT_FIRST_CCK,
+                crate::videoslot::SLOT_LINE_CCK,
+                usize::MAX,
+                &mut fb,
+                &mut scratch,
+            );
             // LOF has already toggled for the new field on a laced screen;
             // the completed field was the other one.
-            let long_frame = if laced {
+            let long_frame = if wide.interlaced {
                 !self.agnus.lof
             } else {
                 self.agnus.lof
             };
             let field = crate::videoslot::FieldPixels {
                 pixels: &fb,
-                width,
-                rows,
-                visible_start_vpos: start,
-                canvas_scale: scale,
+                width: wide.stride,
+                rows: wide.rows,
+                visible_start_vpos: wide.visible_start_vpos,
+                first_cck: crate::videoslot::SLOT_FIRST_CCK,
+                canvas_scale: wide.canvas_scale,
                 long_frame,
-                interlaced: laced,
-                valid_rows: rows,
+                interlaced: wide.interlaced,
+                valid_rows: wide.rows,
             };
             device.field_complete(&field, self.video_slot_beam());
             self.video_slot_fb = fb;
+            self.video_slot_scratch = scratch;
         }
         self.video_slot = Some(device);
     }
@@ -8359,6 +8386,7 @@ impl Bus {
             self.denise.diwstrt,
             self.denise.diwstop,
             self.effective_diwhigh(),
+            self.capture_start_vpos(),
         )
     }
 
@@ -11099,12 +11127,16 @@ fn display_window_unprogrammed(diwstrt: u16, diwstop: u16) -> bool {
     diwstrt == 0 && diwstop == 0
 }
 
-fn visible_start_vpos_for_diw(diwstrt: u16, diwstop: u16, diwhigh: DiwHigh) -> u32 {
+fn visible_start_vpos_for_diw(
+    diwstrt: u16,
+    diwstop: u16,
+    diwhigh: DiwHigh,
+    min_start_vpos: u32,
+) -> u32 {
     if display_window_unprogrammed(diwstrt, diwstop) {
         return RENDER_VISIBLE_START_VPOS;
     }
-    u32::from(diw_v_start(diwstrt, diwhigh))
-        .clamp(RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_START_VPOS)
+    u32::from(diw_v_start(diwstrt, diwhigh)).clamp(min_start_vpos, RENDER_VISIBLE_START_VPOS)
 }
 
 fn clipped_display_rows_before_visible(

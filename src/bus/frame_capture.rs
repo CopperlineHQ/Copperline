@@ -167,7 +167,7 @@ impl Bus {
         self.current_frame_display_snapshot_taken = false;
         self.ocs_same_line_diw_start_blocked_vpos = None;
         self.current_frame_render_blocked = false;
-        self.current_frame_visible_start_vpos = RENDER_MIN_OVERSCAN_START_VPOS;
+        self.current_frame_visible_start_vpos = self.capture_start_vpos();
         self.current_frame_render_base = self.capture_render_snapshot();
         // Carry each sprite channel's DMA pointer across the frame boundary the
         // way real Agnus does: SPRxPT advances only on fetched words, so the
