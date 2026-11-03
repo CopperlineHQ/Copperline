@@ -860,6 +860,7 @@ fn raw_config_serialize_round_trips() {
             video: Some("PAL".to_string()),
             agnus: None,
             denise: None,
+            genlock: None,
         },
         ide: RawIde {
             master: Some(RawDrive::from_path("hd0.hdf")),
@@ -1752,6 +1753,14 @@ fn chipset_video_standard_parses() -> Result<()> {
             "#,
     )?;
     assert_eq!(cfg.video_standard, VideoStandard::Ntsc);
+    assert!(!cfg.genlock, "no genlock unless configured");
+    Ok(())
+}
+
+#[test]
+fn chipset_genlock_parses() -> Result<()> {
+    let cfg = parse_config("[chipset]\ngenlock = true\n")?;
+    assert!(cfg.genlock);
     Ok(())
 }
 

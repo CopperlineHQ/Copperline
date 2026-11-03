@@ -233,6 +233,13 @@ pub struct Agnus {
     /// keeps running. TODO: a full model would halt the sync generators and
     /// every beam-derived process, not just the CPU-visible counters.
     ersy_freeze: Option<ErsyFreeze>,
+    /// A genlock is attached and supplying sync (`[chipset] genlock`, or a
+    /// video-slot card such as the Video Toaster). ERSY then slaves the
+    /// beam to that sync instead of stopping it; the external sync is
+    /// modelled as running at the machine's own timing, so the counters
+    /// stay live.
+    #[serde(default)]
+    genlock_sync: bool,
     /// the light-pen beam latch lives in Agnus but its enable is a Denise
     /// register bit Agnus snoops off the shared register bus.
     lpen_enabled: bool,
@@ -752,6 +759,7 @@ impl Agnus {
             dma_addr_mask: 0x001F_FFFF,
             vpos_read_delay: None,
             ersy_freeze: None,
+            genlock_sync: false,
             lpen_enabled: false,
             lpen_latch: None,
             lpen_triggered_this_field: false,
@@ -1223,6 +1231,10 @@ impl Agnus {
     /// stops the beam counters: the readback latches the position at the
     /// write. Clearing ERSY releases the counters back to the live beam.
     pub fn set_ersy(&mut self, enabled: bool) {
+        if self.genlock_sync {
+            self.ersy_freeze = None;
+            return;
+        }
         match (enabled, self.ersy_freeze) {
             (true, None) => {
                 self.ersy_freeze = Some(ErsyFreeze {
@@ -1235,6 +1247,20 @@ impl Agnus {
             (false, Some(_)) => self.ersy_freeze = None,
             _ => {}
         }
+    }
+
+    /// Attach or detach a genlock's sync. While attached, ERSY never freezes
+    /// the beam readback (see `genlock_sync`); attaching releases a freeze
+    /// already in force.
+    pub fn set_genlock_sync(&mut self, present: bool) {
+        self.genlock_sync = present;
+        if present {
+            self.ersy_freeze = None;
+        }
+    }
+
+    pub fn genlock_sync(&self) -> bool {
+        self.genlock_sync
     }
 
     /// The internal LPENV/LPENH latches, exposed through VPOSR/VHPOSR while
@@ -1532,6 +1558,46 @@ mod tests {
 
         agnus.advance_by_cck(1);
         assert_eq!(agnus.hpos, 5);
+    }
+
+    /// With a genlock supplying sync, ERSY slaves the beam to it instead of
+    /// stopping it, so the counters keep moving. The Video Toaster switcher
+    /// is the regression example: it runs with ERSY set and waits for the
+    /// bottom of the frame on VPOSR.V8, which never comes with a frozen
+    /// readback.
+    #[test]
+    fn ersy_with_genlock_keeps_beam_counters_live() {
+        let mut agnus =
+            Agnus::with_video_standard_and_revision(VideoStandard::Ntsc, AgnusRevision::AgaAlice);
+        agnus.set_genlock_sync(true);
+        agnus.vpos = 0x50;
+        agnus.hpos = 0x40;
+        agnus.set_ersy(true);
+        let before = agnus.read_vhposr();
+        agnus.advance_by_cck(4);
+        assert_ne!(agnus.read_vhposr(), before);
+        agnus.vpos = 0x102;
+        assert_eq!(agnus.read_vposr() & 1, 1, "V8 tracks the live beam");
+    }
+
+    /// Attaching a genlock while ERSY already froze the counters releases
+    /// them; removing it leaves later ERSY writes freezing again.
+    #[test]
+    fn genlock_attach_releases_an_ersy_freeze() {
+        let mut agnus =
+            Agnus::with_video_standard_and_revision(VideoStandard::Ntsc, AgnusRevision::AgaAlice);
+        agnus.vpos = 0x50;
+        agnus.set_ersy(true);
+        let frozen = agnus.read_vhposr();
+        agnus.advance_by_cck(8);
+        assert_eq!(agnus.read_vhposr(), frozen);
+        agnus.set_genlock_sync(true);
+        assert_ne!(agnus.read_vhposr(), frozen);
+        agnus.set_genlock_sync(false);
+        agnus.set_ersy(true);
+        let frozen = agnus.read_vhposr();
+        agnus.advance_by_cck(8);
+        assert_eq!(agnus.read_vhposr(), frozen);
     }
 
     /// BPLCON0.ERSY with no genlock stops the beam counters: VPOSR/VHPOSR

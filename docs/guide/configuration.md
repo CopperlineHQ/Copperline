@@ -880,6 +880,7 @@ revision = "OCS"   # OCS, ECS, or AGA preset
 video = "PAL"      # PAL or NTSC
 # agnus = "8372A"  # optional fine-grained override
 # denise = "OCS"   # optional fine-grained override
+# genlock = true   # an external genlock supplies sync (default false)
 ```
 
 `revision` is a preset; `agnus` and `denise` allow the mixed configurations
@@ -897,6 +898,17 @@ The AGA preset resolves to Alice and Lisa: 8 bitplanes, the 256-entry
 sprite fetch (DMA and manual sprites), SSCAN2/BSCAN2 scan doubling, 35 ns
 BPLCON3 SPRES output, BPLCON4, and CLXCON2. Remaining gaps are recorded in
 [](../internals/chipset).
+
+`genlock = true` fits an external genlock supplying sync. Setting
+`BPLCON0.ERSY` then slaves the beam to that sync instead of stopping it, so
+the beam counters (`VPOSR`/`VHPOSR`) keep moving; the external sync runs at
+the machine's own timing. Without a genlock, ERSY freezes the counters, as on
+a real Amiga with nothing in the genlock socket. Software written for a
+genlock or a video-slot card that supplies sync (the NewTek Video Toaster)
+runs with ERSY set and waits on the beam, so it needs this. Kickstart's
+genlock probe also finds the genlock, so the OS hides the programmable 31 kHz
+modes that a genlock cannot follow. A [video-slot card](../internals/video)
+that supplies its own sync sets this for as long as it is fitted.
 
 ## `[display]`
 

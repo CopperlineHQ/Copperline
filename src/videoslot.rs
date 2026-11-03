@@ -199,6 +199,13 @@ pub trait VideoSlotDevice: Send {
         None
     }
 
+    /// Whether the card supplies genlock sync to the Amiga (the Toaster
+    /// does). While fitted, `BPLCON0.ERSY` slaves the beam to it instead
+    /// of stopping the counters.
+    fn supplies_sync(&self) -> bool {
+        false
+    }
+
     /// Whether speculative run-ahead may run with this device attached.
     /// A card holding framestores and reacting to the picture is machine
     /// state run-ahead cannot rewind, so the default is no.

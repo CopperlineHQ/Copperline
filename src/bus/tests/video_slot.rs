@@ -191,3 +191,53 @@ fn video_slot_card_blocks_runahead() {
     bus.detach_video_slot();
     assert_eq!(bus.runahead_host_block_reason(), None);
 }
+
+struct SyncCard;
+
+impl VideoSlotDevice for SyncCard {
+    fn name(&self) -> &'static str {
+        "sync"
+    }
+
+    fn wants_completed_fields(&self) -> bool {
+        false
+    }
+
+    fn supplies_sync(&self) -> bool {
+        true
+    }
+}
+
+fn vhposr(bus: &mut Bus) -> u16 {
+    bus.custom_read(0xDFF006, 2) as u16
+}
+
+#[test]
+fn a_card_supplying_sync_keeps_ersy_beam_live() {
+    let mut bus = empty_bus();
+    bus.attach_video_slot(Box::new(SyncCard));
+    assert!(!bus.custom_write(0x100, 2, 0x0202)); // BPLCON0: COLOR + ERSY
+    let a = vhposr(&mut bus);
+    bus.advance_devices(64);
+    assert_ne!(vhposr(&mut bus), a, "beam slaved to the card's sync");
+
+    // Without the card (and no configured genlock) ERSY freezes again.
+    bus.detach_video_slot();
+    assert!(!bus.custom_write(0x100, 2, 0x0200));
+    assert!(!bus.custom_write(0x100, 2, 0x0202));
+    let a = vhposr(&mut bus);
+    bus.advance_devices(64);
+    assert_eq!(vhposr(&mut bus), a);
+}
+
+#[test]
+fn configured_genlock_outlives_a_sync_card() {
+    let mut bus = empty_bus();
+    bus.set_genlock(true);
+    bus.attach_video_slot(Box::new(SyncCard));
+    bus.detach_video_slot();
+    assert!(!bus.custom_write(0x100, 2, 0x0202));
+    let a = vhposr(&mut bus);
+    bus.advance_devices(64);
+    assert_ne!(vhposr(&mut bus), a);
+}

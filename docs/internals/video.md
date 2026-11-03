@@ -651,7 +651,11 @@ colour clock times the canvas scale. `FieldPixels::pixel_at_beam` and
 
 The card can also drive the parallel data pins (`parallel_read`), ahead of
 the Centronics peripheral and the joystick adapter; pins the guest has made
-outputs (DDRB set) stay CIA-driven. A fitted card blocks run-ahead, since
+outputs (DDRB set) stay CIA-driven. A card that supplies genlock sync
+(`supplies_sync`, the Toaster) puts Agnus in genlock mode while fitted:
+`BPLCON0.ERSY` then leaves the beam counters live instead of freezing them
+(`Agnus::set_genlock_sync`; `[chipset] genlock` does the same without a
+card). A fitted card blocks run-ahead, since
 it holds state run-ahead cannot rewind. Like the parallel peripheral it is
 host-attached (`Bus::attach_video_slot`) and survives save-state loads; it
 is not itself serialised.

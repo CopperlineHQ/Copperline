@@ -787,6 +787,9 @@ pub struct Bus {
     video_slot_live: crate::videoslot::LiveFieldCache,
     #[serde(skip)]
     video_slot_fb: Vec<u32>,
+    /// `[chipset] genlock`: a stand-alone genlock is fitted.
+    #[serde(default)]
+    genlock_configured: bool,
     pub rtc: Rtc,
     /// Whether the $DC0000 RTC is fitted (machine-profile flag; the base
     /// A600 shipped without one). The CPU memory map consults this before
@@ -3767,6 +3770,7 @@ impl Bus {
             video_slot: None,
             video_slot_live: Default::default(),
             video_slot_fb: Vec::new(),
+            genlock_configured: false,
             rtc: Rtc::default(),
             rtc_present: true,
             gayle: None,
@@ -6654,13 +6658,28 @@ impl Bus {
     /// choice and does not change ordinary machine behavior.
     /// Fit a card in the video slot, replacing any fitted one.
     pub fn attach_video_slot(&mut self, device: Box<dyn crate::videoslot::VideoSlotDevice>) {
+        if device.supplies_sync() {
+            self.agnus.set_genlock_sync(true);
+        }
         self.video_slot = Some(device);
         self.video_slot_live = Default::default();
     }
 
-    /// Remove the video-slot card, returning it.
+    /// Remove the video-slot card, returning it. Its sync goes with it
+    /// unless a genlock is configured independently.
     pub fn detach_video_slot(&mut self) -> Option<Box<dyn crate::videoslot::VideoSlotDevice>> {
-        self.video_slot.take()
+        let device = self.video_slot.take();
+        if device.as_ref().is_some_and(|d| d.supplies_sync()) && !self.genlock_configured {
+            self.agnus.set_genlock_sync(false);
+        }
+        device
+    }
+
+    /// Fit or remove a stand-alone genlock (`[chipset] genlock`).
+    pub fn set_genlock(&mut self, present: bool) {
+        self.genlock_configured = present;
+        let card_sync = self.video_slot.as_ref().is_some_and(|d| d.supplies_sync());
+        self.agnus.set_genlock_sync(present || card_sync);
     }
 
     pub fn video_slot(&self) -> Option<&dyn crate::videoslot::VideoSlotDevice> {
