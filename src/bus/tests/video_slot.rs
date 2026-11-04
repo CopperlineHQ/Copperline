@@ -42,8 +42,6 @@ struct Probe {
     seen: Arc<Mutex<Seen>>,
     /// Lines whose border colour a completed field is sampled at.
     sample_lines: Vec<u32>,
-    /// Sample this many lines above the beam on a parallel read.
-    read_lag: u32,
     wants_fields: bool,
 }
 
@@ -72,7 +70,8 @@ impl VideoSlotDevice for Probe {
     fn parallel_read(&mut self, live: &mut LiveField<'_>, _ddrb: u8) -> Option<u8> {
         let beam = live.beam();
         let field = live.pixels();
-        let sample = field.rgb12_at_beam(beam.vpos - self.read_lag, PROBE_HPOS, 0);
+        // The beam line is the only one a live field holds.
+        let sample = field.rgb12_at_beam(beam.vpos, PROBE_HPOS, 0);
         self.seen
             .lock()
             .unwrap()
@@ -83,17 +82,11 @@ impl VideoSlotDevice for Probe {
     }
 }
 
-fn probe(
-    bus: &mut Bus,
-    sample_lines: Vec<u32>,
-    read_lag: u32,
-    wants_fields: bool,
-) -> Arc<Mutex<Seen>> {
+fn probe(bus: &mut Bus, sample_lines: Vec<u32>, wants_fields: bool) -> Arc<Mutex<Seen>> {
     let seen = Arc::new(Mutex::new(Seen::default()));
     bus.attach_video_slot(Box::new(Probe {
         seen: Arc::clone(&seen),
         sample_lines,
-        read_lag,
         wants_fields,
     }));
     seen
@@ -102,7 +95,7 @@ fn probe(
 #[test]
 fn completed_fields_show_beam_timed_border_colours() {
     let mut bus = empty_bus();
-    let seen = probe(&mut bus, vec![0x50, 0x70, 0xA0], 0, true);
+    let seen = probe(&mut bus, vec![0x50, 0x70, 0xA0], true);
     advance_to_next_frame(&mut bus);
     seen.lock().unwrap().fields.clear();
 
@@ -125,16 +118,16 @@ fn completed_fields_show_beam_timed_border_colours() {
 #[test]
 fn opting_out_of_completed_fields_skips_the_frame_render() {
     let mut bus = empty_bus();
-    let seen = probe(&mut bus, vec![0x50], 0, false);
+    let seen = probe(&mut bus, vec![0x50], false);
     advance_to_next_frame(&mut bus);
     advance_to_next_frame(&mut bus);
     assert!(seen.lock().unwrap().fields.is_empty());
 }
 
 #[test]
-fn parallel_read_sees_the_field_in_progress() {
+fn parallel_read_sees_the_beam_line_in_progress() {
     let mut bus = empty_bus();
-    let seen = probe(&mut bus, Vec::new(), 4, false);
+    let seen = probe(&mut bus, Vec::new(), false);
     bus.cia_a.write(REG_DDRB, 0x00); // all data pins are inputs
     advance_to_next_frame(&mut bus);
 
@@ -142,34 +135,37 @@ fn parallel_read_sees_the_field_in_progress() {
     advance_to(&mut bus, 0x60, 0x10);
     set_color0(&mut bus, RED);
 
-    // Four lines below the colour change the card samples line $66 of this
-    // same field, which is already red.
-    advance_to(&mut bus, 0x6A, 0x20);
+    // The card samples the beam's own line, left of the beam: red since
+    // the colour write ten lines up.
+    advance_to(&mut bus, 0x6A, 0xA0);
     let v = bus.cia_a_read(0xBFE101, 1) as u8;
     assert_eq!(v, 0xF0, "red nibble F, green nibble 0");
-    // A second read on the same line reuses the live render.
+    // A second read at the same beam position reuses the live render.
     let v2 = bus.cia_a_read(0xBFE101, 1) as u8;
     assert_eq!(v2, 0xF0);
     assert_eq!(bus.video_slot_live_renders(), 1);
 
-    set_color0(&mut bus, GREEN);
+    // A colour write on the beam line itself, before the sample column,
+    // is in the line the card sees.
     advance_to(&mut bus, 0x96, 0x20);
+    set_color0(&mut bus, GREEN);
+    advance_to(&mut bus, 0x96, 0xA0);
     let v3 = bus.cia_a_read(0xBFE101, 1) as u8;
-    assert_eq!(v3, 0x0F, "line $92 is green");
+    assert_eq!(v3, 0x0F, "line $96 is green from clock $20");
     assert_eq!(bus.video_slot_live_renders(), 2);
 
     let seen = seen.lock().unwrap();
     assert_eq!(seen.reads.len(), 3);
     let (beam, _, valid_rows) = seen.reads[2];
     assert_eq!(beam.vpos, 0x96);
-    // Only rows above the beam are final.
-    assert!(valid_rows <= beam.vpos as usize);
+    // Only the beam line is rendered.
+    assert_eq!(valid_rows, 1);
 }
 
 #[test]
 fn card_cannot_override_output_pins() {
     let mut bus = empty_bus();
-    let _seen = probe(&mut bus, Vec::new(), 2, false);
+    let _seen = probe(&mut bus, Vec::new(), false);
     advance_to_next_frame(&mut bus);
     set_color0(&mut bus, RED | GREEN); // card answers $FF
     advance_to(&mut bus, 0x80, 0x20);
@@ -186,7 +182,7 @@ fn video_slot_card_blocks_runahead() {
     // No other host-backed blocker in the way.
     bus.rtc_present = false;
     assert_eq!(bus.runahead_host_block_reason(), None);
-    let _seen = probe(&mut bus, Vec::new(), 0, false);
+    let _seen = probe(&mut bus, Vec::new(), false);
     assert_eq!(bus.runahead_host_block_reason(), Some("video-slot card"));
     bus.detach_video_slot();
     assert_eq!(bus.runahead_host_block_reason(), None);
@@ -374,14 +370,6 @@ fn slot_canvas_extends_past_the_display_captures_right_edge() {
         *width as i64 > field.column_for_hpos(0xE8),
         "the canvas reaches clock $E8"
     );
-    let red = red_columns(row);
-    eprintln!(
-        "width {} red {:?}..{:?} n={}",
-        width,
-        red.first(),
-        red.last(),
-        red.len()
-    );
     assert_eq!(field.rgb12_at_beam(0x60, 0xD0, 0), Some(0));
     assert_eq!(field.rgb12_at_beam(0x60, 0xF0, 0), Some(RED));
 }
@@ -419,4 +407,67 @@ fn fitting_a_card_captures_from_the_first_sprite_line() {
     advance_to_next_frame(&mut bus);
     advance_to_next_frame(&mut bus);
     assert_eq!(bus.frame_visible_start_vpos(), 0x1C);
+}
+
+/// A card answering a parallel read sees the beam's own line of the field
+/// in progress, rendered on its own: the line header sprite and a colour
+/// written earlier on that line are there, as in a completed field.
+#[test]
+fn live_field_renders_the_beam_line_alone() {
+    let mut bus = empty_bus();
+    let seen = Arc::new(Mutex::new(
+        Vec::<(u32, u32, Option<u16>, Option<u16>, usize)>::new(),
+    ));
+    /// `(vpos, hpos, header pixel, border pixel, rows)` per read.
+    type Read = (u32, u32, Option<u16>, Option<u16>, usize);
+    struct Probe(Arc<Mutex<Vec<Read>>>);
+    impl VideoSlotDevice for Probe {
+        fn name(&self) -> &'static str {
+            "probe"
+        }
+        fn wants_completed_fields(&self) -> bool {
+            false
+        }
+        fn parallel_read(&mut self, live: &mut LiveField<'_>, _ddrb: u8) -> Option<u8> {
+            let beam = live.beam();
+            let field = live.pixels();
+            let header = field
+                .row(beam.vpos)
+                .map(|row| rgb12_from(row[field.column_for_lores(0x5C) as usize]));
+            let border = field.rgb12_at_beam(beam.vpos, 0x60, 0);
+            self.0
+                .lock()
+                .unwrap()
+                .push((beam.vpos, beam.hpos, header, border, field.rows));
+            None
+        }
+    }
+    fn rgb12_from(p: u32) -> u16 {
+        crate::videoslot::rgba8_to_rgb12(p)
+    }
+    bus.attach_video_slot(Box::new(Probe(Arc::clone(&seen))));
+    bus.cia_a.write(REG_DDRB, 0x00);
+    advance_to_next_frame(&mut bus);
+    set_color0(&mut bus, 0);
+    assert!(!bus.custom_write(0x08E, 2, 0x2C40));
+    assert!(!bus.custom_write(0x090, 2, 0x2CD1));
+    assert!(!bus.custom_write(0x100, 2, 0x0200));
+    assert!(!bus.custom_write(0x1A2, 2, 0x0F00)); // COLOR17 red
+    advance_to(&mut bus, 0x3F, 0x10);
+    assert!(!bus.custom_write(0x140, 2, 0x402D)); // sprite 0 at $5B, line $40
+    assert!(!bus.custom_write(0x142, 2, 0x4101));
+    assert!(!bus.custom_write(0x146, 2, 0x0000));
+    assert!(!bus.custom_write(0x144, 2, 0x8001));
+    advance_to(&mut bus, 0x40, 0x08);
+    assert!(!bus.custom_write(0x110, 2, 0x0000)); // BPL1DAT: sprites on
+    advance_to(&mut bus, 0x40, 0x30);
+    set_color0(&mut bus, GREEN); // mid-line, before the probe's border sample at $60
+    advance_to(&mut bus, 0x40, 0x90);
+    let _ = bus.cia_a_read(0xBFE101, 1);
+    let seen = seen.lock().unwrap();
+    let (vpos, hpos, header, border, rows) = seen[0];
+    assert_eq!((vpos, rows), (0x40, 1), "one row: the beam line");
+    assert!(hpos >= 0x90);
+    assert_eq!(header, Some(RED), "the sprite's first pixel at $5C");
+    assert_eq!(border, Some(GREEN), "this line's own colour write");
 }

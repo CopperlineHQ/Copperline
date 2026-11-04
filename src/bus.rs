@@ -6761,7 +6761,10 @@ impl Bus {
                 interlaced: wide.interlaced,
                 valid_rows: wide.rows,
             };
-            device.field_complete(&field, self.video_slot_beam());
+            // The counter already moved on to the new field.
+            let mut at = self.video_slot_beam();
+            at.frame = at.frame.saturating_sub(1);
+            device.field_complete(&field, at);
             self.video_slot_fb = fb;
             self.video_slot_scratch = scratch;
         }

@@ -18,10 +18,11 @@
 //! - [`VideoSlotDevice::field_complete`] receives every finished field,
 //!   rendered through the same painter the display uses, at the frame wrap.
 //! - [`VideoSlotDevice::parallel_read`] runs on every guest read of
-//!   `$BFE101` and gets a [`LiveField`] that can render the field still in
-//!   progress, down to the line the beam is on. A card that reacts within
-//!   the same field (a request drawn on line 20, answered on line 40, or a
-//!   byte put on the port while its pixel is being displayed) uses this.
+//!   `$BFE101` and gets a [`LiveField`] that renders the line the beam is
+//!   on, from the field still in progress. A card that answers a request
+//!   drawn on the very line being displayed (the Toaster puts a byte on the
+//!   port while its pixel is passing) uses this; the render is one row, so
+//!   software that polls the port thousands of times a field stays cheap.
 //!
 //! Both views paint a line wider than the display framebuffer: colour
 //! clocks [`SLOT_FIRST_CCK`] onwards for [`SLOT_LINE_CCK`] clocks, which
@@ -40,7 +41,9 @@ pub struct BeamPos {
     pub cck: u64,
     /// Long-frame flag of the field the beam is in (LOF).
     pub long_frame: bool,
-    /// Emulated frame counter of the field the beam is in.
+    /// Emulated frame counter of the field the beam is in. A field's
+    /// completion ([`VideoSlotDevice::field_complete`]) carries the same
+    /// number as the parallel reads made while it was in progress.
     pub frame: u64,
 }
 
@@ -73,9 +76,9 @@ pub struct FieldPixels<'a> {
     pub canvas_scale: usize,
     pub long_frame: bool,
     pub interlaced: bool,
-    /// Rows `0..valid_rows` are final. Equal to `rows` for a completed field;
-    /// a live field is final above the beam, and on the beam's own line to
-    /// the left of the beam.
+    /// Rows `0..valid_rows` are final. Equal to `rows` for a completed field.
+    /// A live field holds the beam's line alone, final to the left of the
+    /// beam.
     pub valid_rows: usize,
 }
 
@@ -136,10 +139,12 @@ pub fn rgba8_to_rgb24(c: u32) -> u32 {
     (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b)
 }
 
-/// On-demand render of the field the beam is currently in.
+/// On-demand render of lines of the field in progress.
 ///
-/// [`LiveField::pixels`] renders the field down to the beam's line; the
-/// render is reused while the beam stays put.
+/// [`LiveField::pixels`] renders the beam's line; [`LiveField::line`] any
+/// line the beam has passed (a card that keeps per-line state, such as the
+/// Toaster's line headers, walks the lines above the beam before answering
+/// a read). A render is reused while the beam stays put.
 pub struct LiveField<'a> {
     pub(crate) bus: &'a crate::bus::Bus,
     pub(crate) cache: &'a mut LiveFieldCache,
@@ -151,19 +156,38 @@ impl<'a> LiveField<'a> {
         self.beam
     }
 
-    /// The in-progress field: final above the beam, and on the beam's line
-    /// to the left of it.
+    /// First line of the field's capture: the line the completed field
+    /// handed to [`VideoSlotDevice::field_complete`] will start at.
+    pub fn first_vpos(&self) -> u32 {
+        self.bus.in_progress_render_parts().visible_start_vpos
+    }
+
+    /// The beam's own line of the in-progress field, final to the left of
+    /// the beam: a one-row canvas whose row 0 is the beam line.
     pub fn pixels(&mut self) -> FieldPixels<'_> {
-        let key = (self.beam.frame, self.beam.vpos, self.beam.hpos);
+        let vpos = self.beam.vpos;
+        self.render_line(vpos, self.beam.hpos)
+    }
+
+    /// One line the beam has passed (`vpos < beam.vpos`), final across its
+    /// width; `None` for the beam's line or below it, or above the capture.
+    pub fn line(&mut self, vpos: u32) -> Option<FieldPixels<'_>> {
+        if vpos >= self.beam.vpos || vpos < self.first_vpos() {
+            return None;
+        }
+        Some(self.render_line(vpos, u32::MAX))
+    }
+
+    fn render_line(&mut self, vpos: u32, hpos: u32) -> FieldPixels<'_> {
+        let key = (self.beam.frame, vpos, hpos);
         if self.cache.rendered_at != Some(key) {
-            let start = self.bus.in_progress_render_parts().visible_start_vpos;
-            let rows_limit = self.beam.vpos.saturating_sub(start) as usize + 1;
-            let mut input = crate::video::bitplane::RenderInput::from_bus_in_progress(self.bus);
+            let mut input =
+                crate::video::bitplane::RenderInput::from_bus_in_progress(self.bus, Some(vpos));
             let wide = crate::video::bitplane::render_wide(
                 &mut input,
                 SLOT_FIRST_CCK,
                 SLOT_LINE_CCK,
-                rows_limit,
+                1,
                 &mut self.cache.fb,
                 &mut self.cache.scratch,
             );

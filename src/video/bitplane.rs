@@ -2723,6 +2723,12 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
                 let (entry, loct) = palette_entry_for_write(state.bplcon3, control.aga(), idx);
                 palette.write_entry(usize::from(entry), loct, value);
                 state.palette.write_entry(usize::from(entry), loct, value);
+                // An earlier event of the same (or an earlier) beam line
+                // may already have seeded row 0's base palette; this write
+                // still precedes row 0's first pixel, so patch it in.
+                for base in &mut base_palettes[..next_base_line] {
+                    base.write_entry(usize::from(entry), loct, value);
+                }
             }
             continue;
         }
@@ -2864,7 +2870,19 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
                 }
             }
             control = next_control;
-            push_control_segment(control_segments, line, beam_x, base_controls[line], control);
+            if before_visible_lines {
+                // A write above the first rendered line is folded into row
+                // 0's base control rather than recorded as a segment at x 0:
+                // the horizontal-window scan (and the row-0 fill above,
+                // which seeded the base with the pre-write state) must see
+                // it in force from the line's first comparator tick, not
+                // from the framebuffer's left edge.
+                if let Some(base) = base_controls.first_mut() {
+                    *base = control;
+                }
+            } else {
+                push_control_segment(control_segments, line, beam_x, base_controls[line], control);
+            }
             if matches!(off, 0x102 | 0x108 | 0x10A) {
                 if let Some(events_by_line) = display_line_events.as_deref_mut() {
                     if line < events_by_line.len() {
@@ -4215,13 +4233,26 @@ impl RenderInput {
     /// Snapshot the frame the beam is in now (see
     /// [`Bus::in_progress_render_parts`]). Rows above the beam render exactly
     /// as the completed frame later will; rows at or below it are partial.
-    pub(crate) fn from_bus_in_progress(bus: &Bus) -> Self {
+    ///
+    /// With `first_vpos`, the snapshot starts at that beam line instead of
+    /// the frame's first captured line: row 0 is `first_vpos`, and the
+    /// register writes above it fold into row 0's start state the way
+    /// lines above a frame's visible start always do. A render of one line
+    /// then costs one row, not a frame.
+    pub(crate) fn from_bus_in_progress(bus: &Bus, first_vpos: Option<u32>) -> Self {
         let parts = bus.in_progress_render_parts();
+        let skip = first_vpos
+            .map(|v| v.saturating_sub(parts.visible_start_vpos) as usize)
+            .unwrap_or(0)
+            .min(parts.geometry.visible_lines);
+        let mut geometry = parts.geometry;
+        geometry.visible_start_vpos += skip as u32;
+        geometry.visible_lines -= skip;
         Self {
-            geometry: parts.geometry,
+            geometry,
             presentation_h_window: parts.presentation_h_window,
             presentation_v_window: parts.presentation_v_window,
-            visible_start_vpos: parts.visible_start_vpos,
+            visible_start_vpos: parts.visible_start_vpos + skip as u32,
             palette_split: parts.palette_split,
             render_base: parts.render_base,
             frame_render_events: parts.render_events.to_vec(),
@@ -4232,10 +4263,15 @@ impl RenderInput {
             top_palette_end: parts.top_palette_end,
             chip_ram: std::sync::Arc::new(parts.chip_ram.to_vec()),
             chip_ram_writes: parts.chip_ram_writes.to_vec(),
-            captured_bitplane_rows: std::sync::Arc::new(parts.captured_bitplane_rows.to_vec()),
+            captured_bitplane_rows: std::sync::Arc::new(
+                parts.captured_bitplane_rows[skip.min(parts.captured_bitplane_rows.len())..]
+                    .to_vec(),
+            ),
             captured_sprite_lines: parts.captured_sprite_lines.to_vec(),
             held_sprites: parts.held_sprites,
-            sprite_display_enable_x_by_y: parts.sprite_display_enable_x_by_y.to_vec(),
+            sprite_display_enable_x_by_y: parts.sprite_display_enable_x_by_y
+                [skip.min(parts.sprite_display_enable_x_by_y.len())..]
+                .to_vec(),
             sprite_dma_observed: parts.sprite_dma_observed,
             frame_lines: parts.frame_lines,
             programmable_vertical_blank: bus.agnus.programmable_vertical_blank(),
