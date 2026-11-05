@@ -3101,8 +3101,11 @@ struct FloppyDrive {
     last_step_inward_cck: Option<u64>,
     last_step_outward_cck: Option<u64>,
     external_id: u32,
+    // Position (0 = MSB) of the ID shift register bit an external unit
+    // presents on /RDY while its motor is stopped; see `rdy_line_asserted`.
     external_id_bit: u8,
-    external_id_mode: bool,
+    // The deselect right after the motor-off select edge that resets the
+    // register does not clock it, so the first read of an ID is its MSB.
     external_id_hold_deactivate: bool,
     // Cumulative spin time, for the COPPERLINE_DISK_SPEED_AFTER gate (lets the disk
     // run at full speed through boot, then be slowed for the demo).
@@ -3165,7 +3168,6 @@ impl Default for FloppyDrive {
             last_step_outward_cck: None,
             external_id: STANDARD_EXTERNAL_DRIVE_ID,
             external_id_bit: 0,
-            external_id_mode: false,
             external_id_hold_deactivate: false,
             elapsed_cck: 0,
         }
@@ -3240,28 +3242,38 @@ impl FloppyDrive {
         self.has_media() && self.motor_on && self.motor_cck >= MOTOR_READY_CCK
     }
 
+    /// The /RDY output of an external unit. While its motor is stopped the
+    /// drive presents its ID shift register on /RDY -- from power-on, not
+    /// only after the motor-on/off reset that starts an ID read, and for as
+    /// long as the motor stays off. A standard Amiga DD drive's ID is all
+    /// ones, so it holds /RDY asserted whenever it is selected with the
+    /// motor off; software probes for a connected external drive by sampling
+    /// /RDY that way at any time, long after Kickstart's own ID read. With
+    /// the motor on, /RDY is the spun-up platter.
     fn rdy_line_asserted(&self) -> bool {
-        if self.external_id_mode && !self.motor_on {
+        if !self.motor_on {
             return self.external_id_bit();
         }
         self.ready()
     }
 
     fn external_id_bit(&self) -> bool {
-        if self.external_id_bit >= 32 {
-            return false;
-        }
-        let shift = 31 - self.external_id_bit;
+        // Reduced here as well as in the advance: a state saved before the
+        // register wrapped may hold the old saturated position 32.
+        let shift = 31 - (self.external_id_bit % 32);
         self.external_id & (1 << shift) != 0
     }
 
     fn advance_external_id(&mut self) {
-        if self.external_id_mode && !self.motor_on {
+        if !self.motor_on {
             if self.external_id_hold_deactivate {
                 self.external_id_hold_deactivate = false;
                 return;
             }
-            self.external_id_bit = self.external_id_bit.saturating_add(1).min(32);
+            // A circular 32-bit register: the clock after bit 0 brings the
+            // MSB back round, so a drive keeps answering /RDY with its ID
+            // after a complete ID read rather than going silent.
+            self.external_id_bit = (self.external_id_bit % 32 + 1) % 32;
         }
     }
 
@@ -3269,11 +3281,9 @@ impl FloppyDrive {
         let was_on = self.motor_on;
         self.set_motor(motor_on);
         if motor_on {
-            self.external_id_mode = false;
             self.external_id_bit = 0;
             self.external_id_hold_deactivate = false;
         } else if was_on {
-            self.external_id_mode = true;
             self.external_id_bit = 0;
             self.external_id_hold_deactivate = true;
         }
@@ -3284,7 +3294,6 @@ impl FloppyDrive {
         // A bus reset (DRESB) fully de-readies the drive rather than letting
         // the spin-up accumulator coast down; clear it explicitly.
         self.motor_cck = 0;
-        self.external_id_mode = false;
         self.external_id_bit = 0;
         self.external_id_hold_deactivate = false;
         self.write_protected_sense = true;
