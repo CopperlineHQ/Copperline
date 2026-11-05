@@ -487,7 +487,13 @@ Starting the motor requires asserting `/SEL` while `/MTR` is low; stopping
 requires `/MTR` to be high before and after the select transition (matching
 WinUAE and vAmiga hardware tests). External drives clock their drive ID shift
 registers off these select edges while the motor is stopped; `DF0:` contains
-no ID hardware.
+no ID hardware. An external unit presents the current ID bit on `/RDY`
+whenever its motor is stopped -- from power-on, not only after the
+motor-on/off reset that begins an ID read -- and the register is circular, so
+clocking past the last bit brings the first one back round. A standard Amiga
+DD drive's ID is all ones, so it holds `/RDY` asserted whenever it is selected
+with the motor off; software can probe for a connected external drive that
+way at any time, long after Kickstart's own ID read at boot.
 
 Disk DMA against a mechanism that cannot deliver cells -- no media in the
 drive, or the motor line off -- arms normally and then pends: Paula has no

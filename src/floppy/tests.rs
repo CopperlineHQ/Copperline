@@ -552,7 +552,8 @@ fn connected_empty_external_drive_keeps_disk_change_asserted_through_step_poll()
     ctrl.write_prb(inward_high);
     let status = ctrl.cia_a_status_bits();
     assert_eq!(status & CIAA_DSKCHANGE, 0);
-    assert_ne!(status & CIAA_DSKRDY, 0);
+    // Motor off: /RDY carries the drive's all-ones ID, media or not.
+    assert_eq!(status & CIAA_DSKRDY, 0);
 
     ctrl.write_prb(inward_high & !CIAB_DSKSTEP);
     ctrl.tick(DISK_STATUS_SETTLE_CCK, 0, &mut []);
@@ -1069,8 +1070,84 @@ fn external_drive_id_reads_shift_msb_first_on_rdy() {
     ctrl.drives[1].external_id = 0xA5A5_0001;
 
     assert_eq!(read_external_drive_id(&mut ctrl, 1), 0xA5A5_0001);
-    assert_eq!(ctrl.drives[1].external_id_bit, 32);
+    // The register is circular: the 32nd clock brings the MSB back round.
+    assert_eq!(ctrl.drives[1].external_id_bit, 0);
     assert!(!ctrl.drives[1].motor_on);
+}
+
+#[test]
+fn external_drive_id_register_wraps_instead_of_going_silent() {
+    // Clocking past bit 0 without a fresh motor-on/off reset keeps
+    // shifting the same ID out, MSB first, rather than dropping /RDY.
+    let mut ctrl = FloppyController::default();
+    ctrl.drives[1].external_id = 0xA5A5_0001;
+    assert_eq!(read_external_drive_id(&mut ctrl, 1), 0xA5A5_0001);
+
+    let mut id = 0u32;
+    for _ in 0..32 {
+        ctrl.write_prb(drive_select_prb(1, false));
+        id = (id << 1) | u32::from(ctrl.cia_a_status_bits() & CIAA_DSKRDY == 0);
+        ctrl.write_prb(drive_deselect_prb(false));
+    }
+    assert_eq!(id, 0xA5A5_0001);
+}
+
+#[test]
+fn standard_external_drive_holds_rdy_with_motor_off_after_kickstart_id_read() {
+    // Kickstart reads every external unit's ID once at boot. A program that
+    // later probes for DF1 by selecting it with the motor off (select,
+    // deselect, select) and sampling /RDY once must still see the standard
+    // DD drive's all-ones ID: /RDY asserted. An unconnected slot answers
+    // nothing.
+    let mut ctrl = FloppyController::default();
+    ctrl.set_connected_drives([true, true, false, false]);
+    assert_eq!(
+        read_external_drive_id(&mut ctrl, 1),
+        STANDARD_EXTERNAL_DRIVE_ID
+    );
+    assert_eq!(read_external_drive_id(&mut ctrl, 2), 0);
+
+    for probe in 0..40 {
+        for idx in [1, 2] {
+            ctrl.write_prb(drive_select_prb(idx, false));
+            ctrl.write_prb(drive_deselect_prb(false));
+            ctrl.write_prb(drive_select_prb(idx, false));
+            let rdy_asserted = ctrl.cia_a_status_bits() & CIAA_DSKRDY == 0;
+            ctrl.write_prb(drive_deselect_prb(false));
+            assert_eq!(rdy_asserted, idx == 1, "df{idx} probe {probe}");
+        }
+    }
+    assert!(!ctrl.drives[1].motor_on);
+}
+
+#[test]
+fn standard_external_drive_answers_id_with_motor_off_from_power_on() {
+    // The ID circuit drives /RDY whenever the motor is stopped, which is the
+    // state a drive powers up in: no motor-on/off reset is needed before a
+    // motor-off select shows the all-ones ID.
+    let mut ctrl = FloppyController::default();
+    ctrl.set_connected_drives([true, true, false, false]);
+
+    ctrl.write_prb(drive_select_prb(1, false));
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.write_prb(drive_deselect_prb(false));
+    ctrl.write_prb(drive_select_prb(2, false));
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+}
+
+#[test]
+fn saturated_id_position_from_an_older_state_reads_as_wrapped() {
+    // States saved before the register wrapped could hold position 32.
+    let mut ctrl = FloppyController::default();
+    ctrl.drives[1].external_id = 0x8000_0000;
+    ctrl.drives[1].external_id_bit = 32;
+
+    ctrl.write_prb(drive_select_prb(1, false));
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
+    ctrl.write_prb(drive_deselect_prb(false));
+    assert_eq!(ctrl.drives[1].external_id_bit, 1);
+    ctrl.write_prb(drive_select_prb(1, false));
+    assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
 }
 
 #[test]
@@ -1257,10 +1334,13 @@ fn internal_df0_rdy_mirrors_track0_while_motor_is_off() {
     assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
     assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
 
-    // An external unit keeps answering with its ID bit instead.
+    // An external unit at cylinder 0 keeps answering with its ID bit
+    // instead: an ID whose MSB is clear holds /RDY high where /TRK0 is low.
     ctrl.set_connected_drives([true, true, false, false]);
+    ctrl.drives[1].external_id = 0x7FFF_FFFF;
     ctrl.write_prb(0xFF);
     ctrl.write_prb(drive_select_prb(1, false));
+    assert_eq!(ctrl.cia_a_status_bits() & CIAA_DSKTRACK0, 0);
     assert_ne!(ctrl.cia_a_status_bits() & CIAA_DSKRDY, 0);
 }
 
