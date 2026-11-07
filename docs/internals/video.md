@@ -634,15 +634,25 @@ painted by the same `render_from_input` the display uses:
   promoted the capture, `Bus::notify_video_slot_field_complete` renders the
   finished field once more on the main thread and passes it to
   `VideoSlotDevice::field_complete`. A card that does not need it opts out
-  with `wants_completed_fields`, which skips the extra render.
+  with `wants_completed_fields`, which skips the extra render. A card that
+  answers `takes_render_input` is handed the frame's `RenderInput` bundle
+  instead (`field_render_input`) and paints the field itself, on a thread
+  of its own (the Toaster, below): the bus refills a bundle the card gave
+  back (`take_spent_render_inputs`, `RenderInput::refill_from_bus`) rather
+  than allocating one per field, and the card lets go of the bundle's
+  shared chip-RAM snapshot as soon as it has painted
+  (`release_shared_buffers`), so the capture side gets the allocation back
+  at the next wrap as it does from the display's renderer.
 - **The field in progress.** A card that reacts within the same field gets
   a `LiveField` on every guest read of `$BFE101`. Its `pixels()` call
-  renders a `RenderInput` built from the capture side
+  renders the beam's own line, and `line(v)` any line above the beam, from
+  a `RenderInput` built from the capture side
   (`RenderInput::from_bus_in_progress`, the in-progress halves of the
   `frame_*`/`last_frame_*` pairs: the frame-start chip-RAM snapshot and its
   beam-timed write log, captured bitplane rows and sprite lines, and the
   frame's register events so far) for the beam's own line alone, whose
-  captured words reach the beam; `line(v)` renders a line the beam has
+  captured words reach the beam (one row per render, so software that polls
+  the port thousands of times a field stays cheap); `line(v)` renders a line the beam has
   passed the same way. A line render leaves out register writes from later
   lines, so a passed line shows what it showed then, and starts one line
   early (a lead row, then dropped) because the painter folds every write on

@@ -910,6 +910,150 @@ genlock probe also finds the genlock, so the OS hides the programmable 31 kHz
 modes that a genlock cannot follow. A [video-slot card](../internals/video)
 that supplies its own sync sets this for as long as it is fitted.
 
+## `[video_slot]`
+
+```toml
+[video_slot]
+card = "toaster"          # "none" (default) or "toaster"
+media = "C:/Toaster/Amiga Toaster Files"   # the card's host folder
+# monitors = true         # Preview and Program monitor windows (default true)
+# preview_overlay = false # the switcher interface over Preview (default false)
+# volume = "ToasterFiles"  # also mount media in the Amiga as ToasterFiles:
+```
+
+`card = "toaster"` fits an emulated NewTek Video Toaster 4000 in the
+A4000's video slot: a card that watches the digital RGB output line by line
+and answers on the parallel port, as the real one does. The NewTek switcher
+(Toaster 4.x) then starts, passes its own card tests and runs; the Toaster
+software and the Kickstart ROM are not included and must be supplied. The
+card supplies genlock sync while fitted (see `[chipset] genlock`).
+
+`media` is the folder that stands in for the card's connectors (default:
+`Amiga Toaster Files` in Copperline's own folder). It is created with these
+subfolders on first use:
+
+- `Input 1` .. `Input 4`: what is plugged into each video input. Drop
+  video files or still pictures in; several play one after another in name
+  order and loop, and an empty folder is an unplugged input. Changes are
+  picked up while the machine runs. Stills (PNG, JPEG, BMP) need nothing
+  else; video files are decoded by ffmpeg, found as `ffmpeg.exe` (or
+  `ffmpeg`) in the folder itself, beside Copperline, or on the `PATH`.
+- `Output`: recordings of the Program output (MP4 or AVI, see below).
+
+A video file's sound comes along with its picture and follows the switcher:
+what is on Program is what you hear, through the emulator's sound output,
+mixed by how much of each input Program shows (a dissolve crossfades the
+sound, a wipe by area, framestores and mattes are silent). Recordings carry
+the same sound. The real card handles picture only; this stands in for the
+audio-follow-video mixer beside it.
+- `Flyer`: kept for the Video Flyer's drives (not emulated yet).
+
+Until the switcher first drives the card, while the machine boots, both
+outputs are black and silent and the input folders are not read yet; the
+inputs start playing once the switcher is up.
+
+The switcher's own screen is an NTSC overscan display, taller and wider
+than the standard TV picture, so the default TV framing leaves its bottom
+rows (the AUTO/TAKE row and the version line) and its left edge off the
+glass. `[display] overscan = "smart"` with `autocrop = true` crops the
+window to the display window the switcher programs instead, which shows
+the whole screen; **Video Settings -> Framing** and **Autocrop** in the
+menu switch the same settings live.
+
+With `monitors` on, the card's two outputs open as windows of their own,
+each on a picture monitor: **Preview** and **Program**. Closing one only
+hides it; **Recording > Show Toaster Monitors** brings both back.
+
+The monitors' front-panel buttons work, as on a studio monitor:
+
+- **POWER** switches the tube on or off. Switched on (and when the
+  windows open), the degaussing coil thumps and hums and the picture comes
+  up as the tube warms; switched off, the picture collapses to a line, then
+  a dot that fades. The sounds are made by Copperline and played on the
+  host's output only: they are not part of the machine's sound, its WAV
+  capture or a recording. A recording carries on with the monitor off.
+- **APERTURE**, **BRIGHT**, **CHROMA**, **PHASE** and **CONTRAST** (up on
+  the top row, down below; hold to repeat) adjust the picture on the
+  monitor only: peaking, black level, saturation, hue and gain. The level
+  shows on the screen for a moment. **RESET** puts them back to their
+  presets, which leave the picture exactly as the card made it (the lamp
+  above RESET is lit at the presets).
+- **VOL** on the Program monitor is the level of the card's sound on the
+  host's speakers (switched off, the Program monitor is silent); recordings
+  keep the sound as made. On the Preview monitor it only shows its level.
+- **BLUE ONLY** drives the blue gun alone, **UNDER SCAN** shows the whole
+  raster inside the glass, and **H-V DELAY** shows the blanking and sync
+  across the middle of the picture. **INPUT B** and **C** select inputs
+  with nothing connected (a dark screen; **A** is the card).
+  **ANALOG/DIGITAL** only lights.
+
+The settings are kept per monitor in the media folder's
+`.copperline/monitors.json`.
+
+In the Program window, the **REC** button on the monitor's top edge (or
+`R`) starts and stops recording the Program output, picture and sound,
+into `Output` (its lamp lights red while it runs); **Recording > Record
+Toaster Program** does the same. **SETUP** beside it opens the
+recording setup over the picture: the format, MP4 (H.264 video with square
+pixels and AAC sound; the default) or the recorder's lossless AVI, the
+MP4's quality (Standard, CRF 18 and 192 kb/s, or High, CRF 12 and 320
+kb/s), and a button that opens the `Output` folder. An MP4 is recorded
+into an AVI beside it first and made from it with ffmpeg when the
+recording stops (the button reads SAVING and the title says so until it
+is done; the AVI is then removed, or kept if ffmpeg is missing or fails).
+The setup is kept in the media folder's `.copperline/recording.json`. The
+monitor artwork can be replaced by a `monitor-program.png` or
+`monitor-preview.png` in the media folder (or `monitor.png` for both):
+the tube is found as the area around the picture's centre enclosed by a
+near-black gap. A replaced artwork has no working front panel.
+
+**Effect sounds.** Some transitions carry sounds (8SVX samples in the
+effect, such as Shatter, Falling Sheep or Camera Iris) that the switcher
+plays through the Amiga's own audio, which Copperline mixes into its sound
+output and the recordings. (NewTek's switcher skips them when a Video
+Flyer is fitted, `animfxhandler.a`: "dont do sound if flyer!".)
+
+`volume` also mounts the media folder in the Amiga as a volume of that
+name (like a `[[filesys]]` entry, never a boot candidate), so the Toaster
+software can load framestores from the input folders and save into
+`Output`, and so the control link below can reach the Amiga. The usual
+name is `ToasterFiles`.
+
+**Control link.** With `volume` set and `S:Copperline-Link.rexx` (from
+Copperline's `assets/toaster`) started by `S:User-Startup`
+(`Run >NIL: SYS:Rexxc/RX S:Copperline-Link.rexx`), an MCP client can drive
+the Toaster software itself: the bridge drops ARexx jobs into the media
+folder's `.copperline` subfolder and the script runs them inside the Amiga
+(see [MCP server](#mcp-server) in the control-protocol reference: tools
+`toaster_switcher`, `toaster_project`, `toaster_rexx`, next to
+`toaster_status`, `toaster_capture`, `toaster_record` and
+`toaster_input`). A job puts the switcher's and the editor's ARexx hosts
+on ARexx's shared list of function hosts only while it runs: left there
+(an `addlib` with no `remlib`, in any script), they take the calls of the
+CG's own macros and hang them.
+
+**Assigns.** The Toaster software expects what NewTek's installer adds to
+`S:User-Startup`: `Assign Toaster:` on the `NewTek` folder, `Assign REXX:
+Toaster:Arexx ADD` (the CG runs its start-up macro, which loads the fonts
+it starts with, and its Alt-F keys from `REXX:CG`), `Assign HIIP:
+Toaster:Programs/Hiip_Support` (the image loaders and savers) and, for
+ToasterPaint and older CG pages, `Assign ToasterFonts: Toaster:PSFonts`.
+
+`preview_overlay` lets the switcher draw its interface over the Preview
+output when its own preference asks for it, as a one-monitor Toaster setup
+does. It is off by default because the interface has a window of its own.
+
+Headless screenshots (`--screenshot-after`) also save each output on its
+monitor beside the capture (`shot-preview.png`, `shot-program.png`).
+`COPPERLINE_DIAG_TOASTER=1` logs what the card decodes and the bus state it
+outputs; `=fields` also dumps one field's line headers in forty; `=perf`
+logs, once an emulated second, the host time each stage of the card's work
+took (`toaster perf:` lines: painting the field, scanning its headers,
+each source, the key, the mix, publishing),
+most of it on the card's own compose thread, with `submit` and
+`compose_wait` the emulation thread's share. How the card works is
+described in [](../internals/video) and in `src/toaster/`.
+
 ## `[display]`
 
 ```toml
@@ -1527,6 +1671,7 @@ channel_mode = "stereo"     # "stereo" (default) or "mono"
 stereo_separation = 100     # 0-100; 100 = hardware panning, 0 = mono
 audio_filter = "auto"       # Paula filter: "auto" (guest-driven), "on", or "off"
 # stem_granularity = "master,source"  # default --audio-stems-mode; see below
+# live_lead_ms = 150        # sound kept ahead of the output device, 50-1000; see below
 ```
 
 The drive sounds are generated from scratch: motor hum with spin-up/down
@@ -1614,6 +1759,23 @@ Windows select each device directly.
 (headless-only; see [](headless.md)), so `--audio-stems-mode` need not be
 repeated on every invocation; the CLI flag still wins when both are given.
 It has no effect without `--audio-stems DIR` on the command line.
+
+(audio-live-lead)=
+### Live output lead
+
+`live_lead_ms` is how much sound the live output keeps queued ahead of the
+host's audio device, 50 to 1000 milliseconds (default 150). The real-time
+pacer runs the machine that far ahead of the wall clock, playback starts
+once that much is queued, and the sound stops when the queue runs dry
+until it holds that much again, so the lead is how long the machine may
+run slower than real time before the sound breaks up. A backlog past twice
+the lead (the machine catching up after a stall) is trimmed back to it,
+and the pacer's own catch-up limit grows with the lead. The picture is
+shown as the machine makes it, so it runs ahead of the sound by the lead,
+which is why the default is short: for a machine that runs near the
+host's limit (a Video Toaster running a transition) `400` keeps the sound continuous through a second
+or two of lost ground, at the cost of the sound trailing the picture by
+that much. Headless runs and `--audio-wav` captures are not affected.
 
 (recording-config)=
 ## `[recording]`
@@ -2871,6 +3033,13 @@ model as the UAE family.
 the default -128 means mounted but never booted from): hard-disk boot
 partitions typically sit at priority 0 and DF0: at 5, so a bootable
 Workbench directory with `bootpri = 6` boots ahead of both.
+
+To the guest each volume is an FFS hard disk (disk type `DOS\1`, as the
+UAE family reports its directory volumes), with the host disk's size and
+free space. Some software checks the type before it will use a volume:
+the Video Toaster's file browser (its load and save requesters) lists
+only volumes of a DOS type it knows, and C:Info calls any other an
+unreadable disk.
 
 Kickstart 1.3 and newer get the full feature set, booting included: a
 `bootpri` above the competition boots the machine from the host

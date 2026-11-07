@@ -43,6 +43,25 @@ struct Probe {
     /// Lines whose border colour a completed field is sampled at.
     sample_lines: Vec<u32>,
     wants_fields: bool,
+    /// Take the frame's render input and paint the field itself, as the
+    /// Toaster does on its own thread.
+    paints_itself: bool,
+    spent: Vec<Box<crate::video::bitplane::RenderInput>>,
+}
+
+impl Probe {
+    fn note_field(&mut self, field: &FieldPixels<'_>) {
+        let samples = self
+            .sample_lines
+            .iter()
+            .map(|&v| field.rgb12_at_beam(v, PROBE_HPOS, 0))
+            .collect();
+        self.seen
+            .lock()
+            .unwrap()
+            .fields
+            .push((field.rows, field.visible_start_vpos, samples));
+    }
 }
 
 impl VideoSlotDevice for Probe {
@@ -55,16 +74,49 @@ impl VideoSlotDevice for Probe {
     }
 
     fn field_complete(&mut self, field: &FieldPixels<'_>, _at: BeamPos) {
-        let samples = self
-            .sample_lines
-            .iter()
-            .map(|&v| field.rgb12_at_beam(v, PROBE_HPOS, 0))
-            .collect();
-        self.seen
-            .lock()
-            .unwrap()
-            .fields
-            .push((field.rows, field.visible_start_vpos, samples));
+        self.note_field(field);
+    }
+
+    fn takes_render_input(&self) -> bool {
+        self.paints_itself
+    }
+
+    fn field_render_input(
+        &mut self,
+        mut input: Box<crate::video::bitplane::RenderInput>,
+        at: BeamPos,
+    ) {
+        let mut fb = Vec::new();
+        let mut scratch = Vec::new();
+        let wide = crate::video::bitplane::render_wide(
+            &mut input,
+            crate::videoslot::SLOT_FIRST_CCK,
+            crate::videoslot::SLOT_LINE_CCK,
+            usize::MAX,
+            &mut fb,
+            &mut scratch,
+        );
+        let field = FieldPixels {
+            pixels: &fb,
+            width: wide.stride,
+            rows: wide.rows,
+            visible_start_vpos: wide.visible_start_vpos,
+            first_cck: crate::videoslot::SLOT_FIRST_CCK,
+            canvas_scale: wide.canvas_scale,
+            long_frame: at.long_frame,
+            interlaced: wide.interlaced,
+            valid_rows: wide.rows,
+        };
+        self.note_field(&field);
+        input.release_shared_buffers();
+        self.spent.push(input);
+    }
+
+    fn take_spent_render_inputs(
+        &mut self,
+        pool: &mut Vec<Box<crate::video::bitplane::RenderInput>>,
+    ) {
+        pool.append(&mut self.spent);
     }
 
     fn parallel_read(&mut self, live: &mut LiveField<'_>, _ddrb: u8) -> Option<u8> {
@@ -83,11 +135,22 @@ impl VideoSlotDevice for Probe {
 }
 
 fn probe(bus: &mut Bus, sample_lines: Vec<u32>, wants_fields: bool) -> Arc<Mutex<Seen>> {
+    probe_with(bus, sample_lines, wants_fields, false)
+}
+
+fn probe_with(
+    bus: &mut Bus,
+    sample_lines: Vec<u32>,
+    wants_fields: bool,
+    paints_itself: bool,
+) -> Arc<Mutex<Seen>> {
     let seen = Arc::new(Mutex::new(Seen::default()));
     bus.attach_video_slot(Box::new(Probe {
         seen: Arc::clone(&seen),
         sample_lines,
         wants_fields,
+        paints_itself,
+        spent: Vec::new(),
     }));
     seen
 }
@@ -113,6 +176,41 @@ fn completed_fields_show_beam_timed_border_colours() {
     assert!(*rows > 0x100, "a full field was rendered: {rows} rows");
     assert!(*start < 0x50);
     assert_eq!(samples, &vec![Some(0), Some(RED), Some(GREEN)]);
+}
+
+#[test]
+fn a_card_painting_its_own_fields_sees_what_a_painted_field_shows() {
+    // The same beam-timed border colours, through the render input the
+    // bus hands a card that paints its fields itself, frame after frame
+    // (the second frame refills a bundle the card gave back).
+    let mut bus = empty_bus();
+    let seen = probe_with(&mut bus, vec![0x50, 0x70, 0xA0], true, true);
+    advance_to_next_frame(&mut bus);
+    seen.lock().unwrap().fields.clear();
+    for (first, second) in [(RED, GREEN), (GREEN, RED)] {
+        set_color0(&mut bus, 0);
+        advance_to(&mut bus, 0x60, 0x10);
+        set_color0(&mut bus, first);
+        advance_to(&mut bus, 0x90, 0x10);
+        set_color0(&mut bus, second);
+        advance_to_next_frame(&mut bus);
+    }
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.fields.len(), 2, "one field per wrap");
+    for (k, (first, second)) in [(RED, GREEN), (GREEN, RED)].into_iter().enumerate() {
+        let (rows, start, samples) = &seen.fields[k];
+        assert!(*rows > 0x100, "a full field was rendered: {rows} rows");
+        assert!(*start < 0x50);
+        assert_eq!(samples, &vec![Some(0), Some(first), Some(second)]);
+    }
+    // One bundle went round: the card gives it back, the bus refills it.
+    drop(seen);
+    assert!(bus.video_slot_inputs.is_empty());
+    let mut pool = Vec::new();
+    bus.video_slot_mut()
+        .unwrap()
+        .take_spent_render_inputs(&mut pool);
+    assert_eq!(pool.len(), 1);
 }
 
 #[test]

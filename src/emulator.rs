@@ -4606,6 +4606,7 @@ fn build_machine_inner(
     paula.set_mono_output(cfg.audio.channel_mode.is_mono());
     paula.set_stereo_separation(f32::from(cfg.audio.stereo_separation) / 100.0);
     paula.set_led_filter_mode(cfg.audio.filter);
+    crate::audio::set_live_lead_ms(cfg.audio.live_lead_ms);
     if cfg.audio.channel_mode.is_mono() && cfg.audio.stereo_separation != 100 {
         log::warn!("[audio] stereo_separation is ignored while channel_mode is mono");
     }
@@ -4622,6 +4623,16 @@ fn build_machine_inner(
     }
     bus.set_video_standard(cfg.video_standard);
     bus.set_genlock(cfg.genlock);
+    if cfg.video_slot == crate::config::VideoSlotCard::Toaster {
+        let media = cfg
+            .video_slot_media
+            .clone()
+            .unwrap_or_else(crate::paths::toaster_files_dir);
+        let mut card = crate::toaster::Toaster::with_media(Some(media));
+        card.set_preview_overlay(cfg.video_slot_preview_overlay);
+        bus.attach_video_slot(Box::new(card));
+        info!("video slot: Video Toaster 4000 fitted");
+    }
     bus.set_chipset_revisions(cfg.agnus_revision, cfg.denise_revision);
     bus.set_rtc_present(cfg.rtc_present);
     bus.set_rtc_chip(cfg.rtc_chip);

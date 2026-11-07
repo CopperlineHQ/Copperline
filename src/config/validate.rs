@@ -362,6 +362,23 @@ impl TryFrom<RawConfig> for Config {
                     }
                 },
             },
+            live_lead_ms: match raw.audio.live_lead_ms {
+                None => defaults.audio.live_lead_ms,
+                Some(v)
+                    if (crate::audio::MIN_LIVE_LEAD_MS..=crate::audio::MAX_LIVE_LEAD_MS)
+                        .contains(&v) =>
+                {
+                    v
+                }
+                Some(v) => {
+                    errors.push(anyhow!(
+                        "[audio] live_lead_ms must be {}-{}, got {v}",
+                        crate::audio::MIN_LIVE_LEAD_MS,
+                        crate::audio::MAX_LIVE_LEAD_MS
+                    ));
+                    defaults.audio.live_lead_ms
+                }
+            },
         };
         let (floppy, floppy_connected, floppy_playlists) =
             parse_floppy(raw.floppy, defaults.floppy_connected)?;
@@ -531,6 +548,43 @@ impl TryFrom<RawConfig> for Config {
         ];
         let adapter_named = raw.parallel.device.is_some();
         let parallel = resolve_parallel(raw.parallel, &raw.input)?;
+        let video_slot = match raw.video_slot.card.as_deref().map(str::to_ascii_lowercase) {
+            None => VideoSlotCard::None,
+            Some(card) => match card.as_str() {
+                "none" | "" => VideoSlotCard::None,
+                "toaster" => VideoSlotCard::Toaster,
+                other => {
+                    return Err(anyhow!(
+                        "unknown [video_slot] card {other:?}: expected none or toaster"
+                    ))
+                }
+            },
+        };
+        let video_slot_media = raw
+            .video_slot
+            .media
+            .as_deref()
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(PathBuf::from);
+        let video_slot_monitors = raw.video_slot.monitors.unwrap_or(true);
+        let video_slot_preview_overlay = raw.video_slot.preview_overlay.unwrap_or(false);
+        // `[video_slot] volume`: the card's host folder as an Amiga volume
+        // too, mounted after the `[[filesys]]` entries.
+        let video_slot_mount = match raw.video_slot.volume.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(_) if video_slot == VideoSlotCard::None => {
+                return Err(anyhow!("[video_slot] volume needs a card"))
+            }
+            Some(volume) => Some(crate::filesys::MountSpec {
+                path: video_slot_media
+                    .clone()
+                    .unwrap_or_else(crate::paths::toaster_files_dir),
+                volume: volume.trim_end_matches(':').to_string(),
+                boot_pri: -128,
+                readonly: false,
+            }),
+        };
         let parallel_joysticks = [
             parse_parallel_socket(
                 raw.input.port3.as_deref(),
@@ -1465,6 +1519,7 @@ impl TryFrom<RawConfig> for Config {
                     boot_pri: m.bootpri.unwrap_or(-128),
                     readonly: m.readonly.unwrap_or(false),
                 })
+                .chain(video_slot_mount)
                 .collect(),
             run_program_dir: raw.run_program_dir,
             chipset,
@@ -1570,6 +1625,10 @@ impl TryFrom<RawConfig> for Config {
             parallel_joysticks,
             serial,
             parallel,
+            video_slot,
+            video_slot_media,
+            video_slot_monitors,
+            video_slot_preview_overlay,
             paths: raw.paths,
         })
     }

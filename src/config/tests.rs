@@ -5401,6 +5401,20 @@ fn audio_stem_granularity_defaults_to_none_and_parses() -> Result<()> {
 }
 
 #[test]
+fn audio_live_lead_defaults_to_150_ms_and_validates() -> Result<()> {
+    assert_eq!(parse_config("")?.audio.live_lead_ms, 150);
+    assert_eq!(
+        parse_config("[audio]\nlive_lead_ms = 400\n")?
+            .audio
+            .live_lead_ms,
+        400
+    );
+    assert!(parse_config("[audio]\nlive_lead_ms = 20\n").is_err());
+    assert!(parse_config("[audio]\nlive_lead_ms = 5000\n").is_err());
+    Ok(())
+}
+
+#[test]
 fn audio_stereo_separation_defaults_to_100_and_validates() -> Result<()> {
     assert_eq!(parse_config("")?.audio.stereo_separation, 100);
     assert_eq!(

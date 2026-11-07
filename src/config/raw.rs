@@ -119,6 +119,8 @@ pub struct RawConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) parallel: RawParallel,
     #[serde(default, skip_serializing_if = "is_default")]
+    pub(crate) video_slot: RawVideoSlot,
+    #[serde(default, skip_serializing_if = "is_default")]
     pub(crate) whdload: RawWhdload,
     /// `[[filesys]]` host-directory mount entries, in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -798,6 +800,34 @@ pub(crate) struct RawSerial {
     /// transport has no inbound side).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) session: Option<String>,
+}
+
+/// `[video_slot]`: the card in the A2000/A3000/A4000 video slot.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawVideoSlot {
+    /// `none` (default) or `toaster` (NewTek Video Toaster 4000).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) card: Option<String>,
+    /// The card's host folder (the Toaster's "Amiga Toaster Files": input
+    /// and output folders). Default: `Amiga Toaster Files` in the
+    /// emulator's own folder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) media: Option<String>,
+    /// Open a window per card video output (the Toaster's Preview and
+    /// Program monitors). Default true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) monitors: Option<bool>,
+    /// Let the Toaster put its interface over the Preview output when the
+    /// switcher asks (its preview-overlay preference). Default false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) preview_overlay: Option<bool>,
+    /// Also mount the card's host folder in the Amiga as a volume of this
+    /// name (e.g. "ToasterFiles"), so the Toaster software can load and
+    /// save there and the control link can reach the Amiga. Default: not
+    /// mounted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) volume: Option<String>,
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.
@@ -1709,6 +1739,9 @@ pub(crate) struct RawAudio {
     /// `--audio-stems` runs that don't pass `--audio-stems-mode` explicitly.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stem_granularity: Option<String>,
+    /// Milliseconds of sound kept ahead of the host's output device.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) live_lead_ms: Option<u32>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

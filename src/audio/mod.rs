@@ -37,19 +37,48 @@ const PAL_PAULA_CLOCK_HZ: u32 = 3_546_895;
 const AUDIO_PROFILE_ENV: &str = "COPPERLINE_AUDIO_PROFILE";
 #[cfg(feature = "frontend")]
 const CPAL_BUFFER_FRAMES: usize = 131072;
-// Live-output latency budget. The steady-state target is deliberately fixed:
-// the emulator's real-time pacer runs the core ahead of the wall clock by
-// `CPAL_TARGET_BUFFER_FRAMES` worth of audio (it subtracts
-// `live_output_lead_seconds` from its device-time target). If a host hitch
-// drains an already-started queue below target, the sink reports the shortfall
-// as extra temporary lead so the pacer refills the fixed cushion instead of
-// settling into a fragile low-latency state.
+// Live-output latency budget. The steady-state target is fixed for a run
+// (`[audio] live_lead_ms`, [`DEFAULT_LIVE_LEAD_MS`] unless set): the
+// emulator's real-time pacer runs the core ahead of the wall clock by the
+// target's worth of audio (it subtracts `live_output_lead_seconds` from its
+// device-time target). If a host hitch drains an already-started queue
+// below target, the sink reports the shortfall as extra temporary lead so
+// the pacer refills the cushion instead of settling into a fragile
+// low-latency state. Playback starts once the queue holds the target, and
+// stops on running dry until it holds it again; a backlog past twice the
+// target (the core sprinting after a stall) is trimmed back to the target.
+// The lead is therefore how long the machine may run slower than real time
+// before the sound stops.
+/// `[audio] live_lead_ms` when unset: about 150 ms.
+pub const DEFAULT_LIVE_LEAD_MS: u32 = 150;
+pub const MIN_LIVE_LEAD_MS: u32 = 50;
+pub const MAX_LIVE_LEAD_MS: u32 = 1000;
+/// The lead the next [`CpalSink`] is built with ([`set_live_lead_ms`]).
+static LIVE_LEAD_MS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(DEFAULT_LIVE_LEAD_MS);
+
+/// Set the live output lead for sinks built from now on: the machine's
+/// `[audio] live_lead_ms`, applied when it is built, so a sink opened later
+/// (a device change) keeps the same budget.
+pub fn set_live_lead_ms(ms: u32) {
+    LIVE_LEAD_MS.store(
+        ms.clamp(MIN_LIVE_LEAD_MS, MAX_LIVE_LEAD_MS),
+        Ordering::Relaxed,
+    );
+}
+
+/// The lead sinks are built with, in milliseconds.
+pub fn live_lead_ms() -> u32 {
+    LIVE_LEAD_MS.load(Ordering::Relaxed)
+}
+
+/// The queue targets, in mixer frames, for a lead: `(target, stale
+/// threshold)`. The threshold is twice the target.
 #[cfg(feature = "frontend")]
-const CPAL_TARGET_BUFFER_FRAMES: usize = 6615; // ~150 ms steady lead
-#[cfg(feature = "frontend")]
-const CPAL_PREBUFFER_FRAMES: usize = CPAL_TARGET_BUFFER_FRAMES;
-#[cfg(feature = "frontend")]
-const CPAL_STALE_DROP_THRESHOLD_FRAMES: usize = 13230; // trim only past ~300 ms
+fn live_lead_frames(ms: u32) -> (usize, usize) {
+    let target = (u64::from(ms) * u64::from(MIX_SAMPLE_RATE) / 1000) as usize;
+    (target, 2 * target)
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AudioRuntimeStatus {
@@ -153,6 +182,10 @@ pub struct CpalSink {
     total_overruns: u64,
     last_log: Instant,
     prebuffer_frames: usize,
+    /// Queue depth the pacer keeps, and the depth past which the backlog
+    /// is trimmed back to it.
+    target_frames: usize,
+    stale_threshold_frames: usize,
 }
 
 // libasound's `snd_lib_error_handler_t` is variadic (`..., const char *fmt,
@@ -445,7 +478,9 @@ impl CpalSink {
         let rb = HeapRb::<(f32, f32)>::new(CPAL_BUFFER_FRAMES);
         let (producer, mut consumer) = rb.split();
 
-        let prebuffer_frames = CPAL_PREBUFFER_FRAMES;
+        let lead_ms = live_lead_ms();
+        let (target_frames, stale_threshold_frames) = live_lead_frames(lead_ms);
+        let prebuffer_frames = target_frames;
         let playback_started = Arc::new(AtomicBool::new(false));
         let playback_started_for_cb = Arc::clone(&playback_started);
         let clear_buffer = Arc::new(AtomicBool::new(false));
@@ -552,7 +587,7 @@ impl CpalSink {
         stream.play().map_err(|e| anyhow!("stream play: {e}"))?;
 
         log::info!(
-            "audio: cpal sink ready, device={:?}, channels={}, output_rate={}, mix_rate={}",
+            "audio: cpal sink ready, device={:?}, channels={}, output_rate={}, mix_rate={}, lead={lead_ms} ms",
             device_name(&device).unwrap_or_else(|| "<unknown>".into()),
             channels,
             output_sample_rate,
@@ -580,6 +615,8 @@ impl CpalSink {
             total_overruns: 0,
             last_log: Instant::now(),
             prebuffer_frames,
+            target_frames,
+            stale_threshold_frames,
         })
     }
 }
@@ -786,7 +823,7 @@ impl AudioSink for CpalSink {
         live_output_lead_seconds_for_state(
             self.playback_started.load(Ordering::Relaxed),
             self.producer.occupied_len(),
-            CPAL_TARGET_BUFFER_FRAMES,
+            self.target_frames,
         )
     }
 
@@ -802,7 +839,7 @@ impl AudioSink for CpalSink {
             prebuffering: live_output_prebuffering(
                 playback_started,
                 occupied_frames,
-                CPAL_TARGET_BUFFER_FRAMES,
+                self.target_frames,
             ),
         }
     }
@@ -817,8 +854,8 @@ impl CpalSink {
     fn request_stale_frame_drop(&self) {
         let stale = stale_live_audio_frames_to_skip(
             self.producer.occupied_len(),
-            CPAL_TARGET_BUFFER_FRAMES,
-            CPAL_STALE_DROP_THRESHOLD_FRAMES,
+            self.target_frames,
+            self.stale_threshold_frames,
         );
         if stale != 0 {
             self.drop_old_frames.fetch_max(stale, Ordering::Relaxed);
@@ -927,9 +964,10 @@ fn callback_device_cck(output_frames: usize, output_sample_rate: u32) -> u64 {
 #[cfg(all(test, feature = "frontend"))]
 mod tests {
     use super::{
-        callback_device_cck, is_alsa_plugin_variant, is_redundant_default,
-        live_output_prebuffering, open_output_sink, sample_is_audible,
-        stale_live_audio_frames_to_skip, AudioOutput, CpalResampler,
+        callback_device_cck, is_alsa_plugin_variant, is_redundant_default, live_lead_frames,
+        live_lead_ms, live_output_prebuffering, open_output_sink, sample_is_audible,
+        set_live_lead_ms, stale_live_audio_frames_to_skip, AudioOutput, CpalResampler,
+        MIN_LIVE_LEAD_MS,
     };
     use ringbuf::traits::{Producer, Split};
     use ringbuf::HeapRb;
@@ -1030,6 +1068,20 @@ mod tests {
         // Disabled never touches the host device and never errors.
         let sink = open_output_sink(false, &AudioOutput::Disabled).unwrap();
         assert!(!sink.device_lost());
+    }
+
+    #[test]
+    fn the_live_lead_sets_the_queue_target_and_the_trim_threshold() {
+        // The old fixed budget: 150 ms is 6615 frames, trimmed past 13230.
+        assert_eq!(live_lead_frames(150), (6615, 13230));
+        assert_eq!(live_lead_frames(400), (17640, 35280));
+        let before = live_lead_ms();
+        set_live_lead_ms(400);
+        assert_eq!(live_lead_ms(), 400);
+        // Out of range is clamped, not refused: the config validates.
+        set_live_lead_ms(5);
+        assert_eq!(live_lead_ms(), MIN_LIVE_LEAD_MS);
+        set_live_lead_ms(before);
     }
 
     #[test]

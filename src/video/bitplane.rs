@@ -4317,6 +4317,16 @@ impl RenderInput {
         self.canvas_origin_cck = cck;
     }
 
+    /// Let go of the frame's shared buffers (the chip-RAM snapshot and
+    /// the captured bitplane rows) once the bundle has been rendered, so
+    /// the capture side can take the allocations back at the next frame
+    /// wrap instead of starting afresh. The bundle is not renderable until
+    /// refilled.
+    pub fn release_shared_buffers(&mut self) {
+        self.chip_ram = std::sync::Arc::new(Vec::new());
+        self.captured_bitplane_rows = std::sync::Arc::new(Vec::new());
+    }
+
     /// Re-snapshot the just-finished frame into this bundle, reusing the
     /// vector allocations left over from a previous frame (the chip-RAM
     /// copy alone is up to 2 MiB per frame). Field-for-field this must

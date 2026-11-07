@@ -153,6 +153,7 @@ pub mod typing;
 pub mod uaelib;
 // The About panel's Check for updates: asks GitHub for the latest release,
 // only when the button is pressed. Gated with the HTTP client it needs.
+pub mod toaster;
 #[cfg(feature = "update-check")]
 pub mod update;
 pub mod uss;

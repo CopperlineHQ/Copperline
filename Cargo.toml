@@ -296,6 +296,10 @@ rmp-serde = "1.3"
 rmpv = { version = "1.3", features = ["with-serde"] }
 toml = "1.1"
 png = "0.18"
+# Still pictures dropped into the Video Toaster's input folders
+# (src/toaster/media.rs). Already in the tree through arboard; this adds
+# the JPEG and BMP decoders.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "bmp"] }
 flate2 = "1"
 cpal = { version = "0.18", optional = true }
 # Kept unconditional (not `frontend`-gated) because the Windows MIDI backend

@@ -630,6 +630,15 @@ fn media_dir(
     dir.is_dir().then_some(dir)
 }
 
+/// The Video Toaster's host folder (inputs, output, Flyer) when the
+/// configuration names none: `Amiga Toaster Files` in the emulator's own
+/// folder.
+pub fn toaster_files_dir() -> PathBuf {
+    config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("Amiga Toaster Files")
+}
+
 /// Kickstart and extended ROM images.
 pub fn roms_dir() -> Option<PathBuf> {
     media_dir(|p, h| p.roms_dir(h))
