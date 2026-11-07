@@ -267,6 +267,26 @@ pub enum CoreOp {
         overlays: Vec<CaptureOverlay>,
         native: bool,
     },
+    /// The video-slot card's state (`toaster.status`).
+    ToasterStatus,
+    /// Save the card's Program and/or Preview picture as PNG
+    /// (`toaster.capture`).
+    ToasterCapture {
+        outputs: Vec<String>,
+        path: Option<PathBuf>,
+    },
+    /// Start or stop recording a card output (`toaster.record`).
+    ToasterRecord {
+        output: String,
+        action: String,
+        path: Option<PathBuf>,
+    },
+    /// Hold a card input to a host file, or back to its folder
+    /// (`toaster.input`).
+    ToasterInput {
+        input: u64,
+        file: Option<String>,
+    },
     ReverseStep {
         n: u64,
     },
@@ -337,7 +357,117 @@ impl CoreOp {
                 | CoreOp::RegionDigest { .. }
                 | CoreOp::Screenshot { .. }
                 | CoreOp::StateInfo { .. }
+                | CoreOp::ToasterStatus
+                | CoreOp::ToasterCapture { .. }
         )
+    }
+}
+
+const NO_CARD: &str = "no video-slot card is fitted ([video_slot] card = \"toaster\")";
+
+/// A card output by its lower-case name.
+fn card_output(
+    emu: &Emulator,
+    name: &str,
+) -> Result<std::sync::Arc<crate::videoslot::CardOutput>, CtlError> {
+    if emu.bus().video_slot().is_none() {
+        return Err(CtlError::unsupported(NO_CARD));
+    }
+    emu.bus()
+        .video_slot_outputs()
+        .into_iter()
+        .find(|o| o.name().eq_ignore_ascii_case(name))
+        .ok_or_else(|| CtlError::not_found(format!("the card has no {name} output")))
+}
+
+/// A card frame resampled to square pixels at its display aspect
+/// (752 x 480 Toaster samples become 640 x 480), opaque.
+fn square_pixels(width: usize, height: usize, pixels: &[u32], aspect: f32) -> (Vec<u32>, usize) {
+    let out_w = ((height as f32 * aspect).round() as usize).max(1);
+    let mut out = Vec::with_capacity(out_w * height);
+    for y in 0..height {
+        let row = &pixels[y * width..(y + 1) * width];
+        for x in 0..out_w {
+            let fx = (x as f32 + 0.5) * width as f32 / out_w as f32 - 0.5;
+            let x0 = (fx.floor().max(0.0) as usize).min(width - 1);
+            let x1 = (x0 + 1).min(width - 1);
+            let t = (fx - x0 as f32).clamp(0.0, 1.0);
+            let a = row[x0].to_le_bytes();
+            let b = row[x1].to_le_bytes();
+            let mix = |i: usize| (f32::from(a[i]) * (1.0 - t) + f32::from(b[i]) * t).round() as u8;
+            out.push(u32::from_le_bytes([mix(0), mix(1), mix(2), 0xFF]));
+        }
+    }
+    (out, out_w)
+}
+
+/// `toaster.capture`: the named outputs as PNGs. With one output `path`
+/// is the file; with both, `-program`/`-preview` go before its extension.
+fn toaster_capture(
+    emu: &Emulator,
+    outputs: &[String],
+    path: Option<&std::path::Path>,
+) -> Result<Value, CtlError> {
+    let base = path
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(crate::screenshot::auto_filename);
+    let mut shots = Vec::new();
+    for name in outputs {
+        let output = card_output(emu, name)?;
+        let (w, h, pixels) = output.snapshot().ok_or_else(|| {
+            CtlError::invalid_state(format!(
+                "the {name} output has no picture yet (the switcher has not started)"
+            ))
+        })?;
+        let (square, sw) = square_pixels(w, h, &pixels, output.aspect());
+        let target = if outputs.len() == 1 {
+            base.clone()
+        } else {
+            let stem = base
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("toaster");
+            base.with_file_name(format!("{stem}-{name}.png"))
+        };
+        crate::screenshot::save(&target, &square, sw as u32, h as u32)
+            .map_err(|e| CtlError::io(format!("saving {name}: {e:#}")))?;
+        shots.push(json!({
+            "output": name,
+            "path": target.display().to_string(),
+            "width": sw,
+            "height": h,
+        }));
+    }
+    Ok(json!({"captures": shots}))
+}
+
+/// `toaster.record`.
+fn toaster_record(
+    emu: &Emulator,
+    name: &str,
+    action: &str,
+    path: Option<&std::path::Path>,
+) -> Result<Value, CtlError> {
+    let output = card_output(emu, name)?;
+    match action {
+        "start" => {
+            let file = match path {
+                Some(p) => output.start_recording(p).map(|()| p.to_path_buf()),
+                None => output.start_recording_auto(),
+            }
+            .map_err(|e| CtlError::invalid_state(format!("{e:#}")))?;
+            Ok(json!({"output": name, "recording": file.display().to_string()}))
+        }
+        "stop" => {
+            let file = output
+                .stop_recording()
+                .map_err(|e| CtlError::io(format!("{e:#}")))?;
+            Ok(json!({"output": name, "saved": file.map(|f| f.display().to_string())}))
+        }
+        _ => Ok(json!({
+            "output": name,
+            "recording": output.recording_path().map(|f| f.display().to_string()),
+        })),
     }
 }
 
@@ -1897,6 +2027,53 @@ pub fn parse_method(method: &str, params: &Value) -> Result<Request, CtlError> {
                 path: p.str_opt("path")?.map(PathBuf::from),
                 overlays,
                 native,
+            })
+        }
+        "toaster.status" => core(CoreOp::ToasterStatus),
+        "toaster.capture" => {
+            let outputs = match p.str_opt("output")?.as_deref() {
+                None | Some("both") => vec!["program".to_string(), "preview".to_string()],
+                Some(o @ ("program" | "preview")) => vec![o.to_string()],
+                Some(other) => {
+                    return Err(CtlError::invalid_params(format!(
+                        "output must be program|preview|both, got {other}"
+                    )))
+                }
+            };
+            core(CoreOp::ToasterCapture {
+                outputs,
+                path: p.str_opt("path")?.map(PathBuf::from),
+            })
+        }
+        "toaster.record" => {
+            let action = p.str_opt("action")?.unwrap_or_else(|| "status".into());
+            if !matches!(action.as_str(), "start" | "stop" | "status") {
+                return Err(CtlError::invalid_params(format!(
+                    "action must be start|stop|status, got {action}"
+                )));
+            }
+            let output = p.str_opt("output")?.unwrap_or_else(|| "program".into());
+            if !matches!(output.as_str(), "program" | "preview") {
+                return Err(CtlError::invalid_params(format!(
+                    "output must be program|preview, got {output}"
+                )));
+            }
+            core(CoreOp::ToasterRecord {
+                output,
+                action,
+                path: p.str_opt("path")?.map(PathBuf::from),
+            })
+        }
+        "toaster.input" => {
+            let input = p
+                .u64_opt("input")?
+                .ok_or_else(|| CtlError::invalid_params("missing input"))?;
+            if !(1..=4).contains(&input) {
+                return Err(CtlError::invalid_params("input must be 1-4"));
+            }
+            core(CoreOp::ToasterInput {
+                input,
+                file: p.str_opt("file")?,
             })
         }
         "capture.digest" => core(CoreOp::Digest),
@@ -3573,6 +3750,27 @@ pub fn exec_core(emu: &mut Emulator, ctx: &mut SessionCtx, op: &CoreOp) -> Resul
                     "sprite7": crate::video::bitplane::PIXEL_SOURCE_SPRITE0 + 7,
                 })),
             }))
+        }
+        CoreOp::ToasterStatus => {
+            let card = emu
+                .bus_mut()
+                .video_slot_mut()
+                .ok_or_else(|| CtlError::unsupported(NO_CARD))?;
+            Ok(json!({"card": card.name(), "state": card.control_status()}))
+        }
+        CoreOp::ToasterCapture { outputs, path } => toaster_capture(emu, outputs, path.as_deref()),
+        CoreOp::ToasterRecord {
+            output,
+            action,
+            path,
+        } => toaster_record(emu, output, action, path.as_deref()),
+        CoreOp::ToasterInput { input, file } => {
+            let card = emu
+                .bus_mut()
+                .video_slot_mut()
+                .ok_or_else(|| CtlError::unsupported(NO_CARD))?;
+            card.control("input", &json!({"input": input, "file": file}))
+                .map_err(CtlError::invalid_params)
         }
         CoreOp::ReverseStep { n } => {
             require_time_travel(emu)?;

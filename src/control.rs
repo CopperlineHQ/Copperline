@@ -32,6 +32,7 @@ pub mod mcp;
 pub mod observe;
 pub mod proto;
 pub mod session;
+pub mod toaster_link;
 pub mod windowed;
 
 use anyhow::{Context, Result};

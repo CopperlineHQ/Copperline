@@ -223,6 +223,51 @@ temporary file and deletes it after reading. With `path`, the image is kept
 there (a relative path resolves against `copperline-ctl`'s working
 directory).
 
+### Video Toaster tools
+
+On a machine with the emulated Video Toaster (`[video_slot] card =
+"toaster"`), four protocol methods read and drive the card itself:
+`toaster.status` (the sources on Program and Preview, the fader, the
+inputs, the host folder), `toaster.capture` (the Program and/or Preview
+picture as PNG; over MCP the images come back attached), `toaster.record`
+(start or stop an AVI recording of an output) and `toaster.input` (hold an
+input to one host file instead of its folder).
+
+Three more tools belong to the MCP bridge and run inside the Amiga, through
+the Toaster's own ARexx ports: `toaster_switcher {"command", "args"}` (a
+switcher command: `M001`, `P002`, `TAKE`, `AUTO`, `TBAR 256`, `STAT
+MAIN`...), `toaster_project {"function", "args"}` (a project-editor
+function: `CROUTONLOAD`, `CROUTONPICK`, `PROJECTLOAD`, `PROJECTSAVE`...) and
+`toaster_rexx {"script"}` (any ARexx; the Toaster's function hosts are
+already added, and what the script `say`s comes back). They need the card's
+folder mounted in the Amiga (`[video_slot] volume = "ToasterFiles"`) and
+`S:Copperline-Link.rexx` running there; the bridge writes jobs into the
+folder's `.copperline` subfolder and collects the answers, so it must run on
+the emulator's computer.
+
+`toaster_program {"program", "command", "args"}` reaches the rest of the
+Toaster suite the same way, each program through its own ARexx port:
+`switcher`, `project` (the project editor, which also carries the Flyer's
+functions), `cg` (ToasterCG), `paint` (ToasterPaint), `lightwave` and
+`modeler`. `command: "open"` loads CG, Paint or LightWave through the
+switcher (and enters Paint); any other command is the program's own, as its
+ARexx document in `Toaster:Programs/Documentation/Arexx` lists them.
+
+A paused machine is run forward until the job is
+done; each job waits up to `timeout_ms` (default 60000).
+
+To drive a windowed session, start Copperline with a control server and an
+info file, then attach:
+
+```sh
+copperline --config toaster.toml --control-gui 127.0.0.1:0 --control-info toaster-control.json
+# in the MCP client: session_attach {"info_file": "toaster-control.json"}
+```
+
+or let the bridge attach by itself when a tool first needs the machine (and
+again after the emulator is restarted):
+`copperline-ctl --mcp --attach-on-use toaster-control.json`.
+
 ### Protocol subset
 
 MCP 2025-06-18 over stdio (newline-delimited JSON-RPC 2.0): supports
