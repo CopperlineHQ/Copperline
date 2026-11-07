@@ -1335,6 +1335,8 @@ pub(super) struct CardMonitors {
     /// a card.
     art: std::cell::RefCell<std::collections::HashMap<String, Option<Arc<MonitorArt>>>>,
     windows: Vec<MonitorWindow>,
+    /// The Flyer clip converter has been started (or there is none).
+    converter_started: bool,
     /// The card's sound level last given to the machine.
     speaker: Option<f32>,
 }
@@ -1344,6 +1346,7 @@ impl CardMonitors {
         Self {
             art: std::cell::RefCell::new(std::collections::HashMap::new()),
             windows: Vec::new(),
+            converter_started: false,
             speaker: None,
         }
     }
@@ -1727,6 +1730,53 @@ impl super::App {
         self.card_monitors.poll();
         if let Some(gain) = self.card_monitors.speaker_change() {
             self.emu.bus_mut().set_video_slot_volume(gain);
+        }
+        self.start_flyer_converter();
+    }
+
+    /// With a Flyer fitted, start the clip converter window beside the
+    /// machine once (`[video_slot] converter`, default on): the
+    /// `flyer-convert` program next to this one, given the card's folder.
+    /// It runs on its own and outlives the machine; a second copy exits.
+    fn start_flyer_converter(&mut self) {
+        if self.card_monitors.converter_started {
+            return;
+        }
+        let slot = &self.machine_config.video_slot;
+        if self.headless_capture_active()
+            || !slot.flyer.unwrap_or(false)
+            || !slot.converter.unwrap_or(true)
+        {
+            return;
+        }
+        let outputs = self.emu.bus().video_slot_outputs();
+        let Some(root) = outputs.iter().find_map(|o| o.media_root()) else {
+            return;
+        };
+        self.card_monitors.converter_started = true;
+        let name = if cfg!(windows) {
+            "flyer-convert.exe"
+        } else {
+            "flyer-convert"
+        };
+        let Some(exe) = std::env::current_exe()
+            .ok()
+            .map(|p| p.with_file_name(name))
+            .filter(|p| p.is_file())
+        else {
+            info!("flyer converter: no {name} beside the emulator");
+            return;
+        };
+        match std::process::Command::new(&exe)
+            .arg("--media")
+            .arg(&root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(_) => info!("flyer converter: started {}", exe.display()),
+            Err(e) => warn!("flyer converter: {}: {e}", exe.display()),
         }
     }
 

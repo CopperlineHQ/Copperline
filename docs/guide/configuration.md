@@ -1069,6 +1069,23 @@ with 3:2 pulldown, 60 frame video keeps every frame), and the four fields
 of each colour frame take the lines of four pictures in turn. The sound is
 resampled to the Flyer's 44.056 kHz.
 
+**The clip converter.** `flyer-convert` (built with Copperline) is the same
+conversion in a window of its own, drawn in the Toaster's style. With a
+Flyer fitted, a windowed Copperline starts it beside the machine, pointed
+at `media` (`converter = false` stops that); it runs on its own, can stay
+open after the machine quits, and a second copy started while one runs
+just exits. Drop video files, still pictures, folders or a folder of
+numbered pictures (one sequence) on it, or use Add Files / Add Folder;
+choose the Flyer drive, quality (Standard, HQ5, HQ6), motion (fields at
+59.94 or frames at 29.97), the fit, how long stills last and how fast a
+sequence plays, the sound (stereo, mono or none) and its gain per channel,
+and Convert. Each clip lands on the drive with its crouton icon
+(`<clip>.I`, a frame a second in), so the Grazer shows it with a picture
+straight away; a `.clip` file dropped on it is copied over as it is. The
+preview shows the selected source as the clip will carry it, fitted, and
+follows the conversion while it runs. Its settings are kept in
+`flyer-convert.json` beside the program.
+
 **Video Flyer.** `flyer = true` (with `card = "toaster"`) also fits a
 NewTek Video Toaster Flyer, the Zorro II card that records and plays clips
 into the Toaster's inputs 3 and 4. The Toaster software finds it as

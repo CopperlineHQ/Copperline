@@ -590,12 +590,15 @@ video = "PAL"
 # or stills to play into each input), Output (Program recordings) and Flyer.
 # The card's Preview and Program outputs open as monitor windows.
 # `flyer = true` also fits a NewTek Video Flyer beside the Toaster; a
+# windowed machine with a Flyer also opens the clip converter window
+# (`flyer-convert`) unless `converter = false`.
 # [video_slot]
 # card = "none"
 # media = "Amiga Toaster Files"
 # monitors = true
 # preview_overlay = false
 # flyer = false
+# converter = true
 
 
 # IDE hard-disk images, on the machines with a built-in IDE port: A600, A1200,

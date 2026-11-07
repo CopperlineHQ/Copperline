@@ -42,8 +42,9 @@ Video Toaster 4.x and Flyer software, and the effects, sources and other
 files around them, are on
 [Open Video Toaster](http://discreetfx.com/openvideotoaster.html). The
 `[video_slot]` section of `docs/guide/configuration.md` describes the
-media folder (the card's inputs and `Output`) and the machine to fit the
-card into.
+media folder (the card's inputs, `Output` and the Flyer's drives) and
+the machine to fit the card into; `flyer-convert` turns video, stills and
+picture sequences into Flyer clips in that folder.
 
 ## Credits
 

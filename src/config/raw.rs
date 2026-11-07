@@ -833,6 +833,11 @@ pub(crate) struct RawVideoSlot {
     /// "toaster"`. Default false.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) flyer: Option<bool>,
+    /// With a Flyer fitted, also start the clip converter window
+    /// (`flyer-convert`, beside the emulator) when a windowed machine
+    /// starts. Default true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) converter: Option<bool>,
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.
