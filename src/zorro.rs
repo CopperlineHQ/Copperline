@@ -754,6 +754,7 @@ enum BoardState {
 struct Board {
     spec: BoardSpec,
     state: BoardState,
+    #[serde(with = "crate::bytes_serde")]
     ram: Vec<u8>,
 }
 

@@ -990,7 +990,9 @@ pub struct Bus {
     last_frame_beam_top_palette_end: Palette,
     last_frame_beam_bottom_palette: Palette,
     last_frame_beam_bottom_palette_valid: bool,
+    #[serde(with = "crate::bytes_serde")]
     current_frame_chip_ram: Vec<u8>,
+    #[serde(with = "crate::bytes_serde::arc")]
     last_frame_chip_ram: std::sync::Arc<Vec<u8>>,
     current_frame_chip_ram_writes: Vec<BeamChipRamWrite>,
     last_frame_chip_ram_writes: Vec<BeamChipRamWrite>,

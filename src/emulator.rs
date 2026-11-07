@@ -123,6 +123,9 @@ pub struct Emulator {
     retired_instructions: u64,
     /// Reverse-debug snapshot ring, present only when reverse mode is armed.
     tt_ring: Option<crate::timetravel::SnapshotRing>,
+    /// The size of the last machine snapshot, so the next one's buffer is
+    /// allocated once instead of grown (and copied) as it fills.
+    snapshot_size_hint: std::sync::atomic::AtomicUsize,
     /// Position-keyed log of applied input actions, recorded during the
     /// forward run and re-applied during reverse replay. Present whenever the
     /// ring is.
@@ -515,6 +518,7 @@ impl Emulator {
             realtime_quantum_cpu_idle: false,
             retired_instructions: 0,
             tt_ring: None,
+            snapshot_size_hint: std::sync::atomic::AtomicUsize::new(0),
             tt_input: None,
             tt_rwatch: None,
             descriptor: crate::config::MachineDescriptor::default(),
@@ -1763,8 +1767,12 @@ impl Emulator {
     /// zlib/magic framing -- snapshots are same-process and need no format
     /// versioning, see `timetravel`).
     fn snapshot_blob(&self) -> Result<Vec<u8>> {
-        let mut buf = Vec::new();
+        use std::sync::atomic::Ordering;
+        let hint = self.snapshot_size_hint.load(Ordering::Relaxed);
+        // A little over the last one: the machine's size barely changes.
+        let mut buf = Vec::with_capacity(hint + hint / 16);
         self.machine.write_state(&mut buf)?;
+        self.snapshot_size_hint.store(buf.len(), Ordering::Relaxed);
         Ok(buf)
     }
 

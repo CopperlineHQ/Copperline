@@ -375,7 +375,20 @@ current build; there is no reader for them.
 In-process snapshots do not use this container. `M68kMachine::write_state`
 writes the same five components as unframed positional bincode for the
 reverse-debugging ring and run-ahead (`emulator.rs`), where speed matters
-and only the build that wrote a blob ever reads it. Netplay rollback
+and only the build that wrote a blob ever reads it. Memory buffers (chip,
+slow, motherboard and accelerator RAM, the ROMs, Zorro board RAM, the
+frame's chip RAM copies, the RTG boards' VRAM, the A2065's and CD32 FMV
+cartridge's RAM) are serialised with
+`bytes_serde`, which writes them with `serialize_bytes`: bincode then
+copies each in one go instead of a call per byte. That matters for the
+ring a control client arms (a snapshot every five frames): an A4000 with
+its 64 MB Z3660 VRAM and 18 MB of RAM spent most of its host
+time serialising byte by byte. The snapshot buffer is allocated at the
+last snapshot's size, so a capture is one pass of copying rather than a
+chain of reallocations. The encoding is the one
+serde's `Vec<u8>` had (bincode: a length and the bytes; the file dialect:
+`bin`, or an empty array when empty), so blobs and files read back
+either way. Netplay rollback
 checkpoints use `write_rollback_state`, which prefixes the same blob with
 the rollback latches file states omit (the Bus rollback state and the
 CPU's sampled interrupt level). `write_chunks` is the file-format twin;

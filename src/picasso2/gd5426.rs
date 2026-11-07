@@ -90,6 +90,7 @@ impl CirrusModel {
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct CirrusGd5426 {
     model: CirrusModel,
+    #[serde(with = "crate::bytes_serde")]
     vram: Vec<u8>,
     seq: Vec<u8>,
     gfx: Vec<u8>,

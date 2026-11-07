@@ -25,6 +25,7 @@ pub mod blitviz;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod blockdev;
 pub mod bus;
+pub mod bytes_serde;
 pub mod cache;
 pub mod cartridge;
 #[cfg(feature = "cd32-fmv")]
