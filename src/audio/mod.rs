@@ -6,6 +6,7 @@
 //! on CLI flags.
 
 #[cfg(any(feature = "mhi", feature = "cd-mp3"))]
+pub mod fx;
 pub(crate) mod mpeg;
 pub mod mux;
 pub(crate) mod resample;
@@ -566,6 +567,7 @@ impl CpalSink {
                             }
                         }
                     }
+                    fx::mix(data, chans, output_sample_rate);
                 },
                 move |err| {
                     log::warn!("cpal stream error: {err}");
@@ -585,6 +587,7 @@ impl CpalSink {
             )
             .map_err(|e| anyhow!("build_output_stream: {e}"))?;
         stream.play().map_err(|e| anyhow!("stream play: {e}"))?;
+        fx::set_live(true);
 
         log::info!(
             "audio: cpal sink ready, device={:?}, channels={}, output_rate={}, mix_rate={}, lead={lead_ms} ms",
@@ -618,6 +621,12 @@ impl CpalSink {
             target_frames,
             stale_threshold_frames,
         })
+    }
+}
+
+impl Drop for CpalSink {
+    fn drop(&mut self) {
+        fx::set_live(false);
     }
 }
 

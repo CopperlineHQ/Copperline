@@ -1643,6 +1643,7 @@ impl App {
             Ok(()) => info!("screenshot saved: {}", path.display()),
             Err(e) => warn!("screenshot save failed ({}): {e:#}", path.display()),
         }
+        self.save_card_monitor_shots(path);
     }
 
     fn capture_native_image(&self) -> super::present::PresentImage<'static> {

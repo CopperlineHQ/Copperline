@@ -661,6 +661,11 @@ pub struct Paula {
     // was skipped still name it; the named-field decoder ignores that entry.
     #[serde(skip, default = "default_output_volume")]
     output_volume: f32,
+    // Host level of a video-slot card's sound (its picture monitor's
+    // volume, or nothing when the monitor is off), 0.0 up. A host
+    // preference like output_volume, skipped in save states.
+    #[serde(skip, default = "default_output_volume")]
+    video_slot_volume: f32,
     // Host output preference: average L/R into both channels. Not part of the
     // emulated machine state, so it is skipped in save states and re-applied
     // from config (carried over across a restore, see adopt_host_preferences).
@@ -812,6 +817,7 @@ impl Paula {
             led_filter_guest_on: true,
             led_filter: StereoLedFilter::new(),
             output_volume: 1.0,
+            video_slot_volume: 1.0,
             mono_output: false,
             stereo_separation: 1.0,
             cd_audio: CdAudioRing::default(),
@@ -888,6 +894,7 @@ impl Paula {
     /// rollback -- would reset them to their defaults.
     pub(crate) fn adopt_host_preferences(&mut self, live: &Paula) {
         self.output_volume = live.output_volume;
+        self.video_slot_volume = live.video_slot_volume;
         self.mono_output = live.mono_output;
         self.stereo_separation = live.stereo_separation;
         self.set_led_filter_mode(live.led_filter_mode);
@@ -1113,6 +1120,12 @@ impl Paula {
 
     pub fn set_output_volume_percent(&mut self, percent: u8) {
         self.output_volume = f32::from(percent.min(100)) / 100.0;
+    }
+
+    /// The level of a video-slot card's sound in the mix (1.0 as made).
+    /// Host preference: the card's picture monitor's volume.
+    pub fn set_video_slot_volume(&mut self, gain: f32) {
+        self.video_slot_volume = gain.clamp(0.0, 4.0);
     }
 
     /// Average the stereo output into both channels (mono) instead of the
@@ -2506,6 +2519,10 @@ impl Paula {
         self.audio.push_source("mhi", mhi_left, mhi_right);
         // A video-slot card's sound, line-mixed like CD-DA.
         let (slot_left, slot_right) = self.video_slot_audio.next_sample();
+        let (slot_left, slot_right) = (
+            slot_left * self.video_slot_volume,
+            slot_right * self.video_slot_volume,
+        );
         left += slot_left;
         right += slot_right;
         self.audio.push_source("videoslot", slot_left, slot_right);

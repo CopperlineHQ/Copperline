@@ -701,6 +701,224 @@ it holds state run-ahead cannot rewind. Like the parallel peripheral it is
 host-attached (`Bus::attach_video_slot`) and survives save-state loads; it
 is not itself serialised.
 
+### The Video Toaster (`toaster.rs`)
+
+`[video_slot] card = "toaster"` fits the one card so far. The NewTek
+protocol it decodes is written up at the top of `toaster.rs`; the parts
+pinned against the real 4.2 switcher are:
+
+- Every line's first sixteen lo-res pixels from comparator position `$5C`
+  (the switcher's sprites 0 and 1 at HSTART `$5B`) are the line header: four
+  words, one per card input line (`R`, `G`, `B`, `I`, each wired to two
+  bits of the AGA low nibbles). `R` bits 15-12 select an extended header
+  (`%1000` EH0 ... `%0111` EH7, `%1011` EH6 with the page in bits 11-8) or a
+  read request's pixel-in-quad (`%0000 %0010 %1100 %1110`); `%1111` with
+  the `G` write bit clear is a line that carries nothing. The switcher's
+  normal display uses EH0 lines everywhere, so EH0's control bits (`OBR`,
+  the bank select, above all) change within a field: the card takes the
+  headers of the field in progress in beam order (`scan_to_beam`, through
+  `LiveField::line`) before answering a read, then the completed field
+  finishes the lines the scan did not reach.
+- A write (`G` bit 15) puts the line's `R|G<<1|B<<2|I<<3` nibbles into
+  framestore line `2L + 1` (fields I/III) or `2L` (II/IV), high or low
+  nibble, normal or complemented copy, in bank `OBR`. The card's pixel 0 is
+  lo-res `$5A`; the switcher's bitmaps start at pixel 12 (quad 3), which
+  is what its `TestReadScanLine` self-test compares against.
+- A read request labels every quad of the line with the quad to return
+  (the `I` line is the label's high nibble, `B` its low nibble; on the wire
+  the label is the plain quad number), and the port answers with byte
+  `4Q + pixel` of the requested line from bank `!OBR`, for the label ten
+  quads (`READ_PIPELINE_PIXELS`) before the beam: fitted so each of the
+  `HS.default` table's read positions lands inside its 18-quad label run
+  with the CIA access's E-clock slip either way.
+
+The emulated 4.2 switcher passes its read-back self-test and calibration
+with this and comes up on its main screen.
+
+#### The video side (`toaster/regs.rs`, `video.rs`, `composite.rs`, `media.rs`)
+
+The extended headers are latched registers (`Regs`), set to the switcher's
+own start-up values (`VTSetUp`) at power-on. The outputs follow the
+switcher's model of the card: one A/B fader. Program = A·(1−k) + B·k with A
+the `AM` mux and B the `BM` mux (EH2), Preview = the `PV` mux (EH1; position
+7 = a copy of Program). Mux positions 0-3 are the inputs, 4/5 framestore
+banks 0/1 played back ("DV1", "DV2"), 6 the encoder (the matte generator
+with EH1 `MATTE`, else the Amiga picture), 7 Program/MONO. The fader's k
+comes from EH4 `CDS`: the constant `CD` for cuts, fades and the T-bar (the
+switcher rewrites CD every field during an AUTO), a luma key on the `LK`
+source against EH68's clip, or per-pixel codes in the Amiga's AGA low
+nibbles for wipes and alpha keys (`DIB`: b1b0, `DIBGR`: b1b0g1r1 scaled by
+CD) and the genlock transparency for `PIXELSW`. The animated wipes
+(`LatchAM`/`LatchBM` effects) set EH2's `AMWIPE`/`BMWIPE` with the bus at
+7: the bus then takes its source per pixel from the Amiga picture, a
+3-bit source number in the low nibbles (b2, r2, r1, the muxes' numbering)
+set by each pixel that carries the genlock T bit and held along the line
+until the next. The matte colour is EH3's
+MA/MB/MP code: the eight BKG colours exactly, others by the generator's
+model (luma from (MA+MB)/2, chroma from |MA−MB|, hue 11.25° per MP step).
+
+`G` bit 15 on a non-header line is `CERB`, "record this line". In write
+mode (EH0 `WERB` set, `ABSE` clear) the line's data is the Amiga's, as
+above (EH0 `LUST` clear stores it 16 samples right: the second pass of the
+switcher's AA "zipper" write, which scrolls its bitmap 16 hi-res pixels
+left, so a framestore or key page loaded from disk lines up with its key); otherwise the card digitises the `IS` input into bank `OBR`: every
+field while live (`ABSE` set), four fields for a grab. Live, bank 0 plays
+the input straight through.
+
+Framestore bytes are 4fsc NTSC composite samples on the I and Q axes with a
+subcarrier-complemented second copy (`composite.rs`, measured off the
+`ColorBars` framestore: blanking 60, black 70, white 200, line-to-line
+subcarrier inversion), decoded to RGB by summing and differencing the two
+copies. Pictures are 752 x 480 from card pixel 12 and framestore line 1,
+the window the switcher's framestore loads use. Inputs are encoded the
+same way when digitised, so a grab reads back to the switcher as real
+samples.
+
+Inputs come from the host folder (`media.rs`): a worker thread per input
+plays the folder's files (stills decoded with the `image` crate, video
+through ffmpeg) into an eight-frame channel, one frame taken per emulated
+frame. Until the switcher's first extended header (`Toaster::active`) the
+workers wait and the card publishes black, silent frames
+(`produce_idle_outputs`): the power-on mux settings select inputs nobody
+chose, and nothing need be decoded while the machine boots. The outputs are published per frame into `videoslot::CardOutput`s,
+which the window layer shows as monitor windows (`card_monitors.rs`) and
+which record themselves (ZMBV AVI, via `recorder.rs`) when asked.
+
+##### The compose thread
+
+Painting the card's view of a field (`render_wide`, about 7 ms on a
+2.3 GHz Xeon), reading its headers, decoding framestore banks, keying,
+mixing and publishing took 15-30 ms of the emulation thread per frame,
+more with a digital effect (another 6 ms a field of composite encoding
+for as long as the switcher leaves the digitiser live afterwards), which
+is a large part of what made a transition cost more than a cut; the rest
+is the switcher's own chip-bus traffic while an effect runs, which the
+machine pays as the real one did. `Toaster` is now a handle: the card proper
+is a `Card` behind a mutex, shared with a `toaster-compose` thread, and a
+finished field reaches it as a job (`Job`: the frame's `RenderInput`, the
+beam at the wrap and how many lines the live scan already took). The thread paints the field, takes its lines
+in (`Card::take_field`: the headers, framestore writes and `CERB` lines
+from `first_unscanned` on), and on the second field of a frame composes
+and publishes the outputs. The emulation thread's part of a field is the
+hand-over (`Toaster::submit`, well under a millisecond).
+
+The guest must not be able to tell. The rules that keep the machine
+deterministic whatever the host's speed:
+
+- *Order.* Jobs run in order on one thread, so the card's registers and
+  framestore go through the same sequence of states as they did when every
+  field was taken at once.
+- *Joins.* Anything read on the emulation thread -- a parallel-port read
+  (`scan_to_beam`, `port_byte`), the control protocol's status, the
+  tests' look inside -- goes through `Toaster::card()`, which first waits
+  for every job handed over so far (`Pipe::drain`). The switcher reads
+  the port only for read-back and calibration, so the wait is rare.
+- *Depth.* `Toaster::submit` waits for a job only when the thread is
+  `PIPELINE_DEPTH` (two) fields behind, which is the slack the thread has
+  before the machine pauses for it (`compose_wait` in the
+  `COPPERLINE_DIAG_TOASTER=perf` log).
+- *Sound.* A frame's sound is produced on the thread but taken by the bus
+  (`take_audio`, right after each field's hand-over) only from jobs known
+  finished at that point: with the depth of two, a frame's sound reaches
+  Paula's mixer two fields after its own on every run, early or late, so a
+  `--audio-wav` capture is the same byte for byte. The ring in Paula
+  (`VideoSlotAudioRing`) absorbs the fixed offset as it absorbs the frame
+  rate mismatch.
+
+Without a thread (`wasm`, a spawn that failed) jobs run on the calling
+thread through the same code, and `field_complete` (the painted-field
+entry, which the tests use) hands a copy of the field over and waits for
+it, so a card driven that way behaves as it always did.
+
+Three more things cut what the thread does per frame. The framestore
+banks' decoded pictures are kept across frames and dropped only when the
+bank is written (`Video::invalidate`), so a digital effect flying a still
+framestore decodes it once, not every frame. A picture the card digitises
+(`CERB` lines outside a write: a grab, or the live input every field after
+a digital effect) is kept as the picture and encoded into the bank only
+when something reads it -- the port, a bank decode, a write to the bank
+(`Card::settle`): the bank holds the same bytes either way, and a live
+input that nothing reads back costs a picture copy per field instead of a
+composite encode. And the per-pixel passes reuse their buffers
+(`Video::take_picture`), weigh the three guns of a mix two at a time in
+16-bit lanes (`video::blend`, exact against the per-gun formula) and apply
+a digital effect's map a quad at a time (`DveMap::apply`). A video
+file's sound is decoded by a second ffmpeg (stereo s16le at the mixer's
+44.1 kHz, 1001/30000 s per frame) and travels with each picture; Program's
+sound is the sum of the inputs by how much of each it shows (A·(1−k̄) +
+B·k̄, latch wipes by pixel share, a key's `LK` source, a live bank 0 by its
+`IS` input; framestores and the matte are silent). It goes to Paula's mixer
+as a `videoslot` source and into the Program recording. The emulator counts
+colour clocks at the PAL rate for every machine, so an Amiga NTSC frame
+lasts 1/29.70 s rather than 1/29.97: each frame's sound is stretched to
+the Amiga frame (0.9 %), and the mixer's ring steers its fill by up to 1 %
+more, so the sound neither gaps nor drifts. The real card had
+no audio; this stands in for the audio-follow-video mixer beside it.
+
+The digital effects (`dve.rs`) run with EH0 `LINP` and `LUT` both off. The
+framestore is then addressed per line and per quad by the Amiga picture
+itself: each picture line's header carries the source line number L
+(`((I>>12)<<4) | (B>>12)`, whatever the header kind), and each quad of its
+B/I data lines a source quad number Q (the quad labels of read-back, I high
+nibble and B low, first pixel most significant). Picture row y (field line
+fl = y+1, parity fl&1, Amiga line 21+(fl>>1)) shows framestore row
+2L+parity−1; card pixel p shows sample 4·Q(p>>2) + (p&3). Q below 192
+addresses a quad, $E8-$EF are the eight `_BCPalette` colours and the rest
+black. The same codes drive `QUAF` (key 0 on $FF, CD elsewhere) and
+`TRANSQUAD` (Q ≥ $F8 with the pixel's bit of Q's low nibble set: CD), so a
+digital effect is a frame of quad addresses the switcher builds in chip
+RAM, with A on background, B the moved framestore and the key from the
+same map. The map applies to every framestore bus except a live bank 0
+on `IS`.
+
+Not modelled yet: the LUT (`LUT` on: colour and posterise effects),
+PED/GAIN/phase trims, and the blanking interval of digitised lines (the
+AutoHue camera test reads the colour burst there).
+
+The monitor windows (`video/window/card_monitors.rs`) each have a painter
+thread of their own, which waits on the output (`CardOutput::
+wait_frame_since`) for the next frame, composes it and presents it; the
+event loop keeps only the windows' input, and passes resizes and repaint
+requests to the painter. Nothing of this is on the emulation thread, so
+the windows' size does not set the machine's pace, and a painter that
+falls behind the card skips to the latest frame. Composition: each window
+size gets a table of every tube pixel's bilinear taps, glass shading and
+coverage in fixed point (`Layer::table`), a new frame is one integer pass
+over it straight into the surface's buffer, split across up to four
+threads above 60,000 tube pixels, and the artwork around the tube is
+painted only when the layer or the controls change. The Program
+monitor's REC and SETUP buttons and its setup panel are drawn by the
+painter over the artwork in the 8x8 overlay font; the event loop hit-tests
+them from the same fractions of the artwork. Recordings go through the
+card output (`CardOutput`): the lossless AVI recorder runs on publish, and
+for an MP4 a thread runs ffmpeg on the AVI when the recording stops.
+
+The front panels (`video/window/monitor_panel.rs`) are hit-tested from
+button rectangles measured off the built-in artworks. The event loop
+keeps each monitor's settings (and saves them) and passes them to the
+painter, which applies them to the frame before the tube table sees it
+(`monitor_panel::process`): one pass of a 3x3 fixed-point matrix built in
+YIQ (contrast scales Y, I and Q; chroma scales I and Q; phase rotates
+them; bright offsets the result), horizontal peaking for APERTURE, the
+blue gun alone, and for H-V DELAY a source map that shifts the raster by
+half a line and half a field with NTSC-proportioned blanking and sync
+between. At the presets the matrix is the identity and the pass is
+skipped. UNDER SCAN builds the tube table for a picture smaller than the
+glass, its taps outside the raster unlit. Power changes animate through
+the same pass (`Beam::at`: a warm-up with a decaying ripple; off, a
+collapse to a line, then a dot), and the painter repaints at about 60
+Hz while one runs. The sounds (`monitor_sounds.rs`) are synthesized once
+(a mains-harmonic degaussing hum, flyback whine, static crackle, switch
+clicks) and mixed by `audio::fx` straight into the host's output
+callback, after the machine's sound, so they bypass the live lead and
+reach no capture. VOL on the Program monitor sets Paula's host-only
+`video_slot_volume` (skipped in save states, like the output volume).
+(Painted on the
+emulation thread, the two windows were the bulk of what a project play
+cost the machine on a fast host: 3.5 ms of host time per NTSC frame
+idle against 15.5 ms with the outputs changing every frame, past real
+time on a Ryzen 9 9950X3D, with the sound stopping and starting.)
+
 ## Interlace (`video/deinterlace.rs`)
 
 Interlaced (LACE) content is presented through a motion-adaptive

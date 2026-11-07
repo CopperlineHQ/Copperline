@@ -117,6 +117,8 @@ impl App {
             rewind: self.rewind_armed,
             recording: self.recorder.is_some(),
             input_recording: self.input_recorder.is_some(),
+            card_outputs: !self.card_monitors.is_empty(),
+            card_recording: self.card_monitors.program_recording(),
             autofire_hz: self.autofire_hz,
             run_ahead_frames: self.run_ahead_frames,
             joystick_input_mode: self.joystick_input_mode,
@@ -552,6 +554,8 @@ impl App {
 
             A::ToggleRecord => self.toggle_recording(),
             A::ToggleRecordInput => self.toggle_input_recording(),
+            A::ToggleCardRecord => self.toggle_card_recording(),
+            A::ShowCardMonitors => self.show_card_monitors(),
             A::SaveClip => self.save_clip_gif(),
             A::SaveNativeScreenshot => self.take_native_screenshot(),
 

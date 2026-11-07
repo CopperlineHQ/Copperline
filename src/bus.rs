@@ -6847,6 +6847,12 @@ impl Bus {
         self.paula.set_output_volume_percent(percent);
     }
 
+    /// The level of a video-slot card's sound in the mix: its picture
+    /// monitor's volume (host preference, not machine state).
+    pub fn set_video_slot_volume(&mut self, gain: f32) {
+        self.paula.set_video_slot_volume(gain);
+    }
+
     pub fn adjust_output_volume_percent(&mut self, delta: i16) {
         let adjusted = i16::from(self.output_volume_percent()).saturating_add(delta);
         self.set_output_volume_percent(adjusted.clamp(0, 100) as u8);
