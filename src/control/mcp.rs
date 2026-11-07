@@ -80,7 +80,8 @@ toaster_input points an input at a host file; toaster_switcher runs a switcher c
 SLOW/MEDM/FAST, STAT MAIN...); toaster_project runs a project-editor function (CROUTONLOAD \
 path, CROUTONPICK n then toaster_switcher DOEN to make it the transition, PROJECTLOAD/ \
 PROJECTSAVE path, CROUTONSINPROJECT, CROUTONNAME...); toaster_program reaches CG, Paint, \
-LightWave and Modeler through their own ports; \
+LightWave and Modeler through their own ports; flyer_import/flyer_export convert video files \
+to and from Video Flyer clips; \
 toaster_rexx runs any ARexx script inside the Amiga and returns what it says. Those three go \
 through S:Copperline-Link.rexx in the Amiga and the ToasterFiles: volume ([video_slot] volume), \
 and need the bridge on the same computer as the emulator.";
@@ -341,7 +342,7 @@ impl McpServer {
     /// the model can read it and adapt; protocol errors are for
     /// malformed requests only.
     pub fn call_tool(&mut self, name: &str, args: Value) -> ToolResult {
-        if !name.starts_with("session_") {
+        if !name.starts_with("session_") && !name.starts_with("flyer_") {
             if let Some(error) = self.auto_attach() {
                 return ToolResult::error(error);
             }
@@ -357,6 +358,7 @@ impl McpServer {
             "toaster_switcher" => self.toaster_function(&args, "command", Some("Switcher")),
             "toaster_project" => self.toaster_function(&args, "function", None),
             "toaster_program" => self.toaster_program(&args),
+            "flyer_import" | "flyer_export" | "flyer_list" => self.flyer_tool(name, &args),
             _ => match catalogue::find(name) {
                 Some(def) => self.call_ccp(def, args),
                 None => ToolResult::error(format!("unknown tool: {name}")),
@@ -700,6 +702,110 @@ impl McpServer {
             Err(e) => return ToolResult::error(e),
         };
         self.run_link_job(&body, link_timeout(args))
+    }
+
+    /// `flyer_import` / `flyer_export` / `flyer_list`: the clip converter,
+    /// on this computer.
+    fn flyer_tool(&mut self, name: &str, args: &Value) -> ToolResult {
+        // The Flyer's drives: the running Toaster's folder, else the
+        // default. Drive FA0 is `Flyer/FA0`, FB0 `Flyer/FB0` and so on.
+        let media_root = self
+            .session
+            .as_mut()
+            .and_then(|s| match s.bridge.call("toaster.status", json!({})) {
+                Ok(Reply::Ok(v)) => v
+                    .pointer("/state/media_root")
+                    .and_then(Value::as_str)
+                    .map(PathBuf::from),
+                _ => None,
+            })
+            .unwrap_or_else(crate::paths::toaster_files_dir);
+        let flyer_dir = media_root.join("Flyer");
+        let fa0 = flyer_dir.join("FA0");
+        let path_arg = |key: &str| args.get(key).and_then(Value::as_str).map(PathBuf::from);
+        if name == "flyer_list" {
+            let mut clips = Vec::new();
+            let mut drives: Vec<PathBuf> = std::fs::read_dir(&flyer_dir)
+                .map(|e| e.filter_map(Result::ok).map(|e| e.path()).collect())
+                .unwrap_or_default();
+            drives.retain(|d| d.is_dir());
+            drives.sort();
+            for drive in drives {
+                let mut paths: Vec<PathBuf> = std::fs::read_dir(&drive)
+                    .map(|e| e.filter_map(Result::ok).map(|e| e.path()).collect())
+                    .unwrap_or_default();
+                paths.sort();
+                for p in paths.into_iter().filter(|p| p.is_file()) {
+                    if let Ok(text) = crate::flyer_convert::describe(&p) {
+                        clips.push(json!({"path": p.display().to_string(), "info": text}));
+                    }
+                }
+            }
+            return ToolResult::ok(
+                json!({"folder": flyer_dir.display().to_string(), "clips": clips}),
+            );
+        }
+        let Some(ffmpeg) = crate::flyer_convert::find_ffmpeg(Some(&media_root)) else {
+            return ToolResult::error(
+                "ffmpeg was not found (COPPERLINE_FFMPEG, the Toaster files folder, beside \
+                 copperline-ctl, or the PATH)",
+            );
+        };
+        if name == "flyer_import" {
+            let Some(source) = path_arg("source") else {
+                return ToolResult::error("missing source");
+            };
+            let clip = path_arg("clip").unwrap_or_else(|| {
+                let stem: String = source
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("Clip")
+                    .chars()
+                    .take(31)
+                    .collect();
+                crate::flyer_convert::unused_path(&fa0.join(format!("{stem}.clip")))
+            });
+            let mut options = crate::flyer_convert::ImportOptions::default();
+            match args.get("grade").and_then(Value::as_str) {
+                None | Some("std") => {}
+                Some("hq5") => options.grade = flyerclip::Grade::Hq5,
+                Some("hq6") => options.grade = flyerclip::Grade::Hq6,
+                Some(other) => {
+                    return ToolResult::error(format!("grade must be std|hq5|hq6, got {other}"))
+                }
+            }
+            if args.get("audio").and_then(Value::as_bool) == Some(false) {
+                options.audio = false;
+            }
+            options.max_seconds = args.get("seconds").and_then(Value::as_f64);
+            match crate::flyer_convert::import(&ffmpeg, &source, &clip, &options, |_| {}) {
+                Ok(r) => ToolResult::ok(json!({
+                    "clip": clip.display().to_string(),
+                    "fields": r.fields,
+                    "seconds": r.seconds,
+                    "audio_channels": r.audio_channels,
+                    "bytes": r.bytes,
+                    "degraded_fields": r.degraded_fields,
+                    "truncated_fields": r.truncated_fields,
+                })),
+                Err(e) => ToolResult::error(format!("{e:#}")),
+            }
+        } else {
+            let Some(clip) = path_arg("clip") else {
+                return ToolResult::error("missing clip");
+            };
+            let output = path_arg("output")
+                .unwrap_or_else(|| crate::flyer_convert::unused_path(&clip.with_extension("mp4")));
+            match crate::flyer_convert::export(&ffmpeg, &clip, &output, |_| {}) {
+                Ok(r) => ToolResult::ok(json!({
+                    "output": output.display().to_string(),
+                    "frames": r.frames,
+                    "seconds": r.seconds,
+                    "audio_channels": r.audio_channels,
+                })),
+                Err(e) => ToolResult::error(format!("{e:#}")),
+            }
+        }
     }
 
     /// Hand `body` to the Amiga through the link folder and wait for its
@@ -1198,6 +1304,40 @@ pub fn bridge_tools() -> Vec<Value> {
                 "args": {"type": "array", "description": "Arguments: numbers stay numbers, the rest are passed as strings"},
                 "timeout_ms": {"type": "integer", "minimum": 1, "description": "Host milliseconds to wait (default 60000)"}
             }), vec!["program", "command"]),
+        }),
+        json!({
+            "name": "flyer_import",
+            "description": "Convert a video file (MP4, MOV, AVI... anything ffmpeg reads) into a \
+                            NewTek Video Flyer clip: VTASC-coded NTSC composite fields plus \
+                            stereo 16-bit audio, on the Flyer's drive FA0 (the Flyer/FA0 \
+                            folder of the Toaster files folder) unless `clip` names the file (a default name never replaces a file). `grade` std (default), hq5 or hq6 \
+                            sets the per-field size budget; `audio` false drops the sound; \
+                            `seconds` stops early. Runs on this computer (needs ffmpeg), no \
+                            emulator needed.",
+            "inputSchema": object(json!({
+                "source": {"type": "string", "description": "Host path of the video file"},
+                "clip": {"type": "string", "description": "Host path of the clip to write (optional)"},
+                "grade": {"type": "string", "enum": ["std", "hq5", "hq6"], "description": "Video grade (default std)"},
+                "audio": {"type": "boolean", "description": "Keep the sound (default true)"},
+                "seconds": {"type": "number", "description": "Convert at most this much"}
+            }), vec!["source"]),
+        }),
+        json!({
+            "name": "flyer_export",
+            "description": "Convert a NewTek Video Flyer clip into a video file (MP4 with H.264 \
+                            and AAC by default; the extension of `output` picks the format), \
+                            640 x 480 at 29.97 frames a second. Without `output` the file goes \
+                            beside the clip, under a name not yet in use. Runs on this computer (needs ffmpeg).",
+            "inputSchema": object(json!({
+                "clip": {"type": "string", "description": "Host path of the Flyer clip"},
+                "output": {"type": "string", "description": "Host path of the video to write (optional)"}
+            }), vec!["clip"]),
+        }),
+        json!({
+            "name": "flyer_list",
+            "description": "List the clips on the Flyer's drives (Flyer/FA0, Flyer/FB0... in the \
+                            Toaster files folder) with their length, audio and grade.",
+            "inputSchema": object(json!({}), vec![]),
         }),
         json!({
             "name": "toaster_rexx",

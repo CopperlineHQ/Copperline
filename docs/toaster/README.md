@@ -25,7 +25,8 @@ a source reference and a confidence tag. Source paths use these roots:
 - `cg-titles.md`: making ToasterCG title pages from outside and keying
   them over Program.
 
-The emulation itself is described in `docs/internals/video.md` (Toaster section) and
+The Flyer clip format is in `crates/flyerclip/FORMAT.md`. The emulation
+itself is described in `docs/internals/video.md` (Toaster section) and
 configured as in `docs/guide/configuration.md`.
 
 ## What you need

@@ -830,6 +830,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "fluxbridge",
+ "flyerclip",
  "getrandom 0.4.3",
  "gif",
  "gilrs",
@@ -2017,6 +2018,10 @@ dependencies = [
  "serialport",
  "thiserror 2.0.20",
 ]
+
+[[package]]
+name = "flyerclip"
+version = "0.1.0"
 
 [[package]]
 name = "fnv"

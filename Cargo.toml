@@ -214,6 +214,8 @@ fluxbridge = ["dep:fluxbridge"]
 host-serial = ["dep:serialport"]
 
 [dependencies]
+# NewTek Video Flyer clips (container, VTASC codec): the flyerclip program.
+flyerclip = { path = "crates/flyerclip" }
 # 0.15.0 is the floor: earlier releases have no AddressBus::batch_boundary
 # callback and no physical RAM/ROM regions beyond the primary fastmem window.
 # Keep the conformance runner on this same version (tools/check-m68k-locks.py).
@@ -474,6 +476,11 @@ required-features = ["bench-bin"]
 [[bin]]
 name = "copperline-ctl"
 path = "src/bin/copperline-ctl.rs"
+required-features = ["ctl-bin"]
+
+[[bin]]
+name = "flyerclip"
+path = "src/bin/flyerclip.rs"
 required-features = ["ctl-bin"]
 
 [[bin]]

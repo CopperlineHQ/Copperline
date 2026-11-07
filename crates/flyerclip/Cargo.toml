@@ -1,0 +1,9 @@
+[package]
+name = "flyerclip"
+version = "0.1.0"
+edition = "2021"
+description = "NewTek Video Toaster Flyer clip container, VTASC video codec and audio, transcribed from the 1995-98 NewTek sources"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+

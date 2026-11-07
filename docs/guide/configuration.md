@@ -1042,6 +1042,28 @@ it starts with, and its Alt-F keys from `REXX:CG`), `Assign HIIP:
 Toaster:Programs/Hiip_Support` (the image loaders and savers) and, for
 ToasterPaint and older CG pages, `Assign ToasterFonts: Toaster:PSFonts`.
 
+**Flyer clips.** The `flyerclip` program (built with Copperline) converts
+between video files and NewTek Video Flyer clips, the Flyer's own format:
+VTASC-coded NTSC composite fields and 16-bit stereo sound
+(`crates/flyerclip`, transcribed from NewTek's Flyer sources; the format is
+written up in `crates/flyerclip/FORMAT.md`). `flyerclip import movie.mp4`
+writes `movie.clip` onto the Flyer's first drive, the media folder's
+`Flyer/FA0` folder; `flyerclip export movie.clip` writes `movie.mp4`
+beside it; `flyerclip info` describes
+a clip. Dropping a file on the program does the right one. `--hq5`/`--hq6`
+give each field a larger budget, `--no-audio` drops the sound and `--seconds
+N` stops early. ffmpeg does the decoding and encoding.
+
+How a source becomes a clip: ffmpeg squares its pixels first (anamorphic
+video keeps its shape), fits it to 4:3 (letterboxed or pillarboxed, like a
+Toaster input, unless the converter below says crop or stretch) and scales
+it to the Flyer's 752 samples by 480 lines. Each field is its own moment,
+59.94 a second, as a camera records: an interlaced source is split into its
+fields, a progressive one sampled at the field rate (24 frame film comes out
+with 3:2 pulldown, 60 frame video keeps every frame), and the four fields
+of each colour frame take the lines of four pictures in turn. The sound is
+resampled to the Flyer's 44.056 kHz.
+
 `preview_overlay` lets the switcher draw its interface over the Preview
 output when its own preference asks for it, as a one-monitor Toaster setup
 does. It is off by default because the interface has a window of its own.

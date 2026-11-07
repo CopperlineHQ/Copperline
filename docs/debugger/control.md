@@ -255,7 +255,10 @@ functions), `cg` (ToasterCG), `paint` (ToasterPaint), `lightwave` and
 switcher (and enters Paint); any other command is the program's own, as its
 ARexx document in `Toaster:Programs/Documentation/Arexx` lists them.
 
-A paused machine is run forward until the job is
+`flyer_import`, `flyer_export` and `flyer_list` convert between video files
+and Video Flyer clips on the Flyer's drives (`Flyer/FA0` and so on in the
+card's folder; the `flyerclip` program's conversions); they run in the bridge and need ffmpeg, not a
+session. A paused machine is run forward until the job is
 done; each job waits up to `timeout_ms` (default 60000).
 
 To drive a windowed session, start Copperline with a control server and an
