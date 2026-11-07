@@ -193,6 +193,19 @@ pub(crate) fn dma_write_byte(mem: &mut Memory, addr: u32, b: u8) -> bool {
     false
 }
 
+/// Where the video beam is, for a board that keeps time by the field (the
+/// Video Flyer's field clock). Only the bus's device tick knows it; a host
+/// built for a CPU access carries none.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HostBeam {
+    /// The line the beam is on.
+    pub vpos: u32,
+    /// Long-frame flag of the field the beam is in (LOF).
+    pub long_frame: bool,
+    /// Emulated field counter: it steps when the beam wraps to line 0.
+    pub frame: u64,
+}
+
 /// The host-services view handed to a [`ZorroDevice`] on every call. Wraps the
 /// guest [`Memory`] so a board can DMA, and is the place capability hooks are
 /// added (CD audio injection, networking) as the boards that need them land.
@@ -225,6 +238,8 @@ pub struct DeviceHost<'a> {
     /// ticks `memory_mut` unconditionally; latching on that would disable
     /// the data cache outright on such machines).
     wrote_memory: bool,
+    /// The beam position, on the bus's device tick (see [`HostBeam`]).
+    beam: Option<HostBeam>,
 }
 
 impl<'a> DeviceHost<'a> {
@@ -237,6 +252,7 @@ impl<'a> DeviceHost<'a> {
             self_slot: None,
             touched_memory: false,
             wrote_memory: false,
+            beam: None,
         }
     }
 
@@ -250,6 +266,7 @@ impl<'a> DeviceHost<'a> {
             self_slot: Some(slot),
             touched_memory: false,
             wrote_memory: false,
+            beam: None,
         }
     }
 
@@ -275,6 +292,7 @@ impl<'a> DeviceHost<'a> {
             self_slot: None,
             touched_memory: false,
             wrote_memory: false,
+            beam: None,
         }
     }
 
@@ -299,7 +317,19 @@ impl<'a> DeviceHost<'a> {
             self_slot: Some(slot),
             touched_memory: false,
             wrote_memory: false,
+            beam: None,
         }
+    }
+
+    /// The same host, carrying the beam position (the bus's device tick).
+    pub fn with_beam(mut self, beam: HostBeam) -> Self {
+        self.beam = Some(beam);
+        self
+    }
+
+    /// Where the beam is, when the host was built with it.
+    pub fn beam(&self) -> Option<HostBeam> {
+        self.beam
     }
 
     /// The guest memory the board DMAs into.
@@ -525,6 +555,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::read(d.as_mut(), off, size, host),
             BoardDevice::Copperhf(d) => ZorroDevice::read(d, off, size, host),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::read(d, off, size, host),
+            BoardDevice::Flyer(d) => ZorroDevice::read(d.as_mut(), off, size, host),
         }
     }
 
@@ -548,6 +579,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
             BoardDevice::Copperhf(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::write(d, off, size, value, host),
+            BoardDevice::Flyer(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
         }
     }
 
@@ -571,6 +603,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::peek_word(d.as_ref(), off),
             BoardDevice::Copperhf(d) => ZorroDevice::peek_word(d, off),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::peek_word(d, off),
+            BoardDevice::Flyer(d) => ZorroDevice::peek_word(d.as_ref(), off),
         }
     }
 
@@ -594,6 +627,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::tick(d.as_mut(), cck, host),
             BoardDevice::Copperhf(d) => ZorroDevice::tick(d, cck, host),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::tick(d, cck, host),
+            BoardDevice::Flyer(d) => ZorroDevice::tick(d.as_mut(), cck, host),
         }
     }
 
@@ -626,6 +660,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::int2_line(d.as_ref()),
             BoardDevice::Copperhf(d) => ZorroDevice::int2_line(d),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::int2_line(d),
+            BoardDevice::Flyer(d) => ZorroDevice::int2_line(d.as_ref()),
         }
     }
 
@@ -649,6 +684,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::int6_line(d.as_ref()),
             BoardDevice::Copperhf(d) => ZorroDevice::int6_line(d),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::int6_line(d),
+            BoardDevice::Flyer(d) => ZorroDevice::int6_line(d.as_ref()),
         }
     }
 
@@ -672,6 +708,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::take_activity(d.as_mut()),
             BoardDevice::Copperhf(d) => ZorroDevice::take_activity(d),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::take_activity(d),
+            BoardDevice::Flyer(d) => ZorroDevice::take_activity(d.as_mut()),
         }
     }
 
@@ -695,6 +732,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::reset(d.as_mut()),
             BoardDevice::Copperhf(d) => ZorroDevice::reset(d),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::reset(d),
+            BoardDevice::Flyer(d) => ZorroDevice::reset(d.as_mut()),
         }
     }
 
@@ -718,6 +756,7 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Cd32Fmv(d) => ZorroDevice::kind(d.as_ref()),
             BoardDevice::Copperhf(d) => ZorroDevice::kind(d),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::kind(d),
+            BoardDevice::Flyer(d) => ZorroDevice::kind(d.as_ref()),
         }
     }
 }

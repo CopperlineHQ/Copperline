@@ -21,22 +21,24 @@ pub(crate) const OUTPUTS: usize = 5;
 pub(crate) const DVE_MAP: usize = 6;
 pub(crate) const BUS_A: usize = 7;
 pub(crate) const BUS_B: usize = 8;
-pub(crate) const SRC_INPUT: usize = 9;
-pub(crate) const SRC_DAC: usize = 10;
-pub(crate) const SRC_AMIGA: usize = 11;
-pub(crate) const LATCH: usize = 12;
-pub(crate) const KEY: usize = 13;
-pub(crate) const MIX: usize = 14;
-pub(crate) const PREVIEW: usize = 15;
-pub(crate) const SOUND: usize = 16;
-pub(crate) const PUBLISH: usize = 17;
-pub(crate) const PAR_READ: usize = 18;
-pub(crate) const SCAN: usize = 19;
-pub(crate) const PORT_BYTE: usize = 20;
-pub(crate) const COMPOSE_WAIT: usize = 21;
-pub(crate) const SUBMIT: usize = 22;
-pub(crate) const GRAB_ENCODE: usize = 23;
-const STAGES: usize = 24;
+pub(crate) const SRC_FLYER: usize = 9;
+pub(crate) const SRC_INPUT: usize = 10;
+pub(crate) const SRC_DAC: usize = 11;
+pub(crate) const SRC_AMIGA: usize = 12;
+pub(crate) const LATCH: usize = 13;
+pub(crate) const KEY: usize = 14;
+pub(crate) const MIX: usize = 15;
+pub(crate) const PREVIEW: usize = 16;
+pub(crate) const SOUND: usize = 17;
+pub(crate) const FLYER_SOUND: usize = 18;
+pub(crate) const PUBLISH: usize = 19;
+pub(crate) const PAR_READ: usize = 20;
+pub(crate) const SCAN: usize = 21;
+pub(crate) const PORT_BYTE: usize = 22;
+pub(crate) const COMPOSE_WAIT: usize = 23;
+pub(crate) const SUBMIT: usize = 24;
+pub(crate) const GRAB_ENCODE: usize = 25;
+const STAGES: usize = 26;
 
 const NAMES: [&str; STAGES] = [
     "field_render",
@@ -48,6 +50,7 @@ const NAMES: [&str; STAGES] = [
     "dve_map",
     "bus_a",
     "bus_b",
+    "src_flyer",
     "src_input",
     "src_dac",
     "src_amiga",
@@ -56,6 +59,7 @@ const NAMES: [&str; STAGES] = [
     "mix",
     "preview",
     "sound",
+    "flyer_sound",
     "publish",
     "par_read",
     "scan",

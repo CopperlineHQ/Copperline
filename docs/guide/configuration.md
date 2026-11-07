@@ -919,6 +919,8 @@ media = "C:/Toaster/Amiga Toaster Files"   # the card's host folder
 # monitors = true         # Preview and Program monitor windows (default true)
 # preview_overlay = false # the switcher interface over Preview (default false)
 # volume = "ToasterFiles"  # also mount media in the Amiga as ToasterFiles:
+# flyer = false           # also fit a Video Flyer (needs card = "toaster")
+# converter = true        # with a Flyer, open the clip converter window too
 ```
 
 `card = "toaster"` fits an emulated NewTek Video Toaster 4000 in the
@@ -949,7 +951,8 @@ mixed by how much of each input Program shows (a dissolve crossfades the
 sound, a wipe by area, framestores and mattes are silent). Recordings carry
 the same sound. The real card handles picture only; this stands in for the
 audio-follow-video mixer beside it.
-- `Flyer`: kept for the Video Flyer's drives (not emulated yet).
+- `Flyer`: the Video Flyer's drives, `Flyer/FA0` and so on (see `flyer`
+  below).
 
 Until the switcher first drives the card, while the machine boots, both
 outputs are black and silent and the input folders are not read yet; the
@@ -1013,8 +1016,10 @@ near-black gap. A replaced artwork has no working front panel.
 **Effect sounds.** Some transitions carry sounds (8SVX samples in the
 effect, such as Shatter, Falling Sheep or Camera Iris) that the switcher
 plays through the Amiga's own audio, which Copperline mixes into its sound
-output and the recordings. (NewTek's switcher skips them when a Video
-Flyer is fitted, `animfxhandler.a`: "dont do sound if flyer!".)
+output and the recordings. NewTek's switcher skips them when a Flyer is
+fitted (`animfxhandler.a`: "dont do sound if flyer!"), so with `flyer =
+true` they are silent, as they were on a real Toaster-Flyer; without the
+Flyer they play.
 
 `volume` also mounts the media folder in the Amiga as a volume of that
 name (like a `[[filesys]]` entry, never a boot candidate), so the Toaster
@@ -1064,6 +1069,89 @@ with 3:2 pulldown, 60 frame video keeps every frame), and the four fields
 of each colour frame take the lines of four pictures in turn. The sound is
 resampled to the Flyer's 44.056 kHz.
 
+**Video Flyer.** `flyer = true` (with `card = "toaster"`) also fits a
+NewTek Video Toaster Flyer, the Zorro II card that records and plays clips
+into the Toaster's inputs 3 and 4. The Toaster software finds it as
+NewTek's board (manufacturer 2191, product 0) and loads it as on a real
+machine: `FlyerInit` (or the switcher at start-up) downloads the Flyer's
+firmware and chip files from `NewTek:Programs/Flyer_Support` and reports
+"Okay", and the switcher then starts with its Flyer controls. The card's
+own processor is not emulated: the window is its shared memory, and the
+commands the software leaves there are answered by Copperline as the
+Flyer's firmware would (the board's serial number is in the 2CC range of
+the installed `chipset.dat`; its EEPROM settings last until the emulator
+quits). `COPPERLINE_DIAG_FLYER=1` logs every command it is sent.
+
+The Flyer's SCSI drives are folders in `media`'s `Flyer` folder: `FA0` (bus
+A, unit 0; created when missing), and `FB0`, `FC0`, ... when those folders
+exist. Files are the clips' bytes as the Flyer stores them (what
+`flyerclip import` and the converter write, or a clip copied off a real
+Flyer drive); a
+`.flyervol` file whose first line is a name renames the volume, which is
+otherwise `FlyerA0`, `FlyerB0`, ... With the Toaster's `FA0` DOS driver
+mounted (copy `NewTek/Programs/System_Support/Devs/DOSDrivers/FA0` into
+`DEVS:DOSDrivers`), the drive is the `FlyerA0:` volume, which lists, reads
+and copies like any other. Clips are read-only (they cannot be overwritten,
+extended or deleted from the Amiga, and nothing records into the drives
+yet, though Process Clip below makes new ones from them); other files, such
+as the crouton icons below, are written straight into the folder. Clips put
+into the folder while the machine runs show up the next time the Grazer
+lists the drive.
+
+A typical start-up, as in the Toaster's own installation: `S:Toaster-Auto`
+(or `S:User-Startup`) runs `NewTek:Programs/System_Support/c/FlyerInit`
+before `rx Toaster:Programs/StartToaster`, so the Flyer is set up when the
+switcher starts.
+
+**Playing clips.** Clips go into a project like any crouton: from the
+Grazer (the `FlyerA0:` drive), or with the Editor's ARexx
+`CROUTONLOAD('FlyerA0:movie.clip')`. A clip's crouton shows a picture from
+the clip once it has an icon: the Editor's `MAKEICON('FlyerA0:movie.clip',
+field)` (or the Flyer controls) has the switcher read that field off the
+drive and write `movie.clip.I` beside the clip, as on a real Flyer. Playing
+the project (or `PROJECTPLAY`) hands the clips to the Flyer as a sequence;
+the Flyer plays them at the right fields on its channels A and B, which
+take over the Toaster's inputs 3 and 4 while it plays (the switcher routes
+them with the Flyer's `ToasterMux`), so the project's transitions run
+between the clips as on the real system. A clip crouton run on its own
+(`CROUTONRUN`, or from the switcher) plays the same way; `CROUTONSTOP`
+stops it. In/out points, audio volume, pan, attack and decay and audio
+envelopes come from the croutons' settings, as the Editor sends them.
+
+The Flyer's sound is the system's sound: its eight-channel mixer's output
+(735 samples a field, about 44.056 kHz, locked to the video) goes to the
+emulator's sound output and into the Program recording, whatever the
+switcher shows. The input folders' sound keeps following Program as
+described above (it stands in for what would reach the Flyer's line
+inputs); an input the Flyer has taken over is silent there.
+
+Jog and shuttle work as on the real card: opening a clip's controls puts
+the clip on Program (through input 3 or 4), and dragging its in/out
+sliders, jogging with the mouse or the arrow keys (Shift for 30 frames),
+or holding a shuttle arrow moves the picture through the clip a colour
+frame at a time, with the sound of each frame heard as it goes. While the
+position stands still the frame's sound repeats as a short loop, as on
+the real Flyer, until the next move or until the controls close (the
+Editor's own quieting after a pause does not happen yet). The shuttle
+moves at the speeds the switcher asks for rather than racing to the end.
+
+Process Clip (the cutting room) works: mark the pieces of a clip with
+their in and out points and names, choose picture, sound or both, and
+Perform makes each piece a clip of its own on the drive, copied from the
+original's coded frames (whole colour frames, so a piece starts on the
+colour frame holding its in point), with its icon. Without Destructive the
+original stays. A destructive cut takes the original off the drive as the
+Flyer would, but its file is moved into a `Trash` folder beside the drive
+folders rather than deleted, so it can be put back. Not emulated yet:
+recording into the Flyer, SMPTE time code and the TBC module.
+
+Flyer clips are decoded ahead of time on worker threads (two to four), so
+playback does not hold up the emulated machine; the picture is the same
+whatever the host's speed. `[cpu] jit = true` runs the switcher, the
+Editor and Flyer playback correctly but does not make them faster: while a
+project plays, the switcher's time goes on chip-bus and CIA accesses,
+which the JIT runs at the same speed as the precise core.
+
 `preview_overlay` lets the switcher draw its interface over the Preview
 output when its own preference asks for it, as a one-monitor Toaster setup
 does. It is off by default because the interface has a window of its own.
@@ -1074,7 +1162,7 @@ monitor beside the capture (`shot-preview.png`, `shot-program.png`).
 outputs; `=fields` also dumps one field's line headers in forty; `=perf`
 logs, once an emulated second, the host time each stage of the card's work
 took (`toaster perf:` lines: painting the field, scanning its headers,
-each source, the key, the mix, publishing),
+each source, the key, the mix, publishing, the Flyer's decodes and waits),
 most of it on the card's own compose thread, with `submit` and
 `compose_wait` the emulation thread's share. How the card works is
 described in [](../internals/video) and in `src/toaster/`.
@@ -1798,7 +1886,8 @@ the lead (the machine catching up after a stall) is trimmed back to it,
 and the pacer's own catch-up limit grows with the lead. The picture is
 shown as the machine makes it, so it runs ahead of the sound by the lead,
 which is why the default is short: for a machine that runs near the
-host's limit (a Video Toaster running a transition) `400` keeps the sound continuous through a second
+host's limit (a Video Toaster with its Flyer playing a project, a
+transition under way) `400` keeps the sound continuous through a second
 or two of lost ground, at the cost of the sound trailing the picture by
 that much. Headless runs and `--audio-wav` captures are not affected.
 

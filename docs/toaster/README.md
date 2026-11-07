@@ -1,8 +1,8 @@
-# Video Toaster: working specs
+# Video Toaster and Flyer: working specs
 
 Notes recovered from NewTek's released sources (switcher, CG, project
 editor, Flyer firmware and flyer.library) while emulating the Video
-Toaster 4000 in Copperline. Each claim carries
+Toaster 4000 and the Video Toaster Flyer in Copperline. Each claim carries
 a source reference and a confidence tag. Source paths use these roots:
 
 - `<vt-src>/`: the Video Toaster source release (AmigaVideoToasterComplete:
@@ -24,6 +24,10 @@ a source reference and a confidence tag. Source paths use these roots:
   and EH0 LUST).
 - `cg-titles.md`: making ToasterCG title pages from outside and keying
   them over Program.
+- `flyer-spec.md`: the Flyer board, its command mailbox and the plan for
+  high-level emulation.
+- `tutorial-map.md`: the functions, panels and tabs a NewTek tutorial
+  covers, what each needs, and how far the emulation supports it.
 
 The Flyer clip format is in `crates/flyerclip/FORMAT.md`. The emulation
 itself is described in `docs/internals/video.md` (Toaster section) and

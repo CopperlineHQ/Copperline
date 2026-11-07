@@ -70,6 +70,7 @@ pub mod perf;
 pub mod regs;
 pub mod video;
 
+use crate::flyer::link::{FieldSource, FlyerLink};
 use crate::video::bitplane::RenderInput;
 use crate::videoslot::{BeamPos, FieldPixels, LiveField, VideoSlotDevice};
 use std::collections::VecDeque;
@@ -407,6 +408,14 @@ pub enum FieldInput {
     Owned(OwnedField),
 }
 
+/// What the Flyer did during a field, taken on the emulation thread when
+/// the field is handed over: see [`crate::flyer::link`].
+struct FlyerState {
+    routed: [bool; 2],
+    shown: [Vec<FieldSource>; 2],
+    sound: Vec<(f32, f32)>,
+}
+
 /// One finished field, for the compose thread.
 struct Job {
     id: u64,
@@ -414,6 +423,7 @@ struct Job {
     at: BeamPos,
     /// Lines of the field the live scan already took in.
     first_unscanned: u32,
+    flyer: Option<FlyerState>,
 }
 
 /// What a field's work produced for the host.
@@ -421,6 +431,8 @@ struct JobResult {
     id: u64,
     /// Program's sound, when the field completed a frame.
     sound: Vec<(f32, f32)>,
+    /// Peak of that sound, for the Flyer's meters.
+    peak: Option<(f32, f32)>,
 }
 
 #[derive(Default)]
@@ -515,11 +527,12 @@ fn run_job(
         input,
         at,
         first_unscanned,
+        flyer,
     } = job;
     let mut card = card.lock().unwrap_or_else(|e| e.into_inner());
     match input {
         FieldInput::Owned(owned) => {
-            let result = card.take_field(&owned.field(), at, first_unscanned, id);
+            let result = card.take_field(&owned.field(), at, first_unscanned, flyer, id);
             (result, None)
         }
         FieldInput::Render(mut input) => {
@@ -551,7 +564,7 @@ fn run_job(
                 interlaced: wide.interlaced,
                 valid_rows: wide.rows,
             };
-            let result = card.take_field(&field, at, first_unscanned, id);
+            let result = card.take_field(&field, at, first_unscanned, flyer, id);
             // The frame's buffers go back to the machine as soon as the
             // field is painted.
             input.release_shared_buffers();
@@ -592,6 +605,14 @@ pub struct Card {
     /// whether the frame has one.
     dve: dve::DveMap,
     dve_on: bool,
+    /// The Video Flyer beside the card: it can take over inputs 3 and 4,
+    /// and its sound is the system's.
+    flyer: Option<Arc<FlyerLink>>,
+    /// What the Flyer did, as the fields' jobs reported it: the routing,
+    /// what each channel showed since the last frame, and its sound.
+    flyer_routed: [bool; 2],
+    flyer_shown: [Vec<FieldSource>; 2],
+    flyer_sound: Vec<(f32, f32)>,
     /// Per-pixel scratch, reused from frame to frame.
     key_buf: Vec<u8>,
     codes_buf: Vec<Option<u8>>,
@@ -604,6 +625,7 @@ pub struct Toaster {
     pipe: Arc<Pipe>,
     worker: Option<std::thread::JoinHandle<()>>,
     outputs: Vec<Arc<crate::videoslot::CardOutput>>,
+    flyer: Option<Arc<FlyerLink>>,
     /// Lines of the field in progress already taken in through the live
     /// scan: `(field number, next line to take)`.
     scanned: Option<(u64, u32)>,
@@ -648,10 +670,18 @@ impl Toaster {
             pipe,
             worker,
             outputs,
+            flyer: None,
             scanned: None,
             submitted: 0,
             joined: 0,
         }
+    }
+
+    /// Fit a Video Flyer beside the card: inputs 3 and 4 show its channels
+    /// A and B when it routes them there, and its sound joins Program's.
+    pub fn set_flyer_link(&mut self, link: Arc<FlyerLink>) {
+        self.flyer = Some(Arc::clone(&link));
+        self.card().flyer = Some(link);
     }
 
     /// The card, once the compose thread has caught up: the state the
@@ -707,12 +737,20 @@ impl Toaster {
             Some((frame, next)) if frame == at.frame => next,
             _ => 0,
         };
+        // What the Flyer did since the last field, taken now so the
+        // frame composed later sees the same whatever the thread's pace.
+        let flyer = self.flyer.as_ref().map(|link| FlyerState {
+            routed: link.routing(),
+            shown: [link.take_shown(0), link.take_shown(1)],
+            sound: link.take_sound(),
+        });
         self.submitted += 1;
         let job = Job {
             id: self.submitted,
             input,
             at,
             first_unscanned,
+            flyer,
         };
         if self.worker_alive() {
             self.pipe.submit(job);
@@ -827,14 +865,31 @@ impl Card {
             preview_overlay: false,
             dve: dve::DveMap::empty(),
             dve_on: false,
+            flyer: None,
+            flyer_routed: [false; 2],
+            flyer_shown: [Vec::new(), Vec::new()],
+            flyer_sound: Vec::new(),
             key_buf: Vec::new(),
             codes_buf: Vec::new(),
         }
     }
 
-    /// Input `n`'s picture into `out`, from the input's host folder. False
-    /// when nothing is plugged in.
+    /// The Flyer channel on input `n` (0-based), when the Flyer has it:
+    /// channel A on input 3, B on input 4.
+    fn flyer_channel(&self, n: usize) -> Option<usize> {
+        let ch = n.checked_sub(2).filter(|&c| c < 2)?;
+        (self.flyer.is_some() && self.flyer_routed[ch]).then_some(ch)
+    }
+
+    /// Input `n`'s picture into `out`: the Flyer's channel where it has
+    /// the input, else the input's host folder. False when nothing is
+    /// plugged in.
     fn input_into(&mut self, n: usize, out: &mut [u32]) -> bool {
+        if let (Some(ch), Some(link)) = (self.flyer_channel(n), &self.flyer) {
+            let shown = std::mem::take(&mut self.flyer_shown[ch]);
+            link.weave_shown(ch, &shown, out);
+            return true;
+        }
         match self.video.input_picture(n) {
             Some(p) => {
                 out.copy_from_slice(&p[..out.len()]);
@@ -1042,10 +1097,20 @@ impl Card {
         field: &FieldPixels<'_>,
         at: BeamPos,
         first_unscanned: u32,
+        flyer: Option<FlyerState>,
         id: u64,
     ) -> JobResult {
         let timer = perf::start();
         self.stats.fields += 1;
+        if let Some(flyer) = flyer {
+            self.flyer_routed = flyer.routed;
+            for (ch, shown) in flyer.shown.into_iter().enumerate() {
+                for source in shown {
+                    crate::flyer::link::push_shown(&mut self.flyer_shown[ch], source);
+                }
+            }
+            self.flyer_sound.extend_from_slice(&flyer.sound);
+        }
         // `COPPERLINE_DIAG_TOASTER=fields`: dump every line header of one
         // field in forty.
         let dump = self.diag_fields && self.active && self.stats.fields.is_multiple_of(40);
@@ -1080,6 +1145,7 @@ impl Card {
         let mut result = JobResult {
             id,
             sound: Vec::new(),
+            peak: None,
         };
         if frame_done {
             let outputs = perf::start();
@@ -1097,10 +1163,17 @@ impl Card {
         }
         timer.stop(perf::FIELD_COMPLETE);
         if perf::on() && self.stats.fields.is_multiple_of(60) {
+            let flyer = self
+                .flyer
+                .as_ref()
+                .map(|l| l.decode_stats())
+                .unwrap_or_default();
             log::info!(
-                "toaster perf: field {} {} at {:?}",
+                "toaster perf: field {} {} flyer decoded={} waited={} at {:?}",
                 self.stats.fields,
                 perf::report(),
+                flyer.0,
+                flyer.1,
                 at.frame
             );
         }
@@ -1159,6 +1232,9 @@ impl VideoSlotDevice for Toaster {
                 break;
             };
             out.extend_from_slice(&result.sound);
+            if let (Some(peak), Some(link)) = (result.peak, &self.flyer) {
+                link.set_line_peak(peak);
+            }
         }
     }
 
@@ -1312,6 +1388,10 @@ impl Card {
             "live_framestore": r.abse(),
             "outputs": outputs,
             "inputs": self.video.input_status(),
+            "flyer": self.flyer.as_ref().map(|_| serde_json::json!({
+                "input3": self.flyer_channel(2).is_some(),
+                "input4": self.flyer_channel(3).is_some(),
+            })),
             "media_root": root.map(|p| p.display().to_string()),
             "link_folder": root.map(|p| p.join(LINK_FOLDER).display().to_string()),
         })
@@ -1331,10 +1411,15 @@ impl Card {
         match (mux, role) {
             (Mux::Vid(n), _) => {
                 let timer = perf::start();
+                let flyer = self.flyer_channel(n).is_some();
                 if !self.input_into(n, out) {
                     out.fill(video::black());
                 }
-                timer.stop(perf::SRC_INPUT);
+                timer.stop(if flyer {
+                    perf::SRC_FLYER
+                } else {
+                    perf::SRC_INPUT
+                });
             }
             // On the IS mux, 4 is the Program output fed back and 5 the
             // external input (DAC0).
@@ -1490,11 +1575,12 @@ impl Card {
     }
 
     /// The sound of `shares` for this frame: each input's frame of sound,
-    /// scaled by how much of it is on the output.
+    /// scaled by how much of it is on the output. An input the Flyer has
+    /// is silent here: the Flyer's sound is its own output.
     fn mix_sound(&self, shares: &Inputs, len: usize) -> Vec<(f32, f32)> {
         let mut out = vec![(0.0f32, 0.0f32); len];
         for (n, &w) in shares.0.iter().enumerate() {
-            if w < 0.001 {
+            if w < 0.001 || self.flyer_channel(n).is_some() {
                 continue;
             }
             let Some(sound) = self.video.input_sound(n) else {
@@ -1562,9 +1648,12 @@ impl Card {
         timer.stop(perf::PREVIEW);
         let samples = self.video.frame_samples();
         let timer = perf::start();
-        let program_sound = self.mix_sound(&program_inputs, samples);
+        let mut program_sound = self.mix_sound(&program_inputs, samples);
         let preview_sound = self.mix_sound(&preview_inputs, samples);
         timer.stop(perf::SOUND);
+        let timer = perf::start();
+        result.peak = self.add_flyer_sound(&mut program_sound);
+        timer.stop(perf::FLYER_SOUND);
         if self.preview_overlay && self.regs().useron() {
             video::overlay_interface(field, Self::pixel0_column(field), &mut preview);
         }
@@ -1609,9 +1698,34 @@ impl Card {
         let mut black = self.video.take_picture();
         black.fill(video::black());
         let silence = vec![(0.0f32, 0.0f32); self.video.frame_samples()];
+        self.flyer_sound.clear();
         self.video.publish(&black, &black, &silence, &silence);
         self.video.give_back(black);
         result.sound = silence;
+    }
+
+    /// The Flyer's audio output is the system's: its fields of sound since
+    /// the last frame, stretched to this frame, join Program's. The input
+    /// files' sound (standing in for what reaches the Flyer's line inputs)
+    /// sets its record meters: that peak is returned for the host to pass
+    /// on.
+    fn add_flyer_sound(&mut self, program: &mut [(f32, f32)]) -> Option<(f32, f32)> {
+        self.flyer.as_ref()?;
+        let peak = program.iter().fold((0.0f32, 0.0f32), |p, &(l, r)| {
+            (p.0.max(l.abs()), p.1.max(r.abs()))
+        });
+        let sound = std::mem::take(&mut self.flyer_sound);
+        if !sound.is_empty() {
+            let len = program.len();
+            for (o, (l, r)) in program
+                .iter_mut()
+                .zip(crate::videoslot::resample(&sound, len))
+            {
+                o.0 += l;
+                o.1 += r;
+            }
+        }
+        Some(peak)
     }
 
     /// The fader's mix, per picture pixel (0 = A, 255 = B): one value, or
@@ -1764,9 +1878,53 @@ mod tests {
     }
 
     #[test]
-    fn the_outputs_are_black_and_silent_until_the_switcher_drives_the_card() {
+    fn a_routed_flyer_channel_is_input_3_and_its_sound_joins_program() {
+        let link = FlyerLink::new();
         let mut card = Toaster::new();
-        // Both buses on input 3: nothing chose it, so nothing shows yet.
+        card.set_flyer_link(Arc::clone(&link));
+        let white = u32::from_le_bytes([255, 255, 255, 255]);
+        link.show(0, FieldSource::Matte(white));
+        let line = Line::new(30);
+        let mut out = vec![0u32; video::PICTURE_W * video::PICTURE_H];
+        // What the Flyer did reaches the card with the next field.
+        let picture = |card: &mut Toaster, n: usize, out: &mut [u32]| {
+            card.field_complete(&line.field(), BeamPos::default());
+            card.card()
+                .source_picture(regs::Mux::Vid(n), video::Role::Fader, &line.field(), out);
+        };
+        // Not routed: input 3 is the card's own (here unplugged) input.
+        picture(&mut card, 2, &mut out);
+        assert!(out.iter().all(|&p| p == video::black()));
+        link.set_routing(true, false);
+        picture(&mut card, 2, &mut out);
+        assert!(out.iter().all(|&p| p == white));
+        picture(&mut card, 3, &mut out);
+        assert!(out.iter().all(|&p| p == video::black()));
+        // The Flyer's two fields of sound reach the card with the next
+        // field (the fourth here completes a frame of idle outputs, which
+        // drop what came before) and fill the frame's.
+        card.field_complete(&line.field(), BeamPos::default());
+        link.push_sound(&[(0.5, 0.25); 1470]);
+        card.field_complete(&line.field(), BeamPos::default());
+        assert!(link.take_sound().is_empty());
+        assert_eq!(card.card().flyer_sound.len(), 1470);
+        let mut program = vec![(0.0f32, 0.0f32); 1485];
+        let peak = card.card().add_flyer_sound(&mut program);
+        assert_eq!(peak, Some((0.0, 0.0)));
+        assert!(program.iter().all(|&(l, r)| l == 0.5 && r == 0.25));
+        assert!(card.card().flyer_sound.is_empty());
+        assert_eq!(card.card().status_value()["flyer"]["input3"], true);
+    }
+
+    #[test]
+    fn the_outputs_are_black_and_silent_until_the_switcher_drives_the_card() {
+        let link = FlyerLink::new();
+        let mut card = Toaster::new();
+        card.set_flyer_link(Arc::clone(&link));
+        let white = u32::from_le_bytes([255, 255, 255, 255]);
+        link.set_routing(true, false);
+        link.show(0, FieldSource::Matte(white));
+        // Both buses on input 3, which the Flyer shows white.
         card.card().elh[ELH_EH0 + 2].r = 0xA200;
         card.card().elh[ELH_EH0 + 2].b = 0x0200;
         let program = |card: &Toaster| {
@@ -1774,14 +1932,21 @@ mod tests {
             let (_, _, pixels) = outputs[1].snapshot().expect("a frame");
             pixels
         };
-        let blank = Line::new(30);
-        card.field_complete(&blank.field(), BeamPos::default());
-        card.field_complete(&blank.field(), BeamPos::default());
-        let mut sound = Vec::new();
-        card.take_audio(&mut sound);
+        let frame = |card: &mut Toaster| {
+            let blank = Line::new(30);
+            card.field_complete(&blank.field(), BeamPos::default());
+            card.field_complete(&blank.field(), BeamPos::default());
+            let mut sound = Vec::new();
+            card.take_audio(&mut sound);
+            sound
+        };
+        link.push_sound(&[(0.5, 0.25); 1470]);
+        let sound = frame(&mut card);
         assert!(!card.card().active);
         assert!(program(&card).iter().all(|&p| p == video::black()));
         assert!(!sound.is_empty() && sound.iter().all(|&(l, r)| l == 0.0 && r == 0.0));
+        // The Flyer's sound from before is dropped, not played late.
+        assert!(link.take_sound().is_empty());
         // The switcher's first header: from then on the outputs follow it.
         let mut eh0 = Line::new(23);
         eh0.header(Header {
@@ -1792,6 +1957,15 @@ mod tests {
         });
         card.field_complete(&eh0.field(), BeamPos::default());
         assert!(card.card().active);
+        card.card().elh[ELH_EH0 + 2].r = 0xA200;
+        card.card().elh[ELH_EH0 + 2].b = 0x0200;
+        link.push_sound(&[(0.5, 0.25); 1470]);
+        let blank = Line::new(30);
+        card.field_complete(&blank.field(), BeamPos::default());
+        let mut sound = Vec::new();
+        card.take_audio(&mut sound);
+        assert!(program(&card).iter().all(|&p| p == white));
+        assert!(sound.iter().any(|&(l, _)| l != 0.0));
     }
 
     #[test]

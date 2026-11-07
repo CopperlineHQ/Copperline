@@ -378,11 +378,11 @@ reverse-debugging ring and run-ahead (`emulator.rs`), where speed matters
 and only the build that wrote a blob ever reads it. Memory buffers (chip,
 slow, motherboard and accelerator RAM, the ROMs, Zorro board RAM, the
 frame's chip RAM copies, the RTG boards' VRAM, the A2065's and CD32 FMV
-cartridge's RAM) are serialised with
+cartridge's RAM, the Flyer's SRAM and DRAM) are serialised with
 `bytes_serde`, which writes them with `serialize_bytes`: bincode then
 copies each in one go instead of a call per byte. That matters for the
 ring a control client arms (a snapshot every five frames): an A4000 with
-its 64 MB Z3660 VRAM and 18 MB of RAM spent most of its host
+its 64 MB Z3660 VRAM, 18 MB of RAM and a Flyer spent most of its host
 time serialising byte by byte. The snapshot buffer is allocated at the
 last snapshot's size, so a capture is one pass of copying rather than a
 chain of reallocations. The encoding is the one

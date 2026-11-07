@@ -809,8 +809,8 @@ pub(crate) struct RawVideoSlot {
     /// `none` (default) or `toaster` (NewTek Video Toaster 4000).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) card: Option<String>,
-    /// The card's host folder (the Toaster's "Amiga Toaster Files": input
-    /// and output folders). Default: `Amiga Toaster Files` in the
+    /// The card's host folder (the Toaster's "Amiga Toaster Files": input,
+    /// output and Flyer folders). Default: `Amiga Toaster Files` in the
     /// emulator's own folder.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) media: Option<String>,
@@ -828,6 +828,11 @@ pub(crate) struct RawVideoSlot {
     /// mounted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) volume: Option<String>,
+    /// Also fit a NewTek Video Flyer (the Zorro II card that records and
+    /// plays clips into the Toaster's inputs 3 and 4). Needs `card =
+    /// "toaster"`. Default false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) flyer: Option<bool>,
 }
 
 /// `[parallel]` peripheral selection for the Amiga Centronics parallel port.

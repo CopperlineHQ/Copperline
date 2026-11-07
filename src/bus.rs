@@ -6268,6 +6268,17 @@ impl Bus {
                 board.reattach_backend()?;
             }
         }
+        // The Flyer's ribbon to the Toaster (which stays with the live
+        // video slot) is not saved: the loaded card takes the live one's.
+        for (device, old) in self.devices.iter_mut().zip(&live.devices) {
+            if let (
+                crate::zorro_device::BoardDevice::Flyer(board),
+                crate::zorro_device::BoardDevice::Flyer(old),
+            ) = (device, old)
+            {
+                board.adopt_link_from(old);
+            }
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.materialize_saved_host_disks()?;
         std::mem::swap(&mut self.paula.serial, &mut live.paula.serial);
@@ -8635,8 +8646,16 @@ impl Bus {
                 mem,
                 paula,
                 devices_wrote_memory,
+                agnus,
+                emulated_frames,
                 ..
             } = self;
+            // The beam, for boards that keep time by the field (the Flyer).
+            let beam = crate::zorro_device::HostBeam {
+                vpos: agnus.vpos,
+                long_frame: agnus.lof,
+                frame: *emulated_frames,
+            };
             for (slot, dev) in devices.iter_mut().enumerate() {
                 let (cd_audio, toccata_audio, mhi_audio) = paula.audio_rings_mut();
                 let mut host = crate::zorro_device::DeviceHost::for_slot_with_audio(
@@ -8645,7 +8664,8 @@ impl Bus {
                     cd_audio,
                     toccata_audio,
                     mhi_audio,
-                );
+                )
+                .with_beam(beam);
                 crate::zorro_device::ZorroDevice::tick(dev, cck, &mut host);
                 // A tick that DMA'd into guest memory (copperhf draining a
                 // completed read, a plugin board writing a buffer) wrote
