@@ -149,11 +149,7 @@ impl FloppyImage {
             let unpacked = decode_gzip_floppy_image(&packed, expanded_limit)?;
             decode_floppy_payload(unpacked, true, &path)?
         } else if packed.starts_with(ZIP_SIGNATURE) {
-            ensure!(
-                ADF_SIZE <= expanded_limit,
-                "expanded floppy image exceeds {expanded_limit} bytes"
-            );
-            let unpacked = decode_zip_floppy_image(&packed)?;
+            let unpacked = decode_zip_floppy_image(&packed, expanded_limit)?;
             decode_floppy_payload(unpacked, true, &path)?
         } else {
             decode_floppy_payload(packed, write_protected, &path)?
@@ -179,6 +175,33 @@ impl FloppyImage {
         matches!(self.data, FloppyImageData::StandardAdf(_))
     }
 
+    /// The density of the medium this image records, derived from its
+    /// own geometry: a 1,802,240-byte ADF, an AmigaDOS track holding
+    /// more than eleven sectors, or a raw revolution too long for a
+    /// DD rotation at the nominal cell rate all mean the disk was
+    /// high-density. The drive reads this on insert the way a real HD
+    /// mechanism reads the disk's HD hole.
+    pub(super) fn density(&self) -> FloppyDensity {
+        match &self.data {
+            FloppyImageData::StandardAdf(bytes) => FloppyDensity::from_adf_len(bytes.len()),
+            FloppyImageData::Tracks(tracks) => {
+                if tracks.iter().flatten().any(|track| match track {
+                    FloppyTrackImage::AmigaDos(data) => {
+                        FloppyDensity::from_track_sectors(data.len() / BYTES_PER_SECTOR)
+                            == FloppyDensity::Hd
+                    }
+                    FloppyTrackImage::RawMfm { bit_len, .. } => {
+                        FloppyDensity::from_revolution_bits(*bit_len) == FloppyDensity::Hd
+                    }
+                }) {
+                    FloppyDensity::Hd
+                } else {
+                    FloppyDensity::Dd
+                }
+            }
+        }
+    }
+
     /// Faulted read: like `HardDriveImage::read_sector`, decides nothing
     /// before the real read (reading has no write-ordering hazard to
     /// prevent) -- copies the track's sectors out of `adf` first, lets
@@ -192,13 +215,14 @@ impl FloppyImage {
         let FloppyImageData::StandardAdf(adf) = &self.data else {
             return None;
         };
-        let off = track * SECTORS_PER_TRACK * BYTES_PER_SECTOR;
-        if off + SECTORS_PER_TRACK * BYTES_PER_SECTOR > adf_len {
+        let sectors_per_track = adf_sectors_per_track(adf_len);
+        let off = track * sectors_per_track * BYTES_PER_SECTOR;
+        if off + sectors_per_track * BYTES_PER_SECTOR > adf_len {
             return None;
         }
-        let mut track_bytes = adf[off..off + SECTORS_PER_TRACK * BYTES_PER_SECTOR].to_vec();
-        for sector in 0..SECTORS_PER_TRACK {
-            let lba = (track * SECTORS_PER_TRACK + sector) as u64;
+        let mut track_bytes = adf[off..off + sectors_per_track * BYTES_PER_SECTOR].to_vec();
+        for sector in 0..sectors_per_track {
+            let lba = (track * sectors_per_track + sector) as u64;
             let sec_off = sector * BYTES_PER_SECTOR;
             let buf = &mut track_bytes[sec_off..sec_off + BYTES_PER_SECTOR];
             match self.fault.on_read(lba, buf, BYTES_PER_SECTOR) {
@@ -228,35 +252,42 @@ impl FloppyImage {
     }
 
     pub(super) fn track_stream(&mut self, track: usize) -> Option<TrackStream> {
+        let density = self.density();
         match &self.data {
             FloppyImageData::StandardAdf(adf) => {
                 if self.fault.is_empty() {
-                    return Some(synthetic_track_stream(encode_adf_track(track, adf)));
+                    return Some(synthetic_track_stream(
+                        encode_adf_track(track, adf),
+                        density,
+                    ));
                 }
                 let adf_len = adf.len();
                 Some(synthetic_track_stream(
                     self.faulted_adf_track_words(track, adf_len)?,
+                    density,
                 ))
             }
             FloppyImageData::Tracks(tracks) => {
                 let image_track = tracks.get(track)?.as_ref()?;
                 match image_track {
-                    FloppyTrackImage::AmigaDos(data) => {
-                        Some(synthetic_track_stream(encode_amigados_track(track, data)))
-                    }
+                    FloppyTrackImage::AmigaDos(data) => Some(synthetic_track_stream(
+                        encode_amigados_track(track, data),
+                        density,
+                    )),
                     FloppyTrackImage::RawMfm {
                         words,
                         bit_len,
                         revolutions,
                         legacy_sync,
-                        density,
+                        density: spans,
                         ..
                     } => Some(raw_mfm_track_stream(
                         words,
                         *bit_len,
                         *revolutions,
                         legacy_sync.is_some(),
-                        density.as_deref().unwrap_or(&[]),
+                        spans.as_deref().unwrap_or(&[]),
+                        density,
                     )),
                 }
             }
@@ -266,9 +297,11 @@ impl FloppyImage {
 
 /// A synthetic (ADF / AmigaDOS) track: one perfectly-aligned revolution of
 /// uniform 2 us cells. The uniform `word_cck` keeps the DMA word cadence and
-/// every timing assertion identical to the old word-grid model.
-pub(super) fn synthetic_track_stream(words: Vec<u16>) -> TrackStream {
-    let word_cck = FloppyController::word_cck_for_track_words(words.len());
+/// every timing assertion identical to the old word-grid model. An HD
+/// revolution carries twice the words at that same cadence, so its
+/// `word_cck` is fitted to the doubled (150 RPM) revolution period.
+pub(super) fn synthetic_track_stream(words: Vec<u16>, density: FloppyDensity) -> TrackStream {
+    let word_cck = FloppyController::word_cck_for_revolution(words.len(), density);
     let bit_len = words.len() * 16;
     TrackStream {
         revs: vec![TrackRev::new(words, bit_len, word_cck)],
@@ -284,6 +317,7 @@ pub(super) fn raw_mfm_track_stream(
     revolutions: u8,
     legacy_sync: bool,
     density: &[DensitySpan],
+    image_density: FloppyDensity,
 ) -> TrackStream {
     let rev_bits = (bit_len as usize).max(1);
     let words_per_rev = rev_bits.div_ceil(16).max(1);
@@ -304,7 +338,7 @@ pub(super) fn raw_mfm_track_stream(
         }
         let rev_words = words[start..end].to_vec();
         let this_bits = rev_bits.min(rev_words.len() * 16);
-        let word_cck = FloppyController::word_cck_for_track_words(rev_words.len());
+        let word_cck = FloppyController::word_cck_for_revolution(rev_words.len(), image_density);
         // The mastered cell-rate profile is a property of the track, so every
         // captured revolution of it carries the same one.
         revs.push(TrackRev::with_density(
@@ -312,7 +346,7 @@ pub(super) fn raw_mfm_track_stream(
         ));
     }
     if revs.is_empty() {
-        let word_cck = FloppyController::word_cck_for_track_words(words.len());
+        let word_cck = FloppyController::word_cck_for_revolution(words.len(), image_density);
         revs.push(TrackRev::with_density(
             words.to_vec(),
             words.len() * 16,
@@ -329,7 +363,7 @@ pub(super) fn decode_floppy_payload(
     path: &Path,
 ) -> Result<(FloppyImageData, bool, bool)> {
     let legacy_extended_adf = packed.starts_with(UAE_EXT1_SIGNATURE);
-    let (data, write_protected) = if packed.len() == ADF_SIZE {
+    let (data, write_protected) = if packed.len() == ADF_SIZE || packed.len() == HD_ADF_SIZE {
         (FloppyImageData::StandardAdf(packed), config_write_protected)
     } else if packed.starts_with(UAE_EXT2_SIGNATURE) {
         (decode_uae_extended_adf(&packed)?, config_write_protected)
@@ -354,10 +388,11 @@ pub(super) fn decode_floppy_payload(
         (decode_scp_flux_image(&packed)?, true)
     } else {
         bail!(
-            "floppy image {} is {} bytes; expected {} bytes (ADF), gzip-compressed supported image, UAE extended ADF, IPF, SCP, or DMS",
+            "floppy image {} is {} bytes; expected {} bytes (DD ADF) or {} bytes (HD ADF), gzip-compressed supported image, UAE extended ADF, IPF, SCP, or DMS",
             path.display(),
             packed.len(),
-            ADF_SIZE
+            ADF_SIZE,
+            HD_ADF_SIZE
         );
     };
     Ok((data, write_protected, legacy_extended_adf))
@@ -377,7 +412,7 @@ pub(super) fn decode_gzip_floppy_image(data: &[u8], limit: usize) -> Result<Vec<
     Ok(unpacked)
 }
 
-pub(super) fn decode_zip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {
+pub(super) fn decode_zip_floppy_image(data: &[u8], expanded_limit: usize) -> Result<Vec<u8>> {
     ensure!(data.starts_with(ZIP_SIGNATURE), "missing zip signature");
     let mut cursor = Cursor::new(data);
     let mut u16buf = [0u8; 2];
@@ -398,8 +433,12 @@ pub(super) fn decode_zip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {
     cursor.read_exact(&mut u32buf)?;
     let uncomp_size = u32::from_le_bytes(u32buf);
     ensure!(
-        uncomp_size as usize == ADF_SIZE,
+        uncomp_size as usize == ADF_SIZE || uncomp_size as usize == HD_ADF_SIZE,
         "invalid ADF file size in ZIP archive"
+    );
+    ensure!(
+        uncomp_size as usize <= expanded_limit,
+        "expanded floppy image exceeds {expanded_limit} bytes"
     );
 
     // Skip to file name length and extra field length
@@ -412,7 +451,7 @@ pub(super) fn decode_zip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {
     // Skip the file name and extra field to reach the compressed data
     cursor.set_position((30 + file_name_length + extra_field_length) as u64);
 
-    let mut decompressed = vec![0; ADF_SIZE];
+    let mut decompressed = vec![0; uncomp_size as usize];
 
     let calculated_crc = match compression {
         8 => {
@@ -548,22 +587,22 @@ pub(super) fn decode_uae_extended_amigados_payload(
         payload[data_len..].iter().all(|&byte| byte == 0),
         "UAE extended ADF track {track} AmigaDOS padding after bit length is non-zero"
     );
-    ensure_double_density_sectors("UAE extended ADF", track, data_len)?;
+    ensure_supported_amigados_sectors("UAE extended ADF", track, data_len)?;
     Ok(Some(&payload[..data_len]))
 }
 
-/// A double-density drive passes at most [`SECTORS_PER_TRACK`] AmigaDOS
-/// sectors under the head per revolution. More than that on one track is a
-/// high-density disk -- twice the sectors at the same 2 us cells, with the
-/// drive turning at half speed -- and the emulated drives are DD units, so
-/// encoding it into one DD revolution would present a track no DD drive
-/// can read. Raw MFM tracks carry their own timing and are not checked.
-fn ensure_double_density_sectors(container: &str, track: usize, data_len: usize) -> Result<()> {
+/// An AmigaDOS track holds at most [`HD_SECTORS_PER_TRACK`] sectors:
+/// eleven at double density, twenty-two at high density (twice the
+/// sectors at the same 2 us cells, with the drive turning at half
+/// speed). More than that on one track is not a disk either Amiga
+/// drive passes under the head in one revolution. Raw MFM tracks
+/// carry their own timing and are not checked.
+fn ensure_supported_amigados_sectors(container: &str, track: usize, data_len: usize) -> Result<()> {
     let sectors = data_len / BYTES_PER_SECTOR;
     ensure!(
-        sectors <= SECTORS_PER_TRACK,
-        "high-density {container} images are not supported: track {track} holds \
-         {sectors} AmigaDOS sectors, a double-density track holds {SECTORS_PER_TRACK}"
+        sectors <= HD_SECTORS_PER_TRACK,
+        "{container} track {track} holds {sectors} AmigaDOS sectors; \
+         a high-density track holds {HD_SECTORS_PER_TRACK}"
     );
     Ok(())
 }
@@ -593,7 +632,7 @@ pub(super) fn decode_uae_legacy_extended_adf(data: &[u8]) -> Result<FloppyImageD
                 len.is_multiple_of(BYTES_PER_SECTOR),
                 "UAE--ADF track {track} AmigaDOS data is not sector-aligned"
             );
-            ensure_double_density_sectors("UAE--ADF", track, len)?;
+            ensure_supported_amigados_sectors("UAE--ADF", track, len)?;
             out.push(Some(FloppyTrackImage::AmigaDos(payload.to_vec())));
         } else {
             let mut words = Vec::with_capacity(len / 2 + 1);

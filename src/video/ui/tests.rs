@@ -3702,7 +3702,7 @@ fn panels_render_into_their_rects() {
     save(&frame, "launcher-storage");
 
     // The Create Image workshop: its two pages (the floppy one again with
-    // HD picked, which adds the double-density-drives warning), and the
+    // HD picked, which changes the size the page offers), and the
     // geometry editor behind the hard-drive one.
     use crate::diskimage::Density::{Dd, Hd};
     for (tab, density, name) in [

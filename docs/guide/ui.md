@@ -1081,7 +1081,7 @@ CHD from the finished image with `chdman createhd`.
 
 | Option | Effect |
 |---|---|
-| **Density** | `DD (880K)` or `HD (1.76M)`. Sets the image size: 901,120 or 1,802,240 bytes. Copperline's floppy drives are double-density only and cannot use an HD image in either container, so the page shows a warning while HD is selected. Make HD images for another emulator, or for a real Amiga with a high-density drive. |
+| **Density** | `DD (880K)` or `HD (1.76M)`. Sets the image size: 901,120 or 1,802,240 bytes. Copperline's floppy drives read both densities in either container; an HD disk needs an HD-aware `trackdisk.device` in the guest (Kickstart 1.x has none). |
 | **Container** | `Standard ADF` writes the sectors in order. `Extended ADF` wraps them in the `UAE-1ADF` container, which stores one record per track. |
 | **Filesystem** | `Unformatted` leaves the image blank for the Amiga to format. `OFS` and `FFS` write a boot block, root block and bitmap. |
 | **DOSType** | The DOS type's options: `International` case folding, `Dir cache`, `Long names`. See **DOSType** below. |

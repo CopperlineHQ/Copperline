@@ -3353,13 +3353,12 @@ fn the_disk_image_pages_describe_what_gets_built() {
     assert_eq!(state.workshop.suggested_name(false), "image.hdf");
 }
 
-/// The Create Floppy page warns about exactly the density the emulated
-/// drives cannot take: they are double-density units, so a DD image the
-/// page writes loads and an HD one is refused, in either container. If a
-/// high-density drive model lands, this fails and the warning should go
-/// with it.
+/// Every floppy the Create Floppy page writes loads back into
+/// Copperline's own drives: the drives take both densities (the HD
+/// image runs at the half-speed, 22-sector geometry), in either
+/// container.
 #[test]
-fn the_hd_floppy_warning_matches_the_double_density_drives() {
+fn every_created_floppy_density_loads_in_the_emulated_drives() {
     use crate::diskimage::{Container, Density};
     let dir = tempfile::tempdir().unwrap();
     for density in Density::ALL {
@@ -3371,19 +3370,16 @@ fn the_hd_floppy_warning_matches_the_double_density_drives() {
             crate::diskimage::create_floppy(&path, &state.workshop.floppy_spec())
                 .expect("floppy written");
             let mut drives = crate::floppy::FloppyController::default();
-            let loads = drives
+            drives
                 .insert_memory_disk_image_bytes(
                     0,
                     std::fs::read(&path).unwrap(),
                     path.clone(),
                     true,
                 )
-                .is_ok();
-            assert_eq!(
-                state.workshop.floppy_needs_hd_drive(),
-                !loads,
-                "{density:?} {container:?}: warning shown vs. image loaded"
-            );
+                .unwrap_or_else(|err| {
+                    panic!("{density:?} {container:?}: created floppy refused: {err:#}")
+                });
         }
     }
 }

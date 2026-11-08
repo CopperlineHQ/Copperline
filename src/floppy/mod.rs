@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Standard Amiga DD floppy/ADF support.
+//! Standard Amiga DD and HD floppy/ADF support.
 //!
-//! The controller presents decoded 901,120 byte ADF images as the raw
-//! AmigaDOS MFM track stream Paula would DMA. Paula does not decode
-//! sectors in hardware; ROM/trackdisk drivers read the MFM words into
-//! chip RAM and decode them in software.
+//! The controller presents decoded ADF images (901,120 bytes DD,
+//! 1,802,240 bytes HD) as the raw AmigaDOS MFM track stream Paula
+//! would DMA. Paula does not decode sectors in hardware; ROM/trackdisk
+//! drivers read the MFM words into chip RAM and decode them in
+//! software. A high-density drive turns at half speed (150 RPM) with
+//! an HD disk inserted, so Paula still sees 2 us cells: an HD track
+//! holds 22 sectors and its revolution simply takes twice as long.
 
 use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::config::{FloppyConfig, FloppyDriveConfig};
@@ -25,8 +28,70 @@ use std::path::{Path, PathBuf};
 pub const CYLINDERS: usize = 80;
 pub const SIDES: usize = 2;
 pub const SECTORS_PER_TRACK: usize = 11;
+pub const HD_SECTORS_PER_TRACK: usize = 22;
 pub const BYTES_PER_SECTOR: usize = 512;
 pub const ADF_SIZE: usize = CYLINDERS * SIDES * SECTORS_PER_TRACK * BYTES_PER_SECTOR;
+pub const HD_ADF_SIZE: usize = CYLINDERS * SIDES * HD_SECTORS_PER_TRACK * BYTES_PER_SECTOR;
+
+/// Whether the medium under the head is double- or high-density. The
+/// drive mechanism is the same either way; what changes is how much a
+/// track holds and how long a revolution takes (an HD drive senses the
+/// disk's HD hole and halves its motor speed, keeping the cell rate
+/// at Paula unchanged). Density is always derived from the inserted
+/// image, never stored, so save states need no new field for it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum FloppyDensity {
+    #[default]
+    Dd,
+    Hd,
+}
+
+/// A raw revolution longer than this many bits cannot be a DD track at
+/// the nominal 2 us cell rate (a DD revolution is ~101k bits), so it
+/// was recorded from an HD disk at half rotation speed (~202k bits).
+const HD_REVOLUTION_BIT_THRESHOLD: u32 = 150_000;
+
+impl FloppyDensity {
+    fn sectors_per_track(self) -> usize {
+        match self {
+            FloppyDensity::Dd => SECTORS_PER_TRACK,
+            FloppyDensity::Hd => HD_SECTORS_PER_TRACK,
+        }
+    }
+
+    /// Revolution period relative to a DD revolution: an HD drive
+    /// with an HD disk turns at 150 RPM instead of 300.
+    fn revolution_multiple(self) -> u32 {
+        match self {
+            FloppyDensity::Dd => 1,
+            FloppyDensity::Hd => 2,
+        }
+    }
+
+    fn from_adf_len(len: usize) -> Self {
+        if len == HD_ADF_SIZE {
+            FloppyDensity::Hd
+        } else {
+            FloppyDensity::Dd
+        }
+    }
+
+    fn from_track_sectors(sectors: usize) -> Self {
+        if sectors > SECTORS_PER_TRACK {
+            FloppyDensity::Hd
+        } else {
+            FloppyDensity::Dd
+        }
+    }
+
+    fn from_revolution_bits(bits: u32) -> Self {
+        if bits > HD_REVOLUTION_BIT_THRESHOLD {
+            FloppyDensity::Hd
+        } else {
+            FloppyDensity::Dd
+        }
+    }
+}
 // IPF and SCP represent cylinders 0..=83, including unformatted slots.
 const MAX_EXTENDED_TRACKS: usize = 2 * 84;
 const SCP_TRACKS: usize = 168;
@@ -157,6 +222,12 @@ const TRACK_GAP_WORDS: usize =
     STANDARD_ADF_TRACK_WORDS - SECTORS_PER_TRACK * AMIGADOS_SECTOR_MFM_WORDS;
 const TRACK_TRAILER_WORDS: usize = 2;
 const TRACK_GAP_LONGS: usize = (TRACK_GAP_WORDS - TRACK_TRAILER_WORDS) / 2;
+// An HD disk turns at 150 RPM, so one revolution passes twice the cells
+// of a DD one: 12668 words, of which 22 sectors fill 11968 and the index
+// gap takes the rest.
+const HD_TRACK_WORDS: usize = 2 * STANDARD_ADF_TRACK_WORDS;
+const HD_TRACK_GAP_LONGS: usize =
+    (HD_TRACK_WORDS - HD_SECTORS_PER_TRACK * AMIGADOS_SECTOR_MFM_WORDS - TRACK_TRAILER_WORDS) / 2;
 const MFM_MASK: u32 = 0x5555_5555;
 // Paula's disk write shifter does not emit the final three bits of a write.
 const DISK_WRITE_LOST_BITS: usize = 3;
@@ -180,6 +251,13 @@ const ZIP_SIGNATURE: &[u8; 4] = &[0x50, 0x4b, 0x03, 0x04];
 pub const IMAGE_EXTENSIONS: &[&str] = &["adf", "adz", "dms", "ipf", "scp", "gz", "zip"];
 
 const STANDARD_EXTERNAL_DRIVE_ID: u32 = 0xFFFF_FFFF;
+/// Drive-ID poll answer of a 3.5-inch high-density drive with an HD
+/// disk inserted: /RDY asserted on every second poll, starting with the
+/// second. Like the DD answer above, a set bit is an asserted (low)
+/// /RDY, so disk.resource's GetUnitID, which collects the line level,
+/// reports this as DRT_150RPM ($AAAAAAAA) and the DD answer as
+/// DRT_AMIGA ($00000000).
+const HD_EXTERNAL_DRIVE_ID: u32 = 0x5555_5555;
 const SCP_TRACK_TABLE_OFFSET: usize = 0x10;
 const SCP_EXTENDED_TRACK_TABLE_OFFSET: usize = 0x80;
 const SCP_TRACK_TABLE_LEN: usize = SCP_TRACKS * 4;
@@ -450,7 +528,7 @@ impl FloppyController {
     pub fn set_connected_drives(&mut self, connected: [bool; 4]) {
         for (idx, drive) in self.drives.iter_mut().enumerate() {
             drive.external_id = if connected[idx] {
-                STANDARD_EXTERNAL_DRIVE_ID
+                drive.inserted_external_id()
             } else {
                 0
             };
@@ -547,12 +625,16 @@ impl FloppyController {
         if drive.cylinder != 0 {
             bits |= CIAA_DSKTRACK0;
         }
-        // The internal DF0 mechanism has no drive-ID circuit; with its motor
+        // The internal DD mechanism has no drive-ID circuit; with its motor
         // off, the /RDY line it presents mirrors the /TRK0 sensor instead
         // (the behaviour WinUAE derived from A500/A2000 hardware, where the
-        // external units answer with their ID shift register). With the
-        // motor on, /RDY is the spun-up platter as on every drive.
-        let rdy_asserted = if idx == 0 && !drive.motor_on {
+        // external units answer with their ID shift register). An HD
+        // mechanism (the A3000/A4000 internal unit) does carry the ID
+        // circuit -- trackdisk sizes its 22-sector geometry from the ID
+        // answer -- so with HD medium inserted DF0 shifts its ID out on
+        // /RDY like an external unit. With the motor on, /RDY is the
+        // spun-up platter as on every drive.
+        let rdy_asserted = if !drive.has_id_circuit(idx) && !drive.motor_on {
             drive.cylinder == 0
         } else {
             drive.rdy_line_asserted()
@@ -951,8 +1033,10 @@ impl FloppyController {
     /// the fault policy entirely -- the data already passed `drop`/`tear`/
     /// `corrupt` once when it was first held, so re-running it through
     /// `finish_write_words` would re-roll those checks on data that
-    /// already cleared them. `lba` is `track * SECTORS_PER_TRACK +
-    /// sector`, the same encoding `finish_write_words` derives it with.
+    /// already cleared them. `lba` is `track * sectors_per_track +
+    /// sector` in the inserted image's density grid (22 sectors per
+    /// track for HD media, 11 for DD), the same encoding
+    /// `finish_write_words` derives it with.
     /// `None` (not committed) if the drive/image/sector-model
     /// preconditions `drive_fault_mut`/`drive_has_sector_model` already
     /// checked no longer hold, or the lba is out of range -- a caller that
@@ -962,9 +1046,10 @@ impl FloppyController {
         let FloppyImageData::StandardAdf(image_data) = &mut image.data else {
             return None;
         };
-        let track = (lba / SECTORS_PER_TRACK as u64) as usize;
-        let sector = (lba % SECTORS_PER_TRACK as u64) as usize;
-        let off = adf_sector_offset(track, sector);
+        let sectors_per_track = adf_sectors_per_track(image_data.len());
+        let track = (lba / sectors_per_track as u64) as usize;
+        let sector = (lba % sectors_per_track as u64) as usize;
+        let off = adf_sector_offset_for(track, sector, sectors_per_track);
         if off + BYTES_PER_SECTOR > image_data.len() || data.len() < BYTES_PER_SECTOR {
             return None;
         }
@@ -973,7 +1058,8 @@ impl FloppyController {
         let sectors = [(sector, sector_data)];
         apply_standard_adf_sectors(image_data, track, &sectors);
         if image.backing == FloppyImageBacking::File {
-            let _ = write_standard_adf_sectors_to_disk(&image.path, track, &sectors);
+            let _ =
+                write_standard_adf_sectors_to_disk(&image.path, track, sectors_per_track, &sectors);
         }
         Some(())
     }
@@ -1300,16 +1386,18 @@ impl FloppyController {
             // drops SEL and MTR together starts the motor -- the latch sees
             // MTR low on one side of the edge -- while stopping it needs MTR
             // high on both sides, the rule WinUAE and vAmiga derived from
-            // hardware. External units additionally run the drive-ID shift
-            // register off the same edges; DF0 has no ID circuit.
+            // hardware. Mechanisms with a drive-ID circuit (external
+            // units, and an internal HD unit) additionally run the ID
+            // shift register off the same edges; the internal DD
+            // mechanism has no ID circuit.
             if select_activated {
                 let motor_on = (prev & CIAB_DSKMOTOR == 0) || (val & CIAB_DSKMOTOR == 0);
-                if idx == 0 {
-                    self.drives[idx].set_motor(motor_on);
-                } else {
+                if self.drives[idx].has_id_circuit(idx) {
                     self.drives[idx].latch_mtrxd(motor_on);
+                } else {
+                    self.drives[idx].set_motor(motor_on);
                 }
-            } else if idx != 0 && select_deactivated {
+            } else if select_deactivated && self.drives[idx].has_id_circuit(idx) {
                 self.drives[idx].advance_external_id();
             }
 
@@ -2458,18 +2546,20 @@ impl FloppyController {
         let fault = &mut image.fault;
         let write_result: Result<()> = match &mut image.data {
             FloppyImageData::StandardAdf(image_data) => {
-                decode_non_empty_track_write(track, write_words).and_then(|sectors| {
+                let sectors_per_track = adf_sectors_per_track(image_data.len());
+                let decoded = decode_non_empty_track_write(track, write_words, sectors_per_track);
+                decoded.and_then(|sectors| {
                     let sectors: Vec<(usize, [u8; BYTES_PER_SECTOR])> = if fault.is_empty() {
                         sectors
                     } else {
                         let mut kept = Vec::with_capacity(sectors.len());
                         for (sector, data) in sectors {
-                            let lba = (track * SECTORS_PER_TRACK + sector) as u64;
+                            let lba = (track * sectors_per_track + sector) as u64;
                             // `stale`'s pre-write capture -- `image_data`
                             // is still this sector's old content, the
                             // same buffer the tear-tail splice below reads
                             // from for the same reason.
-                            let off = adf_sector_offset(track, sector);
+                            let off = adf_sector_offset_for(track, sector, sectors_per_track);
                             let pre_write = &image_data[off..off + BYTES_PER_SECTOR];
                             match fault.on_write(lba, &data, BYTES_PER_SECTOR, pre_write) {
                                 crate::diskfault::Outcome::Proceed => kept.push((sector, data)),
@@ -2491,7 +2581,8 @@ impl FloppyController {
                                     // sector see the write in flight, same
                                     // reasoning as `HardDriveImage::
                                     // write_sector`'s own tear-tail splice.
-                                    let off = adf_sector_offset(track, sector);
+                                    let off =
+                                        adf_sector_offset_for(track, sector, sectors_per_track);
                                     let mut out = [0u8; BYTES_PER_SECTOR];
                                     out.copy_from_slice(&image_data[off..off + BYTES_PER_SECTOR]);
                                     out[..replacement.len()].copy_from_slice(&replacement);
@@ -2516,9 +2607,12 @@ impl FloppyController {
                     }
                     apply_standard_adf_sectors(image_data, track, &sectors);
                     match backing {
-                        FloppyImageBacking::File => {
-                            write_standard_adf_sectors_to_disk(&path, track, &sectors)
-                        }
+                        FloppyImageBacking::File => write_standard_adf_sectors_to_disk(
+                            &path,
+                            track,
+                            sectors_per_track,
+                            &sectors,
+                        ),
                         FloppyImageBacking::Memory => Ok(()),
                     }
                 })
@@ -2785,9 +2879,13 @@ impl FloppyController {
                 // short track -- a drive running off-speed -- stays
                 // self-consistent, exactly as a captured image does.
                 // `bridge_speed` compresses that fit, serving the same cells
-                // in proportionally less time.
-                let word_cck =
-                    (Self::word_cck_for_track_words(words.len()) * 100 / serve_percent).max(1);
+                // in proportionally less time. A revolution with HD-length
+                // bit count came from an HD disk turning at half speed, so
+                // it fits to the doubled revolution period instead.
+                let density = FloppyDensity::from_revolution_bits(bits as u32);
+                let word_cck = (Self::word_cck_for_revolution(words.len(), density) * 100
+                    / serve_percent)
+                    .max(1);
                 // Whether this recording can be trusted beyond a single pass
                 // is FluxBridge's own verdict: index-aligned captures close
                 // on themselves by construction, and an index-less one is
@@ -2953,9 +3051,18 @@ impl FloppyController {
         mask & !1
     }
 
+    /// cck for one 16-cell word of a DD revolution `words` long.
     fn word_cck_for_track_words(words: usize) -> u32 {
+        Self::word_cck_for_revolution(words, FloppyDensity::Dd)
+    }
+
+    /// cck for one 16-cell word of a revolution `words` long at the
+    /// medium's rotation speed: an HD disk turns at 150 RPM, so its
+    /// revolution period doubles and a track twice as long keeps the
+    /// DD word cadence.
+    fn word_cck_for_revolution(words: usize, density: FloppyDensity) -> u32 {
         let words = words.max(1) as u32;
-        (PAULA_CLOCK_HZ / ROTATION_HZ / words).max(1)
+        (PAULA_CLOCK_HZ * density.revolution_multiple() / ROTATION_HZ / words).max(1)
     }
 
     #[cfg(test)]
@@ -3179,19 +3286,65 @@ impl FloppyDrive {
         let image = FloppyImage::load(config)
             .with_context(|| format!("loading floppy image {}", config.path.display()))?;
         let write_protected = image.write_protected;
-        Ok(Self {
+        let mut drive = Self {
             image: Some(image),
             disk_change: true,
             disk_change_sense: true,
             write_protected_target: write_protected,
             write_protected_sense: write_protected,
             ..Self::default()
-        })
+        };
+        drive.refresh_external_id();
+        Ok(drive)
+    }
+
+    /// The density of the medium currently inserted (DD when empty).
+    fn density(&self) -> FloppyDensity {
+        self.image
+            .as_ref()
+            .map(FloppyImage::density)
+            .unwrap_or_default()
+    }
+
+    /// Whether this mechanism runs the drive-ID shift register: every
+    /// external unit does, and so does an internal unit answering the
+    /// HD ID (the A3000/A4000 HD mechanism); the internal DD mechanism
+    /// does not (its /RDY mirrors /TRK0 with the motor off instead).
+    /// Read from the latched ID rather than the image, so CIA status
+    /// reads never walk an extended image's tracks.
+    fn has_id_circuit(&self, idx: usize) -> bool {
+        idx != 0 || self.external_id == HD_EXTERNAL_DRIVE_ID
+    }
+
+    /// The drive-ID poll answer for the medium currently inserted.
+    ///
+    /// An HD mechanism's ID follows its HD-hole sensor, the same switch
+    /// that halves its motor speed: it answers as a high-density drive
+    /// only with an HD disk inserted, and as a DD drive with a DD disk
+    /// or none. trackdisk re-reads the ID on every disk insertion to
+    /// choose 11- or 22-sector geometry. Copperline has no DD/HD
+    /// mechanism setting, so the medium decides: an HD disk makes any
+    /// drive (DF0 included) an HD mechanism, and with DD media or no
+    /// disk every drive stays the DD unit it has always been.
+    fn inserted_external_id(&self) -> u32 {
+        match self.density() {
+            FloppyDensity::Hd => HD_EXTERNAL_DRIVE_ID,
+            FloppyDensity::Dd => STANDARD_EXTERNAL_DRIVE_ID,
+        }
+    }
+
+    /// Re-answer the drive-ID poll for the newly inserted (or ejected)
+    /// medium. A disconnected drive (`external_id == 0`) stays silent.
+    fn refresh_external_id(&mut self) {
+        if self.external_id != 0 {
+            self.external_id = self.inserted_external_id();
+        }
     }
 
     fn insert_image(&mut self, image: FloppyImage) {
         let write_protected = image.write_protected;
         self.image = Some(image);
+        self.refresh_external_id();
         self.set_disk_change(true);
         self.set_write_protected(write_protected);
         self.cached_track = None;
@@ -3203,6 +3356,7 @@ impl FloppyDrive {
 
     fn eject_image(&mut self) {
         self.image = None;
+        self.refresh_external_id();
         self.set_disk_change(true);
         self.set_write_protected(false);
         self.cached_track = None;
@@ -3858,8 +4012,9 @@ fn apply_standard_adf_sectors(
     track: usize,
     sectors: &[(usize, [u8; BYTES_PER_SECTOR])],
 ) {
+    let sectors_per_track = adf_sectors_per_track(image_data.len());
     for (sector, sector_data) in sectors {
-        let off = adf_sector_offset(track, *sector);
+        let off = adf_sector_offset_for(track, *sector, sectors_per_track);
         image_data[off..off + BYTES_PER_SECTOR].copy_from_slice(sector_data);
     }
 }
@@ -3871,6 +4026,7 @@ fn apply_standard_adf_sectors(
 fn write_standard_adf_sectors_to_disk(
     path: &Path,
     track: usize,
+    sectors_per_track: usize,
     sectors: &[(usize, [u8; BYTES_PER_SECTOR])],
 ) -> Result<()> {
     let mut file = std::fs::OpenOptions::new()
@@ -3880,7 +4036,7 @@ fn write_standard_adf_sectors_to_disk(
         .open(path)
         .with_context(|| format!("opening {} for write-through", path.display()))?;
     for (sector, sector_data) in sectors {
-        let off = adf_sector_offset(track, *sector);
+        let off = adf_sector_offset_for(track, *sector, sectors_per_track);
         file.seek(SeekFrom::Start(off as u64))
             .with_context(|| format!("seeking to sector {sector} in {}", path.display()))?;
         file.write_all(sector_data)
@@ -3927,7 +4083,11 @@ fn apply_extended_adf_write(
     };
     match image_track {
         FloppyTrackImage::AmigaDos(track_data) => {
-            let sectors = decode_non_empty_track_write(track, write_words)?;
+            let sectors = decode_non_empty_track_write(
+                track,
+                write_words,
+                track_data.len() / BYTES_PER_SECTOR,
+            )?;
             apply_amigados_track_sectors(track_data, track, &sectors)?;
         }
         FloppyTrackImage::RawMfm {
@@ -3975,8 +4135,9 @@ fn apply_extended_adf_write(
 fn decode_non_empty_track_write(
     track: usize,
     write_words: &[u16],
+    sectors_per_track: usize,
 ) -> Result<Vec<(usize, [u8; BYTES_PER_SECTOR])>> {
-    let sectors = decode_track_write(track, write_words)?;
+    let sectors = decode_track_write(track, write_words, sectors_per_track)?;
     ensure!(!sectors.is_empty(), "no valid AmigaDOS sectors");
     Ok(sectors)
 }
@@ -4656,21 +4817,39 @@ fn disk_bit_phase(rotation_acc_cck: u32, word_cck: u32) -> u8 {
 }
 
 fn encoded_track_words() -> usize {
-    TRACK_GAP_LONGS * 2 + SECTORS_PER_TRACK * AMIGADOS_SECTOR_MFM_WORDS + TRACK_TRAILER_WORDS
+    encoded_track_words_for(SECTORS_PER_TRACK)
+}
+
+/// The index gap ahead of the first sector, in MFM longs: whatever the
+/// sectors leave of the medium's revolution, so a full generated track
+/// is exactly one physical revolution at either density.
+fn track_gap_longs(sectors_per_track: usize) -> usize {
+    if sectors_per_track > SECTORS_PER_TRACK {
+        HD_TRACK_GAP_LONGS
+    } else {
+        TRACK_GAP_LONGS
+    }
+}
+
+fn encoded_track_words_for(sectors_per_track: usize) -> usize {
+    track_gap_longs(sectors_per_track) * 2
+        + sectors_per_track * AMIGADOS_SECTOR_MFM_WORDS
+        + TRACK_TRAILER_WORDS
 }
 
 fn encode_adf_track(track: usize, adf: &[u8]) -> Vec<u16> {
-    let off = adf_sector_offset(track, 0);
-    encode_amigados_track(track, &adf[off..off + SECTORS_PER_TRACK * BYTES_PER_SECTOR])
+    let sectors_per_track = FloppyDensity::from_adf_len(adf.len()).sectors_per_track();
+    let off = adf_sector_offset_for(track, 0, sectors_per_track);
+    encode_amigados_track(track, &adf[off..off + sectors_per_track * BYTES_PER_SECTOR])
 }
 
 fn encode_amigados_track(track: usize, track_data: &[u8]) -> Vec<u16> {
     let sectors_per_track = track_data.len() / BYTES_PER_SECTOR;
-    let mut longs = vec![0xAAAA_AAAAu32; TRACK_GAP_LONGS];
+    let mut longs = vec![0xAAAA_AAAAu32; track_gap_longs(sectors_per_track)];
     for sector in 0..sectors_per_track {
         push_sector(track, sector, sectors_per_track, track_data, &mut longs);
     }
-    let mut words = Vec::with_capacity(encoded_track_words());
+    let mut words = Vec::with_capacity(encoded_track_words_for(sectors_per_track));
     for long in longs {
         words.push((long >> 16) as u16);
         words.push(long as u16);
@@ -4754,7 +4933,11 @@ fn push_encoded_bits(data: u32, dest: &mut Vec<u32>) {
     dest.push(encoded);
 }
 
-fn decode_track_write(track: usize, words: &[u16]) -> Result<Vec<(usize, [u8; BYTES_PER_SECTOR])>> {
+fn decode_track_write(
+    track: usize,
+    words: &[u16],
+    sectors_per_track: usize,
+) -> Result<Vec<(usize, [u8; BYTES_PER_SECTOR])>> {
     let mut sectors = Vec::new();
     let mut pos = 0usize;
     while pos + 2 < words.len() {
@@ -4798,7 +4981,7 @@ fn decode_track_write(track: usize, words: &[u16]) -> Result<Vec<(usize, [u8; BY
         if checksum_decoded_bytes(&data) != stored_data_checksum {
             continue;
         }
-        if info[0] != 0xFF || info[1] as usize != track || info[2] as usize >= SECTORS_PER_TRACK {
+        if info[0] != 0xFF || info[1] as usize != track || info[2] as usize >= sectors_per_track {
             continue;
         }
 
@@ -4847,8 +5030,15 @@ fn checksum_decoded_bytes(data: &[u8]) -> u32 {
     checksum & MFM_MASK
 }
 
-fn adf_sector_offset(track: usize, sector: usize) -> usize {
-    (track * SECTORS_PER_TRACK + sector) * BYTES_PER_SECTOR
+fn adf_sector_offset_for(track: usize, sector: usize, sectors_per_track: usize) -> usize {
+    (track * sectors_per_track + sector) * BYTES_PER_SECTOR
+}
+
+/// The sector grid of a standard ADF byte stream, from its length:
+/// the 1,802,240-byte image is the 22-sector HD grid, anything else
+/// the 11-sector DD grid the decoder accepted.
+fn adf_sectors_per_track(adf_len: usize) -> usize {
+    FloppyDensity::from_adf_len(adf_len).sectors_per_track()
 }
 
 fn read_chip_word(chip_ram: &[u8], addr: u32) -> u16 {

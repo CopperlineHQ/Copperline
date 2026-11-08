@@ -4946,6 +4946,22 @@ fn bad_floppy_size_fails_cleanly() -> Result<()> {
 }
 
 #[test]
+fn high_density_floppy_size_is_accepted() -> Result<()> {
+    let path = temp_path("hd.adf");
+    fs::write(&path, vec![0u8; crate::floppy::HD_ADF_SIZE])?;
+    let cfg = parse_config(&format!(
+        r#"
+            [floppy.df0]
+            path = "{}"
+            "#,
+        toml_path(&path)
+    ));
+    let _ = fs::remove_file(&path);
+    cfg?;
+    Ok(())
+}
+
+#[test]
 fn cli_overrides_select_a_machine_with_no_config_file() -> Result<()> {
     let overrides = ConfigOverrides {
         model: Some("A1200".to_string()),
