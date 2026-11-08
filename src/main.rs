@@ -825,7 +825,6 @@ fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> 
     // Syntax errors stay on stderr. Once a session mode is known, fatal
     // interactive desktop errors also get a dialog; headless commands never do.
     let cli = parse_args_from(args)?;
-    *error_dialog = startup::error_dialog_allowed(desktop, &cli);
     if cli.load_uss.is_some()
         && (cli.load_state.is_some() || cli.run.is_some() || cli.whdload.is_some())
     {
@@ -837,6 +836,7 @@ fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> 
     validate_run_args(&cli)?;
     validate_gdb_args(&cli)?;
     validate_control_args(&cli)?;
+    *error_dialog = startup::error_dialog_allowed(desktop, &cli);
     if cli.calibrate_gamepad {
         return gamepad::run_calibration();
     }

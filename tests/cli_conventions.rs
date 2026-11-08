@@ -43,6 +43,12 @@ fn usage_errors_stay_on_stderr_without_a_dialog() {
         vec!["--desktop", "--modle=A1200"],
         vec!["--help=true"],
         vec!["--version="],
+        vec!["--desktop", "--run-args=x"],
+        vec![
+            "--desktop",
+            "--load-uss=missing.uss",
+            "--run=missing-program",
+        ],
     ] {
         let output = run(&args, true);
         assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
