@@ -48,7 +48,7 @@ jobs:
             libasound2-dev libudev-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
             libxkbcommon-dev libwayland-dev \
-            libfuse2 file
+            libfuse2 file desktop-file-utils shared-mime-info xdg-utils libglib2.0-bin
       - name: Build AppImage
         run: ./packaging/appimage/build-appimage.sh
       - name: Locate artifact
@@ -75,6 +75,7 @@ jobs:
           cd "$smoke"
           "$appimage" --noaudio --screenshot-after 10 smoke.png
           test -s smoke.png
+          python3 "$GITHUB_WORKSPACE/packaging/linux/test-desktop-setup.py" "$appimage"
           # The command-line tools tarball is a release asset of its own;
           # both tools must be in it and must start.
           tar -xzf "$GITHUB_WORKSPACE/${{ steps.artifact.outputs.tools }}"

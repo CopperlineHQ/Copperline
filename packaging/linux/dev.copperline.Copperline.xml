@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-copperline-floppy-image">
+    <comment>Amiga floppy image</comment>
+    <glob pattern="*.dms"/>
+    <glob pattern="*.ipf"/>
+    <glob pattern="*.scp"/>
+  </mime-type>
+  <mime-type type="application/x-copperline-compressed-floppy-image">
+    <comment>Gzip-compressed Amiga floppy image</comment>
+    <sub-class-of type="application/gzip"/>
+    <glob pattern="*.adz"/>
+    <glob pattern="*.adf.gz" weight="60"/>
+  </mime-type>
+  <mime-type type="application/x-amiga-whdload-slave">
+    <comment>Amiga WHDLoad slave</comment>
+    <glob pattern="*.slave"/>
+    <glob pattern="*.slav"/>
+  </mime-type>
+  <mime-type type="application/x-amiga-kickstart-rom">
+    <comment>Amiga Kickstart ROM</comment>
+    <glob pattern="*.rom"/>
+  </mime-type>
+  <!-- Supply the standard types for desktops with older MIME databases. -->
+  <mime-type type="application/toml">
+    <comment>TOML configuration</comment>
+    <sub-class-of type="text/plain"/>
+    <glob pattern="*.toml"/>
+  </mime-type>
+  <mime-type type="application/x-mame-chd">
+    <comment>Compressed hunks of data image</comment>
+    <glob pattern="*.chd"/>
+  </mime-type>
+</mime-info>

@@ -4211,6 +4211,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "objc2-core-services"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "583300ad934cba24ff5292aee751ecc070f7ca6b39a574cc21b7b5e588e06a0b"
+dependencies = [
+ "dispatch2",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-security",
+]
+
+[[package]]
 name = "objc2-core-wlan"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4254,6 +4266,7 @@ dependencies = [
  "libc",
  "objc2 0.6.5",
  "objc2-core-foundation",
+ "objc2-core-services",
 ]
 
 [[package]]

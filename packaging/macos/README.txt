@@ -72,3 +72,11 @@ setup (commonly the access_bpf group), then log out and back in. Run
 best-effort because many access points reject the Amiga's separate source MAC.
 
 Copperline is licensed under GPL-3.0-or-later; see LICENSE.txt.
+
+Opening media
+-------------
+Finder offers Copperline in Open With for floppy images, WHDLoad packages,
+Kickstart ROMs, CD images and TOML configurations. Existing default applications
+are preserved. A newly opened file starts a separate session using the usual
+default machine, or the settings in a TOML file. CD images need a saved CD32/CDTV
+configuration; hard disks and SCSI/ATAPI CDs need explicit configured controllers.

@@ -5,6 +5,47 @@
 use super::*;
 
 impl App {
+    /// A Finder launch initially owns only an untouched configuration window.
+    /// Its first document replaces that bootstrap; later opens start separate
+    /// sessions, preserving the running guest and unsaved launcher edits.
+    #[cfg(target_os = "macos")]
+    pub fn enable_document_opening(&mut self, initial_launch: bool) {
+        self.document_opening_enabled = true;
+        self.initial_document_launcher = initial_launch;
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn open_macos_documents(&mut self) -> bool {
+        let requests = self
+            .macos_documents
+            .as_ref()
+            .map(macos_documents::Handler::take_requests)
+            .unwrap_or_default();
+        let mut opened = false;
+        for files in requests {
+            let started = std::env::current_exe().and_then(|exe| {
+                std::process::Command::new(exe)
+                    .arg("--")
+                    .args(files)
+                    .spawn()
+            });
+            match started {
+                Ok(mut child) => {
+                    // Reap a session that exits while its parent remains open.
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    opened = true;
+                }
+                Err(error) => {
+                    warn!("cannot open Finder documents: {error}");
+                    self.show_osd(format!("Cannot open documents: {error}"));
+                }
+            }
+        }
+        opened
+    }
+
     /// Pick one or more disk images for a drive. The selection replaces
     /// the drive's swap playlist; the first image is inserted right away
     /// and the rest are queued for the swap button / shortcut.
@@ -278,7 +319,7 @@ impl App {
         let mut notice: Option<&'static str> = None;
         for path in files {
             match classify_dropped_media(&path) {
-                DroppedMediaKind::Floppy => floppies.push(path),
+                DroppedMediaKind::Floppy | DroppedMediaKind::Unknown => floppies.push(path),
                 // One disc tray; the first CD image wins.
                 DroppedMediaKind::Cd => cd = cd.or(Some(path)),
                 // One machine to reboot; the first game wins.
@@ -288,6 +329,9 @@ impl App {
                 }
                 DroppedMediaKind::Rom => {
                     notice = Some("Kickstart ROMs are configured in the machine screen");
+                }
+                DroppedMediaKind::Config => {
+                    notice = Some("Load configurations in the machine screen");
                 }
             }
         }

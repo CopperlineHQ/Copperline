@@ -2,13 +2,13 @@
 
 //! Copperline: Amiga emulator.
 //!
-//! Usage: copperline [--config FILE] [ROM]
+//! Usage: copperline [OPTIONS] [ROM] [MEDIA ...]
 //!   If no --config is given, looks for ./copperline.toml, then for a
 //!   copperline.toml beside the executable.
 //!   If no ROM is given (neither argument nor `rom =` in the config), boots
 //!   the bundled AROS open-source Kickstart replacement (see src/romsearch.rs).
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 #[cfg(feature = "gdb")]
 use copperline::gdbstub;
 use copperline::{config, crashlog, debugger, emulator, envcfg, gamepad, priority, video};
@@ -146,6 +146,27 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
         ));
     }
 
+    Ok(())
+}
+
+/// Positional media is a startup choice, not a scheduled hot-insert. Refuse
+/// hardware that could not consume it instead of silently starting empty.
+fn validate_positional_media(cli: &CliArgs, cfg: &Config) -> Result<()> {
+    if !cli.boot_floppies.is_empty() && (!cfg.floppy_connected[0] || cfg.floppy.drives[0].is_none())
+    {
+        bail!("positional floppy images need an enabled image-backed DF0; check the drive wiring, enabled setting and bridge configuration");
+    }
+    if cli.boot_cd.is_some() && !cfg.akiko && !cfg.cdtv_cd {
+        bail!("a positional CD image needs a CD32 or CDTV drive; use --model CD32, --model CDTV, or a matching --config");
+    }
+    if (!cli.boot_floppies.is_empty() || cli.boot_cd.is_some())
+        && cli
+            .netplay
+            .as_ref()
+            .is_some_and(|options| options.role() != copperline::netplay::Role::Host)
+    {
+        bail!("netplay guests receive the host's media; positional disk images are only available to the host");
+    }
     Ok(())
 }
 
@@ -906,8 +927,11 @@ fn main() -> Result<()> {
         let raw = load_raw_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
         (copperline::netplay::guest_config(&raw)?, raw)
     } else {
-        load_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?
+        load_cli_config(&cli)?
     };
+    if netplay_guest {
+        validate_positional_media(&cli, &cfg)?;
+    }
     if let Some(p) = &cli.rom_path {
         raw_cfg.rom = Some(p.to_string_lossy().into_owned());
     }
@@ -1497,6 +1521,8 @@ fn main() -> Result<()> {
         live_audio,
         copperline::sampler::SamplerRequest::from_config(&cfg.parallel),
     );
+    #[cfg(target_os = "macos")]
+    app.enable_document_opening(false);
     app.set_menu_settings_file(menu_settings);
     app.set_expect_screenshots(cli.expect_screenshot);
     app.set_native_screenshots(cli.native_screenshots);
@@ -1719,6 +1745,8 @@ fn run_configuration_screen(
     );
     app.set_menu_settings_file(menu_settings);
     app.open_launcher();
+    #[cfg(target_os = "macos")]
+    app.enable_document_opening(std::env::args_os().len() == 1);
     // `[emulation] auto_launch` in the configuration the launcher opened
     // showing: straight to the machine, no configuration screen first.
     app.auto_launch_if_asked();
@@ -1739,6 +1767,8 @@ fn launcher_requested(cli: &CliArgs) -> bool {
     cli.netplay.is_none()
         && cli.config_path.is_none()
         && cli.rom_path.is_none()
+        && cli.boot_floppies.is_empty()
+        && cli.boot_cd.is_none()
         && cli.whdload.is_none()
         && cli.run.is_none()
         && cli.overrides.is_empty()
@@ -1871,21 +1901,17 @@ fn read_profile_audio_word(chip_ram: &[u8], address: u32) -> u16 {
     ((chip_ram[off] as u16) << 8) | chip_ram[(off + 1) % chip_ram.len()] as u16
 }
 
-/// Load the config, returning both the validated [`Config`] used to build the
-/// machine and the raw TOML view it came from. The configuration screen keeps
-/// the raw view so its "Machine Configuration..." menu item can reopen showing
-/// the running machine's settings.
-fn load_config(
-    explicit: Option<&Path>,
-    overrides: &ConfigOverrides,
-    factory: bool,
-) -> Result<(Config, config::RawConfig)> {
-    let raw = load_raw_config(explicit, overrides, factory)?;
+/// Apply positional media before validation so it replaces stale configured
+/// image paths, while preserving machine choices and the drive's protection.
+fn load_cli_config(cli: &CliArgs) -> Result<(Config, config::RawConfig)> {
+    let mut raw = load_raw_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
+    raw.set_startup_media(&cli.boot_floppies, cli.boot_cd.as_deref())?;
     let cfg = Config::try_from(raw.clone())?;
+    validate_positional_media(cli, &cfg)?;
     Ok((cfg, raw))
 }
 
-/// The raw half of [`load_config`]: find and parse the file, put its
+/// The raw half of [`load_cli_config`]: find and parse the file, put its
 /// `[paths]` in force, validate nothing. The configuration screen starts
 /// from this -- validation belongs to its Run button, where a missing
 /// floppy image is a status line to fix rather than an exit before the
@@ -1965,6 +1991,230 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<CliArgs> {
         parse_args_from(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn positional_media_routes_configs_roms_and_floppy_playlists() -> Result<()> {
+        let cli = parse(&[
+            "disk 1.ADF",
+            "--model",
+            "A1200",
+            "kick.bin",
+            "machine.TOML",
+            "disk2.adz",
+        ])?;
+        assert_eq!(cli.rom_path, Some("kick.bin".into()));
+        assert_eq!(cli.config_path, Some("machine.TOML".into()));
+        assert_eq!(
+            cli.boot_floppies,
+            vec![PathBuf::from("disk 1.ADF"), "disk2.adz".into()]
+        );
+        assert_eq!(cli.overrides.model.as_deref(), Some("A1200"));
+        assert!(!launcher_requested(&cli));
+        assert_eq!(parse(&["kickstart"])?.rom_path, Some("kickstart".into()));
+        assert_eq!(parse(&["game.SLAVE"])?.whdload, Some(".".into()));
+        let cd = parse(&["--model", "CD32", "disc.cue"])?;
+        assert_eq!(cd.boot_cd, Some("disc.cue".into()));
+        assert!(!launcher_requested(&cd));
+        Ok(())
+    }
+
+    #[test]
+    fn positional_launch_conflicts_are_independent_of_option_order() {
+        for args in [
+            vec!["first.toml", "--config", "second.toml"],
+            vec!["--config", "first.toml", "second.toml"],
+            vec!["game.lha", "--whdload", "second.lha"],
+            vec!["--whdload", "game.lha", "second.lha"],
+            vec!["first.cue", "second.iso"],
+            vec!["first.rom", "second.bin"],
+            vec!["game.lha", "disk.adf"],
+            vec!["disk.adf", "--run", "hello"],
+            vec!["disk.adf", "--load-state", "state.clstate"],
+            vec!["disk.adf", "--load-uss", "state.uss"],
+        ] {
+            assert!(
+                parse(&args).is_err(),
+                "accepted conflicting launch targets: {args:?}"
+            );
+        }
+        let error = parse(&["disk.hdf"]).unwrap_err().to_string();
+        assert!(error.contains("controller") && error.contains("--config"));
+    }
+
+    #[test]
+    fn positional_terminator_preserves_filenames_that_look_like_options() -> Result<()> {
+        assert_eq!(
+            parse(&["--", "--script"])?.rom_path,
+            Some("--script".into())
+        );
+        assert_eq!(
+            parse(&["--", "--config.adf"])?.boot_floppies,
+            vec![PathBuf::from("--config.adf")]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn positional_terminator_inside_a_flag_value_does_not_hide_later_scripts() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let script = dir.path().join("input.txt");
+        std::fs::write(&script, "press-after 1 a\n")?;
+        let cli = parse(&[
+            "--run",
+            "hello",
+            "--run-args",
+            "--",
+            "--script",
+            script.to_str().unwrap(),
+        ])?;
+        assert_eq!(cli.run_args.as_deref(), Some("--"));
+        assert_eq!(cli.press_after.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn positional_zip_routing_reads_members_before_selecting_a_boot_path() -> Result<()> {
+        use std::io::Write;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("game.zip");
+        let path_arg = path.to_str().unwrap();
+        for (member, whdload) in [("disk.adf", false), ("Game/Game.Slave", true)] {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&path)?);
+            zip.start_file(member, zip::write::SimpleFileOptions::default())?;
+            zip.write_all(b"fixture")?;
+            zip.finish()?;
+            let cli = parse(&[path_arg])?;
+            assert_eq!(cli.whdload.is_some(), whdload);
+            assert_eq!(cli.boot_floppies.is_empty(), whdload);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn positional_floppies_replace_stale_paths_and_preserve_drive_settings() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let disk1 = dir.path().join("first.adf");
+        let disk2 = dir.path().join("second.adf");
+        for disk in [&disk1, &disk2] {
+            std::fs::write(disk, vec![0u8; 901_120])?;
+        }
+        let config = dir.path().join("machine.toml");
+        std::fs::write(&config, "[machine]\nprofile = 'A1200'\n[floppy]\ndrives = 2\n[floppy.df0]\npath = 'missing-old-disk.adf'\nwrite_protected = false\n[whdload]\ngame = 'missing-remembered-game.lha'\n")?;
+        let cli = parse(&[
+            "--factory",
+            config.to_str().unwrap(),
+            disk1.to_str().unwrap(),
+            "--model",
+            "A500",
+            disk2.to_str().unwrap(),
+        ])?;
+        let (cfg, raw) = load_cli_config(&cli)?;
+        assert_eq!(cfg.machine, Some(config::MachineModel::A500));
+        assert_eq!(cfg.floppy_playlists[0], vec![disk1.clone(), disk2]);
+        let drive = cfg.floppy.drives[0].as_ref().unwrap();
+        assert_eq!(drive.path, disk1);
+        assert!(!drive.write_protected);
+        assert!(cfg.floppy_connected[1]);
+        assert!(copperline::whdload::game_and_options(&raw).0.is_none());
+        assert_eq!(
+            Config::try_from(raw)?.floppy_playlists[0],
+            cfg.floppy_playlists[0]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn positional_cd_supersedes_a_remembered_whdload_boot() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let config = dir.path().join("machine.toml");
+        std::fs::write(
+            &config,
+            "[machine]\nprofile='CD32'\n[whdload]\ngame='missing-remembered-game.lha'\n",
+        )?;
+        let cd = dir.path().join("disc.iso");
+        std::fs::write(&cd, vec![0u8; 2048 * 64])?;
+        let cli = parse(&["--factory", config.to_str().unwrap(), cd.to_str().unwrap()])?;
+        let (cfg, raw) = load_cli_config(&cli)?;
+        assert_eq!(cfg.cd_image_path, Some(cd));
+        assert!(copperline::whdload::game_and_options(&raw).0.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn positional_floppies_do_not_add_hardware_to_a_drive_less_profile() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let disk = dir.path().join("disk.adf");
+        std::fs::write(&disk, vec![0u8; 901_120])?;
+        for model in ["CD32", "CDTV"] {
+            let cli = parse(&["--factory", "--model", model, disk.to_str().unwrap()])?;
+            let error = load_cli_config(&cli).unwrap_err().to_string();
+            assert!(error.contains("DF0"), "{model}: {error}");
+            let cli = parse(&[
+                "--factory",
+                "--model",
+                model,
+                "--floppy-drives",
+                "1",
+                disk.to_str().unwrap(),
+            ])?;
+            let (cfg, _) = load_cli_config(&cli)?;
+            assert!(cfg.floppy_connected[0]);
+            assert!(cfg.floppy.drives[0].is_some());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn positional_floppies_reject_disabled_drives_and_preserve_explicit_wiring() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let disk = dir.path().join("disk.adf");
+        std::fs::write(&disk, vec![0u8; 901_120])?;
+        let config = dir.path().join("machine.toml");
+        std::fs::write(&config, "[floppy.df0]\nenabled=false\n")?;
+        let cli = parse(&[
+            "--factory",
+            config.to_str().unwrap(),
+            disk.to_str().unwrap(),
+        ])?;
+        assert!(load_cli_config(&cli)
+            .unwrap_err()
+            .to_string()
+            .contains("disabled"));
+        for selection in ["enabled=true", "path='missing-old-image.adf'"] {
+            std::fs::write(
+                &config,
+                format!("[machine]\nprofile='CD32'\n[floppy.df0]\n{selection}\n"),
+            )?;
+            let (cfg, _) = load_cli_config(&cli)?;
+            assert!(cfg.floppy_connected[0]);
+            assert_eq!(cfg.floppy.drives[0].as_ref().unwrap().path, disk);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn positional_media_requires_the_selected_machines_hardware() -> Result<()> {
+        let floppy = parse(&["disk.adf"])?;
+        let mut cfg = Config::default();
+        cfg.floppy.drives[0] = Some(config::FloppyDriveConfig {
+            path: "disk.adf".into(),
+            write_protected: true,
+        });
+        validate_positional_media(&floppy, &cfg)?;
+        cfg.floppy_connected = [false; 4];
+        assert!(validate_positional_media(&floppy, &cfg).is_err());
+        cfg.floppy_connected[0] = true;
+        cfg.floppy.drives[0] = None;
+        assert!(validate_positional_media(&floppy, &cfg).is_err());
+        let cd = parse(&["disc.cue"])?;
+        assert!(validate_positional_media(&cd, &cfg).is_err());
+        cfg.akiko = true;
+        validate_positional_media(&cd, &cfg)?;
+        cfg.akiko = false;
+        cfg.cdtv_cd = true;
+        validate_positional_media(&cd, &cfg)?;
+        Ok(())
     }
 
     #[test]
@@ -3089,7 +3339,8 @@ mod tests {
             &path,
             "[machine]\nprofile = \"A4000\"\n\n[paths]\nnvram = \"elsewhere\"\n",
         )?;
-        let loaded = load_config(Some(&path), &ConfigOverrides::default(), true);
+        let cli = parse(&["--factory", "--config", path.to_str().unwrap()])?;
+        let loaded = load_cli_config(&cli);
         let _ = std::fs::remove_file(&path);
         let (cfg, _) = loaded?;
         let battmem = cfg.battmem_path.expect("an A4000 fits an RP5C01");

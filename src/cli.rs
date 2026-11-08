@@ -20,6 +20,10 @@ pub struct CliArgs {
     pub netplay_spectator_invitation_out: Option<PathBuf>,
     pub config_path: Option<PathBuf>,
     pub rom_path: Option<PathBuf>,
+    /// Positional floppy images: first in DF0, the rest in its swap playlist.
+    pub boot_floppies: Vec<PathBuf>,
+    /// Positional CD image for the configured CD32/CDTV drive.
+    pub boot_cd: Option<PathBuf>,
     /// `--whdload GAME`: stage a WHDLoad package (.lha archive or
     /// directory) and boot straight into it (src/whdload.rs).
     pub whdload: Option<PathBuf>,
@@ -412,7 +416,7 @@ pub fn parse_args_from<I>(args: I) -> Result<CliArgs>
 where
     I: IntoIterator<Item = String>,
 {
-    let args = expand_script_files(args.into_iter().collect())?;
+    let args: Vec<String> = args.into_iter().collect();
     let mut netplay_host = None::<PathBuf>;
     let mut netplay_join = None::<String>;
     let mut netplay_relay = None::<String>;
@@ -429,6 +433,9 @@ where
     let mut netplay_watch = None::<String>;
     let mut config_path: Option<PathBuf> = None;
     let mut rom_path: Option<PathBuf> = None;
+    let mut positional = Vec::new();
+    let mut boot_floppies = Vec::new();
+    let mut boot_cd = None;
     let mut whdload: Option<PathBuf> = None;
     let mut run: Option<PathBuf> = None;
     let mut warp_boot = false;
@@ -499,6 +506,16 @@ where
     let mut args = args.into_iter().peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--script" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--script requires a path"))?;
+                // Expand only at a flag boundary: a value that happens to be
+                // `--` or `--script` must remain a value.
+                let mut expanded = expand_script_files(vec![a, path])?;
+                expanded.extend(args);
+                args = expanded.into_iter().peekable();
+            }
             "--calibrate-gamepad" => {
                 calibrate_gamepad = true;
             }
@@ -1594,16 +1611,55 @@ where
                 println!("copperline {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
+            "--" => {
+                positional.extend(args.map(PathBuf::from));
+                break;
+            }
             other if other.starts_with("--") => {
                 return Err(anyhow!("unknown option {:?} (see --help)", other));
             }
-            _ => {
-                if rom_path.is_some() {
-                    return Err(anyhow!("more than one ROM path given"));
-                }
-                rom_path = Some(PathBuf::from(a));
-            }
+            _ => positional.push(PathBuf::from(a)),
         }
+    }
+    // Classify after parsing options, so conflicts do not depend on order.
+    for path in positional {
+        use copperline::media::{classify, whdload_game_path, MediaKind};
+        match classify(&path) {
+            MediaKind::Rom | MediaKind::Unknown => {
+                if rom_path.replace(path).is_some() {
+                    bail!("more than one ROM path given");
+                }
+            }
+            MediaKind::Config => {
+                if config_path.replace(path).is_some() {
+                    bail!("more than one configuration given (including --config)");
+                }
+            }
+            MediaKind::Floppy => boot_floppies.push(path),
+            MediaKind::Cd => {
+                if boot_cd.replace(path).is_some() {
+                    bail!("more than one positional CD image given");
+                }
+            }
+            MediaKind::WhdloadGame => {
+                if whdload.replace(whdload_game_path(path)).is_some() {
+                    bail!("more than one WHDLoad game given (including --whdload)");
+                }
+            }
+            MediaKind::HardDisk => bail!(
+                "hard-disk image {} needs a controller and boot settings; use --config FILE \
+                 with the image configured under [ide], [scsi], [lide] or [copperhf]",
+                path.display()
+            ),
+        }
+    }
+    if (!boot_floppies.is_empty() || boot_cd.is_some()) && (whdload.is_some() || run.is_some()) {
+        bail!("positional disk images cannot combine with --run or a WHDLoad game");
+    }
+    if (!boot_floppies.is_empty() || boot_cd.is_some())
+        && (load_state.is_some() || load_uss.is_some())
+    {
+        bail!("positional disk images cannot combine with --load-state or --load-uss");
     }
     if explicit_audio_live && audio_wav.is_some() {
         return Err(anyhow!("--audio and --audio-wav are mutually exclusive"));
@@ -1907,6 +1963,8 @@ where
         netplay_spectator_invitation_out: netplay_spectator_invite,
         config_path,
         rom_path,
+        boot_floppies,
+        boot_cd,
         whdload,
         run,
         warp_boot,
@@ -2026,7 +2084,7 @@ fn print_help() {
     eprintln!(
         "copperline - Amiga emulator\n\
          \n\
-         Usage: copperline [--config FILE] [--screenshot-after SECS PATH] [ROM]\n\
+         Usage: copperline [OPTIONS] [ROM] [MEDIA ...]\n\
          \n\
          Options:\n  \
          -c, --config FILE              load configuration from FILE (default: ./copperline.toml,\n  \
@@ -2034,6 +2092,9 @@ fn print_help() {
          \x20                            configuration saved with Save default)\n  \
          --factory                      ignore the saved default and a copperline.toml beside the\n  \
          \x20                            executable, and start from Copperline's own settings\n  \
+         [MEDIA ...]                   floppy images boot in DF0 (multiple files form a swap playlist);\n  \
+         \x20                            .lha/.lzh and WHDLoad ZIPs boot as games; .toml loads a config;\n  \
+         \x20                            CD images need a CD32/CDTV machine; ROM paths remain accepted\n  \
          --whdload GAME                 boot a WHDLoad game package: an .lha/.lzh or .zip\n  \
          \x20                            archive, or a directory holding a .slave\n  \
          \x20                            (see docs/guide/whdload.md)\n  \

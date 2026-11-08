@@ -1730,6 +1730,12 @@ pub struct App {
     title_rom_hint: Option<(crate::config::RomId, String)>,
     #[cfg(target_os = "macos")]
     macos_about_wake: Option<winit::event_loop::EventLoopProxy<()>>,
+    #[cfg(target_os = "macos")]
+    macos_documents: Option<macos_documents::Handler>,
+    #[cfg(target_os = "macos")]
+    initial_document_launcher: bool,
+    #[cfg(target_os = "macos")]
+    document_opening_enabled: bool,
     /// The About panel's update check, for the session: not asked until
     /// its button is pressed.
     #[cfg(feature = "update-check")]
@@ -3159,6 +3165,12 @@ impl App {
             title_rom_hint,
             #[cfg(target_os = "macos")]
             macos_about_wake: None,
+            #[cfg(target_os = "macos")]
+            macos_documents: None,
+            #[cfg(target_os = "macos")]
+            initial_document_launcher: false,
+            #[cfg(target_os = "macos")]
+            document_opening_enabled: false,
             #[cfg(feature = "update-check")]
             update_check: app_update::UpdateCheck::Idle,
             machine_config,
@@ -3994,6 +4006,10 @@ impl App {
         #[cfg(target_os = "macos")]
         {
             app.macos_about_wake = Some(event_loop.create_proxy());
+            if app.document_opening_enabled {
+                app.macos_documents =
+                    Some(macos_documents::Handler::install(event_loop.create_proxy()));
+            }
         }
         // Start the control server's socket threads with a wake that
         // kicks the loop out of ControlFlow::Wait, so a command arriving
@@ -4941,6 +4957,13 @@ impl ApplicationHandler for App {
         }
         if self.route_debug_workspace_event(&event) {
             return;
+        }
+        #[cfg(target_os = "macos")]
+        if matches!(
+            event,
+            WindowEvent::KeyboardInput { .. } | WindowEvent::MouseInput { .. }
+        ) {
+            self.initial_document_launcher = false;
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -6372,6 +6395,11 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(target_os = "macos")]
+        if self.open_macos_documents() && self.initial_document_launcher {
+            event_loop.exit();
+            return;
+        }
+        #[cfg(target_os = "macos")]
         if macos_about::take_request() {
             self.suspend_mouse_capture_for_ui();
             self.about_opened_at = Instant::now();
@@ -6880,76 +6908,13 @@ fn display_file_name(path: &std::path::Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
-/// What a file dropped on the window should be treated as. Extensions route
-/// most files; ZIP member names distinguish WHDLoad packages from floppy
-/// images, and CHD metadata distinguishes CDs from hard disks. The floppy
-/// insert path itself sniffs and validates the image content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DroppedMediaKind {
-    /// Anything the floppy loader may accept (floppy::IMAGE_EXTENSIONS and
-    /// unknown extensions): FloppyImage::from_bytes sniffs the content and
-    /// rejects what it cannot read, surfacing a clean OSD failure.
-    Floppy,
-    /// A CD image (cue sheet, bare ISO, Nero NRG, or CD-ROM CHD) for the
-    /// CD drive.
-    Cd,
-    /// Hard disk images cannot be hot-attached; point at the config screen.
-    HardDisk,
-    /// Kickstart ROMs load from the config screen, not at runtime.
-    Rom,
-    /// A WHDLoad game package, or a .slave inside an extracted one:
-    /// something to boot into (src/whdload.rs), not media to insert.
-    WhdloadGame,
-}
+use crate::media::{whdload_game_path as whdload_game_config_path, MediaKind as DroppedMediaKind};
 
 fn classify_dropped_media(path: &std::path::Path) -> DroppedMediaKind {
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().to_ascii_lowercase());
-    match ext.as_deref() {
-        Some("chd") if crate::harddrive::chd::is_hard_disk_chd(path) => DroppedMediaKind::HardDisk,
-        Some("cue") | Some("iso") | Some("nrg") | Some("chd") => DroppedMediaKind::Cd,
-        Some("hdf") | Some("hdz") | Some("vhd") | Some("img") => DroppedMediaKind::HardDisk,
-        Some("rom") => DroppedMediaKind::Rom,
-        Some("zip") => {
-            // WHDLoad packages may themselves contain disk images, so a
-            // slave takes precedence. Listing filters macOS metadata and
-            // does not decompress the archive's payloads.
-            let has_slave = crate::package::list(path).is_ok_and(|members| {
-                members
-                    .iter()
-                    .any(|member| crate::package::is_slave_name(&member.to_string_lossy()))
-            });
-            if has_slave {
-                DroppedMediaKind::WhdloadGame
-            } else {
-                DroppedMediaKind::Floppy
-            }
-        }
-        Some(ext)
-            if crate::package::EXTENSIONS.contains(&ext)
-                || crate::package::SLAVE_EXTENSIONS.contains(&ext) =>
-        {
-            DroppedMediaKind::WhdloadGame
-        }
-        _ => DroppedMediaKind::Floppy,
+    match crate::media::classify(path) {
+        DroppedMediaKind::Unknown => DroppedMediaKind::Floppy,
+        kind => kind,
     }
-}
-
-/// A WHDLoad game path as the configuration stores it. Picking or dropping a
-/// bare `.slave` means its directory (an already-extracted package), which is
-/// what `whdload::prepare` mounts; an `.lha` archive or a directory is taken
-/// as given.
-fn whdload_game_config_path(path: PathBuf) -> PathBuf {
-    let is_slave = path
-        .file_name()
-        .is_some_and(|name| crate::package::is_slave_name(&name.to_string_lossy()));
-    if is_slave {
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            return dir.to_path_buf();
-        }
-    }
-    path
 }
 
 /// Shorten any filesystem path in a status message so its file name stays
@@ -8302,6 +8267,8 @@ mod host_input;
 mod kbdpanel;
 #[cfg(target_os = "macos")]
 mod macos_about;
+#[cfg(target_os = "macos")]
+mod macos_documents;
 mod monitors;
 #[cfg(feature = "mt32")]
 mod mt32panel;

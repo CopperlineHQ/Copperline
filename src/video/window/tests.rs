@@ -9659,7 +9659,7 @@ fn whdload_game_config_path_stores_a_slave_as_its_directory() {
     );
     assert_eq!(
         whdload_game_config_path(PathBuf::from("Turrican.slave")),
-        PathBuf::from("Turrican.slave")
+        PathBuf::from(".")
     );
 }
 

@@ -236,6 +236,63 @@ impl RawConfig {
         });
     }
 
+    /// Apply explicit startup media before validation, preserving drive
+    /// protection/wiring and overriding any remembered WHDLoad boot target.
+    pub fn set_startup_media(&mut self, floppies: &[PathBuf], cd: Option<&Path>) -> Result<()> {
+        if !floppies.is_empty() {
+            let selected = self.floppy.df0.as_ref();
+            if selected.is_some_and(|drive| drive.enabled == Some(false)) {
+                bail!(
+                    "floppy.df0 is disabled; enable it before providing positional floppy images"
+                );
+            }
+            if selected
+                .and_then(|drive| drive.bridge.as_deref())
+                .is_some_and(|bridge| {
+                    !bridge.trim().is_empty() && !bridge.trim().eq_ignore_ascii_case("off")
+                })
+            {
+                bail!("positional floppy images need an image-backed DF0; the configured bridge supplies its own media");
+            }
+            // A configured image or explicit enabled=true already selects
+            // DF0 hardware. Merely supplying a new positional image does not.
+            let explicitly_selected = selected.is_some_and(|drive| {
+                drive.enabled == Some(true)
+                    || drive.path.is_some()
+                    || drive.paths.as_ref().is_some_and(|paths| !paths.is_empty())
+            });
+            let defaults = self
+                .machine
+                .profile
+                .as_deref()
+                .map(parse_machine_model)
+                .transpose()?
+                .map_or_else(Config::default, machine_profile_defaults);
+            let connected = self.floppy.drives.map_or(
+                defaults.floppy_connected[0] || explicitly_selected,
+                |count| count > 0,
+            );
+            if !connected {
+                bail!("positional floppy images need DF0; select a machine with a floppy drive or use --floppy-drives 1");
+            }
+            let drive = self.floppy.df0.get_or_insert_with(Default::default);
+            drive.path = None;
+            drive.paths = Some(
+                floppies
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+            );
+        }
+        if let Some(cd) = cd {
+            self.set_cd_image(cd);
+        }
+        if !floppies.is_empty() || cd.is_some() {
+            self.whdload.game = None;
+        }
+        Ok(())
+    }
+
     /// The `[display]` defaults a game manifest carries: shader and bezel
     /// by their config names, and whether the session opens fullscreen.
     /// Only what is given is set, so a later overlay still wins.
