@@ -22,7 +22,7 @@ Set-StrictMode -Version Latest
 $InstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
 $ZipPath = (Resolve-Path -LiteralPath $ZipPath).Path
 $WorkDir = [IO.Path]::GetFullPath($WorkDir)
-$associationExtensions = @("adf", "adz", "dms", "ipf", "scp", "lha", "lzh", "zip", "slave", "slav", "cue", "iso", "nrg", "chd", "rom", "toml")
+$associationExtensions = @("adf", "adz", "gz", "dms", "ipf", "scp", "lha", "lzh", "zip", "slave", "slav", "cue", "iso", "nrg", "chd", "rom", "toml")
 $uninstallSubkey = "Software\Microsoft\Windows\CurrentVersion\Uninstall\CopperlineHQ.Copperline_is1"
 
 # Where each install mode puts the program, its uninstall entry and its

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise AppImage desktop installation, Exec expansion and removal on Linux."""
 
+import gzip
 import json
 import os
 from pathlib import Path
@@ -54,13 +55,18 @@ def main():
                 time.sleep(0.05)
             assert json.loads(log.read_text()) == ["--", *files]
             for suffix, expected in [
-                ("adz", "application/x-copperline-floppy-image"),
-                ("adf.gz", "application/x-copperline-floppy-image"),
+                ("adz", "application/x-copperline-compressed-floppy-image"),
+                ("adf.gz", "application/x-copperline-compressed-floppy-image"),
+                ("dms", "application/x-copperline-floppy-image"),
+                ("ipf", "application/x-copperline-floppy-image"),
+                ("scp", "application/x-copperline-floppy-image"),
                 ("slave", "application/x-amiga-whdload-slave"),
                 ("rom", "application/x-amiga-kickstart-rom"),
             ]:
                 media = root / f"test.{suffix}"
-                media.write_bytes(b"\x00\x01fixture")
+                payload = (gzip.compress(b"DOS\x00" + bytes(901_116))
+                           if suffix in ("adz", "adf.gz") else b"\x00\x01fixture")
+                media.write_bytes(payload)
                 detected = run("gio", "info", "-a", "standard::content-type", str(media)).stdout
                 assert f"standard::content-type: {expected}" in detected, (suffix, detected)
             assert sentinel.read_bytes() == expected_defaults

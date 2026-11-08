@@ -83,6 +83,8 @@ Root: HKA; Subkey: "Software\Classes\.adf\OpenWithProgids"; ValueType: string; V
 Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".adf"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\.adz\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".adz"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.gz\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".gz"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\.dms\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
 Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".dms"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\.ipf\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue

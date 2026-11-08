@@ -33,7 +33,10 @@ def main():
         bundle_id = f"dev.copperline.document-test.{os.getpid()}"
         info = app / "Contents/Info.plist"
         metadata = plistlib.loads(info.read_bytes())
-        assert metadata["CFBundleDocumentTypes"], "bundle advertises no file types"
+        document_types = metadata["CFBundleDocumentTypes"]
+        extensions = {ext for item in document_types for ext in item["CFBundleTypeExtensions"]}
+        assert {"adf", "adz", "gz", "lha", "zip", "rom", "toml"} <= extensions
+        assert all(item["LSHandlerRank"] == "Alternate" for item in document_types)
         metadata["CFBundleIdentifier"] = bundle_id
         info.write_bytes(plistlib.dumps(metadata))
         (app / "Contents/MacOS/portable.txt").touch()

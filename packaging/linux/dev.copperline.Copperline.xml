@@ -2,10 +2,14 @@
 <mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
   <mime-type type="application/x-copperline-floppy-image">
     <comment>Amiga floppy image</comment>
-    <glob pattern="*.adz"/>
     <glob pattern="*.dms"/>
     <glob pattern="*.ipf"/>
     <glob pattern="*.scp"/>
+  </mime-type>
+  <mime-type type="application/x-copperline-compressed-floppy-image">
+    <comment>Gzip-compressed Amiga floppy image</comment>
+    <sub-class-of type="application/gzip"/>
+    <glob pattern="*.adz"/>
     <glob pattern="*.adf.gz" weight="60"/>
   </mime-type>
   <mime-type type="application/x-amiga-whdload-slave">
