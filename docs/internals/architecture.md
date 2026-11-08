@@ -17,6 +17,8 @@ expansion boards have chapters of their own: [Toccata](toccata.md),
 src/
   main.rs           # native binary: config load, boot, execution-mode selection
   cli.rs            # binary-local command-line parser
+  cli/tokens.rs     # option boundaries, inline values, script-token provenance
+  startup.rs        # desktop launch markers and fatal error presentation
   bin/              # auxiliary binaries, each behind its own cargo feature:
                     #   bench.rs: copperline-bench headless benchmark (native + wasm32-wasip1)
                     #   copperline-ctl.rs: control-protocol client, MCP server, DAP adapter
@@ -136,7 +138,7 @@ src/
   netplay/          # GGPO-style netplay for two to four players
   verdict.rs        # the process exit status of a session
   crashlog.rs       # persistent crash reports from the panic hook
-  winconsole.rs     # closes the console a desktop launch brings (Windows)
+  winconsole.rs     # detects desktop launches and closes their console (Windows)
   timestamp.rs      # compact wall-clock stamps for generated filenames
   timebase.rs       # host clock imports shared with the browser build
   chipset/
@@ -185,6 +187,19 @@ timing-test/        # bootable cross-emulator timing-measurement disk + golden p
 ```
 
 ## The big picture
+
+The native entry point catches fatal errors and returns status 1. Once the
+arguments identify an interactive session, a desktop launch also shows a
+native error dialog. Windows retains the result of its console-ownership
+check; the Linux desktop entry supplies a leading internal `--desktop`
+marker, consumed before CLI parsing; LaunchServices sets
+`COPPERLINE_DESKTOP_LAUNCH=1` through the macOS bundle's `LSEnvironment`.
+The environment marker is read through `envcfg`. Syntax errors, capture and
+benchmark runs, headless debugger/control servers, listing commands, and
+internal helper actions use stderr only, even with a desktop marker.
+Redirected streams alone never enable dialogs. Launcher Run failures keep
+their existing status-line recovery path, and guest/expectation exit codes
+still come from the session verdict.
 
 Copperline's emulated machine runs synchronously on the main thread inside
 winit's event loop. There is no emulation thread and no locking between CPU

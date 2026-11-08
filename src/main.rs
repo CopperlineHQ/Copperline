@@ -13,6 +13,7 @@ use anyhow::{anyhow, Result};
 use copperline::gdbstub;
 use copperline::{config, crashlog, debugger, emulator, envcfg, gamepad, priority, video};
 use log::{info, warn};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -28,10 +29,10 @@ use copperline::video::window::{App, DiskChange, DiskChangeSpec, GifCaptureSpec}
 use copperline::video::HOST_SHORTCUT_MODIFIER_LABEL;
 
 mod cli;
+mod startup;
 
-#[cfg(test)]
 use cli::parse_args_from;
-use cli::{parse_args, CliArgs, CliDiskChange};
+use cli::{CliArgs, CliDiskChange};
 
 fn resolve_disk_change_after(
     cfg: &mut Config,
@@ -759,11 +760,32 @@ fn list_serial_ports() -> Result<()> {
     Ok(())
 }
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
     // Before the logger, which is the first thing that would write to a
     // console this is about to take away (see winconsole).
-    copperline::winconsole::detach_desktop_console();
+    let detached = copperline::winconsole::detach_desktop_console();
+    let (desktop_marker, args) = startup::arguments(std::env::args().skip(1));
+    // LaunchServices supplies the environment marker from the app's plist;
+    // executing the same binary from a terminal does not set it.
+    let desktop = detached
+        || desktop_marker
+        || envcfg::var("COPPERLINE_DESKTOP_LAUNCH").as_deref() == Some("1");
+    let mut error_dialog = false;
+    match run(args, desktop, &mut error_dialog) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            // A desktop launcher can leave stderr closed. Reporting there
+            // must not panic before the native dialog has a chance to open.
+            let _ = writeln!(std::io::stderr().lock(), "Error: {error:#}");
+            if error_dialog {
+                startup::show_error(&error);
+            }
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
 
+fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> {
     let mut log_builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     // Copperline resolves gamepads through gilrs's bundled SDL controller
@@ -800,7 +822,9 @@ fn main() -> Result<()> {
 
     crashlog::install();
 
-    let cli = parse_args()?;
+    // Syntax errors stay on stderr. Once a session mode is known, fatal
+    // interactive desktop errors also get a dialog; headless commands never do.
+    let cli = parse_args_from(args)?;
     if cli.load_uss.is_some()
         && (cli.load_state.is_some() || cli.run.is_some() || cli.whdload.is_some())
     {
@@ -812,6 +836,7 @@ fn main() -> Result<()> {
     validate_run_args(&cli)?;
     validate_gdb_args(&cli)?;
     validate_control_args(&cli)?;
+    *error_dialog = startup::error_dialog_allowed(desktop, &cli);
     if cli.calibrate_gamepad {
         return gamepad::run_calibration();
     }
@@ -1965,6 +1990,154 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<CliArgs> {
         parse_args_from(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn inline_values_compose_with_multiple_arguments_and_repeated_flags() -> Result<()> {
+        let cli = parse(&[
+            "--model=A1200",
+            "--fast=8M",
+            "--window-position=-40",
+            "75",
+            "--mouse-after=1.5",
+            "-20",
+            "30",
+            "2",
+            "--screenshot-after=2",
+            "first=frame.png",
+            "--screenshot-after",
+            "3",
+            "last.png",
+            "--noaudio",
+        ])?;
+        assert_eq!(cli.overrides.model.as_deref(), Some("A1200"));
+        assert_eq!(cli.overrides.fast.as_deref(), Some("8M"));
+        assert_eq!(cli.overrides.window_position, Some([-40, 75]));
+        assert_eq!(cli.mouse_after, [(1.5, -20, 30, 1)]);
+        assert_eq!(
+            cli.screenshot_after,
+            [
+                (2.0, PathBuf::from("first=frame.png")),
+                (3.0, PathBuf::from("last.png")),
+            ]
+        );
+        assert!(!cli.audio_live);
+        Ok(())
+    }
+
+    #[test]
+    fn values_keep_literal_equals_signs_and_option_like_text() -> Result<()> {
+        for spelling in [
+            vec!["--run-args=--guest-option=a=b"],
+            vec!["--run-args", "--guest-option=a=b"],
+        ] {
+            assert_eq!(
+                parse(&spelling)?.run_args.as_deref(),
+                Some("--guest-option=a=b")
+            );
+        }
+        assert_eq!(parse(&["--run-args="])?.run_args.as_deref(), Some(""));
+        assert_eq!(
+            parse(&["--run-args", "--script"])?.run_args.as_deref(),
+            Some("--script")
+        );
+        assert_eq!(
+            parse(&["kick=start.rom"])?.rom_path,
+            Some(PathBuf::from("kick=start.rom"))
+        );
+        let cli = parse(&["--coverage-source-map=old=path=new=path"])?;
+        assert_eq!(
+            cli.coverage_source_map,
+            [("old".to_owned(), "path=new=path".to_owned())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn inline_script_paths_preserve_values_and_expansion_order() -> Result<()> {
+        let path = temp_script(
+            "equals=path",
+            "type 1 \"--model=A1200\"\npress-after 2 f1\n",
+        );
+        let cli = parse(&[
+            "--press-after=0",
+            "esc",
+            &format!("--script={}", path.display()),
+            "--press-after=3",
+            "f2",
+        ])?;
+        let expected = parse(&[
+            "--press-after",
+            "0",
+            "esc",
+            "--type-after",
+            "1",
+            "--model=A1200",
+            "--press-after",
+            "2",
+            "f1",
+            "--press-after",
+            "3",
+            "f2",
+        ])?;
+        assert_eq!(cli.press_after, expected.press_after);
+        assert!(cli.overrides.model.is_none());
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn extra_script_tokens_cannot_expand_scripts_or_change_the_machine() -> Result<()> {
+        for tail in [
+            "--script other.clscript",
+            "--script=other.clscript",
+            "--model=A1200",
+        ] {
+            let path = temp_script("extra-option", &format!("press-after 1 esc {tail}\n"));
+            let error = parse(&["--script", path.to_str().unwrap()]).unwrap_err();
+            assert!(
+                error.to_string().contains("not a scripted-input directive"),
+                "{error}"
+            );
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn switches_reject_inline_values_before_side_effects_or_early_exit() {
+        for flag in [
+            "--noaudio",
+            "--factory",
+            "--full-screen",
+            "--help",
+            "--version",
+        ] {
+            for value in ["", "true", "false"] {
+                let error = parse(&[&format!("{flag}={value}")]).unwrap_err();
+                assert_eq!(error.to_string(), format!("{flag} does not take a value"));
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_options_suggest_only_a_close_public_option() {
+        for (typo, correct) in [
+            ("--modle=A1200", "--model"),
+            ("--screnshot-after", "--screenshot-after"),
+            ("--hlep", "--help"),
+        ] {
+            let error = parse(&[typo]).unwrap_err().to_string();
+            assert!(
+                error.contains(&format!("did you mean {correct:?}?")),
+                "{error}"
+            );
+        }
+        let error = parse(&["--completely-unrelated"]).unwrap_err().to_string();
+        assert!(error.contains("unknown option"));
+        assert!(!error.contains("did you mean"));
+        let error = parse(&["--flga"]).unwrap_err().to_string();
+        assert!(!error.contains("did you mean \"--flag\""), "{error}");
     }
 
     #[test]
