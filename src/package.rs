@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::archive::{Budget, Limits};
 use crate::lha;
 
 /// Which of the three a path is.
@@ -149,9 +150,14 @@ pub fn is_rubbish(path: &Path) -> bool {
 /// Only for the two archive kinds; a folder is already unpacked and the
 /// caller uses it where it is.
 pub fn extract_to_dir(archive: &Path, dest: &Path) -> Result<usize> {
+    extract_to_dir_with_limits(archive, dest, Limits::default())
+}
+
+/// [`extract_to_dir`] with an explicit decompression and entry budget.
+pub fn extract_to_dir_with_limits(archive: &Path, dest: &Path, limits: Limits) -> Result<usize> {
     match Kind::of(archive) {
-        Some(Kind::Lha) => lha::extract_to_dir(archive, dest),
-        Some(Kind::Zip) => extract_zip(archive, dest),
+        Some(Kind::Lha) => lha::extract_to_dir_with_limits(archive, dest, limits),
+        Some(Kind::Zip) => extract_zip(archive, dest, limits),
         Some(Kind::Folder) => bail!("{} is a directory, not an archive", archive.display()),
         None => bail!(
             "{} is not a WHDLoad package (.lha, .zip or a folder)",
@@ -163,10 +169,16 @@ pub fn extract_to_dir(archive: &Path, dest: &Path) -> Result<usize> {
 /// The relative paths of the members of an archive, or of the files in a
 /// folder, with the rubbish left out.
 pub fn list(path: &Path) -> Result<Vec<PathBuf>> {
+    list_with_limits(path, Limits::default())
+}
+
+/// [`list`] with an explicit header/file count limit. Archive payloads are
+/// not decompressed by this operation.
+pub fn list_with_limits(path: &Path, limits: Limits) -> Result<Vec<PathBuf>> {
     let all = match Kind::of(path) {
-        Some(Kind::Lha) => lha::list_files(path)?,
-        Some(Kind::Zip) => zip_names(path)?,
-        Some(Kind::Folder) => walk(path)?,
+        Some(Kind::Lha) => lha::list_files_with_limits(path, limits)?,
+        Some(Kind::Zip) => zip_names(path, limits)?,
+        Some(Kind::Folder) => walk(path, limits.entries)?,
         None => bail!("{} is not a WHDLoad package", path.display()),
     };
     Ok(all.into_iter().filter(|p| !is_rubbish(p)).collect())
@@ -174,46 +186,70 @@ pub fn list(path: &Path) -> Result<Vec<PathBuf>> {
 
 /// Read one member out of an archive or folder, by a path `list` returned.
 pub fn read(path: &Path, member: &Path) -> Result<Vec<u8>> {
+    read_with_limits(path, member, Limits::default())
+}
+
+/// [`read`] with an explicit output and entry budget.
+pub fn read_with_limits(path: &Path, member: &Path, limits: Limits) -> Result<Vec<u8>> {
     match Kind::of(path) {
-        Some(Kind::Lha) => lha::read_member(path, member),
-        Some(Kind::Zip) => read_zip_member(path, member),
-        Some(Kind::Folder) => std::fs::read(path.join(member))
-            .with_context(|| format!("reading {}", path.join(member).display())),
+        Some(Kind::Lha) => lha::read_member_with_limits(path, member, limits),
+        Some(Kind::Zip) => read_zip_member(path, member, limits),
+        Some(Kind::Folder) => read_folder_member(&path.join(member), limits),
         None => bail!("{} is not a WHDLoad package", path.display()),
     }
 }
 
+fn read_folder_member(path: &Path, limits: Limits) -> Result<Vec<u8>> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let size = file.metadata()?.len();
+    Budget::new(limits)
+        .read(&mut file, size)
+        .with_context(|| format!("reading {}", path.display()))
+}
+
 /// The first member whose path satisfies `want`, reading only that one.
-///
-/// The point of it is the scan, which wants one small `.slave` out of each
-/// of a few thousand packages and has no use for the rest.
+/// The library scan supplies [`Limits::SLAVE`] through the variant below.
 pub fn read_first(path: &Path, want: impl Fn(&Path) -> bool) -> Result<Option<Vec<u8>>> {
+    read_first_with_limits(path, want, Limits::default())
+}
+
+/// [`read_first`] with an explicit budget. Unselected archive payloads do
+/// not count towards the byte limit and are not decompressed.
+pub fn read_first_with_limits(
+    path: &Path,
+    want: impl Fn(&Path) -> bool,
+    limits: Limits,
+) -> Result<Option<Vec<u8>>> {
     let wanted = |p: &Path| !is_rubbish(p) && want(p);
     match Kind::of(path) {
-        Some(Kind::Lha) => Ok(lha::read_first(path, wanted)?.map(|entry| entry.data)),
+        Some(Kind::Lha) => Ok(lha::read_first_with_limits(path, wanted, limits)?.map(|e| e.data)),
         Some(Kind::Zip) => {
-            let mut zip = open_zip(path)?;
-            let found = (0..zip.len()).find_map(|i| {
-                let file = zip.by_index(i).ok()?;
-                let member = zip_member_path(&file)?;
-                (!file.is_dir() && wanted(&member)).then_some(i)
-            });
-            match found {
-                Some(i) => {
-                    let mut data = Vec::new();
-                    zip.by_index(i)
-                        .with_context(|| format!("reading a member of {}", path.display()))?
-                        .read_to_end(&mut data)
-                        .with_context(|| format!("decompressing a member of {}", path.display()))?;
-                    Ok(Some(data))
+            let mut zip = open_zip(path, limits)?;
+            for i in 0..zip.len() {
+                // A member that cannot be opened (an unsupported method, a
+                // damaged local header) is skipped unless it is the one
+                // wanted; only the selected member's read can fail the call.
+                let Ok(mut file) = zip.by_index(i) else {
+                    continue;
+                };
+                let Some(member) = zip_member_path(&file) else {
+                    continue;
+                };
+                if !file.is_dir() && wanted(&member) {
+                    let size = file.size();
+                    let data = Budget::new(limits).read(&mut file, size).with_context(|| {
+                        format!("decompressing {} in {}", member.display(), path.display())
+                    })?;
+                    return Ok(Some(data));
                 }
-                None => Ok(None),
             }
+            Ok(None)
         }
         Some(Kind::Folder) => {
-            for member in walk(path)? {
+            for member in walk(path, limits.entries)? {
                 if wanted(&member) {
-                    return Ok(Some(std::fs::read(path.join(&member))?));
+                    return Ok(Some(read_folder_member(&path.join(&member), limits)?));
                 }
             }
             Ok(None)
@@ -353,11 +389,16 @@ pub fn holds_a_slave(dir: &Path) -> bool {
 /// -- and a third is slack for anyone who nested one deeper.
 const FOLDER_SLAVE_DEPTH: usize = 3;
 
-fn open_zip(path: &Path) -> Result<zip::ZipArchive<std::io::BufReader<std::fs::File>>> {
+fn open_zip(
+    path: &Path,
+    limits: Limits,
+) -> Result<zip::ZipArchive<std::io::BufReader<std::fs::File>>> {
     let file = std::fs::File::open(path)
         .with_context(|| format!("opening ZIP archive {}", path.display()))?;
-    zip::ZipArchive::new(std::io::BufReader::new(file))
-        .with_context(|| format!("reading ZIP archive {}", path.display()))
+    let zip = zip::ZipArchive::new(std::io::BufReader::new(file))
+        .with_context(|| format!("reading ZIP archive {}", path.display()))?;
+    limits.check_entries(zip.len())?;
+    Ok(zip)
 }
 
 /// A member name as a relative path, or `None` if it tries to leave the
@@ -390,8 +431,8 @@ fn zip_raw_name<R: Read + ?Sized>(file: &zip::read::ZipFile<'_, R>) -> String {
     String::from_utf8_lossy(file.name_raw()).into_owned()
 }
 
-fn zip_names(path: &Path) -> Result<Vec<PathBuf>> {
-    let mut zip = open_zip(path)?;
+fn zip_names(path: &Path, limits: Limits) -> Result<Vec<PathBuf>> {
+    let mut zip = open_zip(path, limits)?;
     let mut out = Vec::new();
     for i in 0..zip.len() {
         let file = zip
@@ -412,22 +453,24 @@ fn zip_names(path: &Path) -> Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn read_zip_member(path: &Path, member: &Path) -> Result<Vec<u8>> {
-    let mut zip = open_zip(path)?;
+fn read_zip_member(path: &Path, member: &Path, limits: Limits) -> Result<Vec<u8>> {
+    let mut zip = open_zip(path, limits)?;
     for i in 0..zip.len() {
         let mut file = zip.by_index(i)?;
         if zip_member_path(&file).as_deref() == Some(member) {
-            let mut data = Vec::new();
-            file.read_to_end(&mut data)?;
-            return Ok(data);
+            let size = file.size();
+            return Budget::new(limits).read(&mut file, size).with_context(|| {
+                format!("decompressing {} in {}", member.display(), path.display())
+            });
         }
     }
     bail!("{} has no member {}", path.display(), member.display())
 }
 
-fn extract_zip(archive: &Path, dest: &Path) -> Result<usize> {
-    let mut zip = open_zip(archive)?;
+fn extract_zip(archive: &Path, dest: &Path, limits: Limits) -> Result<usize> {
+    let mut zip = open_zip(archive, limits)?;
     let mut written = 0usize;
+    let mut budget = Budget::new(limits);
     for i in 0..zip.len() {
         let mut file = zip
             .by_index(i)
@@ -446,6 +489,10 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<usize> {
         if is_rubbish(&member) {
             continue;
         }
+        let size = file.size();
+        budget
+            .allowance(size)
+            .with_context(|| format!("extracting {}", member.display()))?;
         let at = dest.join(&member);
         if let Some(parent) = at.parent() {
             std::fs::create_dir_all(parent)
@@ -453,8 +500,12 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<usize> {
         }
         let mut out =
             std::fs::File::create(&at).with_context(|| format!("writing {}", at.display()))?;
-        std::io::copy(&mut file, &mut out)
-            .with_context(|| format!("extracting {}", member.display()))?;
+        let result = budget.copy(&mut file, &mut out, size);
+        drop(out);
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&at);
+            return Err(error).with_context(|| format!("extracting {}", member.display()));
+        }
         written += 1;
     }
     Ok(written)
@@ -468,8 +519,8 @@ fn extract_zip(archive: &Path, dest: &Path) -> Result<usize> {
 /// feels like, so an unsorted walk would hash a different slave on
 /// different runs and the digest that identifies a package would move
 /// under it.
-fn walk(root: &Path) -> Result<Vec<PathBuf>> {
-    fn step(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+fn walk(root: &Path, max_files: usize) -> Result<Vec<PathBuf>> {
+    fn step(root: &Path, dir: &Path, out: &mut Vec<PathBuf>, max_files: usize) -> Result<()> {
         let entries =
             std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))?;
         for entry in entries.flatten() {
@@ -479,15 +530,18 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
             }
             let path = entry.path();
             if kind.is_dir() {
-                step(root, &path, out)?;
+                step(root, &path, out, max_files)?;
             } else if let Ok(rel) = path.strip_prefix(root) {
+                if out.len() >= max_files {
+                    bail!("package exceeds the {max_files} file limit");
+                }
                 out.push(rel.to_path_buf());
             }
         }
         Ok(())
     }
     let mut out = Vec::new();
-    step(root, root, &mut out)?;
+    step(root, root, &mut out, max_files)?;
     out.sort_by_key(|p| (p.components().count(), p.to_string_lossy().to_lowercase()));
     Ok(out)
 }
@@ -495,6 +549,138 @@ fn walk(root: &Path) -> Result<Vec<PathBuf>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    const SMALL: Limits = Limits {
+        member_bytes: 4,
+        total_bytes: 6,
+        entries: 2,
+    };
+
+    fn write_zip(path: &Path, members: &[(&str, &[u8])]) {
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, data) in members {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(data).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    #[test]
+    fn zip_output_and_entry_limits_cover_every_read_path() {
+        let dir = crate::lha::tests::temp_dir("zip-limits");
+        let path = dir.join("game.zip");
+        write_zip(&path, &[("one", b"1234"), ("two", b"56")]);
+        assert_eq!(list_with_limits(&path, SMALL).unwrap().len(), 2);
+        assert_eq!(
+            read_with_limits(&path, Path::new("one"), SMALL).unwrap(),
+            b"1234"
+        );
+        assert_eq!(
+            read_first_with_limits(&path, |_| true, SMALL)
+                .unwrap()
+                .unwrap(),
+            b"1234"
+        );
+        assert_eq!(
+            extract_to_dir_with_limits(&path, &dir.join("exact"), SMALL).unwrap(),
+            2
+        );
+        for limits in [
+            Limits {
+                member_bytes: 3,
+                ..SMALL
+            },
+            Limits {
+                total_bytes: 3,
+                ..SMALL
+            },
+            Limits {
+                entries: 1,
+                ..SMALL
+            },
+        ] {
+            assert!(read_with_limits(&path, Path::new("one"), limits).is_err());
+            assert!(read_first_with_limits(&path, |_| true, limits).is_err());
+            assert!(extract_to_dir_with_limits(&path, &dir.join("limited"), limits).is_err());
+        }
+        let out = dir.join("aggregate");
+        assert!(extract_to_dir_with_limits(
+            &path,
+            &out,
+            Limits {
+                total_bytes: 5,
+                ..SMALL
+            }
+        )
+        .is_err());
+        assert!(!out.join("two").exists());
+        assert!(list_with_limits(
+            &path,
+            Limits {
+                entries: 1,
+                ..SMALL
+            }
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn zip_lying_sizes_cannot_bypass_the_output_limit() {
+        let dir = crate::lha::tests::temp_dir("zip-lying-size");
+        let path = dir.join("game.zip");
+        write_zip(&path, &[("data", &[0; 4096])]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Keep the compressed size intact but lie about the decoded size
+        // in both headers, getting past the early declared-size check.
+        bytes[22..26].copy_from_slice(&1u32.to_le_bytes());
+        let central = bytes.windows(4).position(|p| p == b"PK\x01\x02").unwrap();
+        bytes[central + 24..central + 28].copy_from_slice(&1u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert!(read_with_limits(&path, Path::new("data"), SMALL).is_err());
+        assert!(read_first_with_limits(&path, |_| true, SMALL).is_err());
+        let out = dir.join("out");
+        assert!(extract_to_dir_with_limits(&path, &out, SMALL).is_err());
+        assert!(!out.join("data").exists());
+    }
+
+    #[test]
+    fn selective_zip_reads_and_folder_scans_use_their_own_budget() {
+        let dir = crate::lha::tests::temp_dir("slave-limits");
+        let path = dir.join("game.zip");
+        write_zip(&path, &[("data", b"oversize"), ("loader.slave", b"ok")]);
+        let want = |p: &Path| p.extension().is_some_and(|e| e == "slave");
+        assert_eq!(
+            read_first_with_limits(&path, want, SMALL).unwrap().unwrap(),
+            b"ok"
+        );
+        let folder = dir.join("folder");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("loader.slave"), b"oversize").unwrap();
+        assert!(read_first_with_limits(&folder, want, SMALL).is_err());
+        assert!(read_with_limits(&folder, Path::new("loader.slave"), SMALL).is_err());
+    }
+
+    #[test]
+    fn zip_read_first_skips_unselected_members_it_cannot_open() {
+        let dir = crate::lha::tests::temp_dir("zip-unsupported-method");
+        let path = dir.join("game.zip");
+        write_zip(&path, &[("data", b"payload"), ("loader.slave", b"ok")]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Give the first member an unassigned compression method in both
+        // its local and central headers, so opening it fails.
+        bytes[8..10].copy_from_slice(&0x5au16.to_le_bytes());
+        let central = bytes.windows(4).position(|p| p == b"PK\x01\x02").unwrap();
+        bytes[central + 10..central + 12].copy_from_slice(&0x5au16.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        let want = |p: &Path| p.extension().is_some_and(|e| e == "slave");
+        assert_eq!(
+            read_first_with_limits(&path, want, SMALL).unwrap().unwrap(),
+            b"ok"
+        );
+        assert!(read_with_limits(&path, Path::new("data"), SMALL).is_err());
+    }
 
     #[test]
     fn what_a_package_looks_like() {
@@ -580,7 +766,7 @@ mod tests {
         // Compared as paths, not as text: `display()` uses the host's
         // separator, so a string comparison here would pass on Unix and
         // fail on Windows for no reason anybody cares about.
-        let listed = walk(&dir).unwrap();
+        let listed = walk(&dir, Limits::default().entries).unwrap();
         assert_eq!(
             listed,
             ["Aaa.slave", "data/Bbb.slave", "data/deep/Zzz.slave"].map(PathBuf::from)

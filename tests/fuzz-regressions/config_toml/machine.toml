@@ -1,0 +1,4 @@
+[machine]
+profile = "A1200"
+[memory]
+fast = "8M"

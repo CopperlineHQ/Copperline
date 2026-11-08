@@ -1,0 +1,81 @@
+name: Sustained fuzzing
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - dms
+          - floppy_image
+          - cd_image
+          - hardfile_classification
+          - savestate
+          - config_toml
+          - archives
+          - debug_info
+          - control_protocol
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Generate the fuzz lockfile
+        working-directory: fuzz
+        run: |
+          cp ../Cargo.lock Cargo.lock
+          cargo metadata --format-version=1 > /dev/null
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+          key: fuzz-linux
+      - uses: actions/cache/restore@v6
+        id: corpus
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ github.ref_name }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: fuzz-corpus-${{ github.ref_name }}-${{ matrix.target }}-
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: Run a fifteen-minute campaign
+        working-directory: fuzz
+        # Explicit bash enables pipefail so tee cannot hide a fuzz failure.
+        shell: bash
+        env:
+          FUZZ_TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "artifacts/$FUZZ_TARGET" "logs" "corpus/$FUZZ_TARGET"
+          cargo fuzz run --codegen-units=16 "$FUZZ_TARGET" "corpus/$FUZZ_TARGET" -- \
+            -max_total_time=900 -timeout=10 -rss_limit_mb=2048 -max_len=1048576 \
+            -artifact_prefix="artifacts/$FUZZ_TARGET/" \
+            2>&1 | tee "logs/$FUZZ_TARGET.log"
+      - name: Retain crashes, logs and the evolved corpus
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            fuzz/artifacts/${{ matrix.target }}/
+            fuzz/logs/${{ matrix.target }}.log
+            fuzz/corpus/${{ matrix.target }}/
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Save the evolved corpus
+        if: always() && steps.corpus.outcome == 'success'
+        uses: actions/cache/save@v6
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ github.ref_name }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
