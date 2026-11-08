@@ -507,10 +507,12 @@ impl DebugInfo {
             .ok_or("debug information has not been relocated")?;
         let text_size = self.hunks.first().ok_or("program has no text hunk")?.size;
         // The table reaches the profiler base64-encoded inside one control
-        // protocol request, and the server refuses any line longer than
-        // MAX_LINE_BYTES. Refuse a table that could never be delivered
-        // before allocating it: the hunk table's allocation size is
-        // untrusted and can claim gigabytes the file does not hold.
+        // protocol request, and no line may exceed MAX_LINE_BYTES. Refuse a
+        // table whose encoding alone could never be delivered before
+        // allocating it: the hunk table's allocation size is untrusted and
+        // can claim gigabytes the file does not hold. The complete request,
+        // envelope included, is checked against the limit when it is sent
+        // (`Bridge::send`).
         let table_bytes = u64::from(text_size.div_ceil(2)) * 6;
         let max_line = crate::control::proto::MAX_LINE_BYTES as u64;
         if table_bytes.div_ceil(3) * 4 > max_line {
@@ -896,8 +898,9 @@ mod tests {
     fn unwind_table_is_refused_once_it_cannot_fit_one_control_message() {
         // The hunk table's allocation size is untrusted: a fuzzed 36-byte
         // executable claimed a 2.8 GB code hunk and asked for an 8.4 GB
-        // table. One six-byte row per text word, base64-encoded, must fit
-        // in a single control protocol line.
+        // table. A table whose base64 alone exceeds one control protocol
+        // line is refused before allocation; the bridge tests the full
+        // request against the same limit.
         let mut info = DebugInfo::default();
         info.relocate(vec![0x10000]);
         let max_line = crate::control::proto::MAX_LINE_BYTES as u32;
