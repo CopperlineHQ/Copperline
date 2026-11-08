@@ -22,6 +22,7 @@ Set-StrictMode -Version Latest
 $InstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
 $ZipPath = (Resolve-Path -LiteralPath $ZipPath).Path
 $WorkDir = [IO.Path]::GetFullPath($WorkDir)
+$associationExtensions = @("adf", "adz", "dms", "ipf", "scp", "lha", "lzh", "zip", "slave", "slav", "cue", "iso", "nrg", "chd", "rom", "toml")
 $uninstallSubkey = "Software\Microsoft\Windows\CurrentVersion\Uninstall\CopperlineHQ.Copperline_is1"
 
 # Where each install mode puts the program, its uninstall entry and its
@@ -41,6 +42,7 @@ function Get-Layout([string]$InstallMode) {
     [pscustomobject]@{
         InstallDir      = $dir
         UninstallKey    = "$root\$uninstallSubkey"
+        ClassesRoot     = "$root\Software\Classes"
         StartShortcut   = Join-Path ([Environment]::GetFolderPath($programs, "DoNotVerify")) "Copperline.lnk"
         DesktopShortcut = Join-Path ([Environment]::GetFolderPath($desktop, "DoNotVerify")) "Copperline.lnk"
         Uninstaller     = Join-Path $dir "unins000.exe"
@@ -91,12 +93,46 @@ function Assert-Registration($Layout, $Other) {
     if (Test-Path -LiteralPath $Other.UninstallKey) { throw "Setup also registered $($Other.UninstallKey)" }
 }
 
+# Validate native Open With registration, quoting and uninstall cleanup in
+# both registry hives. Extension defaults are snapshots, never test fixtures.
+function Get-ExtensionDefaults($Layout) {
+    $defaults = @{}
+    foreach ($extension in $associationExtensions) {
+        $path = "$($Layout.ClassesRoot)\.$extension"
+        $defaults[$extension] = if (Test-Path -LiteralPath $path) { (Get-Item -LiteralPath $path).GetValue("") } else { $null }
+    }
+    return $defaults
+}
+
+function Assert-Associations($Layout, $Defaults, [bool]$Installed) {
+    $progId = "$($Layout.ClassesRoot)\Copperline.Media"
+    $supported = "$($Layout.ClassesRoot)\Applications\copperline.exe\SupportedTypes"
+    if ($Installed) {
+        $command = (Get-Item -LiteralPath "$progId\shell\open\command").GetValue("")
+        $expected = '"' + (Join-Path $Layout.InstallDir "copperline.exe") + '" -- "%1"'
+        if ($command -ne $expected) { throw "Wrong file association command: $command" }
+    } elseif ((Test-Path -LiteralPath $progId) -or (Test-Path -LiteralPath $supported)) {
+        throw "Uninstall left Copperline file associations"
+    }
+    $after = Get-ExtensionDefaults $Layout
+    foreach ($extension in $associationExtensions) {
+        if ($after[$extension] -cne $Defaults[$extension]) { throw "Changed .$extension default association" }
+        $key = "$($Layout.ClassesRoot)\.$extension\OpenWithProgids"
+        $present = (Test-Path -LiteralPath $key) -and ((Get-Item -LiteralPath $key).GetValueNames() -contains "Copperline.Media")
+        if ($present -ne $Installed) { throw "Wrong .$extension Open With registration state" }
+        if ($Installed -and ((Get-Item -LiteralPath $supported).GetValueNames() -notcontains ".$extension")) {
+            throw "Missing .$extension SupportedTypes registration"
+        }
+    }
+}
+
 $silent = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-")
 
 function Test-InstallMode([string]$InstallMode) {
     $layout = $layouts[$InstallMode]
     $other = $layouts[$(if ($InstallMode -eq "AllUsers") { "CurrentUser" } else { "AllUsers" })]
     $installDir = $layout.InstallDir
+    $extensionDefaults = Get-ExtensionDefaults $layout
     # Only all-users is asked for: the per-user leg checks Setup's default.
     $modeFlag = @(if ($InstallMode -eq "AllUsers") { "/ALLUSERS" })
     try {
@@ -104,6 +140,7 @@ function Test-InstallMode([string]$InstallMode) {
         Invoke-Installer $InstallerPath ($silent + $modeFlag + @("/TASKS=desktopicon", "/LOG=`"$WorkDir\$InstallMode-install.log`""))
         Assert-Payload $installDir
         Assert-Registration $layout $other
+        Assert-Associations $layout $extensionDefaults $true
         $shell = New-Object -ComObject WScript.Shell
         foreach ($path in @($layout.StartShortcut, $layout.DesktopShortcut)) {
             if (-not (Test-Path -LiteralPath $path)) { throw "Shortcut missing: $path" }
@@ -129,6 +166,7 @@ function Test-InstallMode([string]$InstallMode) {
         Invoke-Installer $InstallerPath ($silent + "/LOG=`"$WorkDir\$InstallMode-reinstall.log`"")
         Assert-Payload $installDir
         Assert-Registration $layout $other
+        Assert-Associations $layout $extensionDefaults $true
         if ((Get-FileHash -LiteralPath $config).Hash -ne $configHash -or
             (Get-FileHash -LiteralPath $save).Hash -ne $saveHash) {
             throw "Reinstallation changed user files"
@@ -155,6 +193,7 @@ function Test-InstallMode([string]$InstallMode) {
 
         Write-Host "==> [$InstallMode] Uninstalling and checking removal and preserved user files"
         Invoke-Installer $layout.Uninstaller ($silent + "/LOG=`"$WorkDir\$InstallMode-uninstall.log`"")
+        Assert-Associations $layout $extensionDefaults $false
         foreach ($file in $files) {
             $relative = [IO.Path]::GetRelativePath($payload, $file.FullName)
             if (Test-Path -LiteralPath (Join-Path $installDir $relative)) { throw "Uninstall left $relative" }

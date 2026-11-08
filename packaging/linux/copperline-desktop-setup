@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Install/remove per-user AppImage Open With entries without changing defaults."""
+
+import argparse
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+
+APP_ID = "dev.copperline.Copperline"
+PAYLOAD = {
+    f"applications/{APP_ID}.desktop": f"applications/{APP_ID}.desktop",
+    f"mime/packages/{APP_ID}.xml": f"mime/packages/{APP_ID}.xml",
+    f"icons/hicolor/256x256/apps/{APP_ID}.png": f"icons/hicolor/256x256/apps/{APP_ID}.png",
+}
+
+
+def desktop_quote(path):
+    """Encode one Exec argument through both desktop-string and Exec parsing."""
+    value = str(path)
+    if any(char in value for char in "\n\r\0"):
+        raise ValueError("the AppImage path cannot contain a newline or NUL")
+    value = value.replace("%", "%%")
+    value = "".join("\\" + char if char in '\\"`$' else char for char in value)
+    return '"' + value.replace("\\", "\\\\") + '"'
+
+
+def refresh(data_home):
+    for command, directory in [
+        ("update-mime-database", data_home / "mime"),
+        ("update-desktop-database", data_home / "applications"),
+    ]:
+        if directory.is_dir():
+            subprocess.run([command, str(directory)], check=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("action", choices=["install", "uninstall"])
+    parser.add_argument("appimage", nargs="?", type=Path)
+    args = parser.parse_args()
+    if (args.action == "install") != (args.appimage is not None):
+        parser.error("install needs the AppImage path; uninstall takes no path")
+    for command in ["update-mime-database", "update-desktop-database"]:
+        if shutil.which(command) is None:
+            parser.error(f"{command} is required (install shared-mime-info and desktop-file-utils)")
+    data_home = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share")
+    if not data_home.is_absolute():
+        parser.error("XDG_DATA_HOME must be an absolute path")
+    if args.action == "uninstall":
+        for destination in PAYLOAD.values():
+            (data_home / destination).unlink(missing_ok=True)
+    else:
+        appimage = args.appimage.resolve(strict=True)
+        if not appimage.is_file() or not os.access(appimage, os.X_OK):
+            parser.error("the AppImage must be an executable file")
+        quoted = desktop_quote(appimage)
+        # GLib checks Exec's first executable before expanding %% field codes.
+        # With a literal % in that path it rejects an otherwise valid entry.
+        # Keep the shell program constant and pass every path as a separate
+        # argument; only "$@" is evaluated, never filename text as shell code.
+        if "%" in str(appimage):
+            forward = desktop_quote('exec "$@"')
+            quoted = f"/bin/sh -c {forward} copperline {quoted}"
+        with tempfile.TemporaryDirectory(prefix="copperline-desktop-") as temporary:
+            stage = Path(temporary)
+            # Extraction works without FUSE. Read only the three integration
+            # files, never copy the transient AppDir executable into Exec.
+            for source in PAYLOAD:
+                subprocess.run(
+                    [str(appimage), "--appimage-extract", f"usr/share/{source}"],
+                    cwd=stage, check=True, stdout=subprocess.DEVNULL,
+                )
+            extracted = stage / "squashfs-root/usr/share"
+            contents = {}
+            for source, destination in PAYLOAD.items():
+                content = (extracted / source).read_bytes()
+                if source.endswith(".desktop"):
+                    lines = content.decode().splitlines()
+                    if sum(line.startswith("Exec=") for line in lines) != 1:
+                        raise ValueError("packaged desktop entry needs exactly one Exec line")
+                    content = ("\n".join(
+                        f"Exec={quoted} -- %F" if line.startswith("Exec=") else line
+                        for line in lines
+                    ) + "\n").encode()
+                contents[destination] = content
+            for destination, content in contents.items():
+                target = data_home / destination
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+    refresh(data_home)
+    print(f"Copperline desktop entries {'installed' if args.action == 'install' else 'removed'} for this user.")
+
+
+if __name__ == "__main__":
+    main()

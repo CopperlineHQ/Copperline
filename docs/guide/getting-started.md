@@ -290,6 +290,67 @@ Supported floppy formats include ADF, ADZ (gzip-compressed ADF), single-file ZIP
 DMS, extended ADF, IPF, and SCP. In interactive sessions, disk images can also
 be inserted via drag-and-drop into the emulator window.
 
+(opening-files)=
+## Opening files
+
+Copperline accepts files after its options, with the same media classification
+used for window drops:
+
+```sh
+copperline --factory disk1.adf disk2.adf
+copperline --model A1200 --fast 8M KICK31.ROM game.adf
+copperline machine.toml
+copperline game.lha
+copperline --model CD32 disc.cue
+```
+
+| File | Startup action |
+| --- | --- |
+| ADF, ADZ, DMS, IPF, SCP, `.adf.gz`, floppy ZIP | First image in DF0; further images join its swap playlist |
+| `.lha`, `.lzh`, a ZIP containing a WHDLoad slave, `.slave`/`.slav`, extracted game directory | Direct WHDLoad boot, with the same support archives and Kickstart requirements as `--whdload` |
+| `.cue`, `.iso`, `.nrg`, CD CHD | Disc in the selected CD32/CDTV machine's built-in drive |
+| `.toml` | Configuration, equivalent to `--config FILE` |
+| `.rom` or an otherwise unrecognized filename | ROM override; `.bin` and extensionless ROM paths remain supported |
+
+One ROM and one configuration may accompany floppy or CD media. CLI machine
+options override the named configuration regardless of argument order.
+Positional floppy images replace DF0's configured image playlist while retaining
+its write-protection and wiring. A missing DF0 or native CD drive is an error;
+Copperline does not infer a machine model from a disk. Hard-disk images need
+controller and boot settings in a configuration file. SCSI/ATAPI CD drives
+likewise remain configuration-file attachments.
+
+Multiple configurations, ROMs, WHDLoad games or CDs are errors. Positional disk
+images cannot accompany `--run`, a WHDLoad boot, `--load-state` or `--load-uss`.
+Use `--` before filenames that begin with `--`. ZIPs containing a slave select
+WHDLoad even if they also contain disk images; macOS metadata files are ignored.
+
+The Windows installer registers **Open with** choices for Amiga media and TOML
+configurations for the selected user/all-users installation. Uninstall removes
+Copperline's entries and preserves other applications' defaults. Portable ZIPs
+do not change file associations.
+
+The macOS application advertises the same file types in Finder. **Open with →
+Copperline** uses the positional-file startup path. Opening another document
+starts a separate session, preserving an existing guest or edited launcher.
+An untouched startup window closes when it hands the initial document to its
+session. New sessions use the usual default configuration unless opening a TOML
+file. Generic archive and disc defaults are left to the user's chosen app.
+
+For a Linux AppImage, the companion tools archive includes
+`copperline-desktop-setup`. Install Python 3, `shared-mime-info`,
+`desktop-file-utils` and `xdg-utils`, then register its current location:
+
+```sh
+./copperline-desktop-setup install /absolute/path/to/Copperline.AppImage
+./copperline-desktop-setup uninstall
+```
+
+Registration is per-user in `$XDG_DATA_HOME` (normally `~/.local/share`) and adds
+menu/**Open with** entries without changing default applications. Repeat
+`install` after moving or renaming the AppImage. Adding metadata inside an
+AppImage alone does not install it into the host desktop's MIME database.
+
 ## Example configuration
 
 A fully commented example configuration is available in `copperline.example.toml`

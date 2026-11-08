@@ -218,7 +218,9 @@ is running under the emulator. It is on by default and does not change the
 machine's usable memory; set `identify = false` for a chain with no
 emulator-identifying board. See [](../zorro) for details.
 
-A positional ROM argument on the command line overrides `rom`. Omit `rom`
+A positional ROM argument on the command line overrides `rom`. Positional media
+and `.toml` configurations are also accepted; see
+[Opening files](getting-started.md#opening-files). Omit `rom`
 entirely (and pass no ROM argument) to boot the bundled AROS open-source
 Kickstart replacement, Copperline's default boot ROM; its main and
 extended halves are found as described under

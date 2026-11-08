@@ -102,6 +102,7 @@ pub mod csynth;
 #[cfg(feature = "frontend")]
 pub mod keymap;
 pub mod lha;
+pub mod media;
 pub mod memory;
 #[cfg(feature = "mhi")]
 pub mod mhi;

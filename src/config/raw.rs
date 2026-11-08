@@ -236,6 +236,19 @@ impl RawConfig {
         });
     }
 
+    /// Replace DF0's image playlist, preserving its configured protection and
+    /// wiring. Validation still rejects a disabled or physical drive.
+    pub fn set_boot_floppies(&mut self, paths: &[PathBuf]) {
+        let drive = self.floppy.df0.get_or_insert_with(Default::default);
+        drive.path = None;
+        drive.paths = Some(
+            paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
+        );
+    }
+
     /// The `[display]` defaults a game manifest carries: shader and bezel
     /// by their config names, and whether the session opens fullscreen.
     /// Only what is given is set, so a later overlay still wins.

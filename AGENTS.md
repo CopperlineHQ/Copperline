@@ -27,8 +27,10 @@ file and no Kickstart at all. Configuration is a TOML file
 `docs/guide/configuration.md`), and the common machine knobs are also CLI
 flags layered on top: `--model A500|A1200|CD32|...`, `--chipset OCS|ECS|AGA`,
 `--cpu 68000..68060`, `--chip`/`--fast`/`--slow` memory sizes,
-`--floppy-drives N`. A bare ROM path (only) is accepted positionally; disk
-images go in via `[floppy.df0] path` in the config or `--insert-disk-after`:
+`--floppy-drives N`. ROM, floppy, WHDLoad package, CD and TOML paths are accepted positionally.
+Multiple floppies form DF0's swap playlist; a positional CD needs a CD32/CDTV
+configuration. Hard disks and SCSI/ATAPI CDs need configured controllers.
+Use `[floppy.df0] path` or `--insert-disk-after` for an explicit drive/timestamp:
 
 ```sh
 ./target/release/copperline --model A1200 --fast 8M KICK31.ROM \

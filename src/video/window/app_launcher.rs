@@ -1629,6 +1629,10 @@ impl App {
     /// powering it on. The previous (placeholder or running) machine, and its
     /// audio sink, are dropped here.
     pub(super) fn run_machine(&mut self, emu: Emulator, cfg: &Config, raw: RawConfig) {
+        #[cfg(target_os = "macos")]
+        {
+            self.initial_document_launcher = false;
+        }
         // Anything the on-screen keyboard is holding belongs to the
         // machine being replaced, and has to be handed back while that
         // machine is still here: the new one would otherwise come up with

@@ -22,6 +22,37 @@
   <string>@VERSION@</string>
   <key>CFBundleVersion</key>
   <string>@VERSION@</string>
+  <!-- Offer Open With without claiming ownership of generic archives or discs. -->
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Amiga media and Copperline configurations</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>adf</string>
+        <string>adz</string>
+        <string>dms</string>
+        <string>ipf</string>
+        <string>scp</string>
+        <string>lha</string>
+        <string>lzh</string>
+        <string>zip</string>
+        <string>slave</string>
+        <string>slav</string>
+        <string>cue</string>
+        <string>iso</string>
+        <string>nrg</string>
+        <string>chd</string>
+        <string>rom</string>
+        <string>toml</string>
+      </array>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+    </dict>
+  </array>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.games</string>
   <!-- The real floor is set by the newest system symbol the executable

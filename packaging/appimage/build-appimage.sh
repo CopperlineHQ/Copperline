@@ -127,6 +127,8 @@ install -Dm644 assets/whdboot/README.md \
 # Linux desktop integration metadata.
 install -Dm644 "$linux_meta/dev.copperline.Copperline.desktop" \
   "$appdir/usr/share/applications/dev.copperline.Copperline.desktop"
+install -Dm644 "$linux_meta/dev.copperline.Copperline.xml" \
+  "$appdir/usr/share/mime/packages/dev.copperline.Copperline.xml"
 install -Dm644 "$linux_meta/dev.copperline.Copperline.metainfo.xml" \
   "$appdir/usr/share/metainfo/dev.copperline.Copperline.metainfo.xml"
 install -Dm644 assets/brand/copperline-icon.png \
@@ -183,6 +185,7 @@ install -m755 target/release/copperline-import-uae \
   "$tools_stage/copperline-import-uae"
 install -m644 LICENSE "$tools_stage/LICENSE"
 install -m644 packaging/linux/copperline-tools-README.txt "$tools_stage/README.txt"
+install -m755 packaging/linux/copperline-desktop-setup "$tools_stage/copperline-desktop-setup"
 tar -C "$repo_root/target" -czf "$repo_root/$tools_bundle.tar.gz" "$tools_bundle"
 
 echo "==> Built $OUTPUT, $helper_bundle.tar.gz and $tools_bundle.tar.gz"

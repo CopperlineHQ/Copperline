@@ -8,6 +8,13 @@ cannot carry them itself:
                          agents), the MCP server mode (--mcp) and the Debug
                          Adapter Protocol adapter (--dap) used by the VS Code
                          extension.
+  copperline-desktop-setup  Installs/removes per-user Open With entries for the
+                         AppImage (requires Python 3, shared-mime-info and
+                         desktop-file-utils). It preserves existing defaults:
+                         copperline-desktop-setup install /path/to/Copperline.AppImage
+                         copperline-desktop-setup uninstall
+                         Repeat install after moving or renaming the AppImage.
+
   copperline-import-uae  Converts a WinUAE, Amiberry or FS-UAE config file
                          into a Copperline TOML config:
                          copperline-import-uae --from winuae --in game.uae --out game.toml

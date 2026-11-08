@@ -59,6 +59,7 @@ VersionInfoTextVersion={#AppVersion}
 VersionInfoProductName=Copperline
 VersionInfoCompany=CopperlineHQ
 VersionInfoProductTextVersion={#AppVersion}
+ChangesAssociations=yes
 WizardStyle=modern
 Compression=lzma2
 SolidCompression=yes
@@ -70,6 +71,46 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; Flags: unchecked
 ; Inno records the shipped files individually. No wildcard uninstall deletion:
 ; settings, saves and media added by the user must survive removal.
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Registry]
+; Add Open with choices in the selected install mode. Never write extension
+; defaults or Explorer UserChoice; other applications keep their associations.
+Root: HKA; Subkey: "Software\Classes\Copperline.Media"; ValueType: string; ValueName: ""; ValueData: "Amiga media and Copperline configurations"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Copperline.Media\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\copperline.exe,0"
+Root: HKA; Subkey: "Software\Classes\Copperline.Media\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\copperline.exe"" -- ""%1"""
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\.adf\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".adf"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.adz\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".adz"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.dms\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".dms"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.ipf\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".ipf"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.scp\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".scp"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.lha\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".lha"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.lzh\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".lzh"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.zip\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".zip"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.slave\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".slave"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.slav\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".slav"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.cue\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".cue"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.iso\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".iso"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.nrg\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".nrg"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.chd\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".chd"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.rom\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".rom"; ValueData: ""
+Root: HKA; Subkey: "Software\Classes\.toml\OpenWithProgids"; ValueType: string; ValueName: "Copperline.Media"; ValueData: ""; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Applications\copperline.exe\SupportedTypes"; ValueType: string; ValueName: ".toml"; ValueData: ""
 
 [Icons]
 Name: "{autoprograms}\Copperline"; Filename: "{app}\copperline.exe"; WorkingDir: "{app}"

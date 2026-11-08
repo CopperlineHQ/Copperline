@@ -17,6 +17,7 @@ expansion boards have chapters of their own: [Toccata](toccata.md),
 src/
   main.rs           # native binary: config load, boot, execution-mode selection
   cli.rs            # binary-local command-line parser
+  media.rs          # shared file classification for positional startup and drops
   bin/              # auxiliary binaries, each behind its own cargo feature:
                     #   bench.rs: copperline-bench headless benchmark (native + wasm32-wasip1)
                     #   copperline-ctl.rs: control-protocol client, MCP server, DAP adapter
@@ -183,6 +184,34 @@ crates/zz9k-plugin/         # the bundled zz9k board's WASM module
 tests/              # self-contained integration tests and ignored local-asset tests
 timing-test/        # bootable cross-emulator timing-measurement disk + golden probes
 ```
+
+### Desktop file opening
+
+`media::classify` distinguishes ZIP games from floppy archives using member
+names and CHD disks from CDs using metadata. Unknown files retain caller-specific
+fallbacks: the legacy CLI ROM path or the drop handler's floppy content sniffing.
+The CLI collects positional paths before classifying them, detects conflicting
+boot targets, and applies image overrides to `RawConfig` before validation.
+This keeps the running machine, swap playlist and configuration screen consistent.
+
+Windows shell commands and Linux desktop entries pass files to this CLI path.
+On macOS, `window/macos_documents.rs` registers an `aevt/odoc` Apple-event handler
+before winit starts pumping events and re-registers at AppKit's will-finish-launch
+notification, before initial document delivery. It leaves winit's application delegate intact,
+queues file URLs for the main loop, and starts an independent CLI session per
+open request. Only the full desktop binary enables this bridge; player frontends
+do not. The untouched initial window yields after spawning its document session;
+a running guest or an edited launcher stays open. The bridge owns its handler
+for the event loop's lifetime and unregisters it when the app is dropped.
+
+On a logged-in macOS desktop, run
+`python3 packaging/macos/test-document-open.py /path/to/Copperline.app` to verify
+cold and warm Finder delivery. It signs a temporary app copy with an isolated
+bundle ID, uses intentional ROM-read failures to observe the CLI handoff, checks
+that an existing control connection survives, and unregisters its test bundle.
+Linux AppImage CI runs `packaging/linux/test-desktop-setup.py` against the actual
+package, including Exec quoting, MIME detection, reinstall and removal. Windows
+installer lifecycle CI checks both registry hives and unchanged extension defaults.
 
 ## The big picture
 

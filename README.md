@@ -119,9 +119,17 @@ To boot directly into a Kickstart ROM, configuration file, or floppy image:
 
 ```sh
 ./target/release/copperline path/to/kickstart.rom
-./target/release/copperline --config path/to/copperline.toml
-./target/release/copperline --model A1200 --fast 8M KICK31.ROM --insert-disk-after 0 df0 game.adf
+./target/release/copperline path/to/copperline.toml
+./target/release/copperline --model A1200 --fast 8M KICK31.ROM game.adf
+./target/release/copperline disk1.adf disk2.adf
+./target/release/copperline game.lha
 ```
+
+Positional files are classified like window drops: floppy images boot in DF0,
+multiple floppies form its swap playlist, and WHDLoad packages boot directly.
+CD images require a CD32/CDTV configuration. Desktop packages offer **Open with**;
+see [Opening files](docs/guide/getting-started.md#opening-files) for registration
+and supported formats.
 
 For a build pipeline, use `copperline --run build/hello --window-scale 2` to
 start at twice the normal window width and height. `--maximized` opens a
