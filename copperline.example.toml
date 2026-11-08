@@ -1129,9 +1129,9 @@ floppy_sounds_volume = 100
 # Optional floppy drives. Set [floppy] drives to wire 0-4 mechanisms. CDTV
 # and CD32 default to none; other profiles default to DF0 only. Missing
 # [floppy.dfN] tables mean no disk in that drive. Supported images:
-# DD ADF (901120 bytes), ADZ/gzip, single file ZIP archives, DMS, UAE extended
-# ADF, and read-only IPF and SCP images. DMS/gzip/IPF/SCP are always treated
-# as write-protected.
+# ADF (901120-byte DD or 1802240-byte HD; density follows the image),
+# ADZ/gzip, single file ZIP archives, DMS, UAE extended ADF, and read-only
+# IPF and SCP images. DMS/gzip/IPF/SCP are always treated as write-protected.
 #
 # Drive speed: 100 (real, the default), 200/400/800 (that many percent of
 # real speed; the whole data path stays bit-identical, just faster), or 0

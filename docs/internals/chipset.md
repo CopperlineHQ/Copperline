@@ -409,7 +409,8 @@ step-pulse spacing (~40 us, 140 colour clocks): a pulse arriving sooner
 after the last accepted one -- in either direction -- is ignored, so the
 mechanism never over-steps on pulses faster than the head can move.
 
-Reads assemble MFM bitstreams from the 11-sector AmigaDOS track layout;
+Reads assemble MFM bitstreams from the AmigaDOS track layout (11 sectors
+per track at double density, 22 at high density);
 DSKSYNC matching, word-at-a-time DSKDAT, and DMA into chip RAM behave as
 Paula documents. Non-WORDSYNC read DMA drains Paula's recovered 16-bit
 disk word phase even when DSKLEN is armed between disk-word boundaries.
@@ -451,6 +452,26 @@ timing. This matters for raw loaders that DMA a fixed-size window and make
 their own assumptions about the post-sector gap. UAE extended raw tracks,
 IPF tracks, and SCP flux captures keep their stored track length and
 per-revolution timing instead of using this synthetic geometry.
+
+Density is a property of the inserted medium, sensed the way an HD
+mechanism senses the disk's HD hole. A high-density image -- a
+1,802,240-byte ADF, an HD DMS archive, an extended ADF whose AmigaDOS
+tracks hold more than 11 sectors, or a raw revolution too long for one
+DD rotation at 2 us cells -- turns at 150 RPM. The generated HD
+revolution is 12668 MFM words, exactly twice the DD one (22 sectors
+fill 11968 and the index gap the rest), fitted to the doubled
+revolution period, so Paula sees the DD word cadence and only the
+revolution takes twice as long.
+
+The drive-ID poll follows the medium as an HD mechanism's does: the HD
+answer while an HD disk is inserted, the DD answer with a DD disk or
+none. disk.resource's `GetUnitID` reports these as `DRT_150RPM`
+(`$AAAAAAAA`) and `DRT_AMIGA` (`$00000000`), and trackdisk re-reads the
+ID on every insertion to choose 11- or 22-sector geometry, so DD boots
+are unchanged. That includes DF0: the internal DD mechanism has no ID
+circuit (its /RDY mirrors /TRK0 with the motor off), but the A3000 and
+A4000 internal HD mechanism does, so DF0 shifts out the HD ID with an
+HD disk inserted.
 
 IPF images are decoded by `ipf.rs` rather than the closed-source `capsimg`
 library. The format stores each track as blocks of *stream samples*: sync

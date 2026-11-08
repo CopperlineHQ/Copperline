@@ -34,7 +34,10 @@ ATAPI, CD32's Akiko, or CDTV).
 `floppy` only works on a plain (non-extended) ADF: extended ADF and raw
 MFM images have no logical sector grid for a `lba` to name, and
 `disk.fault.set` rejects them with a specific error rather than silently
-installing a policy the read/write hooks never consult.
+installing a policy the read/write hooks never consult. A floppy `lba`
+is `track * sectors_per_track + sector` in the inserted image's grid --
+11 sectors per track for a DD ADF, 22 for an HD one -- so the same
+numeric range names different tracks at the two densities.
 
 `cd` is read-only medium, so only `corrupt`/`error`/`delay`/`cut` ever
 actually fire on it; a rule with `"op": "write"` is schema-valid there

@@ -5,7 +5,7 @@
 //! carries disk media only, with no paths or controller/save-state data.
 
 use super::formats::{DensitySpan, FloppyImage, FloppyImageData, FloppyTrackImage};
-use super::{ADF_SIZE, BYTES_PER_SECTOR, MAX_EXTENDED_TRACKS};
+use super::{ADF_SIZE, BYTES_PER_SECTOR, HD_ADF_SIZE, MAX_EXTENDED_TRACKS};
 use anyhow::{bail, ensure, Context, Result};
 
 pub(super) const SIGNATURE: &[u8; 8] = b"CLFLOP01";
@@ -23,7 +23,12 @@ pub(super) fn encode(image: &FloppyImage, limit: usize) -> Result<Vec<u8>> {
     ])?;
     let tracks = match &image.data {
         FloppyImageData::StandardAdf(bytes) => {
-            ensure!(bytes.len() == ADF_SIZE, "invalid standard ADF size");
+            ensure!(
+                bytes.len() == ADF_SIZE || bytes.len() == HD_ADF_SIZE,
+                "invalid standard ADF size"
+            );
+            // The ADF is the container's last field, so its length (DD
+            // or HD) is whatever follows the type byte.
             out.put(&[0])?;
             out.put(bytes)?;
             return Ok(out.bytes);
@@ -93,8 +98,11 @@ pub(super) fn decode(bytes: &[u8]) -> Result<(FloppyImageData, bool, bool)> {
     let legacy = input.flag()?;
     match input.byte()? {
         0 => {
-            let data = input.take(ADF_SIZE)?;
-            ensure!(input.0.is_empty(), "trailing floppy transfer data");
+            let data = input.take(input.0.len())?;
+            ensure!(
+                data.len() == ADF_SIZE || data.len() == HD_ADF_SIZE,
+                "invalid standard ADF size in floppy transfer"
+            );
             return Ok((
                 FloppyImageData::StandardAdf(data.to_vec()),
                 protected,

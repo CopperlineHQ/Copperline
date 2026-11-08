@@ -2070,19 +2070,27 @@ playback can break. The menu's *Emulation Settings -> Floppy Speed* changes
 the setting live without restarting the machine. It applies to image-backed
 bays only; a physical drive has its own `replay_speed`.
 
-Supported image formats: standard 901120-byte DD ADF, gzip-compressed
-images (ADZ), single file ZIP archives, DMS archives, UAE extended ADF, and
-read-only IPF and SCP images. DMS, gzip, IPF, and SCP images are decoded at
-load time and always treated as write-protected; set `write_protected = false`
-on a plain ADF to allow write-through updates to the image file. A DMS archive
-is unpacked cylinder by cylinder into the DD image the disk was read from, so
-archives that repeat a cylinder (an advertising boot block ahead of the real
-one) or omit the cylinders that read back blank load normally.
+Supported image formats: standard ADF (901120-byte DD or 1802240-byte
+HD), gzip-compressed images (ADZ), single file ZIP archives, DMS
+archives, UAE extended ADF, and read-only IPF and SCP images. DMS,
+gzip, IPF, and SCP images are decoded at load time and always treated
+as write-protected; set `write_protected = false` on a plain ADF to
+allow write-through updates to the image file. A DMS archive is
+unpacked cylinder by cylinder into the image the disk was read from,
+so archives that repeat a cylinder (an advertising boot block ahead of
+the real one) or omit the cylinders that read back blank load normally.
 
-The emulated drives are double-density units, so high-density images are
-rejected: a 1,802,240-byte HD ADF, a high-density DMS archive, an IPF
-recorded at the HD cell rate, and a UAE extended ADF whose AmigaDOS tracks
-hold more than the 11 sectors a DD track carries.
+The emulated drives take both densities. Density follows the inserted
+image, the way a high-density mechanism senses an HD disk: an HD image
+(a 1,802,240-byte ADF, a high-density DMS archive, or a UAE extended
+ADF whose AmigaDOS tracks hold 22 sectors) runs at HD geometry -- 22
+sectors per track at half rotation speed, with the drive-ID poll
+answering as a high-density drive -- and a DD image runs as it always
+has. Nothing to configure: the same drive reads DD disks after an HD
+one is ejected. The guest needs an HD-aware `trackdisk.device`
+(Kickstart 1.x has none). IPF images of HD disks (signal type 2, the
+1 us cells an HD disk shows a 300 RPM capture drive) are still
+rejected.
 
 IPF (the SPS/CAPS preservation format) is decoded by Copperline itself rather
 than through the closed-source `capsimg` library, so every build reads IPF on

@@ -185,7 +185,10 @@ fn read_external_drive_id(ctrl: &mut FloppyController, idx: usize) -> u32 {
 #[test]
 fn standard_adf_geometry_matches_expected_size() {
     assert_eq!(ADF_SIZE, 901_120);
-    assert_eq!(adf_sector_offset(159, 10) + BYTES_PER_SECTOR, ADF_SIZE);
+    assert_eq!(
+        adf_sector_offset_for(159, 10, SECTORS_PER_TRACK) + BYTES_PER_SECTOR,
+        ADF_SIZE
+    );
 }
 
 #[test]
@@ -195,10 +198,102 @@ fn mfm_encode_decode_round_trip_sector_data() -> Result<()> {
         *b = i as u8;
     }
     let words = encode_adf_track(0, &adf);
-    let decoded = decode_track_write(0, &words)?;
+    let decoded = decode_track_write(0, &words, SECTORS_PER_TRACK)?;
     let sector0 = decoded.iter().find(|(sector, _)| *sector == 0).unwrap();
     assert_eq!(&sector0.1[..], &adf[0..BYTES_PER_SECTOR]);
     assert_eq!(decoded.len(), SECTORS_PER_TRACK);
+    Ok(())
+}
+
+/// A high-density disk carries 22 AmigaDOS sectors per track: the drive
+/// turns at half speed, so Paula still sees 2 us cells and the track
+/// simply holds twice as much. A 1,802,240-byte ADF must load, encode
+/// all 22 sectors of a track (including sector 21 on the last track),
+/// and round-trip their data.
+#[test]
+fn high_density_adf_loads_and_round_trips_22_sector_tracks() -> Result<()> {
+    assert_eq!(HD_ADF_SIZE, 1_802_240);
+    let mut adf = vec![0u8; HD_ADF_SIZE];
+    // Pattern the last sector of track 0 and of the final track.
+    let t0_last = 21 * BYTES_PER_SECTOR;
+    adf[t0_last..t0_last + 4].copy_from_slice(b"HD21");
+    let last_track = CYLINDERS * SIDES - 1;
+    let tail = (last_track * HD_SECTORS_PER_TRACK + 21) * BYTES_PER_SECTOR;
+    assert_eq!(tail + BYTES_PER_SECTOR, HD_ADF_SIZE);
+    adf[tail..tail + 4].copy_from_slice(b"TAIL");
+
+    let mut ctrl = FloppyController::default();
+    ctrl.insert_memory_disk_image_bytes(0, adf.clone(), "hd.adf".into(), true)?;
+    assert!(ctrl.disk_inserted(0));
+
+    let words = encode_adf_track(0, &adf);
+    let decoded = decode_hd_track(0, &words)?;
+    assert_eq!(decoded.len(), HD_SECTORS_PER_TRACK);
+    let sector21 = decoded.iter().find(|(sector, _)| *sector == 21).unwrap();
+    assert_eq!(&sector21.1[..4], b"HD21");
+
+    let words = encode_adf_track(last_track, &adf);
+    let decoded = decode_hd_track(last_track, &words)?;
+    assert_eq!(decoded.len(), HD_SECTORS_PER_TRACK);
+    let sector21 = decoded.iter().find(|(sector, _)| *sector == 21).unwrap();
+    assert_eq!(&sector21.1[..4], b"TAIL");
+    Ok(())
+}
+
+fn decode_hd_track(track: usize, words: &[u16]) -> Result<Vec<(usize, [u8; BYTES_PER_SECTOR])>> {
+    decode_track_write(track, words, HD_SECTORS_PER_TRACK)
+}
+
+/// The half-speed HD revolution takes twice as long as a DD one while
+/// the word cadence at Paula stays the DD cadence: exactly twice the
+/// words at the same colour clocks per word.
+#[test]
+fn high_density_revolution_keeps_the_dd_word_cadence() -> Result<()> {
+    let first_rev = |len: usize| -> Result<TrackRev> {
+        let mut ctrl = FloppyController::default();
+        ctrl.insert_memory_disk_image_bytes(0, vec![0u8; len], "disk.adf".into(), true)?;
+        let stream = ctrl.drives[0].image.as_mut().unwrap().track_stream(0);
+        Ok(stream.unwrap().revs.into_iter().next().unwrap())
+    };
+    let dd_rev = first_rev(ADF_SIZE)?;
+    let hd_rev = first_rev(HD_ADF_SIZE)?;
+
+    assert_eq!(dd_rev.words.len(), STANDARD_ADF_TRACK_WORDS);
+    assert_eq!(hd_rev.words.len(), 2 * STANDARD_ADF_TRACK_WORDS);
+    assert_eq!(hd_rev.word_cck, dd_rev.word_cck);
+    Ok(())
+}
+
+/// trackdisk sizes a unit from the drive-ID poll. With an HD disk
+/// inserted the poll reports the HD drive (/RDY asserted on every
+/// second read, which GetUnitID returns as DRT_150RPM) so the OS
+/// configures 22-sector geometry; DD media and an empty drive keep
+/// reporting DD (asserted on every read, DRT_AMIGA). The internal DD
+/// mechanism has no ID circuit (its /RDY mirrors /TRK0 with the motor
+/// off), but an HD mechanism does, so DF0 answers the poll only with
+/// HD medium inserted.
+#[test]
+fn drive_id_poll_reports_high_density_with_an_hd_disk_inserted() -> Result<()> {
+    let mut ctrl = FloppyController::default();
+    ctrl.set_connected_drives([true, true, false, false]);
+    assert_eq!(read_external_drive_id(&mut ctrl, 1), 0xFFFF_FFFF);
+    ctrl.insert_memory_disk_image_bytes(1, vec![0u8; ADF_SIZE], "dd.adf".into(), true)?;
+    assert_eq!(read_external_drive_id(&mut ctrl, 1), 0xFFFF_FFFF);
+    ctrl.insert_memory_disk_image_bytes(1, vec![0u8; HD_ADF_SIZE], "hd.adf".into(), true)?;
+    assert_eq!(
+        ctrl.drives[1].image.as_ref().unwrap().density(),
+        FloppyDensity::Hd
+    );
+    assert_eq!(read_external_drive_id(&mut ctrl, 1), 0x5555_5555);
+    ctrl.eject_disk_image(1)?;
+    assert_eq!(read_external_drive_id(&mut ctrl, 1), 0xFFFF_FFFF);
+
+    // DF0: no ID answer at all on DD (the poll reads the /TRK0 mirror,
+    // all ones at cylinder 0), the HD answer with HD medium.
+    ctrl.insert_memory_disk_image_bytes(0, vec![0u8; ADF_SIZE], "dd0.adf".into(), true)?;
+    assert_eq!(read_external_drive_id(&mut ctrl, 0), 0xFFFF_FFFF);
+    ctrl.insert_memory_disk_image_bytes(0, vec![0u8; HD_ADF_SIZE], "hd0.adf".into(), true)?;
+    assert_eq!(read_external_drive_id(&mut ctrl, 0), 0x5555_5555);
     Ok(())
 }
 
@@ -1632,14 +1727,14 @@ fn raw_mfm_track_stream_carries_the_density_profile() {
         start_bit: 32,
         permille: 1050,
     }];
-    let stream = raw_mfm_track_stream(&words, 64, 2, false, &spans);
+    let stream = raw_mfm_track_stream(&words, 64, 2, false, &spans, FloppyDensity::Dd);
     assert_eq!(stream.revs.len(), 2);
     for rev in &stream.revs {
         assert_eq!(rev.cell_cck(0), rev.word_cck / 16);
         assert!(rev.rev_cck() > u64::from(rev.word_cck) * 4);
     }
 
-    let uniform = raw_mfm_track_stream(&words, 64, 2, false, &[]);
+    let uniform = raw_mfm_track_stream(&words, 64, 2, false, &[], FloppyDensity::Dd);
     for rev in &uniform.revs {
         assert!(rev.density.is_empty());
         assert_eq!(rev.rev_cck(), u64::from(rev.word_cck) * 4);
@@ -2985,7 +3080,7 @@ fn wordsync_read_reframes_at_every_sync_across_odd_length_index_wrap() -> Result
     // itself); the Lemmings 2 demo IPF on the AROS ROM is the regression.
     let mut adf = vec![0u8; ADF_SIZE];
     for sector in 0..SECTORS_PER_TRACK {
-        let off = adf_sector_offset(0, sector);
+        let off = adf_sector_offset_for(0, sector, SECTORS_PER_TRACK);
         for (idx, byte) in adf[off..off + BYTES_PER_SECTOR].iter_mut().enumerate() {
             *byte = (sector as u8).wrapping_mul(37) ^ (idx as u8).wrapping_mul(3);
         }
@@ -3061,10 +3156,10 @@ fn wordsync_read_reframes_at_every_sync_across_odd_length_index_wrap() -> Result
 
     let buffer = bytes_to_words(&chip_ram);
     assert_eq!(buffer[0], DEFAULT_DSKSYNC);
-    let decoded = decode_track_write(0, &buffer)?;
+    let decoded = decode_track_write(0, &buffer, SECTORS_PER_TRACK)?;
     let mut seen = [false; SECTORS_PER_TRACK];
     for (sector, data) in &decoded {
-        let off = adf_sector_offset(0, *sector);
+        let off = adf_sector_offset_for(0, *sector, SECTORS_PER_TRACK);
         assert_eq!(
             &data[..],
             &adf[off..off + BYTES_PER_SECTOR],
@@ -4546,7 +4641,7 @@ fn uae_extended_adf_amigados_track_encodes_sectors() -> Result<()> {
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
     ctrl.ensure_track(0, 0);
-    let decoded = decode_track_write(0, &ctrl.drives[0].cached_words())?;
+    let decoded = decode_track_write(0, &ctrl.drives[0].cached_words(), SECTORS_PER_TRACK)?;
 
     let sector0 = decoded.iter().find(|(sector, _)| *sector == 0).unwrap();
     assert_eq!(&sector0.1[..], &[0x5A; BYTES_PER_SECTOR]);
@@ -4581,7 +4676,7 @@ fn uae_extended_adf_amigados_track_uses_bit_length_before_zero_padding() -> Resu
     ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     ctrl.tick(MOTOR_READY_CCK, 0, &mut []);
     ctrl.ensure_track(0, 0);
-    let decoded = decode_track_write(0, &ctrl.drives[0].cached_words())?;
+    let decoded = decode_track_write(0, &ctrl.drives[0].cached_words(), SECTORS_PER_TRACK)?;
 
     let sector0 = decoded.iter().find(|(sector, _)| *sector == 0).unwrap();
     assert_eq!(&sector0.1[..], &[0x5A; BYTES_PER_SECTOR]);
@@ -4620,13 +4715,13 @@ fn uae_extended_adf_blank_amigados_track_without_sector_payload_is_empty() -> Re
     Ok(())
 }
 
-/// A double-density drive passes at most eleven AmigaDOS sectors per
-/// revolution. A UAE-1ADF type-0 track holding twenty-two was read from a
-/// high-density disk, which the emulated DD drives cannot present, so the
-/// loader refuses it -- whether the bit length or the stored length sizes
-/// the sector run -- while an eleven-sector track still loads.
+/// A UAE-1ADF type-0 track holding twenty-two AmigaDOS sectors was
+/// read from a high-density disk: the drive presents it as one
+/// half-speed HD revolution, whether the bit length or the stored
+/// length sizes the sector run. More than twenty-two sectors fits no
+/// Amiga revolution and is still refused.
 #[test]
-fn uae_extended_adf_refuses_amigados_track_beyond_double_density_sectors() -> Result<()> {
+fn uae_extended_adf_loads_high_density_amigados_tracks() -> Result<()> {
     let dd = vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR];
     let mut ctrl = FloppyController::default();
     ctrl.insert_memory_disk_image_bytes(
@@ -4635,34 +4730,63 @@ fn uae_extended_adf_refuses_amigados_track_beyond_double_density_sectors() -> Re
         "dd.ext.adf".into(),
         true,
     )?;
+    assert_eq!(
+        ctrl.drives[0].image.as_ref().unwrap().density(),
+        FloppyDensity::Dd
+    );
 
-    let hd = vec![0u8; 2 * SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    let hd = vec![0u8; HD_SECTORS_PER_TRACK * BYTES_PER_SECTOR];
     for bit_len in [(hd.len() * 8) as u32, 0] {
-        let err = ctrl
-            .insert_memory_disk_image_bytes(
-                0,
-                ext2_track_image(0, bit_len, 1, &hd),
-                "hd.ext.adf".into(),
-                true,
-            )
-            .expect_err("22 AmigaDOS sectors on a track need a high-density drive");
-        assert!(format!("{err:#}").contains("high-density"), "{err:#}");
+        ctrl.insert_memory_disk_image_bytes(
+            0,
+            ext2_track_image(0, bit_len, 1, &hd),
+            "hd.ext.adf".into(),
+            true,
+        )?;
+        assert_eq!(
+            ctrl.drives[0].image.as_ref().unwrap().density(),
+            FloppyDensity::Hd
+        );
     }
+
+    let oversize = vec![0u8; (HD_SECTORS_PER_TRACK + 1) * BYTES_PER_SECTOR];
+    let err = ctrl
+        .insert_memory_disk_image_bytes(
+            0,
+            ext2_track_image(0, (oversize.len() * 8) as u32, 1, &oversize),
+            "oversize.ext.adf".into(),
+            true,
+        )
+        .expect_err("23 AmigaDOS sectors fit no Amiga track");
+    assert!(format!("{err:#}").contains("high-density"), "{err:#}");
     Ok(())
 }
 
 /// The legacy UAE--ADF container stores AmigaDOS tracks (sync 0) the same
-/// way, so the same double-density sector limit applies to it.
+/// way, so the same high-density track loads from it too, and the same
+/// twenty-two-sector ceiling applies.
 #[test]
-fn legacy_extended_adf_refuses_amigados_track_beyond_double_density_sectors() -> Result<()> {
+fn legacy_extended_adf_loads_high_density_amigados_tracks() -> Result<()> {
     let dd = vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR];
     let mut ctrl = FloppyController::default();
     ctrl.insert_memory_disk_image_bytes(0, ext1_track_image(0, &dd), "dd.ext.adf".into(), true)?;
 
-    let hd = vec![0u8; 2 * SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    let hd = vec![0u8; HD_SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    ctrl.insert_memory_disk_image_bytes(0, ext1_track_image(0, &hd), "hd.ext.adf".into(), true)?;
+    assert_eq!(
+        ctrl.drives[0].image.as_ref().unwrap().density(),
+        FloppyDensity::Hd
+    );
+
+    let oversize = vec![0u8; (HD_SECTORS_PER_TRACK + 1) * BYTES_PER_SECTOR];
     let err = ctrl
-        .insert_memory_disk_image_bytes(0, ext1_track_image(0, &hd), "hd.ext.adf".into(), true)
-        .expect_err("22 AmigaDOS sectors on a track need a high-density drive");
+        .insert_memory_disk_image_bytes(
+            0,
+            ext1_track_image(0, &oversize),
+            "oversize.ext.adf".into(),
+            true,
+        )
+        .expect_err("23 AmigaDOS sectors fit no Amiga track");
     assert!(format!("{err:#}").contains("high-density"), "{err:#}");
     Ok(())
 }
@@ -4715,7 +4839,7 @@ fn writable_extended_adf_amigados_track_persists_sector_updates() -> Result<()> 
     reloaded.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
     reloaded.tick(MOTOR_READY_CCK, 0, &mut []);
     reloaded.ensure_track(0, 0);
-    let decoded = decode_track_write(0, &reloaded.drives[0].cached_words())?;
+    let decoded = decode_track_write(0, &reloaded.drives[0].cached_words(), SECTORS_PER_TRACK)?;
     let sector0 = decoded.iter().find(|(sector, _)| *sector == 0).unwrap();
     assert_eq!(&sector0.1[..], &[0xA5; BYTES_PER_SECTOR]);
 
@@ -5657,6 +5781,61 @@ fn write_dma_decodes_and_persists_track() -> Result<()> {
     Ok(())
 }
 
+/// The HD counterpart: a guest write of a 22-sector track persists
+/// every sector at its HD-grid offset, including sector 21, which a
+/// DD grid would place one whole track early.
+#[test]
+fn write_dma_decodes_and_persists_high_density_track() -> Result<()> {
+    let path = temp_path("hd-write.adf");
+    fs::write(&path, vec![0u8; HD_ADF_SIZE])?;
+    let cfg = FloppyConfig {
+        bridges: std::array::from_fn(|_| None),
+        speed: 100,
+        drives: [
+            Some(FloppyDriveConfig {
+                path: path.clone(),
+                write_protected: false,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let mut ctrl = FloppyController::from_config(&cfg)?;
+    let mut source = vec![0u8; HD_ADF_SIZE];
+    let sector21 = 21 * BYTES_PER_SECTOR;
+    source[sector21..sector21 + BYTES_PER_SECTOR].fill(0x5A);
+    let words = encode_adf_track(0, &source);
+    let mut chip_ram = vec![0u8; words.len() * 2 + 2];
+    for (i, word) in words.iter().copied().enumerate() {
+        let [hi, lo] = word.to_be_bytes();
+        chip_ram[i * 2] = hi;
+        chip_ram[i * 2 + 1] = lo;
+    }
+
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+    ctrl.set_dskpt_low(0);
+    let len = DSKLEN_DMAEN | DSKLEN_WRITE | (words.len() as u16 & DSKLEN_MASK);
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    while !ctrl.tick(ctrl.word_cck(), dmacon, &mut chip_ram) {}
+
+    let persisted = fs::read(&path)?;
+    assert_eq!(persisted.len(), HD_ADF_SIZE);
+    assert_eq!(
+        &persisted[sector21..sector21 + BYTES_PER_SECTOR],
+        &[0x5A; BYTES_PER_SECTOR]
+    );
+    // The DD grid's track-1 start (where a DD offset for track 0
+    // sector 21 would notionally belong) is untouched.
+    let dd_track1 = SECTORS_PER_TRACK * BYTES_PER_SECTOR;
+    assert_eq!(&persisted[dd_track1..dd_track1 + 4], &[0; 4]);
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
 #[test]
 fn memory_backed_write_and_state_round_trip_preserve_bytes_without_host_io() -> Result<()> {
     let label = temp_path("browser.adf");
@@ -5754,7 +5933,7 @@ fn trackloader_sized_wordsync_window_decodes_full_amigados_track() -> Result<()>
     let mut adf = vec![0u8; ADF_SIZE];
     let track = 35;
     for sector in 0..SECTORS_PER_TRACK {
-        let off = adf_sector_offset(track, sector);
+        let off = adf_sector_offset_for(track, sector, SECTORS_PER_TRACK);
         for (idx, byte) in adf[off..off + BYTES_PER_SECTOR].iter_mut().enumerate() {
             *byte = (track as u8).wrapping_mul(3) ^ (sector as u8) ^ idx as u8;
         }
@@ -5778,11 +5957,11 @@ fn trackloader_sized_wordsync_window_decodes_full_amigados_track() -> Result<()>
             window[0] = DEFAULT_DSKSYNC;
         }
 
-        let decoded = decode_track_write(track, &window)
+        let decoded = decode_track_write(track, &window, SECTORS_PER_TRACK)
             .with_context(|| format!("decoding wordsync window after sync {sync_pos}"))?;
         assert_eq!(decoded.len(), SECTORS_PER_TRACK);
         for (sector, data) in decoded {
-            let off = adf_sector_offset(track, sector);
+            let off = adf_sector_offset_for(track, sector, SECTORS_PER_TRACK);
             assert_eq!(&data[..], &adf[off..off + BYTES_PER_SECTOR]);
         }
     }
@@ -5884,7 +6063,7 @@ fn non_wordsync_full_track_dma_uses_recovered_disk_word_phase() -> Result<()> {
     let dmacon = DMACON_DMAEN | DMACON_DISK;
     while !ctrl.tick(ctrl.word_cck(), dmacon, &mut chip_ram) {}
 
-    let sectors = decode_track_write(0, &bytes_to_words(&chip_ram))?;
+    let sectors = decode_track_write(0, &bytes_to_words(&chip_ram), SECTORS_PER_TRACK)?;
     let sector0 = sectors.iter().find(|(sector, _)| *sector == 0);
     let Some((_, sector0)) = sector0 else {
         panic!(
@@ -6272,6 +6451,37 @@ fn netplay_standard_adf_never_sniffs_bootblock_as_transfer_metadata() -> Result<
     assert!(controller
         .insert_netplay_disk_image_bytes_with_limit(0, adf, "unwrapped".into(), false, ADF_SIZE,)
         .is_err());
+    Ok(())
+}
+
+/// A high-density ADF crosses the netplay transfer container at its
+/// full 1,802,240 bytes and arrives still an HD disk.
+#[test]
+fn netplay_high_density_adf_round_trips_through_transfer() -> Result<()> {
+    let mut adf = vec![0u8; HD_ADF_SIZE];
+    adf[HD_ADF_SIZE - 4..].copy_from_slice(b"HDND");
+    let mut controller = FloppyController::default();
+    controller.insert_memory_disk_image_bytes(0, adf.clone(), "hd.adf".into(), true)?;
+    let transferred = controller.export_netplay_disk_image(0, HD_ADF_SIZE + 11)?;
+    assert_eq!(transferred.len(), HD_ADF_SIZE + 11);
+    // The ADF runs to the end of the container: a payload of neither
+    // standard size is refused.
+    assert!(transfer::decode(&transferred[..transferred.len() - 1]).is_err());
+    let mut padded = transferred.clone();
+    padded.push(0);
+    assert!(transfer::decode(&padded).is_err());
+    controller.insert_netplay_disk_image_bytes_with_limit(
+        0,
+        transferred,
+        "received-hd".into(),
+        true,
+        HD_ADF_SIZE + 11,
+    )?;
+    assert_eq!(controller.export_disk_image(0)?, adf);
+    assert_eq!(
+        controller.drives[0].image.as_ref().unwrap().density(),
+        FloppyDensity::Hd
+    );
     Ok(())
 }
 

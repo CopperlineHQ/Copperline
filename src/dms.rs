@@ -5,15 +5,16 @@
 //! This is a Rust port of the decompression path from xDMS 1.3.2,
 //! whose original source is public domain. DMS stores Amiga floppy
 //! data as compressed cylinder records; the emulator consumes the
-//! decoded standard 901,120-byte ADF byte stream.
+//! decoded standard ADF byte stream (901,120 bytes, or 1,802,240
+//! for a high-density archive, whose records hold twice the bytes
+//! per cylinder).
 
-use crate::floppy::ADF_SIZE;
+use crate::floppy::{ADF_SIZE, HD_ADF_SIZE};
 use anyhow::{anyhow, bail, ensure, Context, Result};
 
 const HEAD_LEN: usize = 56;
 const TRACK_HEAD_LEN: usize = 20;
 const DMS_TRACKS: usize = 80;
-const DMS_CYLINDER_BYTES: usize = ADF_SIZE / DMS_TRACKS;
 /// Info-header general-info bits: encrypted archive, and a high-density
 /// (two cylinders' worth of data per record) archive.
 const GENINFO_ENCRYPTED: u16 = 0x0002;
@@ -77,10 +78,15 @@ pub fn decode_dms_adf(data: &[u8]) -> Result<Vec<u8>> {
         geninfo & GENINFO_ENCRYPTED == 0,
         "encrypted DMS archives are not supported"
     );
-    ensure!(
-        geninfo & GENINFO_HD == 0,
-        "high-density DMS archives are not supported"
-    );
+    // A high-density archive's records each hold an HD cylinder (22
+    // sectors a side), so cylinders land at twice the spacing in an HD
+    // image.
+    let image_size = if geninfo & GENINFO_HD != 0 {
+        HD_ADF_SIZE
+    } else {
+        ADF_SIZE
+    };
+    let cylinder_bytes = image_size / DMS_TRACKS;
     let disktype = be_u16(&data[50..52]);
     ensure!(disktype != 7, "FMS DMS archives are not floppy images");
 
@@ -93,7 +99,7 @@ pub fn decode_dms_adf(data: &[u8]) -> Result<Vec<u8>> {
     // the real cylinder 0, and the later record wins) and, with the NoZero
     // general-info bit, omit records for cylinders that read back as all
     // zeroes. Both cases leave the image at its natural 80-cylinder size.
-    let mut adf = vec![0u8; ADF_SIZE];
+    let mut adf = vec![0u8; image_size];
     let mut cylinders = 0usize;
 
     while pos < data.len() {
@@ -136,7 +142,7 @@ pub fn decode_dms_adf(data: &[u8]) -> Result<Vec<u8>> {
                 track.unpacked_sum,
                 actual_sum
             );
-            let start = track.number as usize * DMS_CYLINDER_BYTES;
+            let start = track.number as usize * cylinder_bytes;
             let end = start + unpacked.len();
             ensure!(
                 end <= adf.len(),
@@ -144,7 +150,7 @@ pub fn decode_dms_adf(data: &[u8]) -> Result<Vec<u8>> {
                 track.number,
                 unpacked.len(),
                 start,
-                ADF_SIZE
+                adf.len()
             );
             adf[start..end].copy_from_slice(&unpacked);
             cylinders += 1;
@@ -972,6 +978,8 @@ fn dms_crc16(data: &[u8]) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const DMS_CYLINDER_BYTES: usize = ADF_SIZE / DMS_TRACKS;
     use std::path::Path;
 
     #[test]
@@ -1059,19 +1067,25 @@ mod tests {
     }
 
     #[test]
-    fn a_high_density_archive_is_rejected() {
-        // An HD record holds two cylinders, so its data would have to land at
-        // twice the spacing. Nothing downstream reads a 1760K disk, and at DD
-        // spacing the cylinders would overlap into an image of exactly the
-        // expected size, so the general-info bit is refused up front.
-        let mut dms = make_uncompressed_dms(&pattern_adf());
+    fn a_high_density_archive_decodes_at_twice_the_cylinder_spacing() -> Result<()> {
+        // An HD record holds an HD cylinder (two DD cylinders' worth
+        // of bytes), so records land at twice the DD spacing in a
+        // 1,802,240-byte image.
+        let mut expected = vec![0u8; HD_ADF_SIZE];
+        for (idx, byte) in expected.iter_mut().enumerate() {
+            *byte = (idx as u8).wrapping_mul(17).wrapping_add(23);
+        }
+        let mut dms = make_dms_header();
         let geninfo = be_u16(&dms[10..12]) | GENINFO_HD;
         put_be_u16(&mut dms[10..12], geninfo);
         let hcrc = dms_crc16(&dms[4..HEAD_LEN - 2]);
         put_be_u16(&mut dms[HEAD_LEN - 2..HEAD_LEN], hcrc);
+        for (cylinder, chunk) in expected.chunks_exact(HD_ADF_SIZE / DMS_TRACKS).enumerate() {
+            dms.extend_from_slice(&uncompressed_record(cylinder as u16, chunk));
+        }
 
-        let err = decode_dms_adf(&dms).unwrap_err().to_string();
-        assert!(err.contains("high-density"), "{err}");
+        assert_eq!(decode_dms_adf(&dms)?, expected);
+        Ok(())
     }
 
     #[test]
