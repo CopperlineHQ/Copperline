@@ -180,11 +180,17 @@ jobs:
         working-directory: fuzz
         # Explicit bash enables pipefail so tee cannot hide a fuzz failure.
         shell: bash
+        # Run the binaries the build step produced. Every Cargo invocation
+        # in this checkout reruns build.rs and recompiles the core, and
+        # `cargo fuzz run` is two of them per target.
+        env:
+          ASAN_OPTIONS: detect_odr_violation=0
         run: |
           mkdir -p logs
+          bin="target/$(rustc -vV | sed -n 's/^host: //p')/release"
           for target in dms floppy_image cd_image hardfile_classification savestate config_toml archives debug_info control_protocol; do
             mkdir -p "artifacts/$target" "corpus/$target"
-            cargo fuzz run --codegen-units=16 "$target" "corpus/$target" -- \
+            "$bin/$target" "corpus/$target" \
               -max_total_time=10 -timeout=10 -rss_limit_mb=2048 -max_len=1048576 \
               -artifact_prefix="artifacts/$target/" \
               2>&1 | tee "logs/$target.log"

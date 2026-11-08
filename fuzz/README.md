@@ -53,7 +53,11 @@ workflow on the default branch, so a maintenance-branch change must be
 merged forward before its daily schedule becomes active.
 
 The campaign builds use 16 codegen units to keep instrumentation builds
-within the job budget. Both jobs cap each input at 1 MiB, memory at 2 GiB and each execution at ten
+within the job budget. Both jobs build once and then run the instrumented
+binaries in `target/<host>/release/` directly: `build.rs` watches git files
+that a CI checkout or a worktree may lack, so every Cargo invocation there
+recompiles the core, and `cargo fuzz run` costs two invocations per target.
+Both jobs cap each input at 1 MiB, memory at 2 GiB and each execution at ten
 seconds; job wall-clock limits also cover builds and hangs. Scheduled jobs
 restore each target's evolved corpus and save it for the next campaign.
 Crashes, logs and scheduled corpora are uploaded even on failure and retained
