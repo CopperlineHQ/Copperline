@@ -6,9 +6,14 @@ Copperline includes a built-in GDB remote debugging stub:
 ./target/release/copperline --config copperline.example.toml --noaudio --gdb :2345
 ```
 
-Port-only syntax (`2345` or `:2345`) binds to `127.0.0.1`. To bind to all
-interfaces on a trusted local network, specify `0.0.0.0:2345`. The stub has
-no authentication, so do not expose it to untrusted networks.
+Port-only syntax (`2345` or `:2345`) binds to `127.0.0.1`. Both `--gdb`
+and `--gdb-gui` accept only loopback addresses by default, including IPv6
+`[::1]:2345` and hostnames that resolve entirely to loopback addresses.
+A non-loopback or wildcard address requires `--allow-remote-debugging`, for
+example `--gdb 0.0.0.0:2345 --allow-remote-debugging`. The stub has no
+authentication or encryption and grants control of the session, including
+host file operations; use an SSH tunnel for remote debugging instead of
+exposing it to an untrusted network.
 
 ## Headless and windowed modes
 

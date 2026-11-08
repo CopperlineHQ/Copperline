@@ -40,8 +40,8 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
     let listener =
         TcpListener::bind(&bind).with_context(|| format!("binding control server {bind}"))?;
     let local = listener.local_addr().context("resolving control address")?;
-    let token = config.resolve_token();
-    super::announce(&local, &token, config.info_file.as_ref())?;
+    let token = config.resolve_token()?;
+    let _info_file = super::announce(&local, &token, config.info_file.as_ref())?;
     log::info!("control: listening on {local}");
 
     emu.set_paced(false);

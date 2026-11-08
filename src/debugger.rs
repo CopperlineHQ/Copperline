@@ -976,6 +976,38 @@ pub fn normalize_listen_addr(input: &str) -> anyhow::Result<String> {
     Ok(trimmed.to_string())
 }
 
+/// Bind an unauthenticated debugger transport. Resolve once so the address
+/// checked here is exactly the address passed to the OS, including hostnames.
+#[cfg(feature = "control")]
+pub fn bind_debug_listener(
+    input: &str,
+    allow_remote: bool,
+) -> anyhow::Result<std::net::TcpListener> {
+    use anyhow::{bail, Context as _};
+    use std::net::{TcpListener, ToSocketAddrs as _};
+
+    let bind = normalize_listen_addr(input)?;
+    let addresses: Vec<_> = bind
+        .to_socket_addrs()
+        .with_context(|| format!("resolving debugger address {bind}"))?
+        .collect();
+    if addresses.is_empty() {
+        bail!("debugger address {bind} resolved to no addresses");
+    }
+    if !allow_remote
+        && addresses
+            .iter()
+            .any(|addr| !addr.ip().to_canonical().is_loopback())
+    {
+        bail!(
+            "non-loopback debugger address {bind} requires --allow-remote-debugging; \
+               GDB/DAP have no authentication and grant control of the host session"
+        );
+    }
+    TcpListener::bind(addresses.as_slice())
+        .with_context(|| format!("binding debugger listener {bind}"))
+}
+
 /// One operand in a breakpoint condition: a register, an immediate, or a
 /// 16-bit memory word. Memory and immediates are written in hex; the memory
 /// form is `M<hex>` (e.g. `MC00002`).
@@ -1808,6 +1840,24 @@ pub fn reverse_config_from_env() -> Option<ReverseConfig> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "control")]
+    #[test]
+    fn unauthenticated_listeners_require_remote_opt_in() {
+        for addr in ["0.0.0.0:0", "[::]:0", "192.0.2.1:0", "[::ffff:192.0.2.1]:0"] {
+            let error = super::bind_debug_listener(addr, false).unwrap_err();
+            assert!(
+                error.to_string().contains("--allow-remote-debugging"),
+                "{addr}: {error:#}"
+            );
+        }
+        for addr in ["0", ":0", "127.0.0.1:0", "localhost:0"] {
+            let listener = super::bind_debug_listener(addr, false).unwrap();
+            assert!(listener.local_addr().unwrap().ip().is_loopback());
+        }
+        let listener = super::bind_debug_listener("0.0.0.0:0", true).unwrap();
+        assert!(listener.local_addr().unwrap().ip().is_unspecified());
+    }
+
     use super::*;
 
     #[test]

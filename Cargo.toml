@@ -139,7 +139,7 @@ bench-bin = []
 # over loopback TCP for driving the emulator from scripts and external tools
 # (`--control` headless, `--control-gui` windowed). Uses std::net + threads,
 # so browser builds (--no-default-features) compile it out.
-control = ["dep:base64"]
+control = ["dep:base64", "dep:getrandom"]
 # User-mode NAT backend for emulated NICs (`[a2065] net = "nat"`, src/net/nat/):
 # a slirp-style virtual gateway giving the guest outbound IPv4 with no host
 # privileges. Uses std::net + threads, so browser builds compile it out.
@@ -204,6 +204,8 @@ env_logger = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 base64 = { version = "0.23", optional = true }
+# OS randomness for control-server authentication tokens.
+getrandom = { version = "0.4", features = ["std"], optional = true }
 sha2 = { version = "0.11", default-features = false }
 # DWARF and ELF readers for the DAP adapter's debug-info module
 # (src/debuginfo/): line tables, functions, variable locations, and CFI

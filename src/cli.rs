@@ -100,6 +100,8 @@ pub struct CliArgs {
     /// `--control-gui` attaches the control server.
     pub gdb_gui: Option<String>,
     pub gdb_dialect: Option<String>,
+    /// Explicit opt-in for unauthenticated GDB listeners outside loopback.
+    pub allow_remote_debugging: bool,
     /// `--control ADDR`: run the headless Copperline Control Protocol
     /// server (JSON-RPC over loopback TCP), pausing at reset until a
     /// client resumes. `--control-token`/`--control-info` refine it.
@@ -458,6 +460,7 @@ where
     let mut gdb: Option<String> = None;
     let mut gdb_gui: Option<String> = None;
     let mut gdb_dialect = None;
+    let mut allow_remote_debugging = false;
     let mut control_listen: Option<String> = None;
     let mut control_gui_listen: Option<String> = None;
     let mut control_token: Option<String> = None;
@@ -1460,6 +1463,7 @@ where
                     .ok_or_else(|| anyhow!("--gdb requires ADDR, :PORT, or PORT"))?;
                 gdb = Some(listen);
             }
+            "--allow-remote-debugging" => allow_remote_debugging = true,
             "--gdb-dialect" => {
                 let dialect = args
                     .next()
@@ -1987,6 +1991,7 @@ where
         gdb,
         gdb_gui,
         gdb_dialect,
+        allow_remote_debugging,
         control: control_listen,
         control_gui: control_gui_listen,
         control_token,
@@ -2220,6 +2225,7 @@ fn print_help() {
          \x20                            :PORT, or PORT; port-only forms bind 127.0.0.1\n  \
          --gdb-dialect DIALECT         standard (default) or bartman\n  \
          --gdb-gui ADDR                 attach the GDB remote server to the normal window\n  \
+         --allow-remote-debugging       allow unauthenticated GDB outside loopback\n  \
          --control ADDR                 run the headless JSON-RPC control server on ADDR\n  \
          \x20                            (port 0 picks a free port; see docs/debugger/control.md)\n  \
          --control-gui ADDR             attach the control server to the normal window\n  \

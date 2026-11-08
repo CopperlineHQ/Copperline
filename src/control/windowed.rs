@@ -45,6 +45,7 @@ pub enum CtlMsg {
 pub struct ControlHandle {
     listener: Option<TcpListener>,
     token: String,
+    _info_file: Option<tempfile::NamedTempFile>,
     cmd_tx: Sender<CtlMsg>,
     cmd_rx: Receiver<CtlMsg>,
     connection: Arc<Mutex<Option<Arc<OutboundConnection>>>>,
@@ -66,13 +67,14 @@ impl ControlHandle {
         let listener =
             TcpListener::bind(&bind).with_context(|| format!("binding control server {bind}"))?;
         let local = listener.local_addr().context("resolving control address")?;
-        let token = config.resolve_token();
-        super::announce(&local, &token, config.info_file.as_ref())?;
+        let token = config.resolve_token()?;
+        let info_file = super::announce(&local, &token, config.info_file.as_ref())?;
         log::info!("control: listening on {local}");
         let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
         Ok(Self {
             listener: Some(listener),
             token,
+            _info_file: info_file,
             cmd_tx,
             cmd_rx,
             connection: Arc::new(Mutex::new(None)),
@@ -93,6 +95,7 @@ impl ControlHandle {
         let handle = Self {
             listener: None,
             token: String::new(),
+            _info_file: None,
             cmd_tx: cmd_tx.clone(),
             cmd_rx,
             connection: Arc::new(Mutex::new(Some(Arc::new(connection)))),

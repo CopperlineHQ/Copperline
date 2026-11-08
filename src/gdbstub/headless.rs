@@ -8,7 +8,7 @@
 //! commands so inspection remains side-effect-free.
 
 use super::core::*;
-use crate::debugger::normalize_listen_addr;
+use crate::debugger::bind_debug_listener;
 use crate::emulator::Emulator;
 use anyhow::{bail, Context, Result};
 use std::io::{Read, Write};
@@ -17,6 +17,7 @@ use std::net::{TcpListener, TcpStream};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub listen: String,
+    pub allow_remote: bool,
     pub bartman: bool,
     pub reverse_budget_mb: usize,
     pub reverse_interval_frames: u64,
@@ -29,6 +30,7 @@ impl Config {
     pub fn new(listen: String) -> Self {
         Self {
             listen,
+            allow_remote: false,
             bartman: false,
             reverse_budget_mb: crate::envcfg::var("COPPERLINE_DBG_RR_BUDGET_MB")
                 .and_then(|s| s.trim().parse::<usize>().ok())
@@ -42,9 +44,8 @@ impl Config {
 }
 
 pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
-    let bind = normalize_listen_addr(&config.listen)?;
-    let listener = TcpListener::bind(&bind).with_context(|| format!("binding GDB stub {bind}"))?;
-    log::info!("gdb: listening on {bind}");
+    let listener = bind_debug_listener(&config.listen, config.allow_remote)?;
+    log::info!("gdb: listening on {}", listener.local_addr()?);
 
     emu.set_paced(false);
     emu.enable_time_travel(config.reverse_budget_mb, config.reverse_interval_frames);
@@ -372,7 +373,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::debugger::parse_custom_reg;
+    use crate::debugger::{normalize_listen_addr, parse_custom_reg};
     use crate::gdbstub::testkit::{emulator_with_loadseg_program, GdbClient};
 
     #[test]

@@ -88,7 +88,16 @@ dap.configurations.c = {
 ```
 
 Any client that connects to a TCP debug server can use `--dap-listen ADDR`
-instead. Zed loads debug adapters through extensions only; none exists yet.
+instead. It accepts `PORT`, `:PORT`, or `HOST:PORT`; port-only forms bind to
+`127.0.0.1`. TCP DAP accepts only loopback addresses by default. Binding a
+wildcard or non-loopback address requires `--allow-remote-debugging` on
+`copperline-ctl`. DAP has no authentication or encryption: a client can
+launch host programs through the adapter's `copperline` argument and control
+attached sessions. Prefer stdio or an SSH tunnel for remote access. The
+control protocol's token authenticates the adapter to the emulator; it does
+not authenticate an IDE to the TCP DAP adapter.
+
+Zed loads debug adapters through extensions only; none exists yet.
 
 ## Launch and attach
 
