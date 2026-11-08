@@ -1,3 +1,5 @@
+mod common;
+
 use std::collections::HashSet;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -150,20 +152,21 @@ fn lock_emulator_tests() -> std::sync::MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn have_required_files(paths: &[&str]) -> bool {
+fn require_files(paths: &[&str]) {
     // Assets live in the asset directory; the example configs live in the
     // repo. A required file counts as present if it is in either place.
     let dirs = [asset_dir(), repo_root()];
     let missing: Vec<_> = paths
         .iter()
-        .filter(|path| !dirs.iter().any(|dir| dir.join(path).exists()))
+        .filter(|path| !dirs.iter().any(|dir| dir.join(path).is_file()))
         .copied()
         .collect();
-    if !missing.is_empty() {
-        eprintln!("skipping image regression; missing files: {missing:?}");
-        return false;
-    }
-    true
+    assert!(
+        missing.is_empty(),
+        "missing image-regression assets: {missing:?}; install them in {} \
+         or set COPPERLINE_TEST_ASSETS (see tests/README.md)",
+        asset_dir().display()
+    );
 }
 
 fn write_temp_config(name: &str, contents: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -202,7 +205,7 @@ fn run_screenshot(
         .arg(seconds)
         .arg(&path);
 
-    let output = cmd.output()?;
+    let output = common::output_with_timeout(&mut cmd, Duration::from_secs(300))?;
     if !output.status.success() {
         panic!(
             "copperline exited with {}\nstdout tail:\n{}\nstderr tail:\n{}",
@@ -258,7 +261,7 @@ fn run_frame_dump_report(
     }
 
     let started = Instant::now();
-    let output = cmd.output()?;
+    let output = common::output_with_timeout(&mut cmd, Duration::from_secs(300))?;
     let elapsed = started.elapsed();
     let combined_output = format!(
         "{}{}",
@@ -568,9 +571,7 @@ video = "PAL"
 #[ignore = "runs the emulator and requires local Kickstart ROM assets"]
 fn dblpal_boot_presents_full_programmable_scan() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = lock_emulator_tests();
-    if !have_required_files(&["wb31-dblpal.adf", "KICK31.ROM"]) {
-        return Ok(());
-    }
+    require_files(&["wb31-dblpal.adf", "KICK31.ROM"]);
 
     let cfg_path = write_temp_config("dblpal", DBLPAL_CONFIG)?;
     let cfg_arg = cfg_path.to_string_lossy().into_owned();
@@ -611,9 +612,7 @@ fn dblpal_boot_presents_full_programmable_scan() -> Result<(), Box<dyn std::erro
 #[ignore = "runs the emulator and requires local Kickstart ROM assets"]
 fn kickstart_boot_screen_has_expected_structure() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = lock_emulator_tests();
-    if !have_required_files(&["kickstart205.rom"]) {
-        return Ok(());
-    }
+    require_files(&["kickstart205.rom"]);
 
     let cfg_path = write_temp_config("kickstart205", KICKSTART_205_CONFIG)?;
     let cfg_arg = cfg_path.to_string_lossy().into_owned();
@@ -678,9 +677,7 @@ fn kickstart_boot_screen_has_expected_structure() -> Result<(), Box<dyn std::err
 #[ignore = "runs the emulator and requires a local Kickstart 1.3 ROM asset"]
 fn reset_dsksync_boot_regression_reaches_boot_display() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = lock_emulator_tests();
-    if !have_required_files(&["KICK13.ROM"]) {
-        return Ok(());
-    }
+    require_files(&["KICK13.ROM"]);
 
     let cfg_path = std::env::temp_dir().join(format!(
         "copperline-kick13-reset-dsksync-{}.toml",
@@ -830,18 +827,20 @@ fn run_flag_boots_and_runs_a_guest_binary() -> Result<(), Box<dyn std::error::Er
     )?;
 
     let shot = screenshot_path("run-flag");
-    let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
-        .env("RUST_LOG", "copperline=warn")
-        .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
-        .env("HOME", &config_home)
-        .env("USERPROFILE", &config_home)
-        .arg("--noaudio")
-        .arg("--run")
-        .arg(prog_dir.join("mkfile"))
-        .arg("--screenshot-after")
-        .arg("50.0")
-        .arg(&shot)
-        .output()?;
+    let output = common::output_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_copperline"))
+            .env("RUST_LOG", "copperline=warn")
+            .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
+            .env("HOME", &config_home)
+            .env("USERPROFILE", &config_home)
+            .arg("--noaudio")
+            .arg("--run")
+            .arg(prog_dir.join("mkfile"))
+            .arg("--screenshot-after")
+            .arg("50.0")
+            .arg(&shot),
+        Duration::from_secs(300),
+    )?;
     if !output.status.success() {
         panic!(
             "copperline exited with {}\nstdout tail:\n{}\nstderr tail:\n{}",
@@ -918,14 +917,13 @@ fn run_uaelib_probe(
     if let Some(path) = &config_path {
         cmd.arg("--config").arg(path);
     }
-    let output = cmd
-        .arg("--noaudio")
+    cmd.arg("--noaudio")
         .arg("--run")
         .arg(prog_dir.join("uaelibtest"))
         .arg("--screenshot-after")
         .arg("50.0")
-        .arg(&shot)
-        .output()?;
+        .arg(&shot);
+    let output = common::output_with_timeout(&mut cmd, Duration::from_secs(300))?;
     if !output.status.success() {
         panic!(
             "copperline exited with {}\nstdout tail:\n{}\nstderr tail:\n{}",
@@ -1007,9 +1005,7 @@ fn run_flag_without_the_uaelib_trap_falls_back_to_serial_debug_output(
 fn hostfs_boot_kick13_runs_a_guest_binary_and_writes_to_the_host(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = lock_emulator_tests();
-    if !have_required_files(&["KICK13.ROM"]) {
-        return Ok(());
-    }
+    require_files(&["KICK13.ROM"]);
     hostfs_boot_write_round_trip("hostfs-kick13", "rom = \"KICK13.ROM\"", 12.0, "20.0")
 }
 
@@ -1018,9 +1014,7 @@ fn hostfs_boot_kick13_runs_a_guest_binary_and_writes_to_the_host(
 fn ocs_bpu7_ham_captures_avoid_isolated_vertical_rectangle_frames(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = lock_emulator_tests();
-    if !have_required_files(INSIDE_MACHINE_FILES) {
-        return Ok(());
-    }
+    require_files(INSIDE_MACHINE_FILES);
     let cfg_path = write_temp_config("ocs-bpu7-ham", INSIDE_MACHINE_CONFIG)?;
     let cfg_arg = cfg_path.to_string_lossy().into_owned();
 
@@ -1057,15 +1051,11 @@ fn ocs_bpu7_ham_captures_avoid_isolated_vertical_rectangle_frames(
 fn ocs_bpu7_ham_live_audio_capture_has_no_cpal_underrun_bursts(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let _guard = lock_emulator_tests();
-    if envcfg::var_os("COPPERLINE_LIVE_AUDIO_ACCEPTANCE").is_none() {
-        eprintln!(
-            "skipping live-audio acceptance; set COPPERLINE_LIVE_AUDIO_ACCEPTANCE=1 to run it"
-        );
-        return Ok(());
-    }
-    if !have_required_files(INSIDE_MACHINE_FILES) {
-        return Ok(());
-    }
+    assert!(
+        envcfg::var_os("COPPERLINE_LIVE_AUDIO_ACCEPTANCE").is_some(),
+        "live-audio acceptance needs COPPERLINE_LIVE_AUDIO_ACCEPTANCE=1 and an audio device"
+    );
+    require_files(INSIDE_MACHINE_FILES);
     let cfg_path = write_temp_config("ocs-bpu7-ham-live-audio", INSIDE_MACHINE_CONFIG)?;
     let cfg_arg = cfg_path.to_string_lossy().into_owned();
 
@@ -1091,9 +1081,7 @@ fn ocs_bpu7_ham_live_audio_capture_has_no_cpal_underrun_bursts(
 #[ignore = "runs the emulator and requires local DiagROM assets"]
 fn diagrom_menu_preserves_left_margin_text_columns() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = lock_emulator_tests();
-    if !have_required_files(&["diagrom.rom"]) {
-        return Ok(());
-    }
+    require_files(&["diagrom.rom"]);
 
     // DiagROM boots as a Kickstart replacement, so the ROM is passed
     // positionally (there is no ./diagrom.rom fallback; the bundled AROS
@@ -1204,9 +1192,7 @@ fn assert_mmu_boot_passes(cpu_model: &str) -> Result<(), Box<dyn std::error::Err
 #[ignore = "runs the emulator and requires local KS3.1 + MMU test disk assets"]
 fn mmu_library_boot_and_muforce_hits_68040() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = lock_emulator_tests();
-    if !have_required_files(MMU_BOOT_ASSETS) {
-        return Ok(());
-    }
+    require_files(MMU_BOOT_ASSETS);
     assert_mmu_boot_passes("68040")
 }
 
@@ -1214,8 +1200,6 @@ fn mmu_library_boot_and_muforce_hits_68040() -> Result<(), Box<dyn std::error::E
 #[ignore = "runs the emulator and requires local KS3.1 + MMU test disk assets"]
 fn mmu_library_boot_and_muforce_hits_68030() -> Result<(), Box<dyn std::error::Error>> {
     let _guard = lock_emulator_tests();
-    if !have_required_files(MMU_BOOT_ASSETS) {
-        return Ok(());
-    }
+    require_files(MMU_BOOT_ASSETS);
     assert_mmu_boot_passes("68030")
 }

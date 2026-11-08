@@ -29,12 +29,14 @@
 //! `render_display_only` would reuse a thread-local input that refills
 //! incrementally across whatever machines were captured before.
 //!
-//! Release-only, like tests/probe_golden.rs: a debug-build emulator is far
+//! Optimized-only, like tests/probe_golden.rs: a debug-build emulator is far
 //! too slow for multi-second emulated boots.
 //!
 //! ```sh
 //! cargo test --release --test savestate_roundtrip -- --nocapture
 //! ```
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -373,14 +375,9 @@ fn resumed_run_alternate_construction(
 /// rendered output from the next frame wrap on -- including when the loading
 /// machine was built through a different construction path.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn resume_matches_uninterrupted_run() {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping savestate roundtrip; run with --release \
-             (a debug emulator is too slow for the emulated boot)"
-        );
-        return;
-    }
+    common::require_optimized();
     pin_bundled_aros();
 
     println!("run A: uninterrupted");
@@ -412,14 +409,9 @@ fn resume_matches_uninterrupted_run() {
 /// test above fails for save-state bugs specifically, not for general
 /// nondeterminism leaking in from the host.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn independent_builds_agree_at_the_split_point() {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping savestate roundtrip; run with --release \
-             (a debug emulator is too slow for the emulated boot)"
-        );
-        return;
-    }
+    common::require_optimized();
     pin_bundled_aros();
 
     let started = Instant::now();

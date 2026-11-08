@@ -23,9 +23,11 @@
 //! staging volume, so this runs on any checkout (see
 //! `tests/copperhf_device.rs`'s own header comment for the same
 //! bundled-ROM `--run` pattern this borrows its emulated-time budget from).
-//! Release-only for the same reason as every other AROS-boot integration
+//! Optimized-only for the same reason as every other AROS-boot integration
 //! test in this suite: a debug-build emulator is far too slow for a full
 //! AROS boot plus `--run` staging.
+
+mod common;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -164,14 +166,9 @@ fn toml_path(path: &Path) -> String {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn m4_command_coverage_over_aros_autoboot() -> Result<(), Box<dyn std::error::Error>> {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping copperhf.device M4 end-to-end probe; run with --release \
-             (a debug emulator is far too slow for a full AROS boot + --run staging)"
-        );
-        return Ok(());
-    }
+    common::require_optimized();
 
     let root = repo_root();
     let scratch = std::env::temp_dir().join(format!(
@@ -203,26 +200,30 @@ fn m4_command_coverage_over_aros_autoboot() -> Result<(), Box<dyn std::error::Er
     )?;
 
     let screenshot = scratch.join("copperhf-m4.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
-        .current_dir(&root)
-        .env("RUST_LOG", "copperline=warn")
-        .env("COPPERLINE_AROS_DIR", root.join("assets/aros"))
-        .env("XDG_CONFIG_HOME", &config_home)
-        .arg("--factory")
-        .arg("--config")
-        .arg(&config)
-        .arg("--noaudio")
-        .arg("--run")
-        .arg(&probe)
-        // Same emulated-time budget as tests/copperhf_device.rs's M2 test:
-        // bundled-AROS `--run` hands the guest control at ~11s emulated,
-        // this probe does more work than M2's but is still a handful of
-        // synchronous DoIO/SendIO round trips plus one softint-poll spin,
-        // nowhere near 50s of emulated headroom.
-        .arg("--screenshot-after")
-        .arg("50")
-        .arg(&screenshot)
-        .output()?;
+    let output = common::output_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_copperline"))
+            .current_dir(&root)
+            .env("RUST_LOG", "copperline=warn")
+            .env("COPPERLINE_AROS_DIR", root.join("assets/aros"))
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("HOME", &config_home)
+            .env("USERPROFILE", &config_home)
+            .arg("--factory")
+            .arg("--config")
+            .arg(&config)
+            .arg("--noaudio")
+            .arg("--run")
+            .arg(&probe)
+            // Same emulated-time budget as tests/copperhf_device.rs's M2 test:
+            // bundled-AROS `--run` hands the guest control at ~11s emulated,
+            // this probe does more work than M2's but is still a handful of
+            // synchronous DoIO/SendIO round trips plus one softint-poll spin,
+            // nowhere near 50s of emulated headroom.
+            .arg("--screenshot-after")
+            .arg("50")
+            .arg(&screenshot),
+        std::time::Duration::from_secs(300),
+    )?;
     assert!(
         output.status.success(),
         "Copperline exited with {}\nstdout:\n{}\nstderr:\n{}",

@@ -10,6 +10,8 @@
 //! `docs/guide/configuration.md`'s `[audio]` section for why that's audible
 //! with no disk at all.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -25,13 +27,15 @@ fn write_minimal_config(path: &Path) {
 }
 
 fn run_copperline(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_copperline"))
-        .current_dir(repo_root())
-        .env("RUST_LOG", "copperline=warn")
-        .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
-        .args(args)
-        .output()
-        .expect("run emulator")
+    common::output_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_copperline"))
+            .current_dir(repo_root())
+            .env("RUST_LOG", "copperline=warn")
+            .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
+            .args(args),
+        std::time::Duration::from_secs(120),
+    )
+    .expect("run emulator")
 }
 
 fn file_names(dir: &Path) -> Vec<String> {

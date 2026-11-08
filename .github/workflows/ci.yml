@@ -24,6 +24,7 @@ env:
 # checks share one Linux job and one entry rather than one macOS entry each.
 jobs:
   build:
+    timeout-minutes: 30
     # Keep the existing check name for branch-protection rules. The ci
     # profile inherits release semantics without shipping-only fat LTO.
     name: Build (release)
@@ -62,10 +63,9 @@ jobs:
             | while IFS=$'\t' read -r kind name exe; do
                 case "$kind:$name" in
                   lib:copperline)        cp "$exe" ci-bins/unit-lib ;;
-                  bin:copperline)        cp "$exe" ci-bins/unit-bin-copperline ;;
-                  bin:copperline-ctl)    cp "$exe" ci-bins/unit-bin-copperline-ctl ;;
+                  bin:*)                 cp "$exe" "ci-bins/unit-bin-$name" ;;
                   test:probe_golden)     cp "$exe" ci-bins/probe_golden ;;
-                  test:image_regression) cp "$exe" ci-bins/image_regression ;;
+                  test:*)                cp "$exe" "ci-bins/test-$name" ;;
                 esac
               done
           ls -l ci-bins
@@ -84,6 +84,7 @@ jobs:
           retention-days: 7
 
   checks:
+    timeout-minutes: 30
     name: Rustfmt, clippy, and feature checks
     # Style, lints, and the check-only feature combinations need no release
     # build, so this runs alongside the build job instead of gating it. It
@@ -131,7 +132,26 @@ jobs:
         working-directory: crates/copperline-player
         run: cargo fmt --check
 
+  probe-binaries:
+    name: Probe assembly consistency
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Fetch pinned vasm 2.0b source mirror
+        uses: actions/checkout@v7
+        with:
+          repository: StarWolf3000/vasm-mirror
+          ref: 7db75ca16f3f528463ae9846fd057040737d826b
+          path: target/vasm
+          persist-credentials: false
+      - name: Build assembler
+        run: make -C target/vasm -j2 CPU=m68k SYNTAX=mot
+      - name: Compare probe sources and binaries
+        run: python3 tools/check-probe-binaries.py --vasm "$PWD/target/vasm/vasmm68k_mot"
+
   fuzz-build:
+    timeout-minutes: 30
     name: Fuzz harnesses build
     # Build every untrusted-input harness on each change so parser API
     # refactors cannot silently leave the fuzz workspace stale. Sustained
@@ -162,6 +182,7 @@ jobs:
         run: cargo fuzz build
 
   msrv:
+    timeout-minutes: 30
     name: MSRV (rust-version)
     # Prove that Cargo.toml's declared minimum remains truthful when source
     # or dependency updates land.
@@ -195,6 +216,7 @@ jobs:
         run: cargo +"$MSRV" test --locked --lib --no-run
 
   cargo-deny:
+    timeout-minutes: 30
     name: Dependency policy (${{ matrix.name }})
     # Frontends have standalone workspaces and lockfiles, so check each
     # shipped dependency graph explicitly.
@@ -222,6 +244,7 @@ jobs:
           # warnings; hide only their verbose dependency inclusion graphs.
 
   unit-tests:
+    timeout-minutes: 30
     name: Unit tests
     needs: build
     runs-on: macos-latest
@@ -243,17 +266,27 @@ jobs:
           grep -Eq '^test result: ok\. [1-9][0-9]* passed;' inspector-tests.txt
       - name: Unit tests
         # The inline #[cfg(test)] suites in the lib and binaries, prebuilt
-        # by the build job (this is everything a root `cargo test` runs
-        # besides tests/probe_golden.rs, which has its own job below; the
-        # crate has no doctests). The GDB remote-protocol suite in
+        # by the build job. Integration targets run in the next step;
+        # probe goldens have their own job below. The crate has no doctests.
+        # The GDB remote-protocol suite in
         # src/gdbstub is part of unit-lib: gdb is a default feature.
         # Inspector tests ran in the preceding step.
         run: |
           ./ci-bins/unit-lib --skip video::window::egui_debugger::
-          ./ci-bins/unit-bin-copperline
-          ./ci-bins/unit-bin-copperline-ctl
+          for suite in ci-bins/unit-bin-*; do
+            "$suite"
+          done
+      - name: Integration tests
+        run: |
+          mkdir -p target/ci
+          cp ci-bins/copperline target/ci/copperline
+          for suite in ci-bins/test-*; do
+            "$suite"
+          done
+          ./ci-bins/test-audio_stems_determinism --ignored
 
   probe-golden:
+    timeout-minutes: 30
     name: Probe golden renders
     needs: build
     runs-on: macos-latest
@@ -296,6 +329,7 @@ jobs:
           if-no-files-found: ignore
 
   hostsocket-plugin:
+    timeout-minutes: 30
     name: HostSocket plugin (wasm32)
     # The bundled bsdsocket.library board (crates/hostsocket-plugin) ships
     # as a committed artifact (assets/hostsocket/hostsocket_plugin.wasm, the
@@ -323,6 +357,7 @@ jobs:
         run: cargo test --locked
 
   zz9k-plugin:
+    timeout-minutes: 30
     name: ZZ9K plugin (wasm32)
     # The bundled ZZ9000 crypto board (crates/zz9k-plugin) ships as a
     # committed artifact (assets/zz9k/zz9k_plugin.wasm, the blob a plain
@@ -359,6 +394,7 @@ jobs:
         run: cargo test --locked
 
   diagrom-smoke:
+    timeout-minutes: 30
     name: DiagROM boot smoke
     needs: build
     runs-on: macos-latest
@@ -424,7 +460,7 @@ jobs:
         run: |
           mkdir -p test-assets
           cp diagrom.rom test-assets/
-          ./ci-bins/image_regression diagrom --ignored --nocapture
+          ./ci-bins/test-image_regression diagrom --ignored --nocapture
       - name: Upload boot screenshot
         if: always()
         uses: actions/upload-artifact@v7
@@ -436,6 +472,7 @@ jobs:
           if-no-files-found: ignore
 
   linux-tests:
+    timeout-minutes: 30
     # Preserve the required check name; the ci profile is release-derived.
     name: Linux tests (release)
     # Functional coverage on Linux: the inline unit suites and
@@ -524,6 +561,7 @@ jobs:
           retention-days: 7
 
   wasm:
+    timeout-minutes: 30
     name: Headless core and browser build
     # Guards the portability split behind the browser build (see
     # docs/guide/browser.md): the core must keep compiling without the
@@ -579,6 +617,7 @@ jobs:
         run: npm test
 
   netplay-service:
+    timeout-minutes: 30
     name: Browser netplay room service
     runs-on: ubuntu-latest
     steps:
@@ -596,6 +635,7 @@ jobs:
         working-directory: services/netplay
 
   docs:
+    timeout-minutes: 30
     name: Docs build (HTML + PDF)
     # Independent of the Rust build: catches MyST/cross-reference breakage
     # (e.g. duplicate labels that only collide in the single-document PDF).

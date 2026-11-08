@@ -27,9 +27,11 @@
 //! subtest markers.
 //!
 //! Needs no local assets at all: the bundled AROS ROM boots the `--run`
-//! staging volume. Release-only, like every other AROS-boot integration
+//! staging volume. Optimized-only, like every other AROS-boot integration
 //! test in this suite: a debug-build emulator is far too slow for a full
 //! AROS boot plus `--run` staging.
+
+mod common;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -266,14 +268,9 @@ fn read_marker(image: &[u8], block: u64) -> Vec<u8> {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn lseg_filesystem_loads_into_filesystem_resource() -> Result<(), Box<dyn std::error::Error>> {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping copperhf.device M6 LSEG-loader probe; run with --release \
-             (a debug emulator is far too slow for a full AROS boot + --run staging)"
-        );
-        return Ok(());
-    }
+    common::require_optimized();
 
     let root = repo_root();
     let scratch =
@@ -300,25 +297,29 @@ fn lseg_filesystem_loads_into_filesystem_resource() -> Result<(), Box<dyn std::e
     )?;
 
     let screenshot = scratch.join("copperhf-m6.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
-        .current_dir(&root)
-        .env("RUST_LOG", "copperline=warn")
-        .env("COPPERLINE_AROS_DIR", root.join("assets/aros"))
-        .env("XDG_CONFIG_HOME", &config_home)
-        .arg("--factory")
-        .arg("--config")
-        .arg(&config)
-        .arg("--noaudio")
-        .arg("--run")
-        .arg(&probe)
-        // Same emulated-time budget as tests/copperhf_m4_guest.rs's probe:
-        // bundled-AROS `--run` boots hand the guest control at ~11s
-        // emulated, and this probe (four in-memory checks, no I/O beyond
-        // its own marker writes) finishes moments later.
-        .arg("--screenshot-after")
-        .arg("50")
-        .arg(&screenshot)
-        .output()?;
+    let output = common::output_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_copperline"))
+            .current_dir(&root)
+            .env("RUST_LOG", "copperline=warn")
+            .env("COPPERLINE_AROS_DIR", root.join("assets/aros"))
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("HOME", &config_home)
+            .env("USERPROFILE", &config_home)
+            .arg("--factory")
+            .arg("--config")
+            .arg(&config)
+            .arg("--noaudio")
+            .arg("--run")
+            .arg(&probe)
+            // Same emulated-time budget as tests/copperhf_m4_guest.rs's probe:
+            // bundled-AROS `--run` boots hand the guest control at ~11s
+            // emulated, and this probe (four in-memory checks, no I/O beyond
+            // its own marker writes) finishes moments later.
+            .arg("--screenshot-after")
+            .arg("50")
+            .arg(&screenshot),
+        std::time::Duration::from_secs(300),
+    )?;
     assert!(
         output.status.success(),
         "Copperline exited with {}\nstdout:\n{}\nstderr:\n{}",

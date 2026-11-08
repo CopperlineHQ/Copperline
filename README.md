@@ -210,17 +210,26 @@ cd docs && myst build --html
 
 ## Testing
 
-Run the unit test suite:
+Run the unit suite and fast integration tests:
 
 ```sh
 cargo test
 ```
 
-Integration tests requiring local ROM and disk assets can be run with:
+Run the optimized native suite, including probe goldens and save-state checks:
 
 ```sh
-cargo test --release -- --ignored
+cargo test --profile ci --locked
 ```
+
+Slow tests are reported as ignored in debug builds. Select asset-backed tests
+explicitly once their required files are installed, for example:
+
+```sh
+cargo test --release --test image_regression kickstart_boot_screen -- --ignored
+```
+
+Selected image regressions fail if their assets are missing.
 
 See [`tests/README.md`](tests/README.md) for details on asset paths and test configuration.
 
