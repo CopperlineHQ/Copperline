@@ -7,6 +7,9 @@ are enabled (both are defaults). The other cases also run in core builds.
 
 The initial inputs are owned, synthetic boundary cases, plus the ELF
 compiled from `guest/dap-test/reloc/`; they are not claimed fuzz findings.
+`debug_info/oversize-text-hunk-unwind-table.hunk` is the first retained
+campaign finding: a hunk table claiming a 2.8 GB code hunk made the
+compact unwind table allocate 8.4 GB.
 `fuzz/tools/generate_parser_seeds.py` regenerates those files and the
 initial corpus without deleting later retained crashes. The archive cases
 include highly compressible data and forged uncompressed lengths.

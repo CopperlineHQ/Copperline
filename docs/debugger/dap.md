@@ -61,7 +61,9 @@ instruction samples, converts them to a source-mapped `.cpuprofile`, and opens
 the result in VS Code. The profile includes inlined frames from optimized
 code and a `[Bus wait]` child that isolates time lost to chip-DMA
 contention. Other DAP clients can send the same custom request and open the
-returned `path`.
+returned `path`. The unwind table travels in a single control-protocol
+request, which is capped at 4 MiB, so profiling a program whose first code
+hunk holds more than 1 MiB of text reports an error instead.
 
 The same toolbar opens Copperline's native Debugger, Console, and Frame
 Analyzer windows (the custom `copperline/ui.show {"window"}` request). The
