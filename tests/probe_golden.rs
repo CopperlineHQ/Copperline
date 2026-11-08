@@ -322,10 +322,15 @@ fn run_probe(p: &Probe) {
             })
             .filter(|&width| width != 0)
             .collect();
+        let expected = [vec![32; 64], vec![16; 32], vec![8; 32]].concat();
+        if widths != expected {
+            fs::create_dir_all(&diff_dir).expect("create diff dir");
+            fs::copy(&shot_path, diff_dir.join(format!("{name}-actual.png"))).expect("copy actual");
+        }
         assert_eq!(
-            widths,
-            [vec![32; 64], vec![16; 32], vec![8; 32]].concat(),
-            "{name}: probe did not render the expected sprite staircase"
+            widths, expected,
+            "{name}: probe did not render the expected sprite staircase \
+             (actual in target/probe-golden/)"
         );
     }
 

@@ -851,6 +851,8 @@ Each emulator capture has a 120-second wall-clock timeout.
 `ntsc-aga-sprites` runs `agashres-sprites.bin` on the NTSC A1200 profile,
 pinning the shorter field geometry and AGA sprite widths. Before blessing,
 the test also requires the visible 4:4:2:1 sprite-width staircase.
+If that check fails, the actual capture is saved in `target/probe-golden/`
+before the assertion fails, including during a rejected bless.
 This is a deterministic model regression, not a physical NTSC reference.
 CI builds pinned vasm 2.0b from a source mirror and requires every tracked
 `timing-test/*.bin` (including the boot block) to match its adjacent source.
