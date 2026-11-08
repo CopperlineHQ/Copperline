@@ -2078,15 +2078,25 @@ struct CrtPresent {
 
 /// Draw one frame through the GPU passes and present it. The present
 /// worker runs this for the normal display; the main thread runs it for a
-/// frame that carries something only it has (the RTG texture upload, the
-/// inspector's egui paint through `after`). `notify` is the window whose
+/// frame that carries something only it has (the RTG board frame in
+/// `rtg_frame`, as `(pixels, width, height)`, or the inspector's egui
+/// paint through `after`). `notify` is the window whose
 /// `pre_present_notify` runs after the draw and before the present, as it
 /// always did; see `worker_notify_window` for why the worker passes None
 /// on macOS.
+///
+/// The frame's texture uploads run inside the render callback, after the
+/// surface has handed over a texture to draw into. A queue write is staged
+/// until the next submit, and a present the surface skips has none: macOS
+/// reports a covered, minimised or other-Space window as occluded, which
+/// `pixels` returns as `Ok(())` without submitting. An upload made before
+/// the acquire would leave one staged copy of the frame behind for every
+/// frame the window stays hidden.
 fn present_job(
     gpu: &mut Gpu,
     notify: Option<&Window>,
     job: &PresentJob,
+    rtg_frame: Option<(&[u32], u32, u32)>,
     mut after: Option<PresentAfter<'_>>,
     mut capture: Option<&mut output_capture::OutputCapture>,
 ) -> Result<(), pixels::Error> {
@@ -2108,100 +2118,108 @@ fn present_job(
         }
         dst.copy_from_slice(frame);
     }
-    if let Some(picture) = &job.picture {
-        scaler.upload_picture(
-            pixels.device(),
-            pixels.queue(),
-            &picture.fb,
-            picture.width,
-            picture.rows,
-        );
-    }
-    if let PresentPass::Rtg { ui, .. } = &job.pass {
-        rtg_texture.upload_ui(pixels.device(), pixels.queue(), ui);
-    }
-    let mut draw = |encoder: &mut wgpu::CommandEncoder,
-                    target: &wgpu::TextureView,
-                    ctx: &pixels::PixelsContext<'_>| {
-        scaler.render(
-            &ctx.device,
-            &ctx.queue,
-            &ctx.texture,
-            encoder,
-            target,
-            &job.draws,
-        );
-        match &job.pass {
-            PresentPass::Plain => {}
-            PresentPass::Rtg {
-                rect,
-                integer_scaling,
-                ui,
-                ui_viewport,
-            } => {
-                rtg_texture.render_composited(
-                    &ctx.queue,
-                    encoder,
-                    target,
-                    *ui_viewport,
-                    *rect,
-                    *integer_scaling,
-                    ui,
-                );
-            }
-            PresentPass::Crt(crt) => {
-                if crt.bezel_active {
-                    let opening = bezel::opening_rect(crt.style, crt.viewport);
-                    if crt.crt_active {
-                        crt_shader.render(
-                            &ctx.device,
-                            &ctx.queue,
-                            &ctx.texture,
-                            encoder,
-                            target,
-                            opening,
-                            crt.kind,
-                            crt.uniforms.with_viewport(opening),
-                        );
-                    }
-                    bezel_shader.render(
-                        &ctx.device,
-                        &ctx.queue,
-                        &ctx.texture,
-                        encoder,
-                        target,
-                        crt.viewport,
-                        crt.style,
-                        bezel::uniforms_from(&crt.uniforms, crt.viewport, opening, crt.crt_active),
-                    );
-                    sticker_pass.render(
-                        &ctx.device,
-                        &ctx.queue,
-                        encoder,
-                        target,
-                        crt.viewport,
-                        opening,
-                    );
-                } else {
-                    crt_shader.render(
-                        &ctx.device,
-                        &ctx.queue,
-                        &ctx.texture,
-                        encoder,
-                        target,
-                        crt.viewport,
-                        crt.kind,
-                        crt.uniforms,
-                    );
-                }
-            }
-        }
-    };
     presenter.render(
         pixels,
         notify,
         job.emulated_frame,
         |encoder, target, ctx| {
+            if let Some(picture) = &job.picture {
+                scaler.upload_picture(
+                    &ctx.device,
+                    &ctx.queue,
+                    &picture.fb,
+                    picture.width,
+                    picture.rows,
+                );
+            }
+            if let Some((board, width, height)) = rtg_frame {
+                rtg_texture.upload(&ctx.device, &ctx.queue, board, width, height);
+            }
+            if let PresentPass::Rtg { ui, .. } = &job.pass {
+                rtg_texture.upload_ui(&ctx.device, &ctx.queue, ui);
+            }
+            let mut draw = |encoder: &mut wgpu::CommandEncoder,
+                            target: &wgpu::TextureView,
+                            ctx: &pixels::PixelsContext<'_>| {
+                scaler.render(
+                    &ctx.device,
+                    &ctx.queue,
+                    &ctx.texture,
+                    encoder,
+                    target,
+                    &job.draws,
+                );
+                match &job.pass {
+                    PresentPass::Plain => {}
+                    PresentPass::Rtg {
+                        rect,
+                        integer_scaling,
+                        ui,
+                        ui_viewport,
+                    } => {
+                        rtg_texture.render_composited(
+                            &ctx.queue,
+                            encoder,
+                            target,
+                            *ui_viewport,
+                            *rect,
+                            *integer_scaling,
+                            ui,
+                        );
+                    }
+                    PresentPass::Crt(crt) => {
+                        if crt.bezel_active {
+                            let opening = bezel::opening_rect(crt.style, crt.viewport);
+                            if crt.crt_active {
+                                crt_shader.render(
+                                    &ctx.device,
+                                    &ctx.queue,
+                                    &ctx.texture,
+                                    encoder,
+                                    target,
+                                    opening,
+                                    crt.kind,
+                                    crt.uniforms.with_viewport(opening),
+                                );
+                            }
+                            bezel_shader.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                crt.viewport,
+                                crt.style,
+                                bezel::uniforms_from(
+                                    &crt.uniforms,
+                                    crt.viewport,
+                                    opening,
+                                    crt.crt_active,
+                                ),
+                            );
+                            sticker_pass.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                encoder,
+                                target,
+                                crt.viewport,
+                                opening,
+                            );
+                        } else {
+                            crt_shader.render(
+                                &ctx.device,
+                                &ctx.queue,
+                                &ctx.texture,
+                                encoder,
+                                target,
+                                crt.viewport,
+                                crt.kind,
+                                crt.uniforms,
+                            );
+                        }
+                    }
+                }
+            };
             draw(encoder, target, ctx);
             if let Some(capture) = capture.as_mut() {
                 draw(encoder, &capture.view(), ctx);
@@ -2298,7 +2316,8 @@ impl PresentWorker {
                             if let Some(gpu) = held.as_mut() {
                                 if worker_surface_current(job.surface, worker_live_size(&window)) {
                                     let notify = worker_notify_window(&window);
-                                    if let Err(e) = present_job(gpu, notify, &job, None, None) {
+                                    if let Err(e) = present_job(gpu, notify, &job, None, None, None)
+                                    {
                                         log_present_error(&e);
                                     }
                                 }
@@ -5838,18 +5857,6 @@ impl ApplicationHandler for App {
                         } else {
                             None
                         };
-                        if let (Some((w, h)), Some(gpu)) = (
-                            self.rtg_present_dims.filter(|_| rtg_gpu),
-                            gpu_home.as_deref_mut(),
-                        ) {
-                            gpu.rtg_texture.upload(
-                                gpu.pixels.device(),
-                                gpu.pixels.queue(),
-                                &self.rtg_fb,
-                                w,
-                                h,
-                            );
-                        }
                         let Some(frame) = worker_frame
                             .as_deref_mut()
                             .or_else(|| gpu_home.as_deref_mut().map(|gpu| gpu.pixels.frame_mut()))
@@ -6252,6 +6259,12 @@ impl ApplicationHandler for App {
                                         )
                                     })
                                     .transpose();
+                                // The board frame goes up with the frame, once
+                                // the surface is acquired (see present_job).
+                                let rtg_frame = self
+                                    .rtg_present_dims
+                                    .filter(|_| rtg_gpu)
+                                    .map(|(w, h)| (self.rtg_fb.as_slice(), w, h));
                                 // A frame presented here can block the main
                                 // thread on vsync; the fastest-mode governor
                                 // must not mistake that for frontend load.
@@ -6261,10 +6274,18 @@ impl ApplicationHandler for App {
                                         gpu,
                                         Some(&window),
                                         &job,
+                                        rtg_frame,
                                         after,
                                         capture.as_mut(),
                                     ),
-                                    Err(_) => present_job(gpu, Some(&window), &job, after, None),
+                                    Err(_) => present_job(
+                                        gpu,
+                                        Some(&window),
+                                        &job,
+                                        rtg_frame,
+                                        after,
+                                        None,
+                                    ),
                                 };
                                 self.emu.note_frontend_wait(present_started.elapsed());
                                 if let Err(e) = &result {

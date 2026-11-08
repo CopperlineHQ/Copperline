@@ -907,7 +907,9 @@ scanout, two-plane cursor, and physical pass-through switch in
 `picasso2/gd5426.rs`, and the Graffity Zorro II/III boards (`graffity.rs`)
 reuse that CL-GD5428 core. The window presents
 that frame at its native resolution through a dedicated GPU texture
-(`window/rtg_texture.rs`) rather than the 716-wide chipset buffer, and the
+(`window/rtg_texture.rs`) rather than the 716-wide chipset buffer, uploaded
+only once the window surface is acquired so a hidden window queues nothing
+([](architecture.md)), and the
 TV aperture crop is suppressed -- it is a chipset crop rect, and applying it
 would show a sub-rect of the board's screen. The GPU pass always draws the
 native RTG texture, including while menus, panels, guest debug overlays or
