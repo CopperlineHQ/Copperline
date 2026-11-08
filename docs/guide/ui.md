@@ -4,6 +4,13 @@ Copperline opens a single window: the emulated display presented at a
 TV-like 4:3 aspect ratio, above a status bar with the machine's controls.
 The window scales continuously when resized.
 
+When Copperline is started from Finder, Explorer, or the installed Linux
+desktop entry, fatal session errors also appear in a native error dialog.
+Configuration-screen Run and auto-launch failures remain on the screen's
+status line so the settings can be corrected. Command-line syntax errors
+and headless captures, benchmarks, debugger servers, and listing commands
+report to stderr without opening a dialog; their exit statuses are unchanged.
+
 The display defaults to buffered, synchronised presentation (strict FIFO
 vsync) on all desktop platforms. **Video Settings -> VSync** changes this
 immediately; it is also in the configuration screen's **A/V & Emu -> Display**

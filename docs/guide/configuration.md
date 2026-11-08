@@ -101,6 +101,17 @@ relative to the working directory. Paths given to scheduled input such as
 
 ## Command-line overrides
 
+Long options taking a value accept either `--flag VALUE` or `--flag=VALUE`,
+including `--config=machine.toml` and `--script=input.clscript`. For an option
+with several arguments, the inline value is its first argument:
+`--screenshot-after=10 out.png` or `--window-position=-40 75`. Values keep
+any further `=` characters. Switches such as `--factory` and `--noaudio`
+take no value; `--noaudio=false` is an error.
+
+`--help` and `--version` print to stdout and exit successfully. Invalid
+arguments print to stderr and exit with status 1. A mistyped long option
+suggests a close, unambiguous match when one is available.
+
 The most common machine knobs can be set on the command line without writing
 a config file. These flags layer on top of the config file (or, when there is
 none, the built-in defaults) and are validated by exactly the same parsers and

@@ -8,6 +8,11 @@
   <string>Copperline</string>
   <key>CFBundleExecutable</key>
   <string>copperline</string>
+  <key>LSEnvironment</key>
+  <dict>
+    <key>COPPERLINE_DESKTOP_LAUNCH</key>
+    <string>1</string>
+  </dict>
   <key>CFBundleIconFile</key>
   <string>copperline.icns</string>
   <key>CFBundleIdentifier</key>
