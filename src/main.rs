@@ -152,8 +152,9 @@ fn validate_benchmark_args(cli: &CliArgs) -> Result<()> {
 /// Positional media is a startup choice, not a scheduled hot-insert. Refuse
 /// hardware that could not consume it instead of silently starting empty.
 fn validate_positional_media(cli: &CliArgs, cfg: &Config) -> Result<()> {
-    if !cli.boot_floppies.is_empty() && !cfg.floppy_connected[0] {
-        bail!("positional floppy images need DF0; select a machine with a floppy drive or use --floppy-drives 1");
+    if !cli.boot_floppies.is_empty() && (!cfg.floppy_connected[0] || cfg.floppy.drives[0].is_none())
+    {
+        bail!("positional floppy images need an enabled image-backed DF0; check the drive wiring, enabled setting and bridge configuration");
     }
     if cli.boot_cd.is_some() && !cfg.akiko && !cfg.cdtv_cd {
         bail!("a positional CD image needs a CD32 or CDTV drive; use --model CD32, --model CDTV, or a matching --config");
@@ -1904,7 +1905,7 @@ fn read_profile_audio_word(chip_ram: &[u8], address: u32) -> u16 {
 /// image paths, while preserving machine choices and the drive's protection.
 fn load_cli_config(cli: &CliArgs) -> Result<(Config, config::RawConfig)> {
     let mut raw = load_raw_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
-    raw.set_startup_media(&cli.boot_floppies, cli.boot_cd.as_deref());
+    raw.set_startup_media(&cli.boot_floppies, cli.boot_cd.as_deref())?;
     let cfg = Config::try_from(raw.clone())?;
     validate_positional_media(cli, &cfg)?;
     Ok((cfg, raw))
@@ -2141,11 +2142,70 @@ mod tests {
     }
 
     #[test]
+    fn positional_floppies_do_not_add_hardware_to_a_drive_less_profile() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let disk = dir.path().join("disk.adf");
+        std::fs::write(&disk, vec![0u8; 901_120])?;
+        for model in ["CD32", "CDTV"] {
+            let cli = parse(&["--factory", "--model", model, disk.to_str().unwrap()])?;
+            let error = load_cli_config(&cli).unwrap_err().to_string();
+            assert!(error.contains("DF0"), "{model}: {error}");
+            let cli = parse(&[
+                "--factory",
+                "--model",
+                model,
+                "--floppy-drives",
+                "1",
+                disk.to_str().unwrap(),
+            ])?;
+            let (cfg, _) = load_cli_config(&cli)?;
+            assert!(cfg.floppy_connected[0]);
+            assert!(cfg.floppy.drives[0].is_some());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn positional_floppies_reject_disabled_drives_and_preserve_explicit_wiring() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let disk = dir.path().join("disk.adf");
+        std::fs::write(&disk, vec![0u8; 901_120])?;
+        let config = dir.path().join("machine.toml");
+        std::fs::write(&config, "[floppy.df0]\nenabled=false\n")?;
+        let cli = parse(&[
+            "--factory",
+            config.to_str().unwrap(),
+            disk.to_str().unwrap(),
+        ])?;
+        assert!(load_cli_config(&cli)
+            .unwrap_err()
+            .to_string()
+            .contains("disabled"));
+        for selection in ["enabled=true", "path='missing-old-image.adf'"] {
+            std::fs::write(
+                &config,
+                format!("[machine]\nprofile='CD32'\n[floppy.df0]\n{selection}\n"),
+            )?;
+            let (cfg, _) = load_cli_config(&cli)?;
+            assert!(cfg.floppy_connected[0]);
+            assert_eq!(cfg.floppy.drives[0].as_ref().unwrap().path, disk);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn positional_media_requires_the_selected_machines_hardware() -> Result<()> {
         let floppy = parse(&["disk.adf"])?;
         let mut cfg = Config::default();
+        cfg.floppy.drives[0] = Some(config::FloppyDriveConfig {
+            path: "disk.adf".into(),
+            write_protected: true,
+        });
         validate_positional_media(&floppy, &cfg)?;
         cfg.floppy_connected = [false; 4];
+        assert!(validate_positional_media(&floppy, &cfg).is_err());
+        cfg.floppy_connected[0] = true;
+        cfg.floppy.drives[0] = None;
         assert!(validate_positional_media(&floppy, &cfg).is_err());
         let cd = parse(&["disc.cue"])?;
         assert!(validate_positional_media(&cd, &cfg).is_err());

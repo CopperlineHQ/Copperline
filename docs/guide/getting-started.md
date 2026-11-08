@@ -317,7 +317,9 @@ options override the named configuration regardless of argument order.
 Positional floppy images replace DF0's configured image playlist while retaining
 its write-protection and wiring. Positional floppy/CD media also overrides a
 remembered `[whdload] game` for this session. A missing DF0 or native CD drive is an error;
-Copperline does not infer a machine model from a disk. Hard-disk images need
+Copperline does not infer a machine model from a disk. A CD32/CDTV profile needs
+an explicitly enabled floppy drive (for example `--floppy-drives 1`) for floppy
+media, and `[floppy.df0] enabled = false` is reported instead of starting empty. Hard-disk images need
 controller and boot settings in a configuration file. SCSI/ATAPI CD drives
 likewise remain configuration-file attachments.
 
