@@ -236,17 +236,25 @@ impl RawConfig {
         });
     }
 
-    /// Replace DF0's image playlist, preserving its configured protection and
-    /// wiring. Validation still rejects a disabled or physical drive.
-    pub fn set_boot_floppies(&mut self, paths: &[PathBuf]) {
-        let drive = self.floppy.df0.get_or_insert_with(Default::default);
-        drive.path = None;
-        drive.paths = Some(
-            paths
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-        );
+    /// Apply explicit startup media before validation, preserving drive
+    /// protection/wiring and overriding any remembered WHDLoad boot target.
+    pub fn set_startup_media(&mut self, floppies: &[PathBuf], cd: Option<&Path>) {
+        if !floppies.is_empty() {
+            let drive = self.floppy.df0.get_or_insert_with(Default::default);
+            drive.path = None;
+            drive.paths = Some(
+                floppies
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect(),
+            );
+        }
+        if let Some(cd) = cd {
+            self.set_cd_image(cd);
+        }
+        if !floppies.is_empty() || cd.is_some() {
+            self.whdload.game = None;
+        }
     }
 
     /// The `[display]` defaults a game manifest carries: shader and bezel

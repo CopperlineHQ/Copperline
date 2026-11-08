@@ -1904,12 +1904,7 @@ fn read_profile_audio_word(chip_ram: &[u8], address: u32) -> u16 {
 /// image paths, while preserving machine choices and the drive's protection.
 fn load_cli_config(cli: &CliArgs) -> Result<(Config, config::RawConfig)> {
     let mut raw = load_raw_config(cli.config_path.as_deref(), &cli.overrides, cli.factory)?;
-    if !cli.boot_floppies.is_empty() {
-        raw.set_boot_floppies(&cli.boot_floppies);
-    }
-    if let Some(path) = &cli.boot_cd {
-        raw.set_cd_image(path);
-    }
+    raw.set_startup_media(&cli.boot_floppies, cli.boot_cd.as_deref());
     let cfg = Config::try_from(raw.clone())?;
     validate_positional_media(cli, &cfg)?;
     Ok((cfg, raw))
@@ -2104,7 +2099,7 @@ mod tests {
             std::fs::write(disk, vec![0u8; 901_120])?;
         }
         let config = dir.path().join("machine.toml");
-        std::fs::write(&config, "[machine]\nprofile = 'A1200'\n[floppy]\ndrives = 2\n[floppy.df0]\npath = 'missing-old-disk.adf'\nwrite_protected = false\n")?;
+        std::fs::write(&config, "[machine]\nprofile = 'A1200'\n[floppy]\ndrives = 2\n[floppy.df0]\npath = 'missing-old-disk.adf'\nwrite_protected = false\n[whdload]\ngame = 'missing-remembered-game.lha'\n")?;
         let cli = parse(&[
             "--factory",
             config.to_str().unwrap(),
@@ -2120,10 +2115,28 @@ mod tests {
         assert_eq!(drive.path, disk1);
         assert!(!drive.write_protected);
         assert!(cfg.floppy_connected[1]);
+        assert!(copperline::whdload::game_and_options(&raw).0.is_none());
         assert_eq!(
             Config::try_from(raw)?.floppy_playlists[0],
             cfg.floppy_playlists[0]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn positional_cd_supersedes_a_remembered_whdload_boot() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let config = dir.path().join("machine.toml");
+        std::fs::write(
+            &config,
+            "[machine]\nprofile='CD32'\n[whdload]\ngame='missing-remembered-game.lha'\n",
+        )?;
+        let cd = dir.path().join("disc.iso");
+        std::fs::write(&cd, vec![0u8; 2048 * 64])?;
+        let cli = parse(&["--factory", config.to_str().unwrap(), cd.to_str().unwrap()])?;
+        let (cfg, raw) = load_cli_config(&cli)?;
+        assert_eq!(cfg.cd_image_path, Some(cd));
+        assert!(copperline::whdload::game_and_options(&raw).0.is_none());
         Ok(())
     }
 
