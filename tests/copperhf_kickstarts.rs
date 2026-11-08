@@ -24,6 +24,8 @@
 //! files' header comments) -- extended here with FSHD/LSEG block builders,
 //! which no earlier milestone's tests needed.
 
+mod common;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -522,17 +524,6 @@ fn assert_ran_ok(tag: &str, output: &std::process::Output) {
     );
 }
 
-fn skip_if_debug(test_name: &str) -> bool {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping copperhf.device Kickstart test ({test_name}); run with --release \
-             (a debug emulator is far too slow for a full autoboot)"
-        );
-        return true;
-    }
-    false
-}
-
 // --- machine configs ---------------------------------------------------
 //
 // Kickstart 1.3 (V34): A500-shaped OCS/68000 config, matching `tests/
@@ -614,9 +605,7 @@ fn assert_golden(tag: &str, name: &str, screenshot_path: &Path) {
 }
 
 fn run_ofs_rdb_bootmark_case(tag: &str, rom_asset: &str, rom_line: &str, machine: &str) {
-    if skip_if_debug(tag) {
-        return;
-    }
+    common::require_optimized();
     let Some(_assets) = skip_if_missing(tag, &[rom_asset]) else {
         return;
     };
@@ -655,9 +644,7 @@ fn run_ofs_rdb_bootmark_case(tag: &str, rom_asset: &str, rom_line: &str, machine
 }
 
 fn run_ofs_rdbless_bootmark_case(tag: &str, rom_asset: &str, rom_line: &str, machine: &str) {
-    if skip_if_debug(tag) {
-        return;
-    }
+    common::require_optimized();
     let Some(_assets) = skip_if_missing(tag, &[rom_asset]) else {
         return;
     };
@@ -696,9 +683,7 @@ fn run_ofs_rdbless_bootmark_case(tag: &str, rom_asset: &str, rom_line: &str, mac
 }
 
 fn run_ofs_golden_case(tag: &str, rom_asset: &str, rom_line: &str, rdb: bool) {
-    if skip_if_debug(tag) {
-        return;
-    }
+    common::require_optimized();
     let Some(_assets) = skip_if_missing(tag, &[rom_asset]) else {
         return;
     };
@@ -825,9 +810,7 @@ fn kick32_ofs_rdbless_autoboots_and_writes_bootmark() {
 /// FFS handler through the FSHD/LSEG chain is its own compatibility data
 /// point).
 fn run_ffs_from_lseg_case(tag: &str, rom_asset: Option<&str>, rom_line: &str, machine: &str) {
-    if skip_if_debug(tag) {
-        return;
-    }
+    common::require_optimized();
     let mut required = vec!["copperhf/FastFileSystem"];
     if let Some(rom) = rom_asset {
         required.insert(0, rom);
@@ -926,9 +909,7 @@ fn aros_ffs_from_lseg_autoboots_and_writes_bootmark() {
 /// The PFS3->4 GiB case, shared between the Kickstart 3.1 row and the
 /// bundled-AROS row (`rom_asset` None: only the pfs3aio binary is needed).
 fn run_pfs3_over_4gib_case(tag: &str, rom_asset: Option<&str>, rom_line: &str, machine: &str) {
-    if skip_if_debug(tag) {
-        return;
-    }
+    common::require_optimized();
     let mut required = vec!["copperhf/pfs3aio"];
     if let Some(rom) = rom_asset {
         required.insert(0, rom);
@@ -1148,9 +1129,7 @@ fn assert_not_guru(tag: &str, screenshot_path: &Path) {
             test-assets/lide/wb13/Workbench1.3/l/FastFileSystem"]
 fn kick13_ffs_from_lseg_boots_without_crashing() {
     let tag = "kick13_ffs_from_lseg_boots_without_crashing";
-    if skip_if_debug(tag) {
-        return;
-    }
+    common::require_optimized();
     // Deliberately NOT test-assets/copperhf/FastFileSystem: that binary is
     // a modern release (V46) requiring utility.library, a Kickstart 2.0+
     // component 1.3 never shipped, and reliably crashes 1.3 as a result --

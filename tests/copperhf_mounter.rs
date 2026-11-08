@@ -34,8 +34,10 @@
 //! AmigaDOS would, to confirm the file actually exists and holds the
 //! marker.
 //!
-//! Release-only, like `tests/copperhf_device.rs`: a debug-build emulator is
+//! Optimized-only, like `tests/copperhf_device.rs`: a debug-build emulator is
 //! far too slow for a full AROS boot to a Startup-Sequence.
+
+mod common;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -379,13 +381,7 @@ fn run_mounter_test(tag: &str, image: &Image) {
 
 /// [`run_mounter_test`] with `machine` (TOML sections) added to the config.
 fn run_mounter_test_on(tag: &str, image: &Image, machine: &str) {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping copperhf.device M3 mounter test ({tag}); run with --release \
-             (a debug emulator is far too slow for a full AROS autoboot)"
-        );
-        return;
-    }
+    common::require_optimized();
 
     let root = repo_root();
     let scratch = scratch_dir(tag);
@@ -411,24 +407,26 @@ fn run_mounter_test_on(tag: &str, image: &Image, machine: &str) {
     .unwrap();
 
     let screenshot = scratch.join("copperhf.png");
-    let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
-        .current_dir(&root)
-        .env("RUST_LOG", "copperline=warn")
-        .env("COPPERLINE_AROS_DIR", root.join("assets/aros"))
-        .env("XDG_CONFIG_HOME", &config_home)
-        .arg("--factory")
-        .arg("--config")
-        .arg(&config)
-        .arg("--noaudio")
-        // Generous budget: a bundled-AROS autoboot to a Startup-Sequence
-        // over a real mounted hard-disk partition (rather than the `--run`
-        // staging volume tests/copperhf_device.rs boots) is slower than the
-        // ~11s DF0 boot, and this milestone's mounter is new code.
-        .arg("--screenshot-after")
-        .arg("60")
-        .arg(&screenshot)
-        .output()
-        .unwrap();
+    let output = common::output_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_copperline"))
+            .current_dir(&root)
+            .env("RUST_LOG", "copperline=warn")
+            .env("COPPERLINE_AROS_DIR", root.join("assets/aros"))
+            .env("XDG_CONFIG_HOME", &config_home)
+            .arg("--factory")
+            .arg("--config")
+            .arg(&config)
+            .arg("--noaudio")
+            // Generous budget: a bundled-AROS autoboot to a Startup-Sequence
+            // over a real mounted hard-disk partition (rather than the `--run`
+            // staging volume tests/copperhf_device.rs boots) is slower than the
+            // ~11s DF0 boot, and this milestone's mounter is new code.
+            .arg("--screenshot-after")
+            .arg("60")
+            .arg(&screenshot),
+        std::time::Duration::from_secs(300),
+    )
+    .unwrap();
     assert!(
         output.status.success(),
         "[{tag}] Copperline exited with {}\nstdout:\n{}\nstderr:\n{}",
@@ -456,11 +454,13 @@ fn run_mounter_test_on(tag: &str, image: &Image, machine: &str) {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn aros_autoboots_from_rdb_image() {
     run_mounter_test("rdb", &rdb_image());
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn aros_autoboots_from_rdbless_image() {
     run_mounter_test("rdbless", &rdbless_image());
 }
@@ -476,6 +476,7 @@ fn aros_autoboots_from_rdbless_image() {
 /// filesystem cannot open the device (the A1200 hides it: its pointers
 /// start with $00).
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn aros_autoboots_from_four_char_partition_in_32bit_ram() {
     run_mounter_test_on(
         "rdb-32bit-ram",

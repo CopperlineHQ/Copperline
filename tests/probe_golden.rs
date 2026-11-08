@@ -27,13 +27,13 @@
 //! and review the diff in the commit:
 //!
 //! ```sh
-//! COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
+//! COPPERLINE_BLESS_GOLDEN=ddfprobe cargo test --release --test probe_golden golden_ddfprobe -- --exact
 //! ```
 //!
 //! On mismatch the actual render and a diff mask are written under
 //! `target/probe-golden/` (uploaded as artifacts by CI).
 //!
-//! The suite runs release-only: `cargo test` in the debug profile skips it
+//! The suite runs optimized-only: `cargo test` in the debug profile ignores it
 //! (a debug-build emulator is far too slow for the ~16s emulated boots).
 //!
 //! Probes excluded by design: ddfprobe-cc5/-cc6 sit on deliberate race
@@ -41,9 +41,16 @@
 //! precession, so any unrelated timing change flips them), and ddfprobe-cc7
 //! replays a chip-RAM dump of a running demo that is not committed.
 
+mod common;
+
+#[allow(dead_code)]
+#[path = "../src/envcfg.rs"]
+mod envcfg;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 const ADF_SIZE: usize = 901_120; // 80 tracks * 2 sides * 11 sectors * 512
 const BOOTBLOCK_SIZE: usize = 1024;
@@ -61,6 +68,8 @@ enum Machine {
     /// A1200 shape (68EC020, AGA, 2M chip) for probes of AGA-only
     /// behaviour (FMODE wide fetches, extended BPLCON1 scroll).
     Aga,
+    /// A1200 profile exercising NTSC field geometry.
+    AgaNtsc,
 }
 
 /// One golden-render probe: name, main-program binary, emulated seconds
@@ -151,20 +160,29 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         Machine::Jit => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
-        Machine::Aga => "revision = \"AGA\"\n",
+        Machine::Aga | Machine::AgaNtsc => "revision = \"AGA\"\n",
     };
     let (cpu, memory) = match machine {
         Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
         Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
-        Machine::Aga => ("68EC020", "chip = \"2M\"\n"),
+        Machine::Aga | Machine::AgaNtsc => ("68EC020", "chip = \"2M\"\n"),
     };
     let acceleration = if matches!(machine, Machine::Jit) {
         "jit = true\nclock_mhz = 25\n"
     } else {
         ""
     };
+    let (profile, video) = if matches!(machine, Machine::AgaNtsc) {
+        (
+            "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n",
+            "NTSC",
+        )
+    } else {
+        ("", "PAL")
+    };
     format!(
         "rom = \"<bundled-aros>\"\n\
+         {profile}\
          [display]\n\
          overscan = \"full\"\n\
          [cpu]\n\
@@ -174,7 +192,7 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
          {memory}\
          [chipset]\n\
          {chipset}\
-         video = \"PAL\"\n\
+         video = \"{video}\"\n\
          [floppy.df0]\n\
          path = '{}'\n\
          write_protected = true\n",
@@ -230,22 +248,24 @@ fn capture_probe(p: &Probe, work: &Path) -> PathBuf {
     fs::write(&cfg_path, probe_config(&adf_path, p.machine)).expect("write config");
     let shot_path = work.join(format!("{name}.png"));
 
-    let output = Command::new(env!("CARGO_BIN_EXE_copperline"))
-        .current_dir(&root)
-        // The raw (unblended, line-doubled) framebuffer with recentring off:
-        // the calibrated forensic capture mode, byte-stable run to run.
-        .env("COPPERLINE_HCENTER", "0")
-        .env("COPPERLINE_SHOT_RAW", "1")
-        .env("COPPERLINE_AROS_DIR", root.join("assets/aros"))
-        .env("RUST_LOG", "copperline=warn")
-        .arg("--noaudio")
-        .arg("--config")
-        .arg(&cfg_path)
-        .arg("--screenshot-after")
-        .arg(format!("{seconds}"))
-        .arg(&shot_path)
-        .output()
-        .expect("run emulator");
+    let output = common::output_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_copperline"))
+            .current_dir(&root)
+            // The raw (unblended, line-doubled) framebuffer with recentring off:
+            // the calibrated forensic capture mode, byte-stable run to run.
+            .env("COPPERLINE_HCENTER", "0")
+            .env("COPPERLINE_SHOT_RAW", "1")
+            .env("COPPERLINE_AROS_DIR", root.join("assets/aros"))
+            .env("RUST_LOG", "copperline=warn")
+            .arg("--noaudio")
+            .arg("--config")
+            .arg(&cfg_path)
+            .arg("--screenshot-after")
+            .arg(format!("{seconds}"))
+            .arg(&shot_path),
+        Duration::from_secs(120),
+    )
+    .expect("run emulator");
     assert!(
         output.status.success(),
         "{name}: emulator exited with {}\nstderr tail:\n{}",
@@ -262,19 +282,23 @@ fn capture_probe(p: &Probe, work: &Path) -> PathBuf {
 }
 
 /// Capture one probe and compare it against its committed golden (or bless
-/// it when `COPPERLINE_BLESS_GOLDEN` is set). Each probe is its own `#[test]`
+/// it when `COPPERLINE_BLESS_GOLDEN` names this probe). Each probe is its own `#[test]`
 /// (see the macro below), so the libtest harness runs the emulator boots in
 /// parallel on the available cores.
 fn run_probe(p: &Probe) {
-    if cfg!(debug_assertions) {
-        eprintln!("skipping probe goldens; run with --release (a debug emulator is too slow)");
-        return;
-    }
+    common::require_optimized();
 
     let name = p.name;
     let root = repo_root();
     let golden_dir = root.join("timing-test/golden");
-    let bless = std::env::var_os("COPPERLINE_BLESS_GOLDEN").is_some();
+    let selected = envcfg::var("COPPERLINE_BLESS_GOLDEN");
+    if let Some(selected) = &selected {
+        assert!(
+            PROBES.iter().any(|p| p.name == selected),
+            "COPPERLINE_BLESS_GOLDEN must name one probe (for example ddfprobe), got {selected:?}"
+        );
+    }
+    let bless = selected.as_deref() == Some(name);
     let work = std::env::temp_dir().join(format!(
         "copperline-probe-golden-{}-{name}",
         std::process::id()
@@ -284,6 +308,31 @@ fn run_probe(p: &Probe) {
 
     let shot_path = capture_probe(p, &work);
     let golden_path = golden_dir.join(format!("{name}.png"));
+    let actual = load_png(&shot_path).expect("load capture");
+    if matches!(p.machine, Machine::AgaNtsc) {
+        // Require the source probe's visible 4:4:2:1 sprite staircase even
+        // when blessing, so a failed boot cannot become a blank reference.
+        let widths: Vec<_> = actual
+            .data
+            .chunks_exact(actual.width as usize * 4)
+            .map(|row| {
+                row.chunks_exact(4)
+                    .filter(|pixel| *pixel == [255, 255, 0, 255])
+                    .count()
+            })
+            .filter(|&width| width != 0)
+            .collect();
+        let expected = [vec![32; 64], vec![16; 32], vec![8; 32]].concat();
+        if widths != expected {
+            fs::create_dir_all(&diff_dir).expect("create diff dir");
+            fs::copy(&shot_path, diff_dir.join(format!("{name}-actual.png"))).expect("copy actual");
+        }
+        assert_eq!(
+            widths, expected,
+            "{name}: probe did not render the expected sprite staircase \
+             (actual in target/probe-golden/)"
+        );
+    }
 
     if bless {
         fs::create_dir_all(&golden_dir).expect("create golden dir");
@@ -296,12 +345,11 @@ fn run_probe(p: &Probe) {
     let mut failure = None;
     if !golden_path.exists() {
         failure = Some(format!(
-            "{name}: missing golden {} (generate with COPPERLINE_BLESS_GOLDEN=1)",
+            "{name}: missing golden {} (generate with COPPERLINE_BLESS_GOLDEN={name})",
             golden_path.display()
         ));
     } else {
         let golden = load_png(&golden_path).expect("load golden");
-        let actual = load_png(&shot_path).expect("load capture");
         if (golden.width, golden.height) != (actual.width, actual.height) {
             failure = Some(format!(
                 "{name}: geometry changed {}x{} -> {}x{}",
@@ -350,7 +398,7 @@ fn run_probe(p: &Probe) {
     assert!(
         failure.is_none(),
         "probe golden mismatch:\n  {}\n\nIf the change is an intentional hardware-model \
-         fix, re-bless with COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test \
+         fix, re-bless with COPPERLINE_BLESS_GOLDEN={name} cargo test --release --test \
          probe_golden and review the render diff in the commit.",
         failure.unwrap()
     );
@@ -360,8 +408,10 @@ fn run_probe(p: &Probe) {
 /// (the shared work is per-probe; there is no cross-probe state).
 macro_rules! probe_tests {
     ($($test_name:ident => $p:expr;)*) => {
+        const PROBES: &[Probe] = &[$($p),*];
         $(
             #[test]
+            #[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
             fn $test_name() {
                 run_probe(&$p);
             }
@@ -370,6 +420,7 @@ macro_rules! probe_tests {
 }
 
 probe_tests! {
+    golden_ntsc_aga_sprites => Probe { name: "ntsc-aga-sprites", program: "agashres-sprites.bin", seconds: 16.0, machine: Machine::AgaNtsc };
     golden_jit_bus_boundary => Probe { name: "jit-bus-boundary", program: "jit-bus-boundary.bin", seconds: 16.0, machine: Machine::Jit };
     golden_timing_test => probe("timing-test", "test.bin", 32.0);
     golden_ddfprobe => probe("ddfprobe", "ddfprobe.bin", 16.0);

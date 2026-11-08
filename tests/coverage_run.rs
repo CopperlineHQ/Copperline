@@ -11,6 +11,8 @@
 //! cargo test --release --test coverage_run -- --ignored
 //! ```
 
+mod common;
+
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -40,13 +42,7 @@ fn fnda(info: &str, name: &str) -> u64 {
 #[test]
 #[ignore = "boots the bundled AROS ROM; release build only"]
 fn run_coverage_writes_lcov_with_the_probe_functions() {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping --coverage end-to-end run; run with --release \
-             (a debug emulator is far too slow for a full AROS boot + --run staging)"
-        );
-        return;
-    }
+    common::require_optimized();
     let root = repo_root();
     let scratch =
         std::env::temp_dir().join(format!("copperline-coverage-run-{}", std::process::id()));

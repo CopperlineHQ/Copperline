@@ -576,8 +576,8 @@ as well as sprite-playfield bit 1 when the enabled plane match fails.
 These fixture updates introduce no further emulation changes.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 47 takes ~20 s on an
-8-core host vs ~90 s sequentially).
+parallel on the available cores. The debug profile reports these tests as
+ignored; `--profile ci` and `--release` execute the comparisons.
 
 ### vAmiga AGA cross-check (2026-08-27)
 
@@ -836,11 +836,30 @@ race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
 committed.
 
-When a hardware-model fix intentionally moves calibrated output, re-bless
-and review the render diff as part of the change:
+When a hardware-model fix intentionally moves calibrated output, name each
+changed probe explicitly and review its render diff as part of the change:
 
 ```sh
-COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
+COPPERLINE_BLESS_GOLDEN=ddfprobe cargo test --release --test probe_golden golden_ddfprobe -- --exact
+```
+
+The blessing variable takes one probe name, not `1` or `all`; every other
+probe still compares against its reference if it runs. An unknown name fails.
+Debug builds report the suite as ignored; forcing it in debug fails.
+Each emulator capture has a 120-second wall-clock timeout.
+
+`ntsc-aga-sprites` runs `agashres-sprites.bin` on the NTSC A1200 profile,
+pinning the shorter field geometry and AGA sprite widths. Before blessing,
+the test also requires the visible 4:4:2:1 sprite-width staircase.
+If that check fails, the actual capture is saved in `target/probe-golden/`
+before the assertion fails, including during a rejected bless.
+This is a deterministic model regression, not a physical NTSC reference.
+CI builds pinned vasm 2.0b from a source mirror and requires every tracked
+`timing-test/*.bin` (including the boot block) to match its adjacent source.
+Run the same check locally with:
+
+```sh
+python3 tools/check-probe-binaries.py --vasm /path/to/vasmm68k_mot
 ```
 
 On a mismatch, CI uploads the actual renders and diff masks

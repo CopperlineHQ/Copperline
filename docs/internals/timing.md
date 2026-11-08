@@ -1290,13 +1290,20 @@ positions. `tests/probe_golden.rs` wraps each `.bin` in a bootable ADF,
 boots it on the bundled AROS ROM, and compares a screenshot pixel for pixel
 with `timing-test/golden/<name>.png`; the probes named in this chapter
 (`ddfprobe-ddfmiss`, `ddfprobe-sotb`, `hamprobe-select`,
-`copprobe-jmpread`, ...) are among them. The suite runs only in release
-builds. After an intentional change, re-bless the goldens and review the
-render diff:
+`copprobe-jmpread`, ...) are among them. The suite runs in optimized (`ci` or `release`) builds and is reported as
+ignored in debug builds. After an intentional change, name the affected
+probe when blessing and review its render diff:
 
 ```sh
-COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
+COPPERLINE_BLESS_GOLDEN=ddfprobe cargo test --release --test probe_golden golden_ddfprobe -- --exact
 ```
+
+The blessing variable accepts one probe name; `1`, `all`, and unknown names
+fail. Other probes continue to compare against their references. Captures
+have a 120-second wall-clock limit, and CI reassembles the tracked probe
+binaries with pinned vasm before accepting their source/binary consistency.
+The suite also includes `ntsc-aga-sprites`, an NTSC A1200-profile render of
+the AGA sprite-width staircase (a model regression, not a hardware capture).
 
 The two probes that display live E-clock-referenced counts (`timing-test`
 itself and `bltprobe-pace`) also move whenever the bundled AROS ROM is
