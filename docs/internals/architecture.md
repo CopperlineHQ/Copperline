@@ -294,6 +294,19 @@ clock. `COPPERLINE_PRESENT_PROFILE=1` enables per-attempt CPU timings for
 acquisition/upload, draw-command recording, and submission; these do not
 measure GPU completion or display scanout.
 
+Every texture upload for a frame (the picture the scaler samples, the RTG
+board frame and its UI atlas) runs inside that draw callback, after the
+surface has been acquired. A wgpu queue write is staged until the next
+submit, and a skipped present has none: macOS reports a covered, minimised
+or other-Space window as occluded, and pixels returns that as `Ok(())`
+without submitting. Uploading before the acquire left one staged copy of
+the frame behind for every frame the window stayed hidden, so an RTG
+session in a covered window grew by its board frame size times the refresh
+rate (about 95 MB/s at 800x600 16-bit) until the host ran out of memory.
+As a backstop, `presenter.rs` submits an empty command list whenever a
+present does not reach pixels' own submit, which flushes anything still
+staged.
+
 The main presentation path uses the **main thread** (event loop, core,
 and pacer), the **`copperline-render`** and **`copperline-present`**
 workers, and the **cpal audio callback**. Rendering and presentation pass
