@@ -8,6 +8,13 @@ for the earlier release notes.
 
 ## Unreleased
 
+### Changed
+
+- The browser, libretro and publisher-kit player frontends are now members
+  of the repository's Cargo workspace. They share the root `Cargo.lock` and
+  build into the root `target/` directory, so a source-built libretro core
+  is at `target/release/` rather than `crates/copperline-libretro/target/release/`.
+
 ### Fixed
 
 - External floppy drives answer the /RDY ID probe while their motor is off,

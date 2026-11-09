@@ -42,11 +42,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          workspaces: crates/copperline-libretro -> target
       - name: Formatting and lint
+        # --no-deps keeps the lint on the libretro crate itself. The core is a
+        # workspace member too, so without it clippy would also lint the core
+        # in libretro's reduced feature set; the core's own CI lint covers it.
         run: |
           cargo fmt --manifest-path crates/copperline-libretro/Cargo.toml --check
-          cargo clippy --manifest-path crates/copperline-libretro/Cargo.toml --all-targets --locked -- -D warnings
+          cargo clippy --manifest-path crates/copperline-libretro/Cargo.toml --all-targets --locked --no-deps -- -D warnings
       - name: Fetch WHDLoad support archives
         run: tools/fetch-whdload.sh
       - name: Deterministic frontend tests
@@ -57,14 +59,14 @@ jobs:
         run: cargo build --manifest-path crates/copperline-libretro/Cargo.toml --release --locked
       - name: Shared-library ABI and replay
         run: |
-          python tools/check-libretro.py "crates/copperline-libretro/target/release/${{ matrix.library }}" --screenshot libretro.png
-          python tools/check-libretro.py "crates/copperline-libretro/target/release/${{ matrix.library }}" --model A1200 --video NTSC
+          python tools/check-libretro.py "target/release/${{ matrix.library }}" --screenshot libretro.png
+          python tools/check-libretro.py "target/release/${{ matrix.library }}" --model A1200 --video NTSC
       - name: RetroArch rollback netplay
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y retroarch xvfb libxtst6
-          python tools/check-libretro-netplay.py "crates/copperline-libretro/target/release/${{ matrix.library }}" --output netplay-test
+          python tools/check-libretro-netplay.py "target/release/${{ matrix.library }}" --output netplay-test
       - name: Netplay logs
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v7
@@ -75,7 +77,7 @@ jobs:
         run: |
           mkdir -p libretro-package/aros libretro-package/system/whdboot
           cp assets/whdboot/*.lha libretro-package/system/whdboot/
-          cp "crates/copperline-libretro/target/release/${{ matrix.library }}" "libretro-package/${{ matrix.installed }}"
+          cp "target/release/${{ matrix.library }}" "libretro-package/${{ matrix.installed }}"
           cp crates/copperline-libretro/copperline_libretro.info libretro-package/
           cp LICENSE libretro-package/
           cp assets/aros/LICENSE assets/aros/ACKNOWLEDGEMENTS assets/aros/README.md libretro-package/aros/

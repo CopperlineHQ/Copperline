@@ -42,6 +42,11 @@ Resolving a forward merge:
 
 - `Cargo.toml` and the lockfiles: a release bump on `v1` edits the version
   line that `main` also owns. Keep `main`'s version.
+- `crates/copperline-web/Cargo.lock`, `crates/copperline-player/Cargo.lock`
+  and `crates/copperline-libretro/Cargo.lock`: `main` deleted them when the
+  frontends joined the root workspace, which locks them in the root
+  `Cargo.lock`. A `v1` change to one shows as a modify/delete conflict; keep
+  the deletion.
 - `packaging/linux/dev.copperline.Copperline.metainfo.xml`: keep both
   sides, so `main` lists every release.
 - `Formula/copperline.rb`: take `v1`'s while `v1` is the newest stable line.
@@ -137,26 +142,25 @@ readers of an older version have a matching manual.
 
 ## Version bump
 
-`crates/copperline-web`, `crates/copperline-player`,
-`crates/copperline-libretro`, `crates/cputest-runner`, and
-`crates/hostsocket-plugin` are separate workspaces with their own committed
-`Cargo.lock` files, so a root build never refreshes them. The web, player,
-and libretro crates pin the root `copperline` version by path; the cputest
-runner independently pins the published `m68k` dependency, and the HostSocket workspace pins the
-dependency graph used to build the committed
-`assets/hostsocket/hostsocket_plugin.wasm`. If a manifest changes without
-regenerating its matching nested lock, every `cargo build --locked` in that
-crate fails at the release tag, and tags are immutable so the breakage cannot
-be fixed after the fact (issue #219: the `v0.12.0` tag shipped
-`crates/copperline-web/Cargo.lock` still pinning `copperline 0.11.0`).
+The root `Cargo.lock` covers the whole root workspace: the emulator and the
+browser, player, and libretro frontends that build on it by path. Any
+unlocked Cargo command at the root rewrites its `copperline` version line
+after a bump. `crates/cputest-runner` and `crates/hostsocket-plugin` are
+standalone workspaces with their own committed `Cargo.lock` files, so a root
+build never refreshes them: the cputest runner independently pins the
+published `m68k` dependency, and the HostSocket workspace pins the dependency
+graph used to build the committed `assets/hostsocket/hostsocket_plugin.wasm`.
+If a manifest changes without regenerating its matching lock, every
+`cargo build --locked` in that crate fails at the release tag, and tags are
+immutable so the breakage cannot be fixed after the fact (issue #219: the
+`v0.12.0` tag shipped the then-separate `crates/copperline-web/Cargo.lock`
+still pinning `copperline 0.11.0`).
 
-In the same commit as any version bump, resync the affected nested locks
-and commit them:
+In the same commit as any version bump, resync the affected locks and commit
+them:
 
 ```sh
-(cd crates/copperline-web && cargo update -p copperline) # root version bump
-(cd crates/copperline-player && cargo update -p copperline)
-(cd crates/copperline-libretro && cargo update -p copperline)
+cargo tree --workspace > /dev/null                       # root version bump
 (cd crates/cputest-runner && cargo update -p m68k)       # m68k requirement change
 (cd crates/hostsocket-plugin && cargo update)            # its manifest/dependencies change
 ```
@@ -174,18 +178,16 @@ bump commit before any CI had run against it.
 Run these before tagging a source release:
 
 ```sh
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --locked
 ```
 
-Confirm every nested workspace lockfile is in sync (fails if a version bump
-missed one; see "Version bump" above):
+Confirm every lockfile is in sync (fails if a version bump missed one; see
+"Version bump" above):
 
 ```sh
-(cd crates/copperline-web && cargo tree --locked > /dev/null)
-(cd crates/copperline-player && cargo tree --locked > /dev/null)
-(cd crates/copperline-libretro && cargo tree --locked > /dev/null)
+cargo tree --workspace --locked > /dev/null
 (cd crates/cputest-runner && cargo tree --locked > /dev/null)
 (cd crates/hostsocket-plugin && cargo tree --locked > /dev/null)
 ```

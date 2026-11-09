@@ -14,6 +14,38 @@ publish = false
 # `copperline-bench` bin target exists.
 default-run = "copperline"
 
+# The emulator and the frontends that build on it by path (browser,
+# libretro, publisher-kit player) form one workspace: one Cargo.lock, one
+# target directory, and this manifest's [patch] and [profile] sections for
+# all of them. A plain `cargo build` or `cargo test` here still builds only
+# the emulator; reach a frontend with `-p` or by running Cargo from its
+# directory. The excluded crates stay standalone with their own lockfiles:
+# the WASM board plugins (size-tuned panic=abort profiles, dependency trees
+# kept out of the emulator's), the cputest runner, the fuzz harnesses, and
+# the bezel preview tool. `.claude` and `target` are excluded because whole
+# checkouts can live there (agent worktrees, the performance gate's baseline
+# in target/performance-baseline): Cargo searches upward for a workspace
+# root, so without the exclusion a nested checkout of a revision that
+# predates this workspace would fail to build as an unlisted member. The
+# root package is a member implicitly; listing "." would claim every path
+# below it and override `exclude`.
+[workspace]
+members = [
+    "crates/copperline-libretro",
+    "crates/copperline-player",
+    "crates/copperline-web",
+]
+default-members = ["."]
+exclude = [
+    ".claude",
+    "crates/cputest-runner",
+    "crates/hostsocket-plugin",
+    "crates/zz9k-plugin",
+    "fuzz",
+    "target",
+    "tools/bezel-preview",
+]
+
 [features]
 default = [
     "midi",
@@ -494,6 +526,13 @@ opt-level = 3
 # rendering than thin LTO, and the resulting executable is smaller.
 lto = "fat"
 codegen-units = 1
+
+# The libretro core is a shared library: keep it unstripped. Cargo's
+# automatic debuginfo stripping can misalign Mach-O dylib LINKEDIT tables
+# rejected by macOS 27's loader (rust#157750). Profiles inheriting from
+# release (`ci` below) inherit this override.
+[profile.release.package.copperline-libretro]
+strip = "none"
 
 # CI needs optimized emulation, but linking every test executable with fat
 # LTO dominates build time. Keep release semantics (including disabled debug

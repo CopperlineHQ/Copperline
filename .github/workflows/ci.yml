@@ -115,11 +115,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          workspaces: |
-            . -> target
-            crates/copperline-player -> target
       - name: Formatting
-        run: cargo fmt --check
+        # --all reaches the workspace's frontend crates (browser, libretro,
+        # player) as well as the emulator itself.
+        run: cargo fmt --all --check
       - name: Clippy
         # Hold the binary, tests, examples, and diagnostic feature gates to
         # the same warning-clean standard used for release checks.
@@ -134,11 +133,6 @@ jobs:
         # (docs/guide/publishing.md).
         working-directory: crates/copperline-player
         run: cargo check --locked
-      - name: Player crate formatting
-        # A standalone workspace, so the root Formatting step never
-        # reaches it.
-        working-directory: crates/copperline-player
-        run: cargo fmt --check
 
   probe-binaries:
     name: Probe assembly consistency
@@ -251,8 +245,10 @@ jobs:
   cargo-deny:
     timeout-minutes: 30
     name: Dependency policy (${{ matrix.name }})
-    # Frontends have standalone workspaces and lockfiles, so check each
-    # shipped dependency graph explicitly.
+    # The frontends share the root lockfile but each ships its own
+    # dependency graph (the core built with different features), so check
+    # each graph explicitly: a member manifest makes that crate the sole
+    # root of the graph cargo-deny checks.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -611,13 +607,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-          components: rustfmt, clippy
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-          workspaces: |
-            . -> target
-            crates/copperline-web -> target
       - name: Core without the desktop frontend
         run: cargo check --no-default-features --locked
       - name: Clippy on the portable core (browser and libretro feature set)
@@ -641,11 +634,6 @@ jobs:
       - name: Web wrapper unit tests
         working-directory: crates/copperline-web
         run: cargo test --locked
-      - name: Web crate formatting
-        # The web crate is a standalone workspace, so the root Formatting
-        # step never reaches it.
-        working-directory: crates/copperline-web
-        run: cargo fmt --check
       - name: Browser rollback netplay on the release WASM bundle
         working-directory: crates/copperline-web
         run: |
@@ -653,7 +641,7 @@ jobs:
           test -n "$version"
           cargo install wasm-bindgen-cli --version "$version" --locked
           RUSTFLAGS="-C target-feature=+simd128" cargo build --release --target wasm32-unknown-unknown --locked
-          wasm-bindgen --target web --out-dir pkg target/wasm32-unknown-unknown/release/copperline_web.wasm
+          wasm-bindgen --target web --out-dir pkg ../../target/wasm32-unknown-unknown/release/copperline_web.wasm
           node ../../tools/check-web-netplay.mjs pkg
           node ../../tools/check-web-netplay-swaps.mjs pkg
       - name: Browser page controller tests

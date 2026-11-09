@@ -23,7 +23,8 @@ from the repository root:
 cargo build --manifest-path crates/copperline-libretro/Cargo.toml --release --locked
 ```
 
-The output is under `crates/copperline-libretro/target/release/`:
+The output is under `target/release/` (the libretro core shares the
+repository's Cargo workspace and target directory):
 
 | Platform | Build output | Installed core filename |
 |---|---|---|
@@ -324,9 +325,9 @@ field history or phosphor effects. Frontend shaders can be applied normally.
 
 ```sh
 cargo fmt --manifest-path crates/copperline-libretro/Cargo.toml --check
-cargo clippy --manifest-path crates/copperline-libretro/Cargo.toml --all-targets --locked -- -D warnings
+cargo clippy --manifest-path crates/copperline-libretro/Cargo.toml --all-targets --locked --no-deps -- -D warnings
 cargo test --manifest-path crates/copperline-libretro/Cargo.toml --profile ci --locked
-python3 tools/check-libretro.py crates/copperline-libretro/target/release/libcopperline_libretro.dylib --screenshot /tmp/libretro.png
+python3 tools/check-libretro.py target/release/libcopperline_libretro.dylib --screenshot /tmp/libretro.png
 ```
 
 Use the matching library suffix on Linux or Windows. The Rust test frontend

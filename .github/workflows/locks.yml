@@ -1,15 +1,15 @@
 name: Lockfile sync
 
 # Verifies every committed Cargo.lock still resolves with --locked, i.e. is
-# in sync with its workspace's manifests. The root lock is already exercised
-# by the --locked builds in ci.yml, but the nested workspaces mostly are not:
-# crates/copperline-web, crates/cputest-runner, and crates/hostsocket-plugin
-# carry their own committed locks. The web lock pins the sibling `copperline`
-# path package by version; the cputest-runner lock pins its `m68k`
-# dependency; the hostsocket-plugin lock pins its `smoltcp` dependency (the
-# committed assets/hostsocket/hostsocket_plugin.wasm is built from it). A manifest
+# in sync with its workspace's manifests. The root lock covers the emulator
+# and the frontends in its workspace (browser, libretro, player), and
+# `cargo tree --workspace` resolves all of their graphs in one step.
+# The standalone crates the root workspace excludes carry their own
+# committed locks: the cputest-runner lock pins its `m68k` dependency and the
+# hostsocket-plugin lock pins its `smoltcp` dependency (the committed
+# assets/hostsocket/hostsocket_plugin.wasm is built from it). A manifest
 # update without a lock refresh breaks `cargo build --locked` (issue #219:
-# the v0.12.0 tag shipped crates/copperline-web/Cargo.lock still pinning
+# the v0.12.0 tag shipped a frontend lockfile, then separate, still pinning
 # copperline 0.11.0).
 #
 # The v* tag trigger is the part that closes issue #219: the drift reached
@@ -39,21 +39,13 @@ jobs:
       # anything, and --locked turns any would-be lockfile update into an
       # error, so each check runs in seconds.
       - name: Root workspace
-        run: cargo tree --locked > /dev/null
-      - name: crates/copperline-web
-        working-directory: crates/copperline-web
-        run: cargo tree --locked > /dev/null
-      - name: crates/copperline-libretro
-        working-directory: crates/copperline-libretro
-        run: cargo tree --locked > /dev/null
+        # --workspace resolves every member's graph, not just the emulator's.
+        run: cargo tree --workspace --locked > /dev/null
       - name: crates/cputest-runner
         working-directory: crates/cputest-runner
         run: cargo tree --locked > /dev/null
       - name: crates/hostsocket-plugin
         working-directory: crates/hostsocket-plugin
-        run: cargo tree --locked > /dev/null
-      - name: crates/copperline-player
-        working-directory: crates/copperline-player
         run: cargo tree --locked > /dev/null
       - name: CPU consumers use the same m68k core
         # Root tests do not run dependency tests. Core CI gates those suites;
