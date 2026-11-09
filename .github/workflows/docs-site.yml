@@ -46,6 +46,7 @@ jobs:
           # MyST prepends this to every internal link and asset URL.
           BASE_URL: /docs
         run: |
+          python3 ../tools/prepare-docs.py
           myst build --html --ci --strict
           test -s _build/html/index.html
       - name: Inject the analytics snippet

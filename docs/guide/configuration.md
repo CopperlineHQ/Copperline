@@ -50,6 +50,11 @@ and out-of-range sizes. Media are opened during startup; depending on the
 device, an unavailable image either stops startup or leaves the unit absent
 with a warning in the log.
 
+For older key spellings and `unknown field` errors, see
+[configuration compatibility](troubleshooting.md#configuration-will-not-load)
+and the [changelog](../changelog.md). Match the manual version to the executable
+before copying a configuration.
+
 ## Paths on Windows
 
 This applies to every path field below (`rom`, disk images, hard-drive

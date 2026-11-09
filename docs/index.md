@@ -8,6 +8,9 @@ abstract: |
 
 # Copperline
 
+```{include} _version.md
+```
+
 Copperline is a cycle-driven Commodore Amiga emulator (OCS, ECS, and AGA)
 written in Rust. The emulator advances the CPU (68000 through 68060), Agnus,
 Denise, Paula, CIAs, floppy subsystem, and chip bus on a unified colour-clock
@@ -29,6 +32,9 @@ Spaceballs' *State of the Art* (1992) running in Copperline.
 - [](guide/getting-started) -- Installation, building from source, and first boot.
 - [](guide/configuration) -- The `copperline.toml` reference for machine
   profiles, memory, storage, expansion boards, and input.
+- [](guide/troubleshooting) -- Version matching, configuration upgrades, save-state
+  compatibility, common failures and known emulation limits.
+- [Changelog](changelog.md) -- User-visible changes and earlier compatibility milestones.
 - [](guide/ui) -- Window controls, status bar, keyboard shortcuts, and gamepad mapping.
 - [](guide/whdload) -- Direct launching and library management for WHDLoad packages.
 - [](guide/run) -- Booting straight into cross-compiled Amiga executables.

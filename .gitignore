@@ -86,6 +86,7 @@ copperline-video-*.avi
 # MyST documentation build output (see docs/README.md). The root copy
 # appears when myst runs from the repository root rather than docs/.
 /docs/_build
+/docs/_version.md
 /_build
 
 # Python bytecode from the tools/ helper scripts.

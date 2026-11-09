@@ -680,7 +680,9 @@ jobs:
         uses: typst-community/setup-typst@v5
       - name: Build HTML
         working-directory: docs
-        run: myst build --html --ci --strict --check-links
+        run: |
+          python3 ../tools/prepare-docs.py
+          myst build --html --ci --strict --check-links
       - name: Build PDF
         working-directory: docs
         # The PDF export merges every chapter into one document, so it is the

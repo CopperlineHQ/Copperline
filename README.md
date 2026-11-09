@@ -9,6 +9,13 @@ Copperline is a cycle-driven Commodore Amiga emulator (OCS, ECS, and AGA) writte
 
 It boots out of the box with the bundled open-source AROS Kickstart replacement, and supports official Kickstart ROMs (1.x through 3.2, plus the CDTV and CD32 extended ROMs), DiagROM, and standard disk, hardfile, and CD media.
 
+The [manual](https://copperline.dev/docs/),
+[troubleshooting and known limits](docs/guide/troubleshooting.md), and
+[changelog](CHANGELOG.md) cover setup and upgrades. Match the manual's version
+label to **About**, which includes the revision for an untagged source build;
+`copperline --version` prints only the package version. Each release carries
+its own PDF manual.
+
 ## Features
 
 - **Chipset and machine models**: OCS, ECS, and AGA support with profiles from the A500 through the A4000, plus CDTV and CD32.

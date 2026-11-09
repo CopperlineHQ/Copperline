@@ -68,6 +68,28 @@ checked whichever branch they target. Those workflows save Rust build caches
 only on `main`; on `v1` they restore the default branch's. The CPU
 conformance workflow follows the same cache policy for PR and scheduled runs.
 
+## Changelog and manual compatibility
+
+Update `CHANGELOG.md` in the same change as user-visible behaviour. Record
+configuration/CLI renames with the status of old spellings (alias, ignored or
+rejected), changed defaults, and save-state container/chunk changes with the
+versions that can read them. Keep unreleased entries separate from tagged
+releases. Before tagging, move the release entries out of **Unreleased** and
+add the version and date. Older compatibility milestones are deliberately
+selective, not a reconstruction of every historical release.
+
+Review `docs/guide/troubleshooting.md` when a compatibility rule or hardware
+limit changes. The HTML banner and sidebar footer, and the PDF opening page,
+are generated from the checked-out package version and source revision; run
+`python3 tools/prepare-docs.py` before building HTML (the PDF helper does this
+automatically). After a forward merge, regenerate from the destination branch
+rather than keeping the maintenance branch's generated version text.
+
+The published `/docs` site describes the last published build, which may be a
+different series from an installed executable. Keep the version identity in
+the publication build, and attach the version-named PDF to every release so
+readers of an older version have a matching manual.
+
 ## Before Creating the Public Repository
 
 1. Create the public repository from a clean tree with rewritten history.
