@@ -54,21 +54,29 @@ jobs:
         # tests compiling (#[ignore] only affects execution). The JSON output
         # maps each test target to its hash-suffixed executable so the binaries
         # can be staged under stable names for the fan-out jobs.
+        #
+        # Every ordinary (non-test) binary goes to ci-bins/bin under its own
+        # file name. Integration tests spawn them through compile-time
+        # CARGO_BIN_EXE_<name> paths (target/ci/<name>), so the test jobs copy
+        # the whole directory back there; staging all of them, rather than a
+        # named list, keeps a new CARGO_BIN_EXE_* user from finding its
+        # binary missing.
         run: |
           cargo test --profile ci --locked --no-run --timings --message-format=json > cargo-test-build.json
-          mkdir -p ci-bins
-          cp target/ci/copperline ci-bins/
-          jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .executable != null)
-                   | [.target.kind[0], .target.name, .executable] | @tsv' cargo-test-build.json \
-            | while IFS=$'\t' read -r kind name exe; do
-                case "$kind:$name" in
-                  lib:copperline)        cp "$exe" ci-bins/unit-lib ;;
-                  bin:*)                 cp "$exe" "ci-bins/unit-bin-$name" ;;
-                  test:probe_golden)     cp "$exe" ci-bins/probe_golden ;;
-                  test:*)                cp "$exe" "ci-bins/test-$name" ;;
+          mkdir -p ci-bins/bin
+          jq -r 'select(.reason == "compiler-artifact" and .executable != null)
+                   | [(.profile.test | tostring), .target.kind[0], .target.name, .executable] | @tsv' cargo-test-build.json \
+            | while IFS=$'\t' read -r test kind name exe; do
+                case "$test:$kind:$name" in
+                  false:bin:*)            cp "$exe" ci-bins/bin/ ;;
+                  true:lib:copperline)    cp "$exe" ci-bins/unit-lib ;;
+                  true:bin:*)             cp "$exe" "ci-bins/unit-bin-$name" ;;
+                  true:test:probe_golden) cp "$exe" ci-bins/probe_golden ;;
+                  true:test:*)            cp "$exe" "ci-bins/test-$name" ;;
                 esac
               done
-          ls -l ci-bins
+          test -x ci-bins/bin/copperline
+          ls -l ci-bins ci-bins/bin
       - name: Upload binaries for the test jobs
         uses: actions/upload-artifact@v7
         with:
@@ -286,7 +294,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          chmod +x ci-bins/*
+          chmod +x ci-bins/* ci-bins/bin/*
           ./ci-bins/unit-lib video::window::egui_debugger:: | tee inspector-tests.txt
           grep -Eq '^test result: ok\. [1-9][0-9]* passed;' inspector-tests.txt
       - name: Unit tests
@@ -302,9 +310,13 @@ jobs:
             "$suite"
           done
       - name: Integration tests
+        # The suites spawn copperline, copperline-ctl, and the other ordinary
+        # binaries through compile-time CARGO_BIN_EXE_* paths under target/ci
+        # (the same absolute path in every job of this repo on hosted
+        # runners), so restore everything the build job staged there first.
         run: |
           mkdir -p target/ci
-          cp ci-bins/copperline target/ci/copperline
+          cp ci-bins/bin/* target/ci/
           for suite in ci-bins/test-*; do
             "$suite"
           done
@@ -337,11 +349,11 @@ jobs:
         # The test harness spawns the emulator through the compile-time
         # CARGO_BIN_EXE_copperline path, which on hosted runners is the
         # same absolute path in every job of this repo -- hence the copy
-        # into target/ci before running.
+        # of the staged binaries into target/ci before running.
         run: |
-          chmod +x ci-bins/*
+          chmod +x ci-bins/* ci-bins/bin/*
           mkdir -p target/ci
-          cp ci-bins/copperline target/ci/copperline
+          cp ci-bins/bin/* target/ci/
           ./ci-bins/probe_golden
       - name: Upload probe render diffs
         # On a golden mismatch the test writes the actual renders and diff
@@ -440,11 +452,11 @@ jobs:
         # The image-regression harness spawns the emulator through the
         # compile-time CARGO_BIN_EXE_copperline path, which on hosted
         # runners is the same absolute path in every job of this repo --
-        # hence the copy into target/ci.
+        # hence the copy of the staged binaries into target/ci.
         run: |
-          chmod +x ci-bins/*
+          chmod +x ci-bins/* ci-bins/bin/*
           mkdir -p target/ci
-          cp ci-bins/copperline target/ci/copperline
+          cp ci-bins/bin/* target/ci/
       - name: Restore cached DiagROM
         id: diagrom-cache
         uses: actions/cache@v6
