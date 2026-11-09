@@ -11,6 +11,9 @@ run headless by itself: add a capture flag to end the run.
 `--warp-boot` and `--warp-until` only affect windowed sessions, since a
 capture run is already unthrottled from the start.
 
+To watch and drive an interactive session where there is no window server,
+for example over SSH, see [Terminal display](terminal.md).
+
 Physical floppy drives attached through [FluxBridge](fluxbridge.md) require
 wall-clock pacing. For repeatable captures, use image-backed media, a fixed
 RTC seed when a clock is fitted, and repeatable inputs. Live networking,

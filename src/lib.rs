@@ -140,6 +140,10 @@ pub mod sdmac;
 pub mod serial;
 pub mod sf2000sd;
 pub mod smc;
+// `--terminal`: the machine inside a Kitty-protocol terminal. Only the
+// desktop frontend drives it.
+#[cfg(feature = "frontend")]
+pub mod terminal;
 pub mod timebase;
 pub mod timestamp;
 pub mod timetravel;

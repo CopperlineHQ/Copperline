@@ -49,6 +49,7 @@ project:
         - file: guide/winuae-state.md
         - file: guide/netplay.md
         - file: guide/headless.md
+        - file: guide/terminal.md
         - file: guide/browser.md
         - file: guide/libretro.md
         - file: guide/publishing.md
@@ -145,6 +146,7 @@ project:
         - guide/winuae-state.md
         - guide/netplay.md
         - guide/headless.md
+        - guide/terminal.md
         - guide/browser.md
         - guide/libretro.md
         - guide/publishing.md
