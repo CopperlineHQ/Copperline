@@ -255,6 +255,9 @@ static void endinfo(void) {
 }
 
 static void safe_memcpy(uae_u8* d, uae_u8* s, int size) {
+    /* Local patch: optional absent memory regions have size -1 and NULL
+     * buffers. Never turn that into a huge memcpy on hosts using glibc. */
+    if (size <= 0) return;
     // assume this is true
     assert(safe_memory_start == 0xffffffff);
     assert(safe_memory_end == 0xffffffff);

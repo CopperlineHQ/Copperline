@@ -47,6 +47,8 @@ embedding runner needs:
   propagate as failures. Rust preflight additionally checks the pinned
   generator's complete numbered-file sequence and final completion footer
   before C parses it; `--pr` requires the exact shared opcode list.
+- Copies of absent optional memory regions are skipped instead of passing a
+  negative length and NULL buffers to `memcpy` (a glibc crash).
 
 `capstone-stub/` shadows the capstone disassembler include the runner uses
 for pretty-printing failing instructions; the stub reports no disassembly
