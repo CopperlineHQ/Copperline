@@ -303,6 +303,9 @@ in the root of the repository. Copy it to `copperline.toml` or pass it via `--co
 ./target/release/copperline --config copperline.example.toml
 ```
 
+For configuration errors, failed boots, save-state compatibility and hardware
+limits, start with [Troubleshooting and known limits](troubleshooting.md).
+
 ## Logging and crash reports
 
 The log goes to stderr at the `info` level. Set `RUST_LOG=debug` or

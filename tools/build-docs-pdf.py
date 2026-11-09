@@ -58,6 +58,7 @@ def repair_generated_sources(directory: Path) -> None:
 
 
 def main() -> None:
+    subprocess.run([sys.executable, str(DOCS.parent / "tools" / "prepare-docs.py")], check=True)
     temporary = DOCS / "_build" / "temp"
     before = set(temporary.glob("*/copperline.typ"))
     subprocess.run(["myst", "build", "--pdf", *sys.argv[1:]], cwd=DOCS, check=True)

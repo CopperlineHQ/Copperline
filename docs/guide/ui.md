@@ -1317,6 +1317,11 @@ support for every expansion board present in the snapshot. States written
 by Copperline 0.19 and earlier used a flat layout with a single version
 and must be recreated.
 
+For cross-release compatibility and load errors, see
+[save-state troubleshooting](troubleshooting.md#a-save-state-will-not-load)
+and the [changelog](../changelog.md). A newer subsystem chunk can be refused
+even when both builds use the same container version.
+
 Saving over an existing file replaces it only after the new snapshot has
 been completely written and flushed. A failed save leaves the previous
 file intact.
