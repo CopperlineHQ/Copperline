@@ -153,33 +153,58 @@ jobs:
   fuzz-build:
     timeout-minutes: 30
     name: Fuzz harnesses build
-    # Build every untrusted-input harness on each change so parser API
-    # refactors cannot silently leave the fuzz workspace stale. Sustained
-    # campaigns remain a local or scheduled workload.
+    # Build and briefly run every untrusted-input harness on each change.
+    # fuzz.yml runs longer daily campaigns and retains evolved corpora.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libasound2-dev libudev-dev
       - uses: dtolnay/rust-toolchain@nightly
       - name: Generate the fuzz lockfile
         working-directory: fuzz
         run: |
-          # This test-only workspace follows the root crate by path. Derive its
-          # lockfile from the current manifests so a root Dependabot update
-          # cannot leave a second committed dependency graph stale.
-          cargo generate-lockfile
+          # Preserve the production dependency versions while adding the
+          # fuzz-only packages, without committing a second lockfile.
+          cp ../Cargo.lock Cargo.lock
+          cargo metadata --format-version=1 > /dev/null
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: fuzz
+          key: fuzz-linux
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: Build all fuzz targets
         working-directory: fuzz
-        run: cargo fuzz build
+        run: cargo fuzz build --codegen-units=16
+      - name: Exercise every harness
+        working-directory: fuzz
+        # Explicit bash enables pipefail so tee cannot hide a fuzz failure.
+        shell: bash
+        # Run the binaries the build step produced. Every Cargo invocation
+        # in this checkout reruns build.rs and recompiles the core, and
+        # `cargo fuzz run` is two of them per target.
+        env:
+          ASAN_OPTIONS: detect_odr_violation=0
+        run: |
+          mkdir -p logs
+          bin="target/$(rustc -vV | sed -n 's/^host: //p')/release"
+          for target in dms floppy_image cd_image hardfile_classification savestate config_toml archives debug_info control_protocol; do
+            mkdir -p "artifacts/$target" "corpus/$target"
+            "$bin/$target" "corpus/$target" \
+              -max_total_time=10 -timeout=10 -rss_limit_mb=2048 -max_len=1048576 \
+              -artifact_prefix="artifacts/$target/" \
+              2>&1 | tee "logs/$target.log"
+          done
+      - name: Retain fuzz smoke failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-smoke
+          path: |
+            fuzz/artifacts/
+            fuzz/logs/
+          if-no-files-found: ignore
+          retention-days: 30
 
   msrv:
     timeout-minutes: 30

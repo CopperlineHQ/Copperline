@@ -433,12 +433,16 @@ fn read_slave_digest(path: &Path) -> Option<String> {
     // a decoder given a corrupt one may well panic rather than return an
     // error. That is one bad file in a library, not a scan that dies.
     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::package::read_first(path, |member| {
-            member
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(crate::package::is_slave_name)
-        })
+        crate::package::read_first_with_limits(
+            path,
+            |member| {
+                member
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(crate::package::is_slave_name)
+            },
+            crate::archive::Limits::SLAVE,
+        )
     }));
     match read {
         Ok(Ok(Some(data))) => Some(super::sha1::hex(&data)),
@@ -627,6 +631,25 @@ fn walk(root: &Path, dir: &Path, depth: usize, walked: &mut usize, out: &mut Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slave_digest_rejects_compressed_members_over_the_scan_budget() {
+        let fixtures =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fuzz-regressions/archives");
+        for name in [
+            "lh5-expansion.lha",
+            "deflate-expansion.zip",
+            "lying-size.zip",
+        ] {
+            assert!(read_slave_digest(&fixtures.join(name)).is_none(), "{name}");
+        }
+        for name in ["stored.lha", "stored.zip"] {
+            assert_eq!(
+                read_slave_digest(&fixtures.join(name)),
+                Some(crate::gamelib::sha1::hex(b"synthetic slave"))
+            );
+        }
+    }
 
     fn scratch(name: &str) -> PathBuf {
         static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

@@ -506,7 +506,22 @@ impl DebugInfo {
             .first()
             .ok_or("debug information has not been relocated")?;
         let text_size = self.hunks.first().ok_or("program has no text hunk")?.size;
-        let mut bytes = Vec::with_capacity(text_size.div_ceil(2) as usize * 6);
+        // The table reaches the profiler base64-encoded inside one control
+        // protocol request, and no line may exceed MAX_LINE_BYTES. Refuse a
+        // table whose encoding alone could never be delivered before
+        // allocating it: the hunk table's allocation size is untrusted and
+        // can claim gigabytes the file does not hold. The complete request,
+        // envelope included, is checked against the limit when it is sent
+        // (`Bridge::send`).
+        let table_bytes = u64::from(text_size.div_ceil(2)) * 6;
+        let max_line = crate::control::proto::MAX_LINE_BYTES as u64;
+        if table_bytes.div_ceil(3) * 4 > max_line {
+            return Err(format!(
+                "hunk 0 holds {text_size} bytes of text; its unwind table would exceed \
+                 the control protocol's {max_line} byte message limit"
+            ));
+        }
+        let mut bytes = Vec::with_capacity(table_bytes as usize);
         for offset in (0..text_size).step_by(2) {
             let default = (15u16, 4i16, -1i16, -4i16);
             let row = self
@@ -878,6 +893,33 @@ mod tests {
     use super::hunk::tests::Builder;
     use super::hunk::{HUNK_CODE, HUNK_DATA};
     use super::*;
+
+    #[test]
+    fn unwind_table_is_refused_once_it_cannot_fit_one_control_message() {
+        // The hunk table's allocation size is untrusted: a fuzzed 36-byte
+        // executable claimed a 2.8 GB code hunk and asked for an 8.4 GB
+        // table. A table whose base64 alone exceeds one control protocol
+        // line is refused before allocation; the bridge tests the full
+        // request against the same limit.
+        let mut info = DebugInfo::default();
+        info.relocate(vec![0x10000]);
+        let max_line = crate::control::proto::MAX_LINE_BYTES as u32;
+        let fits = max_line / 4 * 3 / 6 * 2;
+        for (size, ok) in [(fits, true), (fits + 2, false), (0xa800_0004, false)] {
+            info.hunks = vec![HunkMeta {
+                kind: HunkKind::Code,
+                size,
+            }];
+            match info.bartman_unwind_table() {
+                Ok((base, table)) => {
+                    assert!(ok, "{size} bytes of text should be refused");
+                    assert_eq!(base, 0x10000);
+                    assert_eq!(table.len() as u64, u64::from(size) / 2 * 6);
+                }
+                Err(e) => assert!(!ok && e.contains("message limit"), "{size}: {e}"),
+            }
+        }
+    }
 
     fn asm_program() -> DebugInfo {
         let mut b = Builder::default();

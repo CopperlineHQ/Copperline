@@ -158,9 +158,20 @@ impl Bridge {
             return Err(format!("session lost: {reason}"));
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        self.shared.lock().pending.insert(id, None);
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let line = format!("{msg}\n");
+        let mut line = msg.to_string();
+        // The server drops a connection whose line exceeds MAX_LINE_BYTES.
+        // Refuse such a request here instead, so the caller gets an error
+        // and the session survives.
+        if line.len() > proto::MAX_LINE_BYTES {
+            return Err(format!(
+                "{method} request is {} bytes; a control message carries at most {}",
+                line.len(),
+                proto::MAX_LINE_BYTES
+            ));
+        }
+        line.push('\n');
+        self.shared.lock().pending.insert(id, None);
         let written = {
             let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
             writer
@@ -662,6 +673,43 @@ mod tests {
             Reply::TimedOut
         );
         assert!(bridge.next_event(Duration::from_millis(10)).is_none());
+        bridge.close();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_request_over_the_line_limit_is_refused_locally_and_the_session_survives() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = scripted_server(listener, |req| {
+            if let Some(hello) = hello_reply(req) {
+                return vec![hello];
+            }
+            let len = req["params"]["pad"].as_str().map_or(0, str::len);
+            vec![proto::ok_line(&req["id"], json!({"len": len}))]
+        });
+        let bridge = Bridge::connect(&addr.to_string(), "ok").unwrap();
+        // The full wire line counts: envelope, id and params, not just the
+        // payload. Ids stay single-digit here, so one envelope size fits all.
+        let envelope = |pad: usize| {
+            json!({"jsonrpc": "2.0", "id": 9, "method": "big", "params": {"pad": "x".repeat(pad)}})
+                .to_string()
+                .len()
+        };
+        let fits = proto::MAX_LINE_BYTES - envelope(0);
+        assert_eq!(envelope(fits), proto::MAX_LINE_BYTES);
+        let err = bridge
+            .call("big", json!({"pad": "x".repeat(fits + 1)}))
+            .unwrap_err();
+        assert!(err.contains("at most"), "{err}");
+        assert_eq!(bridge.outstanding(), 0);
+        assert_eq!(
+            bridge
+                .call("big", json!({"pad": "x".repeat(fits)}))
+                .unwrap(),
+            Reply::Ok(json!({"len": fits}))
+        );
+        assert!(bridge.closed().is_none());
         bridge.close();
         server.join().unwrap();
     }

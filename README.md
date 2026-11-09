@@ -237,6 +237,11 @@ cargo test --release --test image_regression kickstart_boot_screen -- --ignored
 
 Selected image regressions fail if their assets are missing.
 
+`cargo test --test fuzz_regressions` replays retained parser inputs without
+nightly or external media. [Fuzzing instructions](fuzz/README.md) cover the
+nine libFuzzer targets, brief PR smoke runs, and daily sustained campaigns.
+WHDLoad archive reads and extraction have [decompression limits](docs/guide/whdload.md).
+
 See [`tests/README.md`](tests/README.md) for details on asset paths and test configuration.
 
 ## Community and Support

@@ -34,6 +34,7 @@ src/
   warpboot.rs       # warp boot: run unpaced until a condition holds, then pace
   runprog.rs        # --run: boot straight into a host executable
   whdload.rs        # --whdload direct boot (package.rs, lha.rs: game packages)
+  archive.rs        # shared LHA/ZIP output budgets and bounded streaming I/O
   gamelib/          # WHDLoad game library and OpenRetro database sync
   debugger.rs       # env-driven headless debugger
   waveform.rs       # trigger-based VCD chipset-signal capture (GTKWave)
@@ -185,6 +186,21 @@ crates/zz9k-plugin/         # the bundled zz9k board's WASM module
 tests/              # self-contained integration tests and ignored local-asset tests
 timing-test/        # bootable cross-emulator timing-measurement disk + golden probes
 ```
+
+Archive output is bounded by `archive::Budget`, shared by the LHA and ZIP
+package paths. Advertised member lengths are checked before allocation or
+file creation; a fixed-size copy buffer also counts the actual decoded
+bytes, with at most a one-byte over-limit probe. Both memory reads and
+streamed disk extraction use that reader and retain end-of-stream checksum
+checks. LHA listing walks headers without decoding payloads, and selective
+reads skip unrelated members. Failed WHDLoad staging is discarded before
+its extraction can be promoted. User limits are documented in
+[WHDLoad support](../guide/whdload.md).
+
+Parser fuzzers and stable regression replay share `fuzz/harnesses/`. The
+[testing guide](../../tests/README.md) and
+[fuzzing instructions](../../fuzz/README.md) describe retained crashes and
+scheduled campaigns.
 
 ## The big picture
 

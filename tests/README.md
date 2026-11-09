@@ -85,6 +85,18 @@ Promote a repeated manual smoke path into a focused unit test, an ignored
 image regression, or a deterministic input script. Completed investigations
 belong in commits and PR descriptions rather than a permanent done-log.
 
+### Parser fuzz regressions
+
+`cargo test --test fuzz_regressions` runs retained inputs through all nine
+parser harnesses on stable Rust, with no guest assets. `control` and `dap`
+enable their corresponding cases. The shared harnesses live in
+`fuzz/harnesses/`; the integration test and libFuzzer call the same code.
+The [retention workflow](fuzz-regressions/README.md) explains how to promote
+a minimized campaign crash into a committed regression. Initial synthetic
+boundary inputs keep every replay path exercised before a campaign finds
+a defect. See [fuzz/README.md](../fuzz/README.md) for campaign commands,
+limits and artifact retention.
+
 ### Hostfs boot round trips
 
 `hostfs_boot_aros_runs_a_guest_binary_and_writes_to_the_host` needs **no

@@ -772,8 +772,15 @@ pub fn prepare(game: &Path, opts: &Options) -> Result<PreparedGame> {
             }
             std::fs::create_dir_all(&staging)
                 .with_context(|| format!("creating {}", staging.display()))?;
-            let files = crate::package::extract_to_dir(game, &staging)
-                .with_context(|| format!("extracting {}", game.display()))?;
+            let files = match crate::package::extract_to_dir(game, &staging)
+                .with_context(|| format!("extracting {}", game.display()))
+            {
+                Ok(files) => files,
+                Err(error) => {
+                    let _ = std::fs::remove_dir_all(&staging);
+                    return Err(error);
+                }
+            };
             std::fs::rename(&staging, &dest)
                 .with_context(|| format!("promoting extraction into {}", dest.display()))?;
             std::fs::write(&marker, format!("{source_name}\n"))
@@ -1450,6 +1457,43 @@ mod tests {
         WhdbootAssets {
             whdload_archive: assets_dir.join(WHDLOAD_USR_ARCHIVE),
             skick_archive: None,
+        }
+    }
+
+    #[test]
+    fn failed_extraction_discards_staging_and_never_promotes_it() {
+        let dir = temp_dir("failed-extraction");
+        let library = dir.join("library");
+        let opts = Options {
+            library: Some(library.clone()),
+            kickstart_dirs: vec![],
+            extra_args: None,
+            assets: Some(fixture_assets(&dir)),
+        };
+        for oversize in [false, true] {
+            let game = dir.join(if oversize { "large.lha" } else { "crc.lha" });
+            let mut bytes = build_lha(&[("first", b"data"), ("second", b"payload")]);
+            if oversize {
+                let at = usize::from(bytes[0]) + 2 + 4;
+                bytes[at + 11..at + 15].copy_from_slice(&u32::MAX.to_le_bytes());
+                let end = at + usize::from(bytes[at]) + 2;
+                bytes[at + 1] = bytes[at + 2..end]
+                    .iter()
+                    .fold(0u8, |sum, &b| sum.wrapping_add(b));
+            } else {
+                let at = bytes.len() - 2;
+                bytes[at] ^= 0xff;
+            }
+            std::fs::write(&game, bytes).unwrap();
+            let error = format!("{:#}", prepare(&game, &opts).unwrap_err());
+            assert!(
+                error.contains(if oversize { "byte limit" } else { "CRC" }),
+                "{error}"
+            );
+            let home = library.join(library_entry_name(&game));
+            assert!(!home.join("game.extracting").exists());
+            assert!(!home.join("game").exists());
+            assert!(!home.join(".source").exists());
         }
     }
 

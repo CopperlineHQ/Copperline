@@ -2,6 +2,7 @@
 /fuzz/target
 /fuzz/artifacts
 /fuzz/coverage
+/fuzz/logs
 # The fuzz crate follows the root package by path. Its lockfile is derived in
 # CI so root dependency updates cannot leave a second committed graph stale.
 /fuzz/Cargo.lock
