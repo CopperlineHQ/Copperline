@@ -481,6 +481,29 @@ emulator times code differently depending on whether it runs from slow or chip
 RAM, rows 13 and 14 diverge -- which matters for any program (like a demo) that
 runs from slow/trapdoor RAM.
 
+## Zero-origin fetch and AGA scroll observation probes
+
+`ddfprobe-zero` selects OCS DDFSTRT/DDFSTOP `$00/$00` between standard
+`$38/$D0` and `$08/$08` control bands. The surviving SHW latch causes
+alternating fetched and empty lines. A per-line DDFSTRT rewrite to `$10`
+behind the beam leaves the captured run anchored at CCK 0; its real word
+count and placement must survive that register rewrite. The complete
+corrected render matches the vAmiga v5 OCS reference after alignment and
+palette mapping. `ddfprobe-agaresfold` sweeps hi-res/SHRES,
+32/64-bit fetches, absolute-grid phases and scroll taps in 48 four-line bands.
+Its assembly header defines the band order. Both are ROM-independent probes
+and have named golden tests in `tests/probe_golden.rs`.
+
+Build with `VASM=/path/to/vasmm68k_mot ./build.sh ddfprobe-zero` (or
+`ddfprobe-agaresfold`). Run on A500 OCS and A1200 AGA respectively. The AGA
+golden is an observation baseline; physical AGA evidence is still required
+before treating the hi-res/SHRES pipeline scaling as verified. Compare band
+interiors separately from the first line, which also exercises mode latency.
+After correcting the native scroll mask, the remaining vAmiga disagreement
+is 284 aligned pixels (0.140%): the first line plus bands 40/44 (SHRES BPL64,
+DDFSTRT `$42`, taps 0/16). See [video internals](../docs/internals/video.md) for the exact
+comparison scope; do not bless this residual as a hardware expectation.
+
 ## Programmable SHRES/interlace reproducer
 
 `dblpal-hires-lace.asm` is a ROM-independent reproducer for the programmable

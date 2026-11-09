@@ -6395,6 +6395,39 @@ fn aga_bplcon1_masks_scroll_range_by_fetch_width() {
 }
 
 #[test]
+fn aga_scroll_taps_wrap_at_the_native_fetch_width_in_each_resolution() {
+    for bplcon0 in [0x1201, 0x9201, 0x1241] {
+        for (fmode, maximum) in [(0, 15), (1, 31), (3, 63)] {
+            let control = ControlState {
+                agnus_revision: AgnusRevision::AgaAlice,
+                bplcon0,
+                bplcon1: 0xFFFF,
+                fmode,
+                ..ControlState::default()
+            };
+            assert_eq!(control.pf1_scroll(), maximum);
+            assert_eq!(control.pf2_scroll(), maximum);
+        }
+    }
+    // ddfprobe-agaresfold SHRES/BPL32 band interiors: legacy taps 0/8/16/24
+    // share their marker positions in vAmiga v5. The prior mask left taps
+    // 8 and 16 one word right, and tap 24 two words right.
+    for bplcon1 in [0, 0x0088, 0x4400, 0x4488] {
+        let control = ControlState {
+            agnus_revision: AgnusRevision::AgaAlice,
+            bplcon0: 0x1241,
+            bplcon1,
+            fmode: 1,
+            ddfstrt: 0x40,
+            ..ControlState::default()
+        };
+        assert_eq!(control.pf1_scroll(), 0);
+        assert_eq!(control.pf2_scroll(), 0);
+        assert_eq!(control.row_reload_advance(), 0);
+    }
+}
+
+#[test]
 fn bplcon1_scroll_nibbles_apply_to_odd_even_planes_without_dual_playfield() {
     let control = ControlState {
         bplcon0: 0x2200,
@@ -9055,6 +9088,62 @@ fn fetch_origin_below_hard_start_stays_linear_in_ddfstrt() {
     assert_eq!(mk(0x10).fetch_origin_native_shift(false, 2), 80);
     assert_eq!(mk(0x10).native_x_offset(false, 2), 80);
     assert_eq!(mk(0x10).fetch_start_native_x(false, 2), 0);
+}
+
+#[test]
+fn captured_fetch_at_cck_zero_keeps_its_origin_count_and_fetch_slots() {
+    for (mode, words) in [(0x1200, 9), (0x9200, 18), (0x1240, 36)] {
+        let mut control = ControlState {
+            agnus_revision: AgnusRevision::Ocs,
+            dmacon: 0x0300,
+            bplcon0: mode,
+            diwstrt: 0x2C81,
+            diwstop: 0x2CC1,
+            ddfstrt: 0x0038,
+            ddfstop: 0x00D0,
+            ..ControlState::default()
+        };
+        apply_captured_fetch_geometry(&mut control, 0, words);
+        assert!(control.has_valid_ddf_window());
+        assert_eq!(control.ddf_window(), Some((0, 0x40)));
+        assert_eq!(control.words_per_row(640), words);
+        assert!(fetch_word_index_active_at_hpos(control, 0, 0));
+        let plan = line_fetch_plan_for_word(control, &[], 0, 1);
+        assert_eq!(plan.word_fetch_hpos, Some(0));
+        assert_eq!(plan.iter().count(), 1);
+        assert!(fetch_word_index_active_at_hpos(
+            control,
+            1,
+            control.fetch_cck_per_word()
+        ));
+        assert!(!fetch_word_index_active_at_hpos(control, words, 0x48));
+        assert!(control.bitplane_content_window_h().is_some());
+        let shifted = ControlState {
+            ddfstrt: 8,
+            ..control
+        };
+        let shift = |c: ControlState| {
+            c.fetch_origin_native_shift(c.diw_h_start(), c.framebuffer_pixel_repeat())
+        };
+        let native_per_cck = if control.shres() {
+            8
+        } else if control.hires() {
+            4
+        } else {
+            2
+        };
+        assert_eq!(shift(control) - shift(shifted), 8 * native_per_cck);
+    }
+    let mut one_word = ControlState {
+        bplcon0: 0x1200,
+        ..ControlState::default()
+    };
+    apply_captured_fetch_geometry(&mut one_word, 0, 1);
+    assert_eq!(one_word.ddf_window(), Some((0, 0)));
+    assert_eq!(one_word.words_per_row(640), 1);
+    // Register-only unprogrammed fallback remains distinct from that run.
+    assert_eq!(ControlState::default().ddf_window(), None);
+    assert_eq!(ControlState::default().words_per_row(640), 40);
 }
 
 /// Differential regression oracle for the fast interior run: randomized

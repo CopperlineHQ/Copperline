@@ -104,8 +104,11 @@ cadence, so hi-res ignores nibble bit 3 and super-hi-res bits 2-3 (pinned
 by the `ddfprobe-hscroll` golden probe on the Kickstart 2.05 boot-screen
 constellation, vAmiga-verified). AGA's extended BPLCON1 fields feed the
 same per-plane delays through `aga_bplcon1_scroll_samples`, masked to one
-fetch-unit width (32-bit fetches scroll within 32 lo-res px, 64-bit within
-64).
+fetch-unit width in native samples: 16, 32 or 64 samples for the selected
+FMODE. In hi-res that is 8, 16 or 32 lo-res pixels; in SHRES it is 4, 8 or
+16. Applying a lo-res-sized mask at every resolution left SHRES BPL32 taps
+8/16/24 one or two words too far right. The `ddfprobe-agaresfold` matrix
+checks those wrap points against vAmiga v5 band interiors.
 
 An off-grid DDFSTRT interacts with the scroll in both fetch regimes. An
 FMODE=0 fetch placed off the shifter reload grid rounds UP (the data is
@@ -138,6 +141,20 @@ Roots tap >= 16, pulling the swirl a gulp left and shearing the
 kaleidoscope line by line. The hi-res/SHRES scaling of the pipeline is
 not yet externally verified; only lo-res is pinned.
 
+`timing-test/ddfprobe-agaresfold.asm` supplies the missing observation
+matrix: 48 bands covering hi-res and SHRES, 32/64-bit fetches, on-grid
+starts and off-grid phases, and taps around the candidate pipeline
+boundaries. At vAmiga v5 revision `8ee181c8a4ac420f04402c82de20977b312027c5`,
+the resolution-dependent scroll mask removes the SHRES BPL32 wrap
+disagreements. The complete matrix still differs by 284 of 202,628 aligned
+pixels (0.140%): 28 pixels on the first line and 32 pixels on each of the
+four lines in bands 40 and 44. Those two bands select SHRES BPL64,
+DDFSTRT `$42`, and legacy taps 0/16 (both wrap to native tap 0). vAmiga puts
+their markers one 64-sample gulp to the right. The other 46 band interiors
+agree. The 8-cck pipeline remains a hypothesis for these off-grid SHRES
+cases; the golden records the current output and does not establish
+hardware correctness. Physical AGA verification remains open.
+
 The phase is the fetch run's, not the register's. On ECS Agnus and AGA
 Alice a DDFSTRT below the hardwired start (`$18`) only latches BPHSTART;
 the run starts when SHW rises at `$18`, on every line, so DDFSTRT
@@ -149,6 +166,18 @@ band: the Skeleton Krew CD32 constellation (issue #836: lo-res BPL64,
 DDFSTRT `$10`, taps swept across 0..63 while the camera scrolls) folded
 taps >= 48 from the register's phase-16 boundary, jumping the playfield
 one gulp left with black past the fetched data on the right.
+
+A captured FMODE=0 run at colour clock zero carries an explicit DDF-window
+validity flag in the renderer's per-line control state. Its origin stays at
+zero and the synthesized stop records the captured span, while word counts,
+fetch plans and content bounds recognize the captured window. Register-only
+unprogrammed fallback stays distinct. `ddfprobe-zero` exercises an OCS
+surviving-SHW run at `$00`, with standard and `$08` control bands.
+Its middle band rewrites DDFSTRT to `$10` behind the beam after the run
+starts, then restores `$00` for the next line. That register view must not
+replace the captured origin. The corrected complete probe agrees with the
+vAmiga v5 OCS reference at every pixel after two-line alignment and a
+bijective palette mapping.
 
 BPLCON1-delayed samples at the left edge of a scanline do not reuse the
 previous line's final bitplane word. Before the current line's shifter has a

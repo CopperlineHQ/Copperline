@@ -19,13 +19,7 @@ pub(super) fn fetch_word_index_active_at_hpos(
     if word_idx >= control.words_per_row(native_w) {
         return false;
     }
-    let Some((start, _stop)) = effective_ddf_window(
-        control.agnus_revision,
-        control.hires() || control.shres(),
-        control.ddfstrt,
-        control.ddfstop,
-        control.ddf_hard_stop_lifted(),
-    ) else {
+    let Some((start, _stop)) = control.ddf_window() else {
         return false;
     };
     let start = u32::from(start);
@@ -133,6 +127,18 @@ impl LineFetchPlan {
     }
 }
 
+fn line_fetch_scan_start(base_control: ControlState, control_segments: &[ControlSegment]) -> u32 {
+    if base_control.captured_ddf_window
+        || control_segments
+            .iter()
+            .any(|segment| segment.control.captured_ddf_window)
+    {
+        0
+    } else {
+        u32::from(BITPLANE_DDF_HARD_START)
+    }
+}
+
 pub(super) fn line_fetch_plan_for_word(
     base_control: ControlState,
     control_segments: &[ControlSegment],
@@ -140,6 +146,7 @@ pub(super) fn line_fetch_plan_for_word(
     dma_planes: usize,
 ) -> LineFetchPlan {
     let mut plan = LineFetchPlan::empty();
+    let scan_start = line_fetch_scan_start(base_control, control_segments);
     if control_segments.is_empty() {
         let start = u32::from(effective_ddf_start_hpos(
             base_control.agnus_revision,
@@ -152,14 +159,14 @@ pub(super) fn line_fetch_plan_for_word(
         } else {
             start + word_group.saturating_mul(base_control.fetch_unit())
         };
-        if (u32::from(BITPLANE_DDF_HARD_START)..=BITPLANE_FETCH_HARD_END).contains(&word_hpos)
+        if (scan_start..=BITPLANE_FETCH_HARD_END).contains(&word_hpos)
             && fetch_word_index_active_at_hpos(base_control, word_idx, word_hpos)
         {
             plan.word_fetch_hpos = Some(word_hpos);
         }
         for plane in 0..dma_planes.min(8) {
             let hpos = bitplane_fetch_hpos_for_plane(base_control, word_idx, plane);
-            if (u32::from(BITPLANE_DDF_HARD_START)..=BITPLANE_FETCH_HARD_END).contains(&hpos)
+            if (scan_start..=BITPLANE_FETCH_HARD_END).contains(&hpos)
                 && fetch_plane_word_active_at_hpos(base_control, word_idx, plane, hpos)
             {
                 plan.push(hpos, plane);
@@ -171,7 +178,7 @@ pub(super) fn line_fetch_plan_for_word(
 
     let mut control = base_control;
     let mut segment_idx = 0usize;
-    for hpos in u32::from(BITPLANE_DDF_HARD_START)..=BITPLANE_FETCH_HARD_END {
+    for hpos in scan_start..=BITPLANE_FETCH_HARD_END {
         let x = ((hpos as i32 - COPPER_WAIT_HPOS_FB0).max(0) as usize * 4).min(FB_WIDTH);
         while segment_idx < control_segments.len() && control_segments[segment_idx].x <= x {
             control = control_segments[segment_idx].control;
@@ -210,7 +217,7 @@ pub(super) fn line_fetch_plans_for_line(
 
     let mut control = base_control;
     let mut segment_idx = 0usize;
-    for hpos in u32::from(BITPLANE_DDF_HARD_START)..=BITPLANE_FETCH_HARD_END {
+    for hpos in line_fetch_scan_start(base_control, control_segments)..=BITPLANE_FETCH_HARD_END {
         let x = ((hpos as i32 - COPPER_WAIT_HPOS_FB0).max(0) as usize * 4).min(FB_WIDTH);
         while segment_idx < control_segments.len() && control_segments[segment_idx].x <= x {
             control = control_segments[segment_idx].control;
@@ -219,13 +226,7 @@ pub(super) fn line_fetch_plans_for_line(
         if !control.bitplane_dma_enabled() || !control.has_valid_ddf_window() {
             continue;
         }
-        let Some((start, _stop)) = effective_ddf_window(
-            control.agnus_revision,
-            control.hires() || control.shres(),
-            control.ddfstrt,
-            control.ddfstop,
-            control.ddf_hard_stop_lifted(),
-        ) else {
+        let Some((start, _stop)) = control.ddf_window() else {
             continue;
         };
         let start = u32::from(start);

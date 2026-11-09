@@ -469,8 +469,15 @@ CAPS library's definitions: Copylock Amiga masters key sectors at -5.5%,
 and Brierley models apply +/-5-15% weighting per block. Scaling the cell
 clock (`TrackRev::prefix_cck`) lets timing loops that poll `DSKBYTR`
 detect the intended cell density differences (the Copylock check on
-*Lemmings*, for example). Weak bits currently replay as the single
-deterministic revolution stored in the file.
+*Lemmings*, for example). A weak sample carries only a length, with no
+payload; each decoded bit reserves two weak cells. The decoder records those
+spans before index rotation, resets the following MFM context, and produces
+eight realizations using a local fixed-seed PRNG. Only weak cells change.
+Each revolution is separately word-padded, so partial-word track ends do not
+shift the next revolution. `RawMfm.revolutions` feeds the existing cyclic
+reader, save states and netplay transport without adding runtime RNG state.
+Tracks without weak samples still contain one revolution. The eight-pass
+cycle is a deterministic approximation, not a physical noise distribution.
 
 The drive sounds ([](../guide/configuration)) are driven by this model's
 real state transitions -- motor spin-up, seeks, the empty-drive poll click.

@@ -2107,9 +2107,12 @@ Speedlock, and Brierley density profiles, so the sectors a protection times
 pass the head with the same longer or shorter cells the original disk was
 mastered with. A density model the decoder does not know is decoded with
 uniform 2 us cells, which is logged at load time, so a protection that
-measures cell timing on that track may fail. Weak ("flakey") bits are
-replayed as the single deterministic revolution the file stores rather than
-varying per revolution.
+measures cell timing on that track may fail. Weak ("flakey") spans are decoded
+into eight deterministic revolutions with different noise in those spans;
+the stable cells, index position, track length and density stay fixed. The
+drive cycles through those revolutions, including across save/restore and
+netplay transfer. This is a repeating approximation of weak media, not an
+analogue noise or drive-PLL model.
 The browser frontend shares this decoder, so it reads IPF too.
 
 A `paths` playlist lets multi-disk software that only uses DF0: run
