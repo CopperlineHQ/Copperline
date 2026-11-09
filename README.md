@@ -237,6 +237,11 @@ cargo test --release --test image_regression kickstart_boot_screen -- --ignored
 
 Selected image regressions fail if their assets are missing.
 
+Every PR also runs the [AROS performance gate](docs/internals/jit-performance.md#ci-aros-performance-gate):
+release builds of the candidate and a tracked baseline run on the same host,
+covering A500/A1200 core execution and rendering. A median slowdown over 10%
+fails the check; raw samples and build provenance are retained.
+
 `cargo test --test fuzz_regressions` replays retained parser inputs without
 nightly or external media. [Fuzzing instructions](fuzz/README.md) cover the
 nine libFuzzer targets, brief PR smoke runs, and daily sustained campaigns.

@@ -1,0 +1,24 @@
+# Fixed AROS cold boot, empty DF0; exercises the AGA/020 bus and renderer.
+[machine]
+profile = "A1200"
+rtc_time = 1111111109
+rtc_frozen = true
+battmem = ""
+rom_scsi_device_disable = true
+
+[cpu]
+model = "68EC020"
+clock_mhz = 14.18758
+jit = false
+speed = "fixed"
+icache = true
+
+[memory]
+chip = "2M"
+slow = "0"
+fast = "0"
+init = "zero"
+
+[chipset]
+revision = "AGA"
+video = "PAL"

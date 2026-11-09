@@ -26,6 +26,86 @@ software reads it. Keep the ROM, media, memory layout and cache settings equal
 between revisions. ROMs, disk images and third-party executables remain local
 assets.
 
+## CI AROS performance gate
+
+The `Performance` workflow runs `AROS performance gate` on every PR and on
+pushes to `main` and `v1`, with no path filter. It builds `copperline-bench`
+twice using the same stable Rust toolchain, `--release --locked
+--no-default-features --features bench-bin`: once from the full commit SHA in
+`tools/performance/baseline.json`, and once from the candidate (the PR merge
+commit on a PR). This pins a cumulative comparison point before Bus or
+workspace refactoring. It does not move to each PR's parent automatically.
+Require **AROS performance gate** in the protected branches' rules to make
+the check a mandatory merge gate; adding the workflow does not change those
+repository settings.
+
+The tracked TOML files specify PAL A500 (68000, 512 KiB chip and slow RAM)
+and A1200 (68EC020, 2 MiB chip RAM) cold boots with empty drives. Both use
+fixed CPU clocks, interpreter execution, zeroed RAM and a frozen RTC. The
+same explicitly named AROS ROM pair is used for both revisions, with its
+SHA-256 hashes pinned in the policy. Each machine runs for 30 emulated
+seconds both core-only and with CPU rendering, post-processing and
+deinterlacing. This covers common CPU/bus/chipset/render paths without
+proprietary assets. It does not cover native JIT throughput, disk-heavy
+applications, live audio, GPU presentation or every expansion board.
+
+Both compilations finish before timing starts. Each of the four cases gets
+one discarded warmup per binary, then five baseline/candidate pairs on the
+same runner, reversing order every pair. The gate compares the median of
+the paired wall-time-per-emulated-frame ratios and fails above a 10%
+slowdown. Improvements in one case cannot offset a regression in another.
+The threshold allows some shared-host jitter; absolute milliseconds from
+different hosts or workflow runs are not compared.
+
+Missing or malformed output, nonzero exit, a 120-second sample timeout,
+incomplete emulated time, or mismatched emulated frame counts/presented
+counts/render checksums fails the case. A median absolute deviation above
+5% of a binary's median cost also fails, reporting unstable timing instead
+of claiming success. No outlier is removed and no fast retry is selected.
+The benchmark's existing checksum is a coarse presentation check, not an
+image comparison: keep the golden-render and functional suites required
+alongside this check. The benchmark's frame-time sample count can exceed
+the emulated frame count because a core step may stop at an internal
+boundary; throughput uses elapsed wall time and retired emulated frames.
+
+The job summary lists each median, paired percentage change and result.
+The `aros-performance` artifact retains raw warmup/trial logs, all paired
+measurements in `report.json`, configuration/ROM/binary hashes, source SHAs,
+lockfile hashes, toolchain and host details for 14 days, including failures.
+Review these before rerunning a noisy job. A stalled job is bounded to
+30 minutes. The Python gate tests explicitly exercise slower candidates,
+missing output, timeouts, workload mismatches and unstable samples.
+
+To reproduce locally, first build and preserve the baseline binary in a
+separate checkout of the pinned revision, then build the candidate with
+the same command, toolchain and target. Print the required baseline SHA
+with `python3 tools/check-performance.py --print-baseline`. With no builds
+or competing workloads running, invoke:
+
+```sh
+python3 tools/check-performance.py \
+  --baseline-binary /path/to/baseline/target/release/copperline-bench \
+  --candidate-binary target/release/copperline-bench
+```
+
+Results go to `target/performance-gate/` (`--output` selects another
+directory). The harness strips inherited `COPPERLINE_*` settings, passes
+explicit absolute config/ROM paths, and gives each process a fresh working
+directory, so local diagnostics, assets and saved launcher defaults cannot
+alter the workload. Run its asset-free supervision tests with:
+
+```sh
+python3 -m unittest discover -s tools/tests -p test_performance.py -v
+```
+
+Update the baseline SHA, ROM hashes or workloads only in an explicit,
+reviewed change. Preserve the old and proposed baseline comparisons and
+explain any intended emulation or workload changes. Do not refresh the
+baseline merely to make a slowdown pass, or copy a developer machine's
+absolute timings into the policy. The 10% limit and 5% noise threshold
+should be revisited with retained hosted-run evidence if runner variance
+changes.
+
 ## Application throughput
 
 An archive compressor exercises CPU-local loops, OS calls and storage. For an
