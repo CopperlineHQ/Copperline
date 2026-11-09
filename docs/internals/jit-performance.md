@@ -1,9 +1,10 @@
-# Measuring JIT performance
+# Measuring performance
 
-JIT performance depends on the guest workload, memory placement, CPU model and
-host. Measure real applications and sustained audio/video alongside synthetic
-CPU loops. Keep fixed-clock and paced-fastest results separate: fixed mode is
-deterministic, while fastest mode changes guest throughput with host load.
+Performance depends on the guest workload, memory placement, CPU model,
+execution mode and host. Measure real applications and sustained audio/video
+alongside synthetic CPU loops. Keep fixed-clock and paced-fastest results
+separate: fixed mode is deterministic, while fastest mode changes guest
+throughput with host load.
 See [CPU execution](cpu.md#jit-fastest-speed) and
 [pacing](timing.md#jit-fastest-pacing) for the scheduling model.
 
@@ -29,15 +30,26 @@ assets.
 ## CI AROS performance gate
 
 The `Performance` workflow runs `AROS performance gate` on every PR and on
-pushes to `main` and `v1`, with no path filter. It builds `copperline-bench`
-twice using the same stable Rust toolchain, `--release --locked
+pushes to `main` and `v1`, with no path filter. It compares `copperline-bench`
+executables built using the same stable Rust toolchain, `--release --locked
 --no-default-features --features bench-bin`: once from the full commit SHA in
 `tools/performance/baseline.json`, and once from the candidate (the PR merge
 commit on a PR). This pins a cumulative comparison point before Bus or
 workspace refactoring. It does not move to each PR's parent automatically.
+Both branches share this one baseline, including any differences between
+`main` and `v1`; a forward merge does not select a different baseline.
 Require **AROS performance gate** in the protected branches' rules to make
 the check a mandatory merge gate; adding the workflow does not change those
 repository settings.
+
+The baseline cache holds only the executable, keyed by its source SHA,
+the complete `rustc -Vv` output and workflow hash, runner OS/architecture
+and Ubuntu image family. Workflow changes invalidate the build recipe too.
+An exact hit skips baseline compilation; a miss builds it with the same
+command. There are no fallback keys. Only pushes to `main` or `v1` save
+shared baseline caches; PRs restore them without saving merge-ref copies.
+The candidate is always built. Cache key/hit records accompany the binary
+hash and source/toolchain provenance in the performance artifact.
 
 The tracked TOML files specify PAL A500 (68000, 512 KiB chip and slow RAM)
 and A1200 (68EC020, 2 MiB chip RAM) cold boots with empty drives. Both use
@@ -60,8 +72,13 @@ different hosts or workflow runs are not compared.
 Missing or malformed output, nonzero exit, a 120-second sample timeout,
 incomplete emulated time, or mismatched emulated frame counts/presented
 counts/render checksums fails the case. A median absolute deviation above
-5% of a binary's median cost also fails, reporting unstable timing instead
-of claiming success. No outlier is removed and no fast retry is selected.
+5% of the median paired ratio also fails, reporting unstable timing instead
+of claiming success. This measures noise in the value used for the verdict;
+host drift shared by both sides of each pair cancels instead of failing a
+comparison with identical ratios. No outlier is removed and no fast retry
+is selected. Each binary must still repeat the same workload across its
+own warmup and measured trials.
+
 The benchmark's existing checksum is a coarse presentation check, not an
 image comparison: keep the golden-render and functional suites required
 alongside this check. The benchmark's frame-time sample count can exceed
@@ -69,6 +86,12 @@ the emulated frame count because a core step may stop at an internal
 boundary; throughput uses elapsed wall time and retired emulated frames.
 
 The job summary lists each median, paired percentage change and result.
+When the two internally repeatable workloads differ, the case fails with
+**workload changed, baseline refresh needed**. Its medians, paired ratios
+and noise measurement are retained in `report.json`, and the summary
+marks the percentage change as informational. These numbers describe the
+change but cannot establish equal-work performance parity.
+
 The `aros-performance` artifact retains raw warmup/trial logs, all paired
 measurements in `report.json`, configuration/ROM/binary hashes, source SHAs,
 lockfile hashes, toolchain and host details for 14 days, including failures.
@@ -105,6 +128,17 @@ baseline merely to make a slowdown pass, or copy a developer machine's
 absolute timings into the policy. The 10% limit and 5% noise threshold
 should be revisited with retained hosted-run evidence if runner variance
 changes.
+
+For an intended timing or rendering correction that changes the workload
+signature, keep the old baseline during review so the correction's own
+cost remains visible. Attach its failed performance artifact and the
+functional/golden evidence explaining the intended signature change. If
+branch rules require this check, a maintainer can record and approve an
+override for that specific PR under the repository's protection policy.
+After merging the correction, refresh the pin to its immutable merged
+commit in a separate reviewed PR and rerun the gate. Preserve the original
+comparison alongside the refresh. Pointing the fix's own PR at itself
+would hide the performance effect that required the refresh.
 
 ## Application throughput
 

@@ -63,19 +63,49 @@ class SampleTests(unittest.TestCase):
         pairs = [(sample(), sample(5.2))] * 4 + [(sample(10), sample(10.4))]
         self.assertAlmostEqual(performance.evaluate(pairs, 10)["regression_percent"], 4)
 
-    def test_empty_partial_changed_workload_and_noisy_samples_fail(self):
+    def test_shared_host_drift_and_noise_cancel_in_paired_ratios(self):
+        for walls in ([5, 5.3, 5.6, 5.9, 6.2], [5, 5.6, 5, 5.6, 5.3]):
+            with self.subTest(walls=walls):
+                result = performance.evaluate([(sample(w), sample(w)) for w in walls], 10)
+                self.assertTrue(result["passed"])
+                self.assertEqual(result["regression_percent"], 0)
+                self.assertEqual(result["paired_ratio_mad_percent"], 0)
+
+    def test_shared_drift_does_not_hide_a_regression(self):
+        walls = [5, 5.3, 5.6, 5.9, 6.2]
+        result = performance.evaluate([(sample(w), sample(w * 1.2)) for w in walls], 10)
+        self.assertFalse(result["passed"])
+        self.assertAlmostEqual(result["regression_percent"], 20)
+
+    def test_noise_in_paired_ratios_fails(self):
+        for pairs in (
+            [(sample(5 + i), sample()) for i in range(5)],
+            [(sample(), sample(5 + i)) for i in range(5)],
+        ):
+            result = performance.evaluate(pairs, 10)
+            self.assertFalse(result["passed"])
+            self.assertIn("unstable paired timings", result["error"])
+            self.assertGreater(result["paired_ratio_mad_percent"], 5)
+
+    def test_empty_partial_and_inconsistent_workloads_fail(self):
         pairs = [(sample(), sample())] * 5
         for broken in (
             [], pairs[:4], pairs[:4] + [(sample(), replace(sample(), frames=1499))],
-            [(sample(5 + i), sample(5 + i)) for i in range(5)],
-            [(sample(), sample(5 + i)) for i in range(5)],
         ):
             with self.subTest(pairs=broken), self.assertRaises(ValueError):
                 performance.evaluate(broken, 10)
 
-    def test_render_signature_changes_fail(self):
-        with self.assertRaisesRegex(ValueError, "checksums differ"):
-            performance.evaluate([(sample(render=True), replace(sample(render=True), checksum="0x0"))] * 5, 10)
+    def test_cross_binary_workload_changes_fail_but_retain_diagnostic_ratios(self):
+        for changed in (
+            replace(sample(), emulated_seconds=30.012), replace(sample(), frames=1499),
+            replace(sample(render=True), presented=1497), replace(sample(render=True), checksum="0x0"),
+        ):
+            baseline = sample(render=changed.presented is not None)
+            result = performance.evaluate([(baseline, changed)] * 5, 10)
+            self.assertFalse(result["passed"])
+            self.assertTrue(result["workload_changed"])
+            self.assertIn("baseline refresh needed", result["error"])
+            self.assertEqual(len(result["paired_ratios"]), 5)
 
 
 class PolicyTests(unittest.TestCase):
@@ -130,8 +160,9 @@ class ProcessTests(unittest.TestCase):
         self.assertIn("bench:", (self.root / "sample.log").read_text())
 
     def test_timeout_kills_child_and_keeps_partial_output(self):
-        binary = self.binary("stall", "import time\nprint('started', flush=True)\ntime.sleep(60)\n")
-        self.policy["sample_timeout_seconds"] = 0.2
+        # Simulate startup that exceeds the old 200 ms deadline, then stall.
+        binary = self.binary("stall", "import time\ntime.sleep(0.3)\nprint('started', flush=True)\ntime.sleep(60)\n")
+        self.policy["sample_timeout_seconds"] = 2
         with self.assertRaisesRegex(ValueError, "timed out"):
             self.run_sample(binary)
         self.assertIn("started", (self.root / "sample.log").read_text())
@@ -154,6 +185,25 @@ class ProcessTests(unittest.TestCase):
                 self.assertTrue(all(len(case["pairs"]) == 5 for case in report["cases"]))
                 self.assertIn("AROS performance gate", (output / "summary.md").read_text())
                 self.assertEqual(len(list(output.glob("*.log"))), 48)
+
+    def test_workload_change_keeps_metrics_and_failure_in_both_reports(self):
+        baseline = self.binary("baseline", "import sys\n"
+                               f"print({log()!r} if '--render' not in sys.argv else {log(render=True)!r})\n")
+        changed = log(render=True).replace("0x2c934000000", "0x0")
+        candidate = self.binary("candidate", "import sys\n"
+                                f"print({log()!r} if '--render' not in sys.argv else {changed!r})\n")
+        output = self.root / "workload-change"
+        args = SimpleNamespace(baseline_binary=baseline, candidate_binary=candidate,
+                               policy=performance.POLICY, output=output)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(performance.compare(args, self.policy), 1)
+        report = json.loads((output / "report.json").read_text())
+        self.assertFalse(report["passed"])
+        self.assertEqual([c["passed"] for c in report["cases"]], [True, False, True, False])
+        self.assertTrue(all(len(c["paired_ratios"]) == 5 for c in report["cases"]))
+        summary = (output / "summary.md").read_text()
+        self.assertIn("FAIL: workload changed, baseline refresh needed", summary)
+        self.assertIn("+0.00%", summary)
 
 
 if __name__ == "__main__":

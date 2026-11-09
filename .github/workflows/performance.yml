@@ -52,9 +52,34 @@ jobs:
           git -C target/performance-baseline rev-parse HEAD > target/performance-gate/baseline-revision.txt
           sha256sum Cargo.lock target/performance-baseline/Cargo.lock > target/performance-gate/lockfiles.txt
           cp tools/performance/*.toml tools/performance/baseline.json target/performance-gate/
+      - name: Restore the pinned baseline executable
+        id: baseline-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: target/performance-baseline/target/release/copperline-bench
+          # No prefix fallback can skip a rebuild with another source/compiler.
+          key: aros-bench-v1-ubuntu-24.04-${{ runner.os }}-${{ runner.arch }}-${{ steps.baseline.outputs.revision }}-${{ hashFiles('target/performance-gate/toolchain.txt', '.github/workflows/performance.yml') }}
+      - name: Record baseline cache provenance
+        env:
+          CACHE_KEY: ${{ steps.baseline-cache.outputs.cache-primary-key }}
+          CACHE_HIT: ${{ steps.baseline-cache.outputs.cache-hit }}
+        run: |
+          printf '%s\n' "$CACHE_KEY" > target/performance-gate/baseline-cache-key.txt
+          printf '%s\n' "$CACHE_HIT" > target/performance-gate/baseline-cache-hit.txt
       - name: Build the baseline (release, core only)
+        if: steps.baseline-cache.outputs.cache-hit != 'true'
         working-directory: target/performance-baseline
         run: cargo build --release --locked --no-default-features --features bench-bin --bin copperline-bench
+      - name: Save the pinned baseline executable
+        # Shared caches come only from branch pushes, never PR merge refs.
+        if: >-
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v1') &&
+          steps.baseline-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/performance-baseline/target/release/copperline-bench
+          key: ${{ steps.baseline-cache.outputs.cache-primary-key }}
       - name: Build the candidate (release, core only)
         run: cargo build --release --locked --no-default-features --features bench-bin --bin copperline-bench
       - name: Compare AROS core and render throughput

@@ -151,26 +151,30 @@ def run_sample(binary, config, policy, render, log):
 def evaluate(pairs, max_regression_percent):
     if len(pairs) < 5:
         raise ValueError("at least five complete pairs are required")
-    samples = [sample for pair in pairs for sample in pair]
-    if len({sample.signature for sample in samples}) != 1:
-        raise ValueError("baseline/candidate frame counts or render checksums differ")
-    # Fail closed on a noisy host. Do not cherry-pick a fast repeat or drop
-    # outliers. The raw samples let the maintainer diagnose and rerun the job.
     for index, label in enumerate(("baseline", "candidate")):
-        costs = [pair[index].cost for pair in pairs]
-        median = statistics.median(costs)
-        mad = statistics.median(abs(cost - median) for cost in costs)
-        if mad / median > 0.05:
-            raise ValueError(f"unstable {label} timings (median absolute deviation exceeds 5%)")
+        if len({pair[index].signature for pair in pairs}) != 1:
+            raise ValueError(f"{label} workload differs between trials")
+    # Pairing cancels host drift shared by both binaries. Check noise in
+    # the ratios used for the verdict, rather than rejecting that shared drift.
     ratios = [candidate.cost / baseline.cost for baseline, candidate in pairs]
-    regression = (statistics.median(ratios) - 1) * 100
-    return {
+    median = statistics.median(ratios)
+    mad_fraction = statistics.median(abs(ratio - median) for ratio in ratios) / median
+    regression = (median - 1) * 100
+    changed = pairs[0][0].signature != pairs[0][1].signature
+    result = {
         "baseline_median_ms_per_frame": statistics.median(pair[0].cost for pair in pairs) * 1000,
         "candidate_median_ms_per_frame": statistics.median(pair[1].cost for pair in pairs) * 1000,
         "paired_ratios": ratios,
+        "paired_ratio_mad_percent": mad_fraction * 100,
         "regression_percent": regression,
-        "passed": regression <= max_regression_percent,
+        "workload_changed": changed,
+        "passed": not changed and mad_fraction <= 0.05 and regression <= max_regression_percent,
     }
+    if changed:
+        result["error"] = "workload changed, baseline refresh needed; ratios are informational"
+    elif mad_fraction > 0.05:
+        result["error"] = "unstable paired timings (median absolute deviation exceeds 5%)"
+    return result
 
 
 def write_report(output, report):
@@ -212,12 +216,13 @@ def compare(args, policy):
                     write_report(output, report)
                     print(f"{name} pair {trial + 1}: baseline {pair['baseline'].wall_seconds:.3f}s, "
                           f"candidate {pair['candidate'].wall_seconds:.3f}s", flush=True)
-                if any(sample.signature != pairs[0][0].signature for sample in warmups):
+                if any(sample.signature != pairs[0][index].signature for index, sample in enumerate(warmups)):
                     raise ValueError("warmup workload differs from measured samples")
                 case.update(evaluate(pairs, policy["max_regression_percent"]))
                 failed |= not case["passed"]
                 print(f"{name}: {case['regression_percent']:+.2f}% "
-                      f"({'PASS' if case['passed'] else 'FAIL'})", flush=True)
+                      f"({'PASS' if case['passed'] else 'FAIL'})"
+                      + (f": {case['error']}" if "error" in case else ""), flush=True)
             except ValueError as error:
                 failed = True
                 case.update({"passed": False, "error": str(error)})
@@ -228,15 +233,17 @@ def compare(args, policy):
     summary = ["# AROS performance gate", "",
                f"Baseline: `{policy['baseline_revision']}`. "
                f"Limit: {policy['max_regression_percent']}% slower, median of {policy['pairs']} alternating pairs.",
-               "", "| Workload | Baseline ms/frame | Candidate ms/frame | Change | Result |",
+               "", "| Workload | Baseline ms/frame | Candidate ms/frame | Median paired change | Result |",
                "| --- | ---: | ---: | ---: | --- |"]
     for case in report["cases"]:
-        if "error" in case:
+        if "regression_percent" not in case:
             summary.append(f"| {case['name']} | - | - | - | FAIL: {case['error']} |")
         else:
             summary.append(f"| {case['name']} | {case['baseline_median_ms_per_frame']:.3f} | "
                            f"{case['candidate_median_ms_per_frame']:.3f} | "
-                           f"{case['regression_percent']:+.2f}% | {'PASS' if case['passed'] else 'FAIL'} |")
+                           f"{case['regression_percent']:+.2f}% | "
+                           f"{'PASS' if case['passed'] else 'FAIL'}"
+                           + (f": {case['error']}" if "error" in case else "") + " |")
     (output / "summary.md").write_text("\n".join(summary) + "\n")
     return int(failed)
 
