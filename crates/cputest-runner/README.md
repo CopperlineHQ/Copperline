@@ -30,6 +30,12 @@ the same version, source and checksum. To enforce a merge gate, require
 `CPU conformance (020+)` and the lockfile check in GitHub branch protection.
 Repository settings are separate from this workflow.
 
+The workflow explicitly selects Bash with `pipefail`, so logging through
+`tee` preserves runner failures. The PR loop records every CPU's result and
+fails after all four runs if any failed. Failure-injection tests execute the
+actual workflow commands with controlled runner/generator failures before
+the real conformance runs.
+
 Scheduled and manually dispatched runs additionally generate full instruction
 sets for 68000/010, alongside the same 020+ subset. Jobs have explicit time
 limits and retain generator/runner logs for seven days. Generated data and generator binaries
@@ -44,6 +50,7 @@ The Rust tests use the host's native JIT backend.
 From the repository root:
 
 ```sh
+python3 -m unittest discover -s tools/tests -p test_cputest_workflow.py -v
 cargo test --release --locked --manifest-path crates/cputest-runner/Cargo.toml
 cargo build --release --locked --manifest-path crates/cputest-runner/Cargo.toml
 for cpu in 68020 68030 68040 68060; do

@@ -1865,7 +1865,7 @@ static int test_mnemo(const char* path, const char* opcode) {
     int size;
     uae_u8 data[4] = {0};
     uae_u32 v;
-    char fname[256], tfname[256];
+    char tfname[256];
     int filecnt = 1;
     uae_u32 starttimeid;
     int lvl;
@@ -2015,7 +2015,7 @@ static int test_mnemo(const char* path, const char* opcode) {
             exit(1);
         }
         if (fread(test_data, 1, test_data_size, f) != test_data_size) {
-            printf("Couldn't read '%s'\n", fname);
+            printf("Couldn't read '%s'\n", tfname);
             free(test_data);
             errors++;
             break;
