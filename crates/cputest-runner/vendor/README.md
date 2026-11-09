@@ -28,7 +28,8 @@ embedding runner needs:
   round, mirroring the generator's `doopcodeswap` protocol;
 - `validate_exception` skips the newer length-prefixed exception detail
   records (the exception NUMBER is still verified; frame contents are
-  checked through the register comparison);
+  not validated by the generated-data adapter; separate Rust MMU tests check
+  selected frame fields);
 - out-of-range CT_ABSOLUTE_LONG branch targets are accepted (the newer
   generator emits them for targets outside test memory);
 - `m68k_tester_addressing_mask()` exposes the mask parsed from the data
@@ -42,6 +43,10 @@ embedding runner needs:
   every fatal abort (unreadable or malformed test data, allocation
   failure) exits with status 1 instead of the WinUAE original's 0, so a
   broken data set cannot read as a pass in CI.
+- Empty directory lists and zero-case mnemonics fail. Stale/short-file errors
+  propagate as failures. Rust preflight additionally checks the pinned
+  generator's complete numbered-file sequence and final completion footer
+  before C parses it; `--pr` requires the exact shared opcode list.
 
 `capstone-stub/` shadows the capstone disassembler include the runner uses
 for pretty-printing failing instructions; the stub reports no disassembly

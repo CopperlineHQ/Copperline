@@ -2,13 +2,14 @@
 # Build the WinUAE cputest generator and produce an instruction test set
 # for the cputest-runner harness.
 #
-# Usage: cputest-gen.sh <output-dir> [cpu] [work-dir]
+# Usage: cputest-gen.sh <output-dir> [cpu] [work-dir] [full|pr]
 #
 #   output-dir  where the generated data lands; the runner is then invoked as
 #                 cputest-runner <output-dir> all <cpu>
 #   cpu         68000 (default), 68010, 68020, 68030, 68040 or 68060
 #   work-dir    where the generator is cloned and built
 #               (default: <output-dir>/.cputest-build, kept for reuse)
+#   profile     full (default) or the bounded 020+ PR opcode set
 #
 # The generator is Toni Wilen's WinUAE cputest gencpu chain, via the portable
 # packaging in emoon/m68k_cpu_tester_api (MIT). It is pinned to the commit the
@@ -29,13 +30,27 @@ set -e
 TESTER_REPO="https://github.com/emoon/m68k_cpu_tester_api"
 TESTER_COMMIT="025b999239800357e95065fe5b9a15ea5b300fa7"
 
-OUT="${1:?usage: cputest-gen.sh <output-dir> [cpu] [work-dir]}"
+OUT="${1:?usage: cputest-gen.sh <output-dir> [cpu] [work-dir] [full|pr]}"
 CPU="${2:-68000}"
 WORK="${3:-$OUT/.cputest-build}"
+PROFILE="${4:-full}"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 case "$CPU" in
     68000|68010|68020|68030|68040|68060) ;;
     *) echo "unsupported cpu: $CPU" >&2; exit 1 ;;
+esac
+
+case "$PROFILE" in
+    full) MODE=all ;;
+    pr)
+        case "$CPU" in
+            68020|68030|68040|68060) ;;
+            *) echo "PR profile requires 68020 or later" >&2; exit 1 ;;
+        esac
+        MODE=$(paste -s -d, "$SCRIPT_DIR/../pr-opcodes.txt")
+        ;;
+    *) echo "unsupported profile: $PROFILE" >&2; exit 1 ;;
 esac
 
 mkdir -p "$OUT" "$WORK"
@@ -104,7 +119,7 @@ fi
 cat > cputestgen.ini <<EOF
 [cputest]
 cpu=$CPU
-cpu_address_space=68030
+cpu_address_space=68020
 fpu=
 verbose=1
 path=data/
@@ -135,26 +150,28 @@ feature_sr_mask=0x0000
 feature_loop_mode=0
 feature_loop_mode_register=7
 feature_loop_mode_68010=0
-feature_full_extension_format=0
+feature_full_extension_format=1
 feature_addressing_modes_src=
 feature_addressing_modes_dst=
 feature_instruction_size=
 mode=
-[test=Basic]
+[test=$PROFILE]
 cpu=68000-68060
 enabled=1
-mode=all
+mode=$MODE
 feature_sr_mask=0x0000
 EOF
 
-# The generator does not create its output tree itself.
-mkdir -p "data/${CPU}_Basic"
+# Remove only this generated set: stale opcode directories or numbered files
+# must not hide a generator that emitted fewer tests than the previous run.
+rm -rf "data/${CPU}_$PROFILE"
+mkdir -p "data/${CPU}_$PROFILE"
 
 ./cputester
 
-# The generator writes data/<cpu>_Basic; the runner expects <out>/<cpu>.
+# The runner expects <out>/<cpu>.
 rm -f "$OUT/$CPU"
-ln -s "$SRC/gencpu/data/${CPU}_Basic" "$OUT/$CPU"
+ln -s "$SRC/gencpu/data/${CPU}_$PROFILE" "$OUT/$CPU"
 
 echo
 echo "Generated: $OUT/$CPU"

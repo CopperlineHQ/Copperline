@@ -65,8 +65,8 @@ workflow from") on the tag the site should show.
 
 The push-triggered workflows run on both branches, and pull requests are
 checked whichever branch they target. Those workflows save Rust build caches
-only on `main`; on `v1` they restore the default branch's. (A manual run of
-the nightly `cputest` workflow on `v1` does save a cache scoped to `v1`.)
+only on `main`; on `v1` they restore the default branch's. The CPU
+conformance workflow follows the same cache policy for PR and scheduled runs.
 
 ## Before Creating the Public Repository
 
