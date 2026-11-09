@@ -354,7 +354,7 @@ For a Linux AppImage, the companion tools archive includes
 ```
 
 Registration is per-user in `$XDG_DATA_HOME` (normally `~/.local/share`) and adds
-menu/**Open with** entries without changing default applications. Repeat
+menu and **Open with** entries without changing default applications. Repeat
 `install` after moving or renaming the AppImage. Adding metadata inside an
 AppImage alone does not install it into the host desktop's MIME database.
 
