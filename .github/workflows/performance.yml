@@ -1,0 +1,107 @@
+name: Performance
+
+on:
+  push:
+    branches: [main, v1]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  aros-performance:
+    # No path filter: Bus, dependency, build-profile and workspace changes
+    # must all run the same gate. This name can be required by branch rules.
+    name: AROS performance gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+      - name: Test the gate and validate the tracked baseline
+        id: baseline
+        run: |
+          python3 -m unittest discover -s tools/tests -p test_performance.py -v
+          revision="$(python3 tools/check-performance.py --print-baseline)"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Check out the pinned baseline
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.baseline.outputs.revision }}
+          path: target/performance-baseline
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Registry-only: two small core builds do not need another large
+          # target cache competing with the desktop/release cache pool.
+          cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Record build and host provenance
+        run: |
+          mkdir -p target/performance-gate
+          rustc -Vv > target/performance-gate/toolchain.txt
+          lscpu > target/performance-gate/host.txt
+          git rev-parse HEAD > target/performance-gate/candidate-revision.txt
+          git -C target/performance-baseline rev-parse HEAD > target/performance-gate/baseline-revision.txt
+          sha256sum Cargo.lock target/performance-baseline/Cargo.lock > target/performance-gate/lockfiles.txt
+          cp tools/performance/*.toml tools/performance/baseline.json target/performance-gate/
+      - name: Restore the pinned baseline executable
+        id: baseline-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: target/performance-baseline/target/release/copperline-bench
+          # No prefix fallback can skip a rebuild with another source/compiler.
+          key: aros-bench-v1-ubuntu-24.04-${{ runner.os }}-${{ runner.arch }}-${{ steps.baseline.outputs.revision }}-${{ hashFiles('target/performance-gate/toolchain.txt', '.github/workflows/performance.yml') }}
+      - name: Record baseline cache provenance
+        env:
+          CACHE_KEY: ${{ steps.baseline-cache.outputs.cache-primary-key }}
+          CACHE_HIT: ${{ steps.baseline-cache.outputs.cache-hit }}
+        run: |
+          printf '%s\n' "$CACHE_KEY" > target/performance-gate/baseline-cache-key.txt
+          printf '%s\n' "$CACHE_HIT" > target/performance-gate/baseline-cache-hit.txt
+      - name: Build the baseline (release, core only)
+        if: steps.baseline-cache.outputs.cache-hit != 'true'
+        working-directory: target/performance-baseline
+        run: cargo build --release --locked --no-default-features --features bench-bin --bin copperline-bench
+      - name: Save the pinned baseline executable
+        # Shared caches come only from branch pushes, never PR merge refs.
+        if: >-
+          github.event_name == 'push' &&
+          (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/v1') &&
+          steps.baseline-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: target/performance-baseline/target/release/copperline-bench
+          key: ${{ steps.baseline-cache.outputs.cache-primary-key }}
+      - name: Build the candidate (release, core only)
+        run: cargo build --release --locked --no-default-features --features bench-bin --bin copperline-bench
+      - name: Compare AROS core and render throughput
+        # Both builds have finished before any timing. Every sample runs
+        # on this same host; no absolute cross-runner timing is a gate.
+        run: |
+          python3 tools/check-performance.py \
+            --baseline-binary target/performance-baseline/target/release/copperline-bench \
+            --candidate-binary target/release/copperline-bench
+      - name: Publish performance summary
+        if: always()
+        run: |
+          if [ -f target/performance-gate/summary.md ]; then
+            cat target/performance-gate/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'AROS performance gate did not complete. See job logs and retained artifacts.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Retain raw samples and provenance
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: aros-performance
+          path: target/performance-gate/
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "8c0fcb09ff778c69946defe78b02794524f26fd1",
+  "seconds": 30,
+  "pairs": 5,
+  "max_regression_percent": 10,
+  "sample_timeout_seconds": 120,
+  "rom_sha256": {
+    "aros-amiga-m68k-rom.bin": "1f16dad45e0da11276cad6c6ea9936284bf0fa96d46063ccf850b45d2f8316fe",
+    "aros-amiga-m68k-ext.bin": "c8e313d5b43ba5ec35f0300e5589f12667039714777896ab0e37d040f560965f"
+  },
+  "workloads": [
+    {"name": "a500-pal", "config": "a500-pal.toml"},
+    {"name": "a1200-pal", "config": "a1200-pal.toml"}
+  ]
+}
