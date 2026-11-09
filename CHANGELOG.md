@@ -8,6 +8,14 @@ for the earlier release notes.
 
 ## Unreleased
 
+### Added
+
+- `--terminal` shows and drives the machine in a terminal that speaks the
+  Kitty graphics and keyboard protocols (kitty, Ghostty, WezTerm) instead of
+  a window, including over SSH with no display server. F12 is the host key;
+  `--terminal-fps` caps the frame rate and `--terminal-log` sets the log file
+  (see docs/guide/terminal.md).
+
 ### Changed
 
 - The browser, libretro and publisher-kit player frontends are now members

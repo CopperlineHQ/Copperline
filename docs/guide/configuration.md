@@ -197,6 +197,9 @@ range checks as the equivalent TOML fields:
 | `--pcmcia-sram SIZE` | `[pcmcia] card = "sram"`, `size` | a session-only SRAM card in the slot, `64K` to `4M` |
 | `--gif-after SECS PATH` | (none) | write an animated GIF clip of the display from SECS emulated seconds, then exit (see [](headless.md#capturing-gif-clips)) |
 | `--gif-seconds N` | (none) | length of each `--gif-after` clip in emulated seconds; defaults to `[recording] clip_seconds` |
+| `--terminal` | (none) | show and drive the machine in a Kitty-protocol terminal instead of a window, also over SSH ([Terminal display](terminal.md)) |
+| `--terminal-fps N` | (none; needs `--terminal`) | send at most N frames a second to the terminal |
+| `--terminal-log PATH` | (none; needs `--terminal`) | log file while `--terminal` owns the terminal (default `copperline-terminal-PID.log` in the temporary directory) |
 
 For example, to boot a stock A1200 profile but with 8 MB of fast RAM and a
 faster CPU, with no config file at all:

@@ -119,6 +119,11 @@ pub struct CliArgs {
     /// `--control-token TOKEN` / `--control-info PATH` for either mode.
     pub control_token: Option<String>,
     pub control_info: Option<PathBuf>,
+    /// `--terminal`: show and drive the session in the controlling terminal
+    /// (Kitty graphics and keyboard protocols) instead of a window, with
+    /// `--terminal-fps` / `--terminal-log` refining it.
+    pub terminal: bool,
+    pub terminal_options: copperline::terminal::Options,
     /// Dump consecutive rendered frames after an emulated-time delay. This
     /// is intended for debugging flicker and frame-to-frame palette
     /// changes that a single screenshot cannot show.
@@ -506,6 +511,8 @@ where
     let mut control_gui_listen: Option<String> = None;
     let mut control_token: Option<String> = None;
     let mut control_info: Option<PathBuf> = None;
+    let mut terminal = false;
+    let mut terminal_options = copperline::terminal::Options::default();
     let mut dump_dir: Option<PathBuf> = None;
     let mut dump_start_secs: f32 = 0.0;
     let mut dump_count: Option<u32> = None;
@@ -1540,6 +1547,24 @@ where
                     .ok_or_else(|| anyhow!("--control-info requires a file path"))?;
                 control_info = Some(PathBuf::from(path));
             }
+            "--terminal" => terminal = true,
+            "--terminal-fps" => {
+                let fps: f32 = next_arg(
+                    &mut args,
+                    "--terminal-fps requires N",
+                    "--terminal-fps N must be a number",
+                )?;
+                if !(fps > 0.0 && fps.is_finite()) {
+                    return Err(anyhow!("--terminal-fps N must be greater than zero"));
+                }
+                terminal_options.max_fps = Some(fps);
+            }
+            "--terminal-log" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| anyhow!("--terminal-log requires a file path"))?;
+                terminal_options.log_path = Some(PathBuf::from(path));
+            }
             "--dump-frames" => {
                 let path = args
                     .next()
@@ -2037,6 +2062,8 @@ where
         control_gui: control_gui_listen,
         control_token,
         control_info,
+        terminal,
+        terminal_options,
         frame_dump,
         waveform,
         press_after,
@@ -2276,6 +2303,12 @@ fn help_text() -> String {
          --control-token TOKEN          pin the control auth token (default: generated;\n  \
          \x20                            visible in ps -- prefer --control-info)\n  \
          --control-info PATH            write the control endpoint and token to PATH as JSON\n  \
+         --terminal                     show and drive the machine in this terminal instead of\n  \
+         \x20                            a window (kitty, Ghostty, WezTerm; works over SSH;\n  \
+         \x20                            F12 is the host key; see docs/guide/terminal.md)\n  \
+         --terminal-fps N               send at most N frames a second to the terminal\n  \
+         --terminal-log PATH            log file while --terminal owns the terminal\n  \
+         \x20                            (default: copperline-terminal-PID.log in the temp dir)\n  \
          --dump-frames DIR              dump consecutive PNG frames into DIR, then exit\n  \
          --dump-start SECS              start frame dumping after SECS seconds (default: 0)\n  \
          --dump-count COUNT             number of frames to dump with --dump-frames\n  \

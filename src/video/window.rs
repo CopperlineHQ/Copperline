@@ -8282,6 +8282,8 @@ mod rtg_ui;
 mod scaler;
 pub(in crate::video) mod statusbar;
 mod stickers;
+#[cfg(unix)]
+mod terminal;
 mod title;
 pub(super) use present::{scale_rect, texture_height, texture_width, Rect};
 pub(super) use statusbar::{draw_rect_bevel, fill_rect, fill_rect_blend};

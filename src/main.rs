@@ -366,6 +366,38 @@ fn validate_control_args(cli: &CliArgs) -> Result<()> {
     Ok(())
 }
 
+/// `--terminal` runs the App's own loop with the terminal as its display, so
+/// it excludes the forms that own the machine (`--control`, `--gdb`,
+/// `--benchmark-until`) and the window attachments, which need the window's
+/// event loop.
+fn validate_terminal_args(cli: &CliArgs) -> Result<()> {
+    if !cli.terminal {
+        if cli.terminal_options != copperline::terminal::Options::default() {
+            return Err(anyhow!("--terminal-fps and --terminal-log need --terminal"));
+        }
+        return Ok(());
+    }
+    if cfg!(not(unix)) {
+        return Err(anyhow!("--terminal is not available on this platform"));
+    }
+    let conflicts = [
+        (cli.control.is_some(), "--control"),
+        (cli.control_gui.is_some(), "--control-gui"),
+        (cli.gdb.is_some(), "--gdb"),
+        (cli.gdb_gui.is_some(), "--gdb-gui"),
+        (cli.benchmark_until.is_some(), "--benchmark-until"),
+        (cli.netplay.is_some(), "netplay"),
+        (
+            cli.live_audio_profile_secs.is_some(),
+            "--profile-live-audio",
+        ),
+    ];
+    if let Some((_, flag)) = conflicts.iter().find(|(set, _)| *set) {
+        return Err(anyhow!("--terminal cannot be combined with {flag}"));
+    }
+    Ok(())
+}
+
 fn run_headless_benchmark(mut emu: Emulator, target_secs: f32) -> Result<()> {
     emu.set_paced(false);
     emu.reset_stats();
@@ -862,6 +894,8 @@ fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> 
     validate_run_args(&cli)?;
     validate_gdb_args(&cli)?;
     validate_control_args(&cli)?;
+    validate_terminal_args(&cli)?;
+    let terminal = cli.terminal.then(|| cli.terminal_options.clone());
     *error_dialog = startup::error_dialog_allowed(desktop, &cli);
     if cli.calibrate_gamepad {
         return gamepad::run_calibration();
@@ -1205,12 +1239,18 @@ fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> 
     // wall-clock time. The emulated result is identical either way.
     // A --coverage run without an interactive server attached is a capture
     // run too: it ends by itself when the program exits. With
-    // --control-gui/--gdb-gui it rides along the windowed session instead.
-    let coverage_capture =
-        cli.coverage.is_some() && cli.control_gui.is_none() && cli.gdb_gui.is_none();
+    // --control-gui/--gdb-gui it rides along the windowed session instead,
+    // and with --terminal along the terminal session.
+    let coverage_capture = cli.coverage.is_some()
+        && cli.control_gui.is_none()
+        && cli.gdb_gui.is_none()
+        && terminal.is_none();
     // --exit-on-return is the same kind of run: it ends by itself when the
     // program returns, so on its own it needs no window either.
-    let exit_capture = cli.exit_on_return && cli.control_gui.is_none() && cli.gdb_gui.is_none();
+    let exit_capture = cli.exit_on_return
+        && cli.control_gui.is_none()
+        && cli.gdb_gui.is_none()
+        && terminal.is_none();
     let headless_capture = !cli.screenshot_after.is_empty()
         || !cli.expect_screenshot.is_empty()
         || cli.frame_dump.is_some()
@@ -1385,7 +1425,8 @@ fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> 
         || coverage_capture
         || exit_capture)
         && cli.control_gui.is_none()
-        && cli.gdb_gui.is_none();
+        && cli.gdb_gui.is_none()
+        && terminal.is_none();
     // The warp-launch gate belongs to interactive sessions only: a capture
     // run is already unpaced end to end and must never be re-paced when the
     // program loads.
@@ -1597,6 +1638,13 @@ fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> 
     // the core unthrottled, so priority buys it nothing.
     if realtime_priority && paced {
         priority::elevate_pacer_thread();
+    }
+    // --terminal: the terminal is the display. Like a windowless capture it
+    // never touches winit, so it works over SSH with no display server.
+    #[cfg(unix)]
+    if let Some(options) = terminal {
+        info!("terminal: showing the session in the controlling terminal");
+        return finish_with(app.run_terminal(options)?);
     }
     if windowless_capture {
         info!("headless capture: running without a window (no display connection)");
@@ -1832,6 +1880,7 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.record_input.is_none()
         && cli.audio_wav.is_none()
         && cli.audio_live
+        && !cli.terminal
 }
 
 fn run_live_audio_profile(secs: f32) -> Result<()> {
@@ -3176,6 +3225,42 @@ mod tests {
         ])?)
         .unwrap_err();
         assert!(err.to_string().contains("--expect-screenshot"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_flags_parse_and_exclude_machine_owning_modes() -> Result<()> {
+        let args = parse(&[
+            "--terminal",
+            "--terminal-fps",
+            "12.5",
+            "--terminal-log",
+            "/tmp/t.log",
+        ])?;
+        assert!(args.terminal);
+        assert_eq!(args.terminal_options.max_fps, Some(12.5));
+        assert_eq!(
+            args.terminal_options.log_path.as_deref(),
+            Some(std::path::Path::new("/tmp/t.log"))
+        );
+        assert!(validate_terminal_args(&args).is_ok() || cfg!(not(unix)));
+        // A terminal session is interactive: no launcher in front of it.
+        assert!(!launcher_requested(&parse(&["--terminal"])?));
+        assert!(parse(&["--terminal-fps", "0"]).is_err());
+        let err = validate_terminal_args(&parse(&["--terminal-fps", "10"])?).unwrap_err();
+        assert!(err.to_string().contains("need --terminal"), "{err}");
+        #[cfg(unix)]
+        for conflict in [
+            &["--control", ":0"][..],
+            &["--gdb", ":0"],
+            &["--control-gui", ":0"],
+            &["--benchmark-until", "5"],
+        ] {
+            let mut args = vec!["--terminal"];
+            args.extend_from_slice(conflict);
+            let err = validate_terminal_args(&parse(&args)?).unwrap_err();
+            assert!(err.to_string().contains(conflict[0]), "{err}");
+        }
         Ok(())
     }
 
