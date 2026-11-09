@@ -632,8 +632,10 @@ jobs:
         working-directory: crates/copperline-web
         run: cargo check --target wasm32-unknown-unknown --locked
       - name: Web wrapper unit tests
-        working-directory: crates/copperline-web
-        run: cargo test --locked
+        # Run from the workspace root, not the crate directory, so the
+        # root-level entry point (and the test-thread stack it must pick up
+        # from the root .cargo/config.toml) stays covered.
+        run: cargo test -p copperline-web --locked
       - name: Browser rollback netplay on the release WASM bundle
         working-directory: crates/copperline-web
         run: |
