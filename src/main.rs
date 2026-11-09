@@ -210,6 +210,11 @@ fn validate_gdb_args(cli: &CliArgs) -> Result<()> {
              rebuild with --features gdb for --gdb/--gdb-gui"
         ));
     }
+    if cli.allow_remote_debugging && cli.gdb.is_none() && cli.gdb_gui.is_none() {
+        return Err(anyhow!(
+            "--allow-remote-debugging requires --gdb or --gdb-gui"
+        ));
+    }
     if cli.gdb_dialect.is_some() && cli.gdb.is_none() && cli.gdb_gui.is_none() {
         return Err(anyhow!("--gdb-dialect requires --gdb or --gdb-gui"));
     }
@@ -1285,6 +1290,7 @@ fn main() -> Result<()> {
     if let Some(listen) = cli.gdb {
         let mut gdb = gdbstub::Config::new(listen);
         gdb.bartman = cli.gdb_dialect.as_deref() == Some("bartman");
+        gdb.allow_remote = cli.allow_remote_debugging;
         // --run + --gdb: stop at the program's first instruction, the
         // moment the guest OS loads it.
         gdb.stop_on_load = run_prog_name.clone();
@@ -1553,6 +1559,7 @@ fn main() -> Result<()> {
         // opens, socket threads start inside App::run.
         let mut config = gdbstub::Config::new(listen);
         config.bartman = cli.gdb_dialect.as_deref() == Some("bartman");
+        config.allow_remote = cli.allow_remote_debugging;
         // --run + --gdb-gui: stop at the program's first instruction,
         // the moment the guest OS loads it.
         config.stop_on_load = run_prog_name.clone();
@@ -3156,6 +3163,21 @@ mod tests {
         ])?;
         let err = validate_benchmark_args(&args).unwrap_err();
         assert!(err.to_string().contains("--screenshot-after"), "{err:#}");
+        Ok(())
+    }
+
+    #[test]
+    fn remote_debugging_opt_in_requires_a_gdb_listener() -> Result<()> {
+        let args = parse(&["--allow-remote-debugging"])?;
+        assert!(validate_gdb_args(&args)
+            .unwrap_err()
+            .to_string()
+            .contains("requires --gdb"));
+        for flag in ["--gdb", "--gdb-gui"] {
+            let args = parse(&[flag, "0.0.0.0:0", "--allow-remote-debugging"])?;
+            assert!(args.allow_remote_debugging);
+            validate_gdb_args(&args)?;
+        }
         Ok(())
     }
 

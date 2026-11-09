@@ -49,6 +49,7 @@ struct Options {
     mcp: bool,
     dap: bool,
     dap_listen: Option<String>,
+    allow_remote_debugging: bool,
     method: Option<String>,
     params: Value,
 }
@@ -58,7 +59,7 @@ fn usage() -> &'static str {
      [--repl | METHOD [JSON-PARAMS]]\n       \
      copperline-ctl --mcp [--info FILE | --connect ADDR --token TOKEN]\n       \
      copperline-ctl --dap [--info FILE | --connect ADDR --token TOKEN]\n       \
-     copperline-ctl --dap-listen ADDR [--info FILE | --connect ADDR --token TOKEN]\n       \
+     copperline-ctl --dap-listen ADDR [--allow-remote-debugging] [--info FILE | --connect ADDR --token TOKEN]\n       \
      copperline-ctl profile STATE [--rom ROM] --out PATH [--frames N] [--format native|bartman]\n       \
      copperline-ctl profile-report DIR --program PROG [--elf PROG.ELF] \
        --out FILE [--format chrome|bartman|lcov] [--per-frame] \
@@ -79,6 +80,7 @@ fn parse_options() -> Result<Options, String> {
     let mut mcp = false;
     let mut dap = false;
     let mut dap_listen = None;
+    let mut allow_remote_debugging = false;
     let mut method = None;
     let mut params = Value::Null;
     let mut args = std::env::args().skip(1);
@@ -110,6 +112,7 @@ fn parse_options() -> Result<Options, String> {
             "--repl" => repl = true,
             "--mcp" => mcp = true,
             "--dap" => dap = true,
+            "--allow-remote-debugging" => allow_remote_debugging = true,
             "--dap-listen" => {
                 dap_listen = Some(args.next().ok_or("--dap-listen requires ADDR")?);
             }
@@ -120,6 +123,9 @@ fn parse_options() -> Result<Options, String> {
             }
             other => return Err(format!("unexpected argument {other:?}\n{}", usage())),
         }
+    }
+    if allow_remote_debugging && dap_listen.is_none() {
+        return Err("--allow-remote-debugging requires --dap-listen".into());
     }
     let dap = dap || dap_listen.is_some();
     if mcp && dap {
@@ -148,6 +154,7 @@ fn parse_options() -> Result<Options, String> {
         mcp,
         dap,
         dap_listen,
+        allow_remote_debugging,
         method,
         params,
     })
@@ -377,7 +384,9 @@ fn run_dap(options: &Options) -> ExitCode {
         _ => None,
     };
     let result = match &options.dap_listen {
-        Some(addr) => copperline::control::dap::run_listen(addr, attach),
+        Some(addr) => {
+            copperline::control::dap::run_listen(addr, options.allow_remote_debugging, attach)
+        }
         None => copperline::control::dap::run_stdio(attach),
     };
     match result {

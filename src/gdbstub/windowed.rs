@@ -61,9 +61,7 @@ impl GdbHandle {
     /// before the window exists so a debugger can attach as soon as it
     /// opens; threads are spawned later by [`GdbHandle::start`].
     pub fn bind(config: &super::Config) -> Result<Self> {
-        let bind = crate::debugger::normalize_listen_addr(&config.listen)?;
-        let listener =
-            TcpListener::bind(&bind).with_context(|| format!("binding GDB stub {bind}"))?;
+        let listener = crate::debugger::bind_debug_listener(&config.listen, config.allow_remote)?;
         let local = listener
             .local_addr()
             .context("resolving GDB stub address")?;

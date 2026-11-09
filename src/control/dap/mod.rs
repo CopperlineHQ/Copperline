@@ -31,7 +31,6 @@ use proto::{Outgoing, Request};
 use serde_json::{json, Value};
 use session::Session;
 use std::io::{self, BufRead, BufReader, Write};
-use std::net::TcpListener;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -463,15 +462,18 @@ pub fn run_stdio(preattached: Option<Bridge>) -> io::Result<()> {
 
 /// `copperline-ctl --dap-listen ADDR`: accept DAP clients over TCP, one
 /// at a time (the `debugServer` style of connection).
-pub fn run_listen(addr: &str, mut preattached: Option<Bridge>) -> io::Result<()> {
-    let bind = crate::debugger::normalize_listen_addr(addr)
+pub fn run_listen(
+    addr: &str,
+    allow_remote: bool,
+    mut preattached: Option<Bridge>,
+) -> io::Result<()> {
+    let listener = crate::debugger::bind_debug_listener(addr, allow_remote)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
-    let listener = TcpListener::bind(&bind)?;
     eprintln!(
         "copperline-dap: listening on {}",
         listener
             .local_addr()
-            .map_or(bind.clone(), |a| a.to_string())
+            .map_or_else(|_| addr.to_string(), |a| a.to_string())
     );
     loop {
         let (stream, peer) = listener.accept()?;

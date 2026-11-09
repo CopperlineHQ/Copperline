@@ -42,15 +42,26 @@ the control client did not request arrives as `event.stopped`, and
 `continue` is outstanding (`pause` first). Either client's pause ends the
 other's run with reason `pause`.
 
-On start-up the server prints its endpoint and token to stderr as one line
-(`copperline-control: listen=ADDR token=TOKEN proto=1`). The token is a fresh
-random 128-bit value unless `--control-token TOKEN` pins one; a pinned token
-is visible in the process list, so prefer `--control-info FILE`, which writes
-the same details to a JSON file readable only by its owner:
+On start-up the server prints its endpoint and info-file path to stderr as
+one line (`copperline-control: listen=ADDR info=PATH proto=1`). It never
+prints the token. The token is a fresh 128-bit value from the operating
+system's cryptographic random source; if that source fails, the server
+does not start. `--control-token TOKEN` pins a nonempty token, which is
+visible in the process list, so prefer `--control-info FILE` for handoff.
+The JSON file contains:
 
 ```json
 {"listen": "127.0.0.1:52114", "token": "1f0c...", "proto": 1}
 ```
+
+An explicit file is replaced atomically with a newly created file (mode
+0600 on Unix), including when the old path was a symlink or had broader
+permissions. Other systems use the containing directory's default access
+controls, so choose a directory private to your account. Without
+`--control-info`, the server creates a temporary info file, prints its
+path, and removes it on normal shutdown. Pass that path to
+`copperline-ctl --info PATH`. Scripts that previously parsed `token=` from
+stderr must read the JSON file instead.
 
 With `--run PROG`, either mode arms a one-shot `loadseg` stop for the
 program before the machine runs, the same break-at-entry `--gdb` has: the

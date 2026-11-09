@@ -167,6 +167,15 @@ board offline, below) instead of hanging the emulator. A save state stores the
 module's path and replays its memory image on load, so the `.wasm` file, and
 any file a file-typed option names, must remain where the manifest points.
 
+Each board is limited to one linear memory of at most 64 MiB and one table
+of at most 65,536 elements. The limits apply during instantiation, `init`,
+all later calls, cold resets, and save-state restore. Oversized initial
+resources are rejected; `memory.grow` and `table.grow` return -1 when growth
+would exceed a limit, allowing the plugin to handle allocation failure.
+These limits bound the plugin's linear memory and table storage, rather
+than Wasmtime's compiler or all host resources. Older save states whose
+plugin memory exceeds 64 MiB cannot be restored.
+
 ### Module ABI
 
 The host calls these exports (all optional except `memory`):

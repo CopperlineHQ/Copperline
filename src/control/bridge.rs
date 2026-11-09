@@ -442,11 +442,9 @@ static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Pick the `--control-info` path and create the log file for one launch.
 ///
-/// The emulator announces its token on stderr, so the log is readable by
-/// the owner only from the moment it exists, like the info file, and is
-/// never an existing file: a symlink planted under a predictable name in a
-/// shared temp dir would carry the token away. A name that already exists
-/// is simply skipped for the next one in the sequence.
+/// Logs can contain private guest output, so the log is readable by the
+/// owner only from the moment it exists and never reuses an existing file.
+/// A name that already exists is skipped for the next one in the sequence.
 fn create_launch_files() -> Result<(PathBuf, PathBuf, std::fs::File), String> {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -842,8 +840,7 @@ mod tests {
         assert!(err.contains("exited"), "{err}");
         assert!(err.contains("boot failure"), "{err}");
         assert!(err.contains("--control :0"), "{err}");
-        // The log the emulator's stderr went to (where a real emulator
-        // announces its token) is readable by the owner only.
+        // The log the emulator's stderr went to is readable by the owner only.
         let log = err
             .split("; log ")
             .nth(1)

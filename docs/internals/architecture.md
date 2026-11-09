@@ -526,6 +526,24 @@ or invalid relocation targets/offsets produce a section-specific diagnostic.
 See the [DAP reference](../debugger/dap.md#debug-information) for supported
 toolchains and variable-location expressions.
 
+## Debug transport and WASM resource boundaries
+
+The unauthenticated GDB drivers and TCP DAP adapter share
+`debugger::bind_debug_listener`: resolve the address once, require every
+resolved IP to be loopback unless the caller explicitly enables remote
+debugging, then bind those same resolved addresses. The authenticated CCP
+transport retains its existing address handling. Control tokens come from
+`getrandom`'s OS source with errors propagated to startup, and appear only
+in JSON handoff files, never the startup log. Explicit handoff paths are
+replaced atomically; automatic paths are owned by the server and removed
+when it drops. See the [control protocol](../debugger/control.md).
+
+`WasmRuntime::instantiate` installs a Wasmtime `StoreLimits` limiter before
+instantiating each plugin. Its one memory (64 MiB) and one table (65,536
+elements) limits also cover reset-created stores and host-initiated memory
+growth on restore. The limiter is host state, so this adds no serialized
+field or save-state format version. See [WASM boards](../zorro.md#wasm-plugin-boards).
+
 ## envcfg: environment variables are start-up settings
 
 All `COPPERLINE_*` knobs are read through `src/envcfg.rs`, which snapshots

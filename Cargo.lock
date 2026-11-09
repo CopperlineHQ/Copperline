@@ -810,6 +810,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "fluxbridge",
+ "getrandom 0.4.3",
  "gif",
  "gilrs",
  "gimli 0.34.0",

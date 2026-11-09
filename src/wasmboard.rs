@@ -147,7 +147,8 @@ use std::net::{Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use wasmtime::{
-    Caller, Config, Engine, Extern, Linker, Memory as WasmMemory, Module, Store, TypedFunc,
+    Caller, Config, Engine, Extern, Linker, Memory as WasmMemory, Module, Store, StoreLimits,
+    StoreLimitsBuilder, TypedFunc,
 };
 
 // The manifest structs live in `crate::wasm_manifest` so config/zorro can
@@ -155,10 +156,16 @@ use wasmtime::{
 // `wasmboard::WasmManifest` paths keep working.
 pub use crate::wasm_manifest::{WasmCaps, WasmManifest};
 
+// One memory/table per board makes these per-resource limits also bound the
+// total linear memory and table storage of a plugin instance.
+const MAX_LINEAR_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TABLE_ELEMENTS: usize = 65_536;
+
 /// Store data for host imports. The Amiga-memory pointer is stored as a
 /// `usize` (0 = none) so the store stays `Send`; it is set to the live
 /// `&mut Memory` only for the duration of a plugin call (see [`WasmRuntime::enter`]).
 struct HostCtx {
+    limits: StoreLimits,
     /// Address of the live `Memory`, valid only during a plugin call.
     mem: usize,
     name: String,
@@ -287,6 +294,13 @@ impl WasmRuntime {
         let mut store = Store::new(
             engine,
             HostCtx {
+                limits: StoreLimitsBuilder::new()
+                    .memory_size(MAX_LINEAR_MEMORY_BYTES)
+                    .memories(1)
+                    .table_elements(MAX_TABLE_ELEMENTS)
+                    .tables(1)
+                    .instances(1)
+                    .build(),
                 mem: 0,
                 name: manifest.name.clone(),
                 net,
@@ -301,6 +315,7 @@ impl WasmRuntime {
                 pending_dma_bytes: 0,
             },
         );
+        store.limiter(|ctx| &mut ctx.limits);
         let mut linker = Linker::new(engine);
         register_host_fns(&mut linker, manifest.caps)?;
         let instance = linker
@@ -2342,6 +2357,88 @@ mod tests {
             wcs: Vec::new(),
             wcs_write_protected: false,
         }
+    }
+
+    #[test]
+    fn plugin_instantiation_rejects_oversized_or_multiple_memories_and_tables() {
+        for (name, wat) in [
+            ("large-memory", "(module (memory (export \"memory\") 1025))"),
+            (
+                "extra-memory",
+                "(module (memory (export \"memory\") 1) (memory 1))",
+            ),
+            (
+                "large-table",
+                "(module (memory (export \"memory\") 1) (table 65537 funcref))",
+            ),
+            (
+                "extra-table",
+                "(module (memory (export \"memory\") 1) (table 1 funcref) (table 1 funcref))",
+            ),
+        ] {
+            let path = write_wasm(name, wat);
+            let result = WasmBoard::from_file(&path, manifest(name, false));
+            let error = result.err().expect("oversized plugin must be rejected");
+            assert!(
+                format!("{error:#}").contains("instantiating WASM plugin"),
+                "{name}: {error:#}"
+            );
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn plugin_memory_growth_is_limited_during_calls_reset_and_restore() {
+        let path = write_wasm(
+            "bounded-growth",
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "read") (param $pages i32) (param i32) (result i32)
+                (memory.grow (local.get $pages))))
+        "#,
+        );
+        let mut board = WasmBoard::from_file(&path, manifest("bounded-growth", false)).unwrap();
+        let mut mem = empty_memory();
+        let mut host = DeviceHost::new(&mut mem);
+        let max_pages = (MAX_LINEAR_MEMORY_BYTES / 65536) as u32;
+        for _ in 0..2 {
+            assert_eq!(board.read(1, 0, &mut host), 1);
+            assert_eq!(board.read(max_pages, 0, &mut host), u32::MAX);
+            let mut rt = board.rt.borrow_mut();
+            assert_eq!(rt.memory.size(&rt.store), 2);
+            assert!(!rt.faulted, "a denied memory.grow returns -1 to the plugin");
+            assert!(rt.restore(max_pages as u64 + 1, &[]).is_err());
+            assert_eq!(rt.memory.size(&rt.store), 2);
+            let (pages, bytes) = rt.snapshot();
+            drop(rt);
+            board.reset();
+            board.rt.borrow_mut().restore(pages, &bytes).unwrap();
+            assert_eq!(board.read(max_pages, 0, &mut host), u32::MAX);
+            board.reset();
+        }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn plugin_init_cannot_grow_memory_past_the_limit() {
+        let path = write_wasm(
+            "bounded-init",
+            r#"
+            (module
+              (memory (export "memory") 1)
+              (func (export "init")
+                (i32.store (i32.const 0) (memory.grow (i32.const 1024))))
+              (func (export "read") (param i32 i32) (result i32)
+                (i32.load (i32.const 0))))
+        "#,
+        );
+        let mut board = WasmBoard::from_file(&path, manifest("bounded-init", false)).unwrap();
+        let mut mem = empty_memory();
+        assert_eq!(board.read(0, 0, &mut DeviceHost::new(&mut mem)), u32::MAX);
+        let rt = board.rt.borrow();
+        assert_eq!(rt.memory.size(&rt.store), 1);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

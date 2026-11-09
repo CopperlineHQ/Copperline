@@ -15,6 +15,12 @@ Run them, once the assets are in place, with:
 cargo test --release --test image_regression -- --ignored --nocapture
 ```
 
+`tests/debugger_security.rs` runs in the default suite without external
+assets. It checks GDB/DAP remote-listener rejection, explicit GDB/TCP DAP
+opt-in, and control authentication through temporary info files while
+asserting that tokens never appear in process logs. Child processes have
+20-second deadlines and are killed on test failure.
+
 ## Contributor regression workflow
 
 The fast gate for a CPU, memory, bus, IRQ, or chipset change is:
