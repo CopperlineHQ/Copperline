@@ -48,6 +48,18 @@ def repair_generated_sources(directory: Path) -> None:
         text = source.read_text()
         parts = re.split(r"(`+[^`]*`+)", text)
         for index in range(0, len(parts), 2):
+            # MyST does not escape a slash in front of emphasis: Markdown
+            # "menu/**Open with**" becomes Typst "menu/*Open with*", and "/*" in
+            # markup opens a block comment that silently drops the rest of the
+            # chapter from the PDF. Refuse it instead of shipping a truncated
+            # manual.
+            comment = parts[index].find("/*")
+            if comment >= 0:
+                context = parts[index][max(0, comment - 30):comment + 30].replace("\n", " ")
+                raise ValueError(
+                    f"Typst comment opener '/*' in {source.name} prose near {context!r}; "
+                    "reword the Markdown so no slash precedes emphasis"
+                )
             parts[index] = re.sub(r"(?<![\w.#])arrow\.r(?![\w.])", "#sym.arrow.r", parts[index])
         source.write_text("".join(parts))
 

@@ -73,6 +73,9 @@ helper's layout-convergence failures and incorrect page counts in long
 manuals. It also corrects menu arrows emitted as literal `arrow.r` text by
 MyST 1.10. Markdown sources and the downloaded templates are left unchanged.
 New tablex features fail the build until an equivalent native mapping is added.
+A slash directly before emphasis (such as `menu/**Open with**`) also fails
+the build: MyST emits it unescaped as `/*`, which Typst reads as a block
+comment that would silently drop the rest of the chapter, so reword it.
 
 ## Validation
 
