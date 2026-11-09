@@ -14,11 +14,6 @@ license = "GPL-3.0-or-later"
 description = "Standalone single-game player built on the Copperline Amiga emulator"
 publish = false
 
-# Standalone: deliberately not a member of any workspace, so building this
-# crate never changes the root package's lockfile or native artifacts
-# (the same shape as crates/copperline-web).
-[workspace]
-
 [dependencies]
 # The interactive frontend, the CPU JIT, MP3 cue-sheet tracks (a bundled CD
 # image may package its audio that way), and the CD32 FMV cartridge whose
@@ -40,13 +35,5 @@ env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 
-# The root manifest's pixels patch (the unbounded surface-acquire retry,
-# parasyte/pixels#462); [patch] applies only at a workspace root, so this
-# standalone workspace repeats it. Remove together.
-[patch.crates-io]
-pixels = { git = "https://github.com/parasyte/pixels", rev = "c681486feaaaf413b2db5c7b57d342677f0dfd87" }
-
-[profile.release]
-opt-level = 3
-lto = "fat"
-codegen-units = 1
+# The pixels [patch] and the build profiles come from the workspace root
+# manifest.

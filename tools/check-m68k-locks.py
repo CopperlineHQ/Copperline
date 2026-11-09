@@ -7,11 +7,10 @@ import tomllib
 
 
 ROOT = Path(__file__).resolve().parents[1]
+# The root lock covers the emulator and every frontend in its workspace; the
+# conformance runner is a standalone workspace with its own lock.
 LOCKS = (
     "Cargo.lock",
-    "crates/copperline-player/Cargo.lock",
-    "crates/copperline-web/Cargo.lock",
-    "crates/copperline-libretro/Cargo.lock",
     "crates/cputest-runner/Cargo.lock",
 )
 

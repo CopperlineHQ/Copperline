@@ -30,19 +30,23 @@ jobs:
           python3 -m unittest discover -s tools/tests -p test_performance.py -v
           revision="$(python3 tools/check-performance.py --print-baseline)"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
-      - name: Check out the pinned baseline
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ steps.baseline.outputs.revision }}
-          path: target/performance-baseline
-          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+      # Restore before the baseline checkout below. When its key misses
+      # (any Cargo.lock or manifest change), rust-cache pre-cleans target/
+      # even with cache-targets off, and would delete a checkout already
+      # nested at target/performance-baseline.
       - uses: Swatinem/rust-cache@v2
         with:
           # Registry-only: two small core builds do not need another large
           # target cache competing with the desktop/release cache pool.
           cache-targets: false
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Check out the pinned baseline
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.baseline.outputs.revision }}
+          path: target/performance-baseline
+          persist-credentials: false
       - name: Record build and host provenance
         run: |
           mkdir -p target/performance-gate

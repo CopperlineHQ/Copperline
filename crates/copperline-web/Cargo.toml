@@ -7,10 +7,6 @@ license = "GPL-3.0-or-later"
 description = "Browser (wasm32) frontend for the Copperline Amiga emulator"
 publish = false
 
-# Standalone: deliberately not a member of any workspace, so building this
-# crate never changes the root package's lockfile or native artifacts.
-[workspace]
-
 [lib]
 crate-type = ["cdylib"]
 
@@ -25,10 +21,7 @@ log = "0.4"
 console_log = "1"
 console_error_panic_hook = "0.1"
 
-[profile.release]
-opt-level = 3
-# The emulator's hot path crosses the web wrapper, CPU, bus and chipset
-# crates. Fat LTO is about 4% faster than thin LTO in the controlled Chrome
-# AROS workload; the longer release link is worthwhile for the shipped bundle.
-lto = "fat"
-codegen-units = 1
+# The fat-LTO release profile comes from the workspace root manifest. The
+# emulator's hot path crosses the web wrapper, CPU, bus and chipset crates:
+# fat LTO is about 4% faster than thin LTO in the controlled Chrome AROS
+# workload, so the longer release link is worthwhile for the shipped bundle.

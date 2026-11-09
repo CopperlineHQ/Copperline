@@ -142,8 +142,11 @@ cargo install wasm-bindgen-cli --version "$bindgen_version" --locked
 cd crates/copperline-web
 cargo build --release --target wasm32-unknown-unknown --locked
 wasm-bindgen --target web --out-dir pkg \
-  target/wasm32-unknown-unknown/release/copperline_web.wasm
+  ../../target/wasm32-unknown-unknown/release/copperline_web.wasm
 ```
+
+The web crate is a member of the repository's Cargo workspace, so it builds
+into the shared `target/` directory at the repository root.
 
 The compiled JavaScript loader (`copperline_web.js`) and WebAssembly binary
 (`copperline_web_bg.wasm`) are output to the `pkg/` directory.

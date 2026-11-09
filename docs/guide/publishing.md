@@ -81,6 +81,8 @@ COPPERLINE_GAME_MANIFEST=/path/to/game.toml \
 
 Without `COPPERLINE_GAME_MANIFEST`, the example manifest is built, which only
 checks that the crate compiles. The payload is never embedded in the binary.
+The player crate is a member of the repository's Cargo workspace, so the
+binary lands in the shared `target/release/` directory at the repository root.
 
 To build and package a complete bundle for the host platform:
 

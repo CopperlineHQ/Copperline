@@ -79,7 +79,9 @@ def player_binary() -> Path:
     """Where cargo leaves the built player, platform executable suffix
     included -- omitting .exe would declare every Windows build missing."""
     exe = "copperline-player.exe" if sys.platform == "win32" else "copperline-player"
-    return REPO / "crates/copperline-player/target/release" / exe
+    # The player is a member of the root workspace, so it builds into the
+    # shared target directory.
+    return REPO / "target/release" / exe
 
 
 def build_player(manifest_path: Path) -> Path:
