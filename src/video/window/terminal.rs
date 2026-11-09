@@ -44,16 +44,9 @@ struct TermSession {
     parser: Parser,
     geometry: Geometry,
     probed_cell: Option<(u16, u16)>,
-    /// The terminal reports key releases (Kitty keyboard protocol with
-    /// event types). Without them every key is a tap.
-    key_releases: bool,
+    keys: HostKeys,
     /// Keys pressed as taps, with the emulated frame they are let go at.
     taps: Vec<(KeyCode, u64)>,
-    /// F12 was pressed: the next key is a host command.
-    menu: bool,
-    /// Keys whose press was a host command, so their release is not the
-    /// machine's either.
-    swallowed: Vec<TermKey>,
     /// The pointer's last position, in frame pixels, while over the picture.
     pointer: Option<(f64, f64)>,
     notice: Option<(String, Instant)>,
@@ -119,7 +112,7 @@ impl App {
         let geometry = read_geometry(&terminal, caps.cell_pixels)
             .ok_or_else(|| anyhow!("--terminal: the terminal reports no window size"))?;
         let output = Output::start(
-            terminal.try_clone()?,
+            terminal.output_handle()?,
             geometry,
             options.min_frame_interval(),
         )?;
@@ -130,10 +123,8 @@ impl App {
             parser: Parser::new(),
             geometry,
             probed_cell: caps.cell_pixels,
-            key_releases,
+            keys: HostKeys::new(key_releases),
             taps: Vec::new(),
-            menu: false,
-            swallowed: Vec::new(),
             pointer: None,
             notice: None,
             rates_at: now,
@@ -185,12 +176,13 @@ impl App {
                 s.parser.feed(&buf[..n], &mut events);
                 wait = Duration::ZERO;
             }
-            if s.parser.has_pending() {
+            if s.parser.lone_escape_pending() {
                 // A lone ESC is the Escape key unless more of its sequence
-                // is just behind it.
+                // is just behind it. (Any longer unfinished sequence simply
+                // waits for its remaining bytes.)
                 let n = s.terminal.read(&mut buf, Duration::from_millis(15))?;
                 if n == 0 {
-                    s.parser.flush(&mut events);
+                    s.parser.flush_lone_escape(&mut events);
                 } else {
                     s.parser.feed(&buf[..n], &mut events);
                 }
@@ -221,7 +213,11 @@ impl App {
                 self.pump_joystick_input();
                 self.deliver_host_mouse_motion();
                 self.update_warp_input_yield();
-                let (frames, budget) = self.warp_burst_plan(false);
+                // While a capture is scheduled, one frame per pass, as the
+                // window does: scheduled input and captures are serviced
+                // between passes, so a warp burst would move them in
+                // emulated time and skip the frames they capture.
+                let (frames, budget) = self.warp_burst_plan(self.headless_capture_active());
                 let started = Instant::now();
                 for _ in 0..frames {
                     if let Err(e) = self.emu.step_frame() {
@@ -287,37 +283,15 @@ impl App {
     }
 
     fn terminal_key(&mut self, s: &mut TermSession, report: KeyReport) {
-        // The Amiga keyboard repeats by itself; a host repeat is no new key.
-        if report.action == KeyAction::Repeat {
-            return;
-        }
-        let pressed = report.action == KeyAction::Press;
-        if report.key == TermKey::F(12) {
-            if pressed {
-                s.menu = !s.menu;
-            }
-            return;
-        }
-        // A key whose release will not be reported is a tap.
-        let tap = report.legacy || !s.key_releases;
-        let modifier = matches!(report.key, TermKey::Modifier(..));
-        if s.menu && !modifier {
-            if pressed {
-                s.menu = false;
-                if !tap {
-                    s.swallowed.push(report.key);
-                }
-                self.terminal_command(s, report.key);
-            }
-            return;
-        }
-        if !pressed {
-            if let Some(i) = s.swallowed.iter().position(|k| *k == report.key) {
-                s.swallowed.swap_remove(i);
+        let (key, pressed, tap) = match s.keys.route(report) {
+            KeyRoute::Ignore => return,
+            KeyRoute::Command(key) => {
+                self.terminal_command(s, key);
                 return;
             }
-        }
-        let Some(code) = terminal_keycode(report.key) else {
+            KeyRoute::Machine { key, pressed, tap } => (key, pressed, tap),
+        };
+        let Some(code) = terminal_keycode(key) else {
             return;
         };
         if !tap {
@@ -389,7 +363,7 @@ impl App {
         }
         self.release_mouse_buttons();
         s.pointer = None;
-        s.menu = false;
+        s.keys.lose_focus();
     }
 
     fn terminal_mouse(&mut self, s: &mut TermSession, report: MouseReport) {
@@ -481,7 +455,7 @@ impl App {
         if s.notice.as_ref().is_some_and(|(_, until)| now >= *until) {
             s.notice = None;
         }
-        let text = if s.menu {
+        let text = if s.keys.menu {
             " F12:  q quit   p pause   w warp   r reset   s screenshot   Esc back".to_string()
         } else {
             let secs = self.emu.bus().emulated_seconds();
@@ -519,6 +493,97 @@ impl App {
             s.output().post_status(text.clone());
             s.status = text;
         }
+    }
+}
+
+/// Where a key report goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyRoute {
+    /// Nowhere: a repeat, F12 itself, or the release of a command key.
+    Ignore,
+    /// F12 then this key: a host command.
+    Command(TermKey),
+    /// A transition for the machine; `tap` when no release will follow.
+    Machine {
+        key: TermKey,
+        pressed: bool,
+        tap: bool,
+    },
+}
+
+/// The host side of the keyboard: the F12 menu, and which releases belong
+/// to command keys rather than to the machine.
+#[derive(Debug, Default)]
+struct HostKeys {
+    /// The terminal reports key releases (Kitty keyboard protocol with
+    /// event types). Without them every key is a tap.
+    key_releases: bool,
+    /// F12 was pressed: the next key is a host command.
+    menu: bool,
+    /// Command keys whose release is still to come; it is not the
+    /// machine's.
+    swallowed: Vec<TermKey>,
+}
+
+impl HostKeys {
+    fn new(key_releases: bool) -> Self {
+        Self {
+            key_releases,
+            ..Self::default()
+        }
+    }
+
+    fn route(&mut self, report: KeyReport) -> KeyRoute {
+        // The Amiga keyboard repeats by itself; a host repeat is no new key.
+        if report.action == KeyAction::Repeat {
+            return KeyRoute::Ignore;
+        }
+        let pressed = report.action == KeyAction::Press;
+        if report.key == TermKey::F(12) {
+            if pressed {
+                self.menu = !self.menu;
+            }
+            return KeyRoute::Ignore;
+        }
+        let tap = report.legacy || !self.key_releases;
+        if let Some(i) = self.swallowed.iter().position(|k| *k == report.key) {
+            self.swallowed.swap_remove(i);
+            if !pressed {
+                return KeyRoute::Ignore;
+            }
+            // A new press of a command key whose release never came: that
+            // release was lost, and this press is an ordinary one.
+        }
+        if !pressed {
+            // A release reaches the machine even with the menu open: its
+            // press may well have gone there before F12 was pressed.
+            return KeyRoute::Machine {
+                key: report.key,
+                pressed,
+                tap,
+            };
+        }
+        // Modifiers pass through the menu, so a held Shift stays the
+        // machine's.
+        if self.menu && !matches!(report.key, TermKey::Modifier(..)) {
+            self.menu = false;
+            if !tap {
+                self.swallowed.push(report.key);
+            }
+            return KeyRoute::Command(report.key);
+        }
+        KeyRoute::Machine {
+            key: report.key,
+            pressed,
+            tap,
+        }
+    }
+
+    /// The terminal lost the focus: releases will go elsewhere, and the
+    /// menu closes.
+    fn lose_focus(&mut self) {
+        self.menu = false;
+        self.swallowed.clear();
     }
 }
 
@@ -637,6 +702,97 @@ mod tests {
             let code = terminal_keycode(TermKey::Char(ch)).unwrap();
             assert!(host_to_amiga_rawkey(code).is_some(), "{ch:?}");
         }
+    }
+
+    fn report(key: TermKey, action: KeyAction) -> KeyReport {
+        KeyReport {
+            key,
+            mods: Mods::default(),
+            action,
+            legacy: false,
+        }
+    }
+
+    fn machine(key: TermKey, pressed: bool) -> KeyRoute {
+        KeyRoute::Machine {
+            key,
+            pressed,
+            tap: false,
+        }
+    }
+
+    #[test]
+    fn a_key_held_across_the_menu_is_still_released() {
+        let a = TermKey::Char('a');
+        let mut keys = HostKeys::new(true);
+        assert_eq!(keys.route(report(a, KeyAction::Press)), machine(a, true));
+        assert_eq!(
+            keys.route(report(TermKey::F(12), KeyAction::Press)),
+            KeyRoute::Ignore
+        );
+        assert!(keys.menu);
+        // A was down before F12: its release is the machine's.
+        assert_eq!(keys.route(report(a, KeyAction::Release)), machine(a, false));
+        assert_eq!(
+            keys.route(report(TermKey::Escape, KeyAction::Press)),
+            KeyRoute::Command(TermKey::Escape)
+        );
+        assert!(!keys.menu);
+        // The command key's own release is not.
+        assert_eq!(
+            keys.route(report(TermKey::Escape, KeyAction::Release)),
+            KeyRoute::Ignore
+        );
+    }
+
+    #[test]
+    fn menu_routing_of_repeats_modifiers_and_taps() {
+        let shift = TermKey::Modifier(ModifierKey::Shift, Side::Left);
+        let mut keys = HostKeys::new(true);
+        assert_eq!(
+            keys.route(report(TermKey::Char('a'), KeyAction::Repeat)),
+            KeyRoute::Ignore
+        );
+        keys.route(report(TermKey::F(12), KeyAction::Press));
+        // Modifiers pass through an open menu.
+        assert_eq!(
+            keys.route(report(shift, KeyAction::Press)),
+            machine(shift, true)
+        );
+        assert!(keys.menu);
+        assert_eq!(
+            keys.route(report(TermKey::Char('q'), KeyAction::Press)),
+            KeyRoute::Command(TermKey::Char('q'))
+        );
+        // A command key whose release was lost: its next press is the
+        // machine's, and so is that press's release.
+        let p = TermKey::Char('p');
+        keys.route(report(TermKey::F(12), KeyAction::Press));
+        keys.route(report(p, KeyAction::Press));
+        assert_eq!(keys.route(report(p, KeyAction::Press)), machine(p, true));
+        assert_eq!(keys.route(report(p, KeyAction::Release)), machine(p, false));
+        // Without release reports every key is a tap.
+        let mut legacy = HostKeys::new(false);
+        assert_eq!(
+            legacy.route(report(TermKey::Char('x'), KeyAction::Press)),
+            KeyRoute::Machine {
+                key: TermKey::Char('x'),
+                pressed: true,
+                tap: true
+            }
+        );
+    }
+
+    #[test]
+    fn losing_focus_closes_the_menu_and_forgets_command_keys() {
+        let q = TermKey::Char('q');
+        let mut keys = HostKeys::new(true);
+        keys.route(report(TermKey::F(12), KeyAction::Press));
+        keys.route(report(q, KeyAction::Press));
+        keys.route(report(TermKey::F(12), KeyAction::Press));
+        keys.lose_focus();
+        assert!(!keys.menu);
+        assert_eq!(keys.route(report(q, KeyAction::Release)), machine(q, false));
     }
 
     #[test]

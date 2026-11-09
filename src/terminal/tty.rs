@@ -42,6 +42,10 @@ const ENTER: &str = concat!(
 );
 
 const LEAVE: &str = concat!(
+    // A string terminator first: a frame write given up on part-way (see
+    // `Output::finish`) can leave the terminal inside an image command,
+    // which would otherwise swallow the rest. Outside one it does nothing.
+    "\x1b\\",
     "\x1b_Ga=d,d=A,q=2\x1b\\", // delete every image
     "\x1b[<u",                 // pop the keyboard flags
     "\x1b[?2004l\x1b[?1004l\x1b[?1016l\x1b[?1006l\x1b[?1003l",
@@ -61,9 +65,17 @@ pub struct Capabilities {
     pub cell_pixels: Option<(u16, u16)>,
 }
 
+/// How long giving the terminal back may wait for it to take the bytes
+/// that turn the session's modes off. A link that is not draining at all
+/// still gets its terminal mode restored.
+const RESTORE_WRITE_BUDGET: Duration = Duration::from_secs(1);
+
 /// What the panic hook needs to give the terminal back.
 struct Restore {
+    /// The blocking handle the terminal mode was read from.
     fd: RawFd,
+    /// The non-blocking output handle, for writes that must not hang.
+    out_fd: RawFd,
     termios: libc::termios,
     log_path: Option<PathBuf>,
 }
@@ -71,13 +83,80 @@ struct Restore {
 static RESTORE: Mutex<Option<Restore>> = Mutex::new(None);
 
 fn restore_terminal(restore: &Restore) {
-    let fd = restore.fd;
-    let _ = write_fd(fd, LEAVE.as_bytes());
+    let deadline = Instant::now() + RESTORE_WRITE_BUDGET;
+    let _ = write_until(restore.out_fd, LEAVE.as_bytes(), || {
+        Instant::now() >= deadline
+    });
     // SAFETY: fd is the terminal this session opened and still owns, and
     // termios is the state tcgetattr read from it.
     unsafe {
-        libc::tcsetattr(fd, libc::TCSANOW, &restore.termios);
+        libc::tcsetattr(restore.fd, libc::TCSANOW, &restore.termios);
     }
+}
+
+/// Write all of `bytes` to the non-blocking `fd`, waiting for room as it
+/// fills, until `give_up` says to stop. Returns whether everything was
+/// written.
+fn write_until(fd: RawFd, mut bytes: &[u8], give_up: impl Fn() -> bool) -> std::io::Result<bool> {
+    while !bytes.is_empty() {
+        if give_up() {
+            return Ok(false);
+        }
+        // SAFETY: bytes is a live slice; fd is an open descriptor.
+        let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+        if n > 0 {
+            bytes = &bytes[n as usize..];
+            continue;
+        }
+        let err = std::io::Error::last_os_error();
+        match err.kind() {
+            std::io::ErrorKind::Interrupted => {}
+            std::io::ErrorKind::WouldBlock => wait_fd(fd, true, Duration::from_millis(20))?,
+            _ if n == 0 => wait_fd(fd, true, Duration::from_millis(20))?,
+            _ => return Err(err),
+        }
+    }
+    Ok(true)
+}
+
+/// Wait up to `timeout` for `fd` to become readable (or writable). This is
+/// select(2), not poll(2): macOS poll does not support `/dev/tty` and
+/// reports it ready at once.
+fn wait_fd(fd: RawFd, writable: bool, timeout: Duration) -> std::io::Result<()> {
+    // FD_SETSIZE's integer type differs between libc targets.
+    #[allow(clippy::unnecessary_cast)]
+    let limit = libc::FD_SETSIZE as usize;
+    if fd < 0 || fd as usize >= limit {
+        // Out of select's reach (a process with a thousand files open):
+        // poll by sleeping a little instead.
+        std::thread::sleep(timeout.min(Duration::from_millis(5)));
+        return Ok(());
+    }
+    // SAFETY: fd_set is plain data that FD_ZERO/FD_SET initialise, for a
+    // descriptor checked to be below FD_SETSIZE above.
+    let ready = unsafe {
+        let mut set: libc::fd_set = std::mem::zeroed();
+        libc::FD_ZERO(&mut set);
+        libc::FD_SET(fd, &mut set);
+        let mut tv = libc::timeval {
+            tv_sec: timeout.as_secs().min(i32::MAX as u64) as libc::time_t,
+            tv_usec: timeout.subsec_micros() as libc::suseconds_t,
+        };
+        let set: *mut libc::fd_set = &mut set;
+        let (read, write) = if writable {
+            (std::ptr::null_mut(), set)
+        } else {
+            (set, std::ptr::null_mut())
+        };
+        libc::select(fd + 1, read, write, std::ptr::null_mut(), &mut tv)
+    };
+    if ready < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.kind() != std::io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+    Ok(())
 }
 
 fn write_fd(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
@@ -98,10 +177,14 @@ fn write_fd(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
 
 /// The terminal, owned for the life of the session.
 pub struct Terminal {
+    /// Blocking handle: the terminal mode, the window size, and the start-up
+    /// writes.
     tty: File,
-    /// A second, non-blocking open of the terminal for reading. Its own open
-    /// file description keeps O_NONBLOCK off the writes.
+    /// Non-blocking opens of the terminal for reading, and for the writer
+    /// thread and the restore, which must never hang on a stalled link. Each
+    /// is its own open file description, so O_NONBLOCK stays off `tty`.
     input: File,
+    output: File,
     /// stdout/stderr descriptors pointed at the log, with their originals.
     redirected: Vec<(RawFd, OwnedFd)>,
     log_path: Option<PathBuf>,
@@ -124,7 +207,13 @@ impl Terminal {
             .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
             .open("/dev/tty")
             .context("opening /dev/tty for input")?;
+        let output = OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .open("/dev/tty")
+            .context("opening /dev/tty for output")?;
         let fd = tty.as_raw_fd();
+        let out_fd = output.as_raw_fd();
         // SAFETY: termios is plain data; tcgetattr fills it from an open fd.
         let mut termios: libc::termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
@@ -142,12 +231,14 @@ impl Terminal {
         let mut terminal = Self {
             tty,
             input,
+            output,
             redirected: Vec::new(),
             log_path: None,
             restored: false,
         };
         *RESTORE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Restore {
             fd,
+            out_fd,
             termios,
             log_path: None,
         });
@@ -199,9 +290,10 @@ impl Terminal {
         write_fd(self.tty.as_raw_fd(), bytes).context("writing to the terminal")
     }
 
-    /// A second handle on the terminal, for the writer thread.
-    pub fn try_clone(&self) -> Result<File> {
-        self.tty
+    /// A handle on the terminal's non-blocking output, for the writer
+    /// thread.
+    pub fn output_handle(&self) -> Result<File> {
+        self.output
             .try_clone()
             .context("duplicating the terminal handle")
     }
@@ -240,44 +332,9 @@ impl Terminal {
         Ok(Some(n as usize))
     }
 
-    /// Wait up to `timeout` for input. This is select(2), not poll(2):
-    /// macOS poll does not support `/dev/tty` and reports it ready at once.
+    /// Wait up to `timeout` for input.
     fn wait_readable(&self, timeout: Duration) -> Result<()> {
-        let fd = self.input.as_raw_fd();
-        // FD_SETSIZE's integer type differs between libc targets.
-        #[allow(clippy::unnecessary_cast)]
-        let limit = libc::FD_SETSIZE as usize;
-        if fd < 0 || fd as usize >= limit {
-            // Out of select's reach (a process with a thousand files open):
-            // poll by sleeping a little instead.
-            std::thread::sleep(timeout.min(Duration::from_millis(5)));
-            return Ok(());
-        }
-        // SAFETY: fd_set is plain data that FD_ZERO/FD_SET initialise, for
-        // a descriptor checked to be below FD_SETSIZE above.
-        let ready = unsafe {
-            let mut set: libc::fd_set = std::mem::zeroed();
-            libc::FD_ZERO(&mut set);
-            libc::FD_SET(fd, &mut set);
-            let mut tv = libc::timeval {
-                tv_sec: timeout.as_secs().min(i32::MAX as u64) as libc::time_t,
-                tv_usec: timeout.subsec_micros() as libc::suseconds_t,
-            };
-            libc::select(
-                fd + 1,
-                &mut set,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut tv,
-            )
-        };
-        if ready < 0 {
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                return Err(err).context("waiting for terminal input");
-            }
-        }
-        Ok(())
+        wait_fd(self.input.as_raw_fd(), false, timeout).context("waiting for terminal input")
     }
 
     /// The window size: columns, rows, and the text area's pixel size (zero
@@ -377,7 +434,10 @@ fn install_panic_hook() {
                 Some(path) => format!("copperline: panicked; details in {}\r\n", path.display()),
                 None => "copperline: panicked\r\n".to_string(),
             };
-            let _ = write_fd(restore.fd, note.as_bytes());
+            let deadline = Instant::now() + RESTORE_WRITE_BUDGET;
+            let _ = write_until(restore.out_fd, note.as_bytes(), || {
+                Instant::now() >= deadline
+            });
         }
         previous(info);
     }));
@@ -427,6 +487,9 @@ pub struct Shown {
 struct Shared {
     mailbox: Mutex<Mailbox>,
     wake: Condvar,
+    /// Set to stop at once: the writer gives up a write in progress and any
+    /// frame-rate wait instead of finishing them.
+    cancel: AtomicBool,
     stats: Stats,
     shown: Mutex<Shown>,
 }
@@ -442,14 +505,25 @@ pub struct Output {
 
 impl Output {
     /// Start the writer on `tty`, laid out for `geometry`. `min_interval`
-    /// spaces frames out to cap the frame rate.
+    /// spaces frames out to cap the frame rate. `tty` is switched to
+    /// non-blocking writes, so stopping never waits on the link.
     pub fn start(tty: File, geometry: Geometry, min_interval: Option<Duration>) -> Result<Self> {
+        let fd = tty.as_raw_fd();
+        // SAFETY: fcntl on an open descriptor this function owns a handle on.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 || libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("making terminal output non-blocking");
+            }
+        }
         let shared = Arc::new(Shared {
             mailbox: Mutex::new(Mailbox {
                 geometry: Some(geometry),
                 ..Mailbox::default()
             }),
             wake: Condvar::new(),
+            cancel: AtomicBool::new(false),
             stats: Stats::default(),
             shown: Mutex::new(Shown::default()),
         });
@@ -520,12 +594,15 @@ impl Output {
         *self.shared.shown.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Stop the writer once it has written what is posted.
+    /// Stop the writer now. A frame still going out is cut short and a
+    /// frame-rate wait ends early, so quitting never waits on the link; the
+    /// terminal's restore sequence closes whatever command was cut.
     pub fn finish(mut self) {
         self.stop();
     }
 
     fn stop(&mut self) {
+        self.shared.cancel.store(true, Ordering::Relaxed);
         self.shared
             .mailbox
             .lock()
@@ -544,7 +621,9 @@ impl Drop for Output {
     }
 }
 
-fn writer(mut tty: File, shared: &Shared, min_interval: Option<Duration>) {
+fn writer(tty: File, shared: &Shared, min_interval: Option<Duration>) {
+    let fd = tty.as_raw_fd();
+    let cancelled = || shared.cancel.load(Ordering::Relaxed);
     let mut encoder = FrameEncoder::new();
     let mut geometry: Option<Geometry> = None;
     let mut status = String::new();
@@ -638,9 +717,13 @@ fn writer(mut tty: File, shared: &Shared, min_interval: Option<Duration>) {
             graphics::status_line(&mut out, g, &status);
         }
         if !out.is_empty() {
-            if tty.write_all(&out).and_then(|()| tty.flush()).is_err() {
-                shared.stats.failed.store(true, Ordering::Relaxed);
-                return;
+            match write_until(fd, &out, cancelled) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(_) => {
+                    shared.stats.failed.store(true, Ordering::Relaxed);
+                    return;
+                }
             }
             shared
                 .stats
@@ -650,16 +733,130 @@ fn writer(mut tty: File, shared: &Shared, min_interval: Option<Duration>) {
         if sent_frame {
             shared.stats.frames.fetch_add(1, Ordering::Relaxed);
             // A frame-rate cap: the next frame waits out the rest of this
-            // one's interval (meanwhile newer frames replace it unsent).
+            // one's interval (meanwhile newer frames replace it unsent). The
+            // wait is on the mailbox, so stopping ends it at once.
             if let Some(interval) = min_interval {
-                let wait = interval.saturating_sub(started.elapsed());
-                if !wait.is_zero() {
-                    std::thread::sleep(wait);
+                let until = started + interval;
+                let mut mailbox = shared.mailbox.lock().unwrap_or_else(|e| e.into_inner());
+                while !mailbox.closed {
+                    let left = until.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        break;
+                    }
+                    mailbox = shared
+                        .wake
+                        .wait_timeout(mailbox, left)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0;
                 }
             }
         }
         if closed {
             return;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read as _;
+
+    /// A pipe standing in for the terminal: (read end, write end).
+    fn pipe() -> (File, File) {
+        let mut fds = [0; 2];
+        // SAFETY: pipe fills two fresh descriptors this test then owns.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        unsafe { (File::from_raw_fd(fds[0]), File::from_raw_fd(fds[1])) }
+    }
+
+    const PANE: Geometry = Geometry {
+        cols: 80,
+        rows: 25,
+        cell_width: 10,
+        cell_height: 20,
+    };
+
+    /// A frame that compresses badly, so it overfills a pipe's buffer.
+    fn noisy_frame(width: u32, height: u32, seed: u32) -> Vec<u32> {
+        let mut state = seed;
+        (0..width * height)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                state
+            })
+            .collect()
+    }
+
+    fn wait_for(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn write_until_gives_up_on_a_terminal_that_stopped_reading() {
+        let (_read, write) = pipe();
+        let fd = write.as_raw_fd();
+        // SAFETY: fcntl on the pipe's own write end.
+        unsafe {
+            libc::fcntl(
+                fd,
+                libc::F_SETFL,
+                libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+            );
+        }
+        let bytes = vec![0u8; 1 << 20];
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(100);
+        let finished = write_until(fd, &bytes, || Instant::now() >= deadline).unwrap();
+        assert!(!finished, "a megabyte cannot fit an undrained pipe");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn stopping_the_writer_does_not_wait_on_a_stalled_link() {
+        // Nobody reads the pipe: the first frame fills it and the writer is
+        // left mid-frame.
+        let (_read, write) = pipe();
+        let output = Output::start(write, PANE, None).unwrap();
+        output.post_frame(&noisy_frame(640, 400, 7), 640, 400);
+        // Give the writer time to fill the pipe; the frame never finishes
+        // going out.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(output.stats().frames.load(Ordering::Relaxed), 0);
+        let started = Instant::now();
+        output.finish();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stop took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn stopping_the_writer_ends_a_frame_rate_wait() {
+        let (mut read, write) = pipe();
+        let drain = std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = read.read_to_end(&mut sink);
+        });
+        // One frame every ten seconds: the writer waits right after the
+        // first one.
+        let output = Output::start(write, PANE, Some(Duration::from_secs(10))).unwrap();
+        output.post_frame(&noisy_frame(64, 40, 3), 64, 40);
+        wait_for("the first frame", || {
+            output.stats().frames.load(Ordering::Relaxed) == 1
+        });
+        let started = Instant::now();
+        output.finish();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stop took {:?}",
+            started.elapsed()
+        );
+        drain.join().unwrap();
     }
 }

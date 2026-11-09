@@ -180,6 +180,10 @@ pub enum Event {
 const ESC: u8 = 0x1b;
 const PASTE_END: &[u8] = b"\x1b[201~";
 
+/// The most bytes of one unfinished sequence kept waiting for the rest.
+/// Real reports are tens of bytes; past this it is noise, and dropped.
+const MAX_PENDING: usize = 64 * 1024;
+
 /// Incremental parser: bytes go in as they arrive, complete events come out,
 /// and a sequence split across reads waits for the rest.
 #[derive(Default)]
@@ -227,21 +231,26 @@ impl Parser {
             }
         }
         self.pending.drain(..pos);
-    }
-
-    /// Whether a lone ESC (or another incomplete sequence) is waiting for
-    /// more bytes.
-    pub fn has_pending(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
-    /// No more bytes came: a lone ESC was the Escape key itself, and any
-    /// other unfinished sequence is dropped.
-    pub fn flush(&mut self, out: &mut Vec<Event>) {
-        if self.pending == [ESC] {
-            out.push(Event::Key(tap(TermKey::Escape, Mods::default())));
+        if self.pending.len() > MAX_PENDING {
+            self.pending.clear();
         }
-        self.pending.clear();
+    }
+
+    /// Whether all that is waiting is a lone ESC: the Escape key on a
+    /// terminal not reporting it as a sequence, or the first byte of a
+    /// sequence still on its way. Only time tells which.
+    pub fn lone_escape_pending(&self) -> bool {
+        self.pending == [ESC]
+    }
+
+    /// No more bytes followed a lone ESC: it was the Escape key. Any other
+    /// unfinished sequence is left waiting for the rest of its bytes, however
+    /// long the link takes to deliver them.
+    pub fn flush_lone_escape(&mut self, out: &mut Vec<Event>) {
+        if self.lone_escape_pending() {
+            out.push(Event::Key(tap(TermKey::Escape, Mods::default())));
+            self.pending.clear();
+        }
     }
 }
 
@@ -856,10 +865,33 @@ mod tests {
         let mut out = Vec::new();
         parser.feed(b"\x1b", &mut out);
         assert!(out.is_empty());
-        assert!(parser.has_pending());
-        parser.flush(&mut out);
+        assert!(parser.lone_escape_pending());
+        parser.flush_lone_escape(&mut out);
         assert_eq!(out, vec![key(TermKey::Escape, 0, KeyAction::Press, true)]);
-        assert!(!parser.has_pending());
+        assert!(!parser.lone_escape_pending());
+    }
+
+    #[test]
+    fn unfinished_sequences_survive_a_pause_in_the_link() {
+        // A key release split across reads with a long gap: the Escape
+        // timeout must not cut it short, or its tail would arrive as keys.
+        let mut parser = Parser::new();
+        let mut out = Vec::new();
+        parser.feed(b"\x1b[97;", &mut out);
+        assert!(!parser.lone_escape_pending());
+        parser.flush_lone_escape(&mut out);
+        assert!(out.is_empty());
+        parser.feed(b"1:3u", &mut out);
+        assert_eq!(
+            out,
+            vec![key(TermKey::Char('a'), 0, KeyAction::Release, false)]
+        );
+        // The same for a paste's terminator split across reads.
+        out.clear();
+        parser.feed(b"\x1b[200~hi\x1b[20", &mut out);
+        parser.flush_lone_escape(&mut out);
+        parser.feed(b"1~", &mut out);
+        assert_eq!(out, vec![Event::Paste("hi".into())]);
     }
 
     #[test]
