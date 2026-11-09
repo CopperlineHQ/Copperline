@@ -532,6 +532,9 @@ fn decode_track(imge: &Imge, area: Option<&[u8]>, info: &Info) -> Result<Option<
     let mut noise =
         0x6A09_E667_F3BC_C909u64 ^ (u64::from(imge.cylinder) << 32) ^ u64::from(imge.head);
     for rev in 0..usize::from(revolutions) {
+        // Weak readback includes clock positions. Like the preservation
+        // decoder, generate raw cells rather than MFM-encoded data, and
+        // allow accidental sync matches instead of filtering the noise.
         for span in &weak {
             for bit in &mut bits[span.clone()] {
                 noise ^= noise << 13;

@@ -9146,6 +9146,31 @@ fn captured_fetch_at_cck_zero_keeps_its_origin_count_and_fetch_slots() {
     assert_eq!(ControlState::default().words_per_row(640), 40);
 }
 
+#[test]
+fn captured_zero_origin_replaces_inverted_register_window() {
+    // The middle band of ddfprobe-zero rewrites DDFSTRT behind the beam
+    // to $10 while DDFSTOP remains $00, after the run already began at 0.
+    // The transient captured-window flag must not make that register pair
+    // a valid span before the capture's geometry replaces it.
+    let mut control = ControlState {
+        agnus_revision: AgnusRevision::Ocs,
+        dmacon: 0x0300,
+        bplcon0: 0x1200,
+        diwstrt: 0x2C81,
+        diwstop: 0x2CC1,
+        ddfstrt: 0x0010,
+        ddfstop: 0x0000,
+        ..ControlState::default()
+    };
+    apply_captured_fetch_geometry(&mut control, 0, 28);
+    assert_eq!(control.ddf_window(), Some((0, 0xD8)));
+    assert_eq!(control.words_per_row(640), 28);
+    assert_eq!(
+        line_fetch_plan_for_word(control, &[], 0, 1).word_fetch_hpos,
+        Some(0)
+    );
+}
+
 /// Differential regression oracle for the fast interior run: randomized
 /// planes, scroll, palette, collision enables, window edges, priorities,
 /// and mid-line control/palette segments, rendered by the production

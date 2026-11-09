@@ -478,6 +478,14 @@ shift the next revolution. `RawMfm.revolutions` feeds the existing cyclic
 reader, save states and netplay transport without adding runtime RNG state.
 Tracks without weak samples still contain one revolution. The eight-pass
 cycle is a deterministic approximation, not a physical noise distribution.
+The generated bits represent raw readback cells, including clock positions;
+they are not constrained to legal MFM or filtered to exclude `DSKSYNC`
+matches. This follows the preservation decoder's
+[`CCapsImageStd::UpdateWeakBit`](https://raw.githubusercontent.com/rsn8887/capsimg/c92d17b4383ebf432788f7b5a38fdd6902376f00/CAPSImg/CapsImageStd.cpp),
+which writes pseudo-random raw bitfields directly. An accidental sync in a
+weak span can therefore reframe Paula's following words; that is part of
+this readback approximation. MFM-encoding the noise or rejecting sync values
+would impose a constraint absent from the weak-medium representation.
 
 The drive sounds ([](../guide/configuration)) are driven by this model's
 real state transitions -- motor spin-up, seeks, the empty-drive poll click.

@@ -1489,7 +1489,7 @@ impl ControlState {
 
     fn ddf_window(&self) -> Option<(u16, u16)> {
         if self.captured_ddf_window {
-            Some((self.ddfstrt, self.ddfstop))
+            (self.ddfstop >= self.ddfstrt).then_some((self.ddfstrt, self.ddfstop))
         } else {
             effective_ddf_window(
                 self.agnus_revision,
