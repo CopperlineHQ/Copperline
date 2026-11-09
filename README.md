@@ -11,8 +11,10 @@ It boots out of the box with the bundled open-source AROS Kickstart replacement,
 
 The [manual](https://copperline.dev/docs/),
 [troubleshooting and known limits](docs/guide/troubleshooting.md), and
-[changelog](CHANGELOG.md) cover setup and upgrades. Match the manual version
-to `copperline --version`; each release carries its own PDF manual.
+[changelog](CHANGELOG.md) cover setup and upgrades. Match the manual's version
+label to **About**, which includes the revision for an untagged source build;
+`copperline --version` prints only the package version. Each release carries
+its own PDF manual.
 
 ## Features
 

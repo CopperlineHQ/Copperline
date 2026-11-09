@@ -39,10 +39,13 @@ myst start               # or: live-reloading local preview server
 Run `prepare-docs.py` before `myst build` or `myst start`, and rerun it after
 a version bump or switching revisions. It generates ignored `_version.md`
 from `Cargo.toml` and Git: the HTML banner, persistent sidebar footer, and
-manual opening page share the same version identity. Only a clean checkout
-at the matching `vVERSION` tag is labelled a release; other builds are source
-snapshots, including source archives without Git metadata. CI and publication
-run this step; the PDF helper runs it automatically.
+manual opening page share the same version identity. The version label follows
+`build.rs` and **About**: at any exact Git tag it is the package version;
+otherwise it adds `+g` and the same short revision. Tracked local changes are
+noted separately, since **About** does not include a dirty-tree suffix. Source
+archives without Git metadata use the package version and report the revision
+as unavailable. CI and publication run this step; the PDF helper runs it
+automatically.
 
 The HTML site is themed to match copperline.dev via `site.css` (wired up
 through the `style` option in `myst.yml`). On every `v*` tag the

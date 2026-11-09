@@ -2,12 +2,17 @@
 
 ## Match the manual to the build
 
-Run `copperline --version` (or check **About**) before copying configuration
-from a manual. The online manual is replaced when a release is published;
-its banner names the package version and source revision it describes. A
-source snapshot can have changes beyond the release with the same package
-version. The persistent sidebar footer keeps that identity visible even
-when the banner has been dismissed.
+Check **About** before copying configuration from a manual. Its version string
+matches the manual's label: the package version at an exact Git tag, or a
+string such as `1.1.0+g12345678` for an untagged source build. The command
+`copperline --version` prints only the package version, so it cannot
+distinguish source revisions.
+
+The online manual is replaced when a release is published; its banner names
+the version and source revision it describes. A source snapshot can have
+changes beyond the release with the same package version. The persistent
+sidebar footer keeps that identity visible even when the banner has been
+dismissed.
 
 For an installed release, download the matching `Copperline-VERSION-manual.pdf`
 from that version's [GitHub release](https://github.com/CopperlineHQ/Copperline/releases).
@@ -101,6 +106,13 @@ For example, 1.1.0 reads old CIA version-1 chunks by migration and writes
 CIA version 2. That does not make the resulting states readable by 1.0.x.
 Forward compatibility is not guaranteed merely because the container version
 is the same. Preserve a copy before trying a state in another build.
+
+The post-1.1.0 external-drive ID fix is another one-way boundary even though
+the container and chunk versions did not change: current maintenance builds
+read 1.1.0 states, but 1.1.0 cannot read their states. Its floppy decoder
+requires `external_id_mode`, which newer states no longer write. An error
+naming that missing field calls for a newer reader or a new snapshot made by
+the older executable.
 
 The reader must also have support for every expansion board in the state.
 A file that loads in one feature build may fail in another. The

@@ -28,9 +28,11 @@ def main() -> None:
         version = tomllib.load(manifest)["package"]["version"]
     revision = git("rev-parse", "HEAD")
     tag = git("describe", "--tags", "--exact-match", "HEAD")
+    short_hash = git("rev-parse", "--short=8", "HEAD")
+    # Match build.rs and the executable's About string, including dirty tags.
+    display_version = version if tag or not short_hash else f"{version}+g{short_hash}"
     clean = git("diff", "--quiet", "HEAD", "--") is not None
-    release = tag == f"v{version}" and clean
-    kind = "release" if release else "source snapshot"
+    kind = "tagged source" if tag else "source snapshot"
     if revision:
         # A local or fork commit need not exist in the upstream repository.
         source = f"`{revision[:12]}`"
@@ -40,14 +42,14 @@ def main() -> None:
     else:
         identity = "source snapshot; revision unavailable"
     text = (
-        f"**Copperline {version} manual** - {identity}. "
-        "Match `copperline --version`; see "
+        f"**Copperline {display_version} manual** - {identity}. "
+        "Match **About**; see "
         "[version and compatibility help](guide/troubleshooting.md).\n"
     )
     output = ROOT / "docs" / "_version.md"
     if not output.exists() or output.read_text() != text:
         output.write_text(text)
-    print(f"Manual: Copperline {version}, {identity}")
+    print(f"Manual: Copperline {display_version}, {identity}")
 
 
 if __name__ == "__main__":

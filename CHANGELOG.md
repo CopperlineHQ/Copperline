@@ -10,6 +10,9 @@ for the earlier release notes.
 
 ### Fixed
 
+- External floppy drives answer the /RDY ID probe while their motor is off,
+  including before the first motor cycle, so boot-time probes can find DF1.
+- Covered or minimised windows no longer leak GPU staging memory.
 - Command-line help is written to stdout. Options accept `--flag=value`,
   misspelled options suggest close matches, and fatal desktop-launch errors
   appear in a native dialog.
@@ -24,7 +27,10 @@ for the earlier release notes.
 ### Compatibility
 
 - No configuration key is removed or renamed by the changes above. Save-state
-  container and subsystem versions are unchanged from 1.1.0.
+  container and subsystem versions are unchanged from 1.1.0, and this build
+  reads 1.1.0 states. Compatibility is one-way: 1.1.0 cannot read states saved
+  after the external-drive ID fix, because its floppy decoder requires the
+  `external_id_mode` field that newer states no longer write.
 
 ## 1.1.0 - 2026-10-31
 
@@ -40,7 +46,7 @@ for the earlier release notes.
 
 | First release | Change | What to do with older files |
 |---|---|---|
-| 0.21.0 | The CD32 FMV module became opt-in. | Set top-level `fmv = true` or use `--fmv` when the cartridge is wanted. |
+| 0.21.0 | The CD32 FMV module became opt-in. | Set top-level `fmv = true` (or `fmv_rom = "path"`), or choose an **FMV module ROM** in the launcher, when the cartridge is wanted. |
 | 0.20.0 | Save states changed from the flat format to named subsystem chunks (container 81); thumbnails and metadata then introduced container 82. | Recreate states made by 0.19 and earlier. Current readers accept container 81 without thumbnails and container 82. |
 | 0.18.0 | LIDE gained named `drive0` through `drive3` keys. | The old `[lide] drives` array still loads; a named key wins for its slot. Saving from the launcher writes the named form. |
 | 0.15.0 | FluxBridge replay speed became `replay_speed` / `--floppy-replay-speed`; `bridge_auto_cache` was removed. | The old `bridge_speed` key and `--floppy-bridge-speed` flag remain aliases. Remove `bridge_auto_cache`; there is no background sweep to enable. Replay speed accepts `normal` / `fast` or the older 100 / 200 values. |
