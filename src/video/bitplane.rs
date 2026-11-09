@@ -33,14 +33,22 @@ use std::sync::OnceLock;
 
 #[cfg(feature = "profile-stats")]
 type RenderTimingStart = Instant;
+/// Zero-sized stand-in for a render phase's start time when phase timing
+/// is compiled out. A named marker rather than `()` so every phase keeps
+/// its `let x_started = render_timing_start();` binding in both builds.
 #[cfg(not(feature = "profile-stats"))]
-type RenderTimingStart = ();
+#[derive(Clone, Copy)]
+struct RenderTimingStart;
 
 #[inline(always)]
 fn render_timing_start() -> RenderTimingStart {
     #[cfg(feature = "profile-stats")]
     {
         Instant::now()
+    }
+    #[cfg(not(feature = "profile-stats"))]
+    {
+        RenderTimingStart
     }
 }
 

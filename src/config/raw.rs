@@ -373,6 +373,7 @@ impl RawConfig {
     /// configuration: the player's set ([`Self::merge_player_settings`])
     /// plus the emulation, input and display settings only the full menu
     /// offers. Fields the overlay leaves unset keep their value.
+    #[cfg(feature = "frontend")]
     pub(crate) fn merge_menu_settings(&mut self, overlay: &RawConfig) {
         fn take<T: Clone>(base: &mut Option<T>, over: &Option<T>) {
             if over.is_some() {
@@ -405,6 +406,7 @@ impl RawConfig {
     /// The keys whose values differ between `self` and `before`, as a
     /// configuration holding only those keys. A key `self` no longer sets
     /// is not reported: this names what changed, it does not remove keys.
+    #[cfg(feature = "frontend")]
     pub(crate) fn changed_from(&self, before: &RawConfig) -> Result<RawConfig> {
         fn diff(now: &toml::Table, before: &toml::Table) -> toml::Table {
             let mut out = toml::Table::new();
