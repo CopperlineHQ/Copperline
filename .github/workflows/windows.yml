@@ -269,12 +269,13 @@ jobs:
     # Compiles the #[test] targets once and hands the finished executables
     # to the test jobs below (needs: test-bins) as a workflow artifact.
     # Binaries, not a shared cargo cache: the test executables are plain
-    # libtest binaries and run fine without cargo. cargo builds the emulator
-    # binary here too (the integration tests spawn it through the
-    # compile-time CARGO_BIN_EXE_copperline path), so the staged
-    # copperline.exe pairs with the probe_golden harness compiled alongside
-    # it and this job needs nothing from the zip build. Separate cache keys
-    # keep the shipping and CI profiles warm independently.
+    # libtest binaries and run fine without cargo. cargo builds the ordinary
+    # binaries here too (the integration tests spawn copperline.exe,
+    # copperline-ctl.exe, and friends through compile-time CARGO_BIN_EXE_*
+    # paths), so the staged executables pair with the test harnesses
+    # compiled alongside them and this job needs nothing from the zip build.
+    # Separate cache keys keep the shipping and CI profiles warm
+    # independently.
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -316,25 +317,33 @@ jobs:
         # the fan-out jobs. The asset-gated integration tests under tests/
         # keep compiling here too (they are #[ignore]d at run time, not
         # excluded from the build).
+        #
+        # Every ordinary (non-test) binary goes to ci-bins\bin under its own
+        # file name. Integration tests spawn them through compile-time
+        # CARGO_BIN_EXE_<name> paths (target\<triple>\ci\<name>.exe), so the
+        # test jobs copy the whole directory back there; staging all of them,
+        # rather than a named list, keeps a new CARGO_BIN_EXE_* user from
+        # finding its binary missing.
         run: |
           $ErrorActionPreference = "Stop"
           & packaging/windows/enable-clang.ps1 -Target ${{ matrix.target }}
           cargo test --profile ci --locked --target ${{ matrix.target }} --no-run --timings --message-format=json > cargo-test-build.json
           if ($LASTEXITCODE -ne 0) { throw "cargo test --no-run exited with $LASTEXITCODE" }
-          New-Item -ItemType Directory -Force -Path ci-bins | Out-Null
-          Copy-Item target\${{ matrix.target }}\ci\copperline.exe ci-bins\
+          New-Item -ItemType Directory -Force -Path ci-bins\bin | Out-Null
           Get-Content cargo-test-build.json | ForEach-Object {
             $msg = $_ | ConvertFrom-Json
-            if ($msg.reason -eq "compiler-artifact" -and $msg.profile.test -and $msg.executable) {
-              switch -Wildcard ("$($msg.target.kind[0]):$($msg.target.name)") {
-                "lib:copperline"     { Copy-Item $msg.executable ci-bins\unit-lib.exe }
-                "bin:*"             { Copy-Item $msg.executable "ci-bins/unit-bin-$($msg.target.name).exe" }
-                "test:probe_golden"  { Copy-Item $msg.executable ci-bins\probe_golden.exe; break }
-                "test:*"             { Copy-Item $msg.executable "ci-bins/test-$($msg.target.name).exe" }
+            if ($msg.reason -eq "compiler-artifact" -and $msg.executable) {
+              switch -Wildcard ("$($msg.profile.test):$($msg.target.kind[0]):$($msg.target.name)") {
+                "False:bin:*"             { Copy-Item $msg.executable ci-bins\bin\ }
+                "True:lib:copperline"     { Copy-Item $msg.executable ci-bins\unit-lib.exe }
+                "True:bin:*"              { Copy-Item $msg.executable "ci-bins/unit-bin-$($msg.target.name).exe" }
+                "True:test:probe_golden"  { Copy-Item $msg.executable ci-bins\probe_golden.exe; break }
+                "True:test:*"             { Copy-Item $msg.executable "ci-bins/test-$($msg.target.name).exe" }
               }
             }
           }
-          Get-ChildItem ci-bins
+          if (-not (Test-Path ci-bins\bin\copperline.exe)) { throw "copperline.exe was not staged" }
+          Get-ChildItem ci-bins, ci-bins\bin
       - name: Upload binaries for the test jobs
         uses: actions/upload-artifact@v7
         with:
@@ -519,10 +528,15 @@ jobs:
           }
       - name: Integration tests
         shell: pwsh
+        # The suites spawn copperline.exe, copperline-ctl.exe, and the other
+        # ordinary binaries through compile-time CARGO_BIN_EXE_* paths under
+        # the --target build directory (the same absolute path in every job
+        # of this repo on hosted runners), so restore everything the
+        # test-bins job staged there first.
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path target\${{ matrix.target }}\ci | Out-Null
-          Copy-Item ci-bins\copperline.exe target\${{ matrix.target }}\ci\copperline.exe
+          Copy-Item ci-bins\bin\* target\${{ matrix.target }}\ci\
           $suites = @(Get-ChildItem ci-bins/test-*.exe)
           if ($suites.Count -eq 0) { throw "No integration test binaries were staged" }
           foreach ($suite in $suites) {
@@ -570,12 +584,12 @@ jobs:
         #
         # The test harness spawns the emulator through the compile-time
         # CARGO_BIN_EXE_copperline path, which on hosted runners is the same
-        # absolute path in every job of this repo -- hence the copy into the
-        # --target build directory before running.
+        # absolute path in every job of this repo -- hence the copy of the
+        # staged binaries into the --target build directory before running.
         run: |
           $ErrorActionPreference = "Stop"
           New-Item -ItemType Directory -Force -Path target\${{ matrix.target }}\ci | Out-Null
-          Copy-Item ci-bins\copperline.exe target\${{ matrix.target }}\ci\copperline.exe
+          Copy-Item ci-bins\bin\* target\${{ matrix.target }}\ci\
           ./ci-bins/probe_golden.exe
           if ($LASTEXITCODE -ne 0) { throw "probe_golden exited with $LASTEXITCODE" }
       - name: Upload probe render diffs
