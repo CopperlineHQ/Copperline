@@ -18,6 +18,8 @@ src/
   main.rs           # native binary: config load, boot, execution-mode selection
   cli.rs            # binary-local command-line parser
   media.rs          # shared file classification for positional startup and drops
+  cli/tokens.rs     # option boundaries, inline values, script-token provenance
+  startup.rs        # desktop launch markers and fatal error presentation
   bin/              # auxiliary binaries, each behind its own cargo feature:
                     #   bench.rs: copperline-bench headless benchmark (native + wasm32-wasip1)
                     #   copperline-ctl.rs: control-protocol client, MCP server, DAP adapter
@@ -33,6 +35,7 @@ src/
   warpboot.rs       # warp boot: run unpaced until a condition holds, then pace
   runprog.rs        # --run: boot straight into a host executable
   whdload.rs        # --whdload direct boot (package.rs, lha.rs: game packages)
+  archive.rs        # shared LHA/ZIP output budgets and bounded streaming I/O
   gamelib/          # WHDLoad game library and OpenRetro database sync
   debugger.rs       # env-driven headless debugger
   waveform.rs       # trigger-based VCD chipset-signal capture (GTKWave)
@@ -137,7 +140,7 @@ src/
   netplay/          # GGPO-style netplay for two to four players
   verdict.rs        # the process exit status of a session
   crashlog.rs       # persistent crash reports from the panic hook
-  winconsole.rs     # closes the console a desktop launch brings (Windows)
+  winconsole.rs     # detects desktop launches and closes their console (Windows)
   timestamp.rs      # compact wall-clock stamps for generated filenames
   timebase.rs       # host clock imports shared with the browser build
   chipset/
@@ -185,6 +188,21 @@ tests/              # self-contained integration tests and ignored local-asset t
 timing-test/        # bootable cross-emulator timing-measurement disk + golden probes
 ```
 
+Archive output is bounded by `archive::Budget`, shared by the LHA and ZIP
+package paths. Advertised member lengths are checked before allocation or
+file creation; a fixed-size copy buffer also counts the actual decoded
+bytes, with at most a one-byte over-limit probe. Both memory reads and
+streamed disk extraction use that reader and retain end-of-stream checksum
+checks. LHA listing walks headers without decoding payloads, and selective
+reads skip unrelated members. Failed WHDLoad staging is discarded before
+its extraction can be promoted. User limits are documented in
+[WHDLoad support](../guide/whdload.md).
+
+Parser fuzzers and stable regression replay share `fuzz/harnesses/`. The
+[testing guide](../../tests/README.md) and
+[fuzzing instructions](../../fuzz/README.md) describe retained crashes and
+scheduled campaigns.
+
 ### Desktop file opening
 
 `media::classify` distinguishes ZIP games from floppy archives using member
@@ -214,6 +232,19 @@ package, including Exec quoting, MIME detection, reinstall and removal. Windows
 installer lifecycle CI checks both registry hives and unchanged extension defaults.
 
 ## The big picture
+
+The native entry point catches fatal errors and returns status 1. Once the
+arguments identify an interactive session, a desktop launch also shows a
+native error dialog. Windows retains the result of its console-ownership
+check; the Linux desktop entry supplies a leading internal `--desktop`
+marker, consumed before CLI parsing; LaunchServices sets
+`COPPERLINE_DESKTOP_LAUNCH=1` through the macOS bundle's `LSEnvironment`.
+The environment marker is read through `envcfg`. Syntax errors, capture and
+benchmark runs, headless debugger/control servers, listing commands, and
+internal helper actions use stderr only, even with a desktop marker.
+Redirected streams alone never enable dialogs. Launcher Run failures keep
+their existing status-line recovery path, and guest/expectation exit codes
+still come from the session verdict.
 
 Copperline's emulated machine runs synchronously on the main thread inside
 winit's event loop. There is no emulation thread and no locking between CPU

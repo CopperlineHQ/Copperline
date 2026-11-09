@@ -6,23 +6,25 @@
 //! of a CPU model, hundreds of state combinations each, validated against
 //! real hardware over years -- and calls back here once per test with the
 //! initial register file. This side loads the registers into `CpuCore`,
-//! executes until the test's terminating exception fires (the generator
-//! places an illegal-instruction sentinel after each tested instruction,
-//! so a clean run ends in vector 4 at the expected PC), and reports the
-//! final state; the runner performs all comparison, including exception
-//! stack frames and memory stores.
+//! executes until the recorded instruction end/branch target or a real
+//! exception (the generator plants ILLEGAL/NOP sentinels), and reports the
+//! final state; the runner compares registers, exception numbers and memory
+//! stores. Detailed exception-frame records are currently skipped.
 //!
 //! Usage:
-//!   cputest-runner <data-dir> <opcode|all> <cpu: 68000|68010|68020|68030|68040|68060>
+//!   cputest-runner <data-dir> <opcode|all> <cpu: 68000|68010|68020|68030|68040|68060> [--pr]
 //!
 //! Generate the data with tools/cputest-gen.sh.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use m68k::core::cpu::{CpuCore, MFLAG_SET, SFLAG_SET};
 use m68k::core::memory::AddressBus;
 use m68k::core::types::CpuType;
 use m68k::NoOpHleHandler;
+
+mod corpus;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -180,6 +182,7 @@ extern "C" {
 /// within a couple of steps (the generator also plants sentinels at branch
 /// targets); a runaway means the core lost the plot.
 const MAX_STEPS: usize = 64;
+static EXECUTION_FAILED: AtomicBool = AtomicBool::new(false);
 
 extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut Registers) {
     let ctx = unsafe { &*ctx };
@@ -234,6 +237,7 @@ extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut R
     regs.cycles = 0;
     let mut exc = 0u32;
     let mut excframe = 0u32;
+    let mut terminated = false;
     for step in 0..MAX_STEPS {
         if debug {
             let op = bus.read_word(cpu.pc);
@@ -270,6 +274,7 @@ extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut R
             if debug {
                 eprintln!("  -> exception {v} frame={excframe:#010X}");
             }
+            terminated = true;
             break;
         }
         regs.cycles = regs.cycles.wrapping_add(step_cycles);
@@ -289,8 +294,16 @@ extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut R
             if cpu.pc != regs.endpc && bus.read_word(cpu.pc) == 0x4E71 {
                 regs.cycles = regs.cycles.wrapping_add(4);
             }
+            terminated = true;
             break;
         }
+    }
+    if !terminated {
+        eprintln!(
+            "cputest instruction did not terminate within {MAX_STEPS} steps at {:#010x}",
+            regs.pc
+        );
+        EXECUTION_FAILED.store(true, Ordering::Relaxed);
     }
 
     // Report the state the way the native runner's exception stub does:
@@ -324,8 +337,8 @@ extern "C" fn run_one_test(_user: *mut c_void, ctx: *const Context, regs: *mut R
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 4 {
-        eprintln!("usage: cputest-runner <data-dir> <opcode|all> <cpu model>");
+    if !(args.len() == 4 || (args.len() == 5 && args[4] == "--pr" && args[2] == "all")) {
+        eprintln!("usage: cputest-runner <data-dir> <opcode|all> <cpu model> [--pr]");
         std::process::exit(2);
     }
     let (cpu_type, level) = match args[3].as_str() {
@@ -342,6 +355,12 @@ fn main() {
     };
     unsafe {
         CPU_TYPE = cpu_type;
+    }
+
+    let root = std::path::Path::new(&args[1]).join(&args[3]);
+    if let Err(error) = corpus::validate(&root, &args[2], args.len() == 5) {
+        eprintln!("invalid cputest corpus: {error}");
+        std::process::exit(1);
     }
 
     let path = CString::new(args[1].clone()).unwrap();
@@ -372,5 +391,9 @@ fn main() {
     }
 
     let ok = unsafe { M68KTester_run_tests(res.context, std::ptr::null_mut(), run_one_test) };
-    std::process::exit(if ok == 1 { 0 } else { 1 });
+    std::process::exit(if ok == 1 && !EXECUTION_FAILED.load(Ordering::Relaxed) {
+        0
+    } else {
+        1
+    });
 }

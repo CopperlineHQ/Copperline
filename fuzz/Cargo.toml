@@ -10,7 +10,10 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 tempfile = "3"
-copperline = { path = ".." }
+# Parser coverage does not need a window, audio device, network backends or
+# dynamically loaded board plugins. Keep debug info, compressed CD audio,
+# FMV state and JIT state support in the instrumented core.
+copperline = { path = "..", default-features = false, features = ["control", "dap", "cpu-jit", "cd-mp3", "cd32-fmv"] }
 
 # The untrusted-media parsers, in the order SECURITY.md's threat model makes
 # them reachable: a hostile disk image, CD image, hardfile, archive, or save
@@ -53,15 +56,37 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "config_toml"
+path = "fuzz_targets/config_toml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "archives"
+path = "fuzz_targets/archives.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "debug_info"
+path = "fuzz_targets/debug_info.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "control_protocol"
+path = "fuzz_targets/control_protocol.rs"
+test = false
+doc = false
+bench = false
+
 [[example]]
 name = "generate_savestate_seed"
 path = "tools/generate_savestate_seed.rs"
 
 [workspace]
 members = ["."]
-
-# The root manifest's pixels patch (the unbounded surface-acquire retry,
-# parasyte/pixels#462); [patch] applies only at a workspace root, so this
-# workspace repeats it. Remove together.
-[patch.crates-io]
-pixels = { git = "https://github.com/parasyte/pixels", rev = "c681486feaaaf413b2db5c7b57d342677f0dfd87" }

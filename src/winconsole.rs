@@ -25,19 +25,22 @@
 /// Close the console window Windows created for a desktop launch. A no-op
 /// everywhere else, and on Windows whenever the console belongs to a shell.
 ///
-/// Call once, before anything writes to stdout or stderr.
+/// Call once, before anything writes to stdout or stderr. Returns whether
+/// this was a desktop launch whose errors need a native dialog.
 #[cfg(not(windows))]
-pub fn detach_desktop_console() {}
+pub fn detach_desktop_console() -> bool {
+    false
+}
 
 #[cfg(windows)]
-pub fn detach_desktop_console() {
+pub fn detach_desktop_console() -> bool {
     use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
     use windows_sys::Win32::System::Console::{
-        FreeConsole, GetConsoleProcessList, GetConsoleWindow, SetStdHandle, STD_ERROR_HANDLE,
-        STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        FreeConsole, GetConsoleProcessList, GetConsoleWindow, GetStdHandle, SetStdHandle,
+        STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
 
@@ -47,8 +50,10 @@ pub fn detach_desktop_console() {
         let console = GetConsoleWindow();
         if console.is_null() {
             // No console at all: started by something windowed, or already
-            // detached. Nothing to do either way.
-            return;
+            // detached. Redirected stderr still belongs to its CLI caller;
+            // a process with neither console nor stderr needs a dialog.
+            let stderr = GetStdHandle(STD_ERROR_HANDLE);
+            return stderr.is_null() || stderr == INVALID_HANDLE_VALUE;
         }
         // Room for two so a shared console is told apart from ours; the count
         // is what is wanted, not the list.
@@ -56,7 +61,7 @@ pub fn detach_desktop_console() {
         if GetConsoleProcessList(attached.as_mut_ptr(), attached.len() as u32) != 1 {
             // Somebody else is attached -- a shell, or cargo run. Their
             // console, and Copperline's output belongs in it.
-            return;
+            return false;
         }
         // Hide before freeing: the window was on screen before this process
         // got to run, and this is the earliest the flash can be cut short.
@@ -84,4 +89,5 @@ pub fn detach_desktop_console() {
         }
         FreeConsole();
     }
+    true
 }

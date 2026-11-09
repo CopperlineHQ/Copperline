@@ -470,6 +470,22 @@ expectations, frame dumps, GIF clips, save-state writes, scheduled input,
 scheduled floppy or CD inserts, input recording, `--exit-on-return`,
 `--profile-live-audio`, `--gdb` or `--control`.
 
+For a smaller executable that measures only the core, or the core plus CPU
+rendering, build the standalone benchmark:
+
+```sh
+cargo build --release --locked --no-default-features --features bench-bin --bin copperline-bench
+./target/release/copperline-bench --config tools/performance/a500-pal.toml \
+  --rom assets/aros/aros-amiga-m68k-rom.bin --ext assets/aros/aros-amiga-m68k-ext.bin \
+  --seconds 30 --render
+```
+
+Omit `--render` to measure core execution alone. Unlike `--benchmark-until`,
+`--seconds` is a duration. The tracked configuration freezes the RTC and uses
+the bundled AROS pair with no disk. The [CI performance gate](../internals/jit-performance.md#ci-aros-performance-gate)
+compares these workloads against a pinned source revision using alternating
+trials on one host. It does not include GPU presentation or live audio.
+
 To measure real-time behaviour instead of throughput, `COPPERLINE_HEADLESS_PACED=1`
 paces a windowless capture run (`--screenshot-after`, `--exit-on-return` and
 the like) to the wall clock exactly as the window does, sleeping each frame

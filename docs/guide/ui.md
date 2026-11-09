@@ -4,6 +4,13 @@ Copperline opens a single window: the emulated display presented at a
 TV-like 4:3 aspect ratio, above a status bar with the machine's controls.
 The window scales continuously when resized.
 
+When Copperline is started from Finder, Explorer, or the installed Linux
+desktop entry, fatal session errors also appear in a native error dialog.
+Configuration-screen Run and auto-launch failures remain on the screen's
+status line so the settings can be corrected. Command-line syntax errors
+and headless captures, benchmarks, debugger servers, and listing commands
+report to stderr without opening a dialog; their exit statuses are unchanged.
+
 The display defaults to buffered, synchronised presentation (strict FIFO
 vsync) on all desktop platforms. **Video Settings -> VSync** changes this
 immediately; it is also in the configuration screen's **A/V & Emu -> Display**
@@ -1309,6 +1316,11 @@ versions rather than producing a corrupt machine. A build still needs
 support for every expansion board present in the snapshot. States written
 by Copperline 0.19 and earlier used a flat layout with a single version
 and must be recreated.
+
+For cross-release compatibility and load errors, see
+[save-state troubleshooting](troubleshooting.md#a-save-state-will-not-load)
+and the [changelog](../changelog.md). A newer subsystem chunk can be refused
+even when both builds use the same container version.
 
 Saving over an existing file replaces it only after the new snapshot has
 been completely written and flushed. A failed save leaves the previous

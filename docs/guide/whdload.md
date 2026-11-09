@@ -36,6 +36,15 @@ Copperline supports three package formats:
 Copperline searches nested folders for the `.slave` file. When a package holds
 more than one, it boots the shallowest (then the first alphabetically).
 
+Archive reads and extraction accept at most **256 MiB per file**, **1 GiB
+of decompressed data per operation**, and **16,384 entries**, including
+directory entries. A package over a limit fails with a size/count error;
+failed game extraction clears its temporary staging directory. Listing
+archive names does not decompress their contents. Library scans read only
+the selected slave and apply a smaller **1 MiB** limit to that file, also
+when scanning an unpacked directory. These are byte limits, so ordinary
+highly compressible files are accepted within the budget.
+
 ## Requirements
 
 ### Kickstart ROMs

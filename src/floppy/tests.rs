@@ -6486,6 +6486,56 @@ fn netplay_high_density_adf_round_trips_through_transfer() -> Result<()> {
 }
 
 #[test]
+fn ipf_weak_revolutions_survive_rotation_transfer_and_restore() -> Result<()> {
+    let mut host = FloppyController::default();
+    host.insert_disk_image_bytes(
+        0,
+        crate::ipf::tests::weak_ipf_image(),
+        "weak.ipf".into(),
+        true,
+    )?;
+    host.ensure_track(0, 0);
+    let revs = host.drives[0].cached.revs.clone();
+    assert_eq!(revs.len(), 8);
+    assert!(revs.windows(2).all(|pair| pair[0].words != pair[1].words));
+    assert!(revs.iter().all(|rev| rev.bit_len == 94));
+
+    let bytes = host.export_netplay_disk_image(0, 1024 * 1024)?;
+    let mut guest = FloppyController::default();
+    guest.insert_netplay_disk_image_bytes_with_limit(
+        0,
+        bytes.clone(),
+        "received".into(),
+        true,
+        bytes.len(),
+    )?;
+    guest.ensure_track(0, 0);
+    assert_eq!(
+        bincode::serialize(&guest.drives[0].cached)?,
+        bincode::serialize(&host.drives[0].cached)?
+    );
+
+    host.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    host.tick(MOTOR_READY_CCK, 0, &mut []);
+    host.ensure_track(0, 0);
+    host.drives[0].set_rotation_word(0);
+    host.drives[0].rotation_acc_cck = 0;
+    // Cross two exact 94-cell index seams, including the partial final word.
+    // Each 16-cell read uses the existing raw-track reader's cyclic geometry.
+    for _ in 0..12 {
+        assert!(host.next_disk_word(0, 0).is_some());
+    }
+    assert_eq!(host.drives[0].rotation_rev, 2);
+    host.prepare_netplay_images();
+    let mut restored: FloppyController = bincode::deserialize(&bincode::serialize(&host)?)?;
+    for _ in 0..64 {
+        assert_eq!(host.next_disk_word(0, 0), restored.next_disk_word(0, 0));
+    }
+    assert_eq!(restored.export_netplay_disk_image(0, bytes.len())?, bytes);
+    Ok(())
+}
+
+#[test]
 fn netplay_ipf_transfer_preserves_all_tracks_and_mastered_density() -> Result<()> {
     let mut host = FloppyController::default();
     host.insert_disk_image_bytes(

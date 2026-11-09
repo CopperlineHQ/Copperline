@@ -15,12 +15,14 @@
 //! and the library route also checks that a state taken inside the monitor
 //! resumes inside it.
 //!
-//! Release-only, like tests/savestate_roundtrip.rs: a debug-build emulator
+//! Optimized-only, like tests/savestate_roundtrip.rs: a debug-build emulator
 //! is far too slow for the emulated boot.
 //!
 //! ```sh
 //! cargo test --release --test hrtmon_freeze -- --nocapture
 //! ```
+
+mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -112,25 +114,13 @@ fn scratch_path(name: &str) -> PathBuf {
     ))
 }
 
-fn skip_in_debug() -> bool {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping hrtmon freeze; run with --release \
-             (a debug emulator is too slow for the emulated boot)"
-        );
-        return true;
-    }
-    false
-}
-
 /// The button through the library: the level-7 vector names the cartridge
 /// entry, the monitor sets `entered` and paints its screen, and a state
 /// taken inside the monitor resumes inside it.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn freeze_enters_the_monitor_and_a_state_resumes_inside_it() {
-    if skip_in_debug() {
-        return;
-    }
+    common::require_optimized();
     pin_bundled_roms();
 
     let mut emu = build().expect("build machine");
@@ -190,33 +180,39 @@ fn freeze_enters_the_monitor_and_a_state_resumes_inside_it() {
 /// emulated instant, the state saved afterwards is inside the monitor, and
 /// the screenshot shows its screen.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn freeze_after_flag_enters_the_monitor_headless() {
-    if skip_in_debug() {
-        return;
-    }
+    common::require_optimized();
     pin_bundled_roms();
     let state = scratch_path("flag.clstate");
     let shot = scratch_path("flag.png");
 
-    let status = Command::new(env!("CARGO_BIN_EXE_copperline"))
-        .current_dir(repo_root())
-        .args([
-            "--factory",
-            "--noaudio",
-            "--rtc-time",
-            &RTC_SEED.to_string(),
-        ])
-        .args(["--cartridge", "hrtmon"])
-        .args(["--freeze-after", &FREEZE_SECS.to_string()])
-        .arg("--save-state-after")
-        .arg(CHECK_SECS.to_string())
-        .arg(&state)
-        .arg("--screenshot-after")
-        .arg(CHECK_SECS.to_string())
-        .arg(&shot)
-        .status()
-        .expect("run copperline");
-    assert!(status.success(), "copperline exited with {status}");
+    let output = common::output_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_copperline"))
+            .current_dir(repo_root())
+            .args([
+                "--factory",
+                "--noaudio",
+                "--rtc-time",
+                &RTC_SEED.to_string(),
+            ])
+            .args(["--cartridge", "hrtmon"])
+            .args(["--freeze-after", &FREEZE_SECS.to_string()])
+            .arg("--save-state-after")
+            .arg(CHECK_SECS.to_string())
+            .arg(&state)
+            .arg("--screenshot-after")
+            .arg(CHECK_SECS.to_string())
+            .arg(&shot),
+        std::time::Duration::from_secs(120),
+    )
+    .expect("run copperline");
+    assert!(
+        output.status.success(),
+        "copperline exited with {}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let mut emu = build().expect("build machine");
     emu.load_state(&state)

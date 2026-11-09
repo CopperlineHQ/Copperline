@@ -127,6 +127,8 @@ static char* outbp;
 static int infoadded;
 static int errors;
 static int testcnt;
+/* Local patch: count callbacks, not CT_END_SKIP rounds, for the CI verdict. */
+static unsigned int executed_count;
 static int dooutput = 1;
 static int quit;
 static uae_u8 ccr_mask;
@@ -253,6 +255,9 @@ static void endinfo(void) {
 }
 
 static void safe_memcpy(uae_u8* d, uae_u8* s, int size) {
+    /* Local patch: optional absent memory regions have size -1 and NULL
+     * buffers. Never turn that into a huge memcpy on hosts using glibc. */
+    if (size <= 0) return;
     // assume this is true
     assert(safe_memory_start == 0xffffffff);
     assert(safe_memory_end == 0xffffffff);
@@ -1778,6 +1783,7 @@ static void process_test(uae_u8* p) {
                         */
 
                         s_cpu_callback(s_cpu_user_data, s_cpu_context, (M68KTesterRegisters*)&test_regs);
+                        executed_count++;
 
                         if (ccr_mask == 0 && ccr == 0) ignore_sr = 1;
 
@@ -1859,7 +1865,7 @@ static int test_mnemo(const char* path, const char* opcode) {
     int size;
     uae_u8 data[4] = {0};
     uae_u32 v;
-    char fname[256], tfname[256];
+    char tfname[256];
     int filecnt = 1;
     uae_u32 starttimeid;
     int lvl;
@@ -1964,6 +1970,7 @@ static int test_mnemo(const char* path, const char* opcode) {
     printf("%s:\n", inst_name);
 
     testcnt = 0;
+    executed_count = 0;
 
     s_cpu_context->low_memory.buffer = low_memory;
     s_cpu_context->low_memory.start = test_low_memory_start;
@@ -1994,21 +2001,23 @@ static int test_mnemo(const char* path, const char* opcode) {
         fread(data, 1, 4, f);
         if (gl(data) != starttimeid) {
             printf("Test data file header mismatch (old test data file?)\n");
+            errors++;
             break;
         }
         fseek(f, 0, SEEK_END);
         test_data_size = ftell(f);
         fseek(f, 16, SEEK_SET);
         test_data_size -= 16;
-        if (test_data_size <= 0) break;
+        if (test_data_size <= 0) { errors++; break; }
         test_data = calloc(1, test_data_size);
         if (!test_data) {
             printf("Couldn't allocate memory for '%s', %u bytes\n", tfname, test_memory_size);
             exit(1);
         }
         if (fread(test_data, 1, test_data_size, f) != test_data_size) {
-            printf("Couldn't read '%s'\n", fname);
+            printf("Couldn't read '%s'\n", tfname);
             free(test_data);
+            errors++;
             break;
         }
         fclose(f);
@@ -2033,6 +2042,11 @@ static int test_mnemo(const char* path, const char* opcode) {
         filecnt++;
     }
 
+    /* Local patch: a header-only or entirely skipped mnemonic is not a pass. */
+    if (!executed_count) {
+        printf("No test cases executed.\n");
+        errors++;
+    }
     if (!errors && !quit) {
         printf("All tests complete (total %u).\n", testcnt);
     }
@@ -2143,6 +2157,12 @@ int M68KTester_run_tests(M68KTesterContext* context, void* user_data, M68KTester
             }
         }
         closedir(d);
+
+        if (!diroff) {
+            printf("No opcode directories found.\n");
+            free(dirs);
+            return 0;
+        }
 
         for (int i = 0; i < diroff; i += MAX_FILE_LEN) {
             for (int j = i + MAX_FILE_LEN; j < diroff; j += MAX_FILE_LEN) {

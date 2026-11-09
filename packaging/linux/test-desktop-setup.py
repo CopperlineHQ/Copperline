@@ -53,7 +53,7 @@ def main():
             deadline = time.monotonic() + 10
             while not log.exists() and time.monotonic() < deadline:
                 time.sleep(0.05)
-            assert json.loads(log.read_text()) == ["--", *files]
+            assert json.loads(log.read_text()) == ["--desktop", "--", *files]
             for suffix, expected in [
                 ("adz", "application/x-copperline-compressed-floppy-image"),
                 ("adf.gz", "application/x-copperline-compressed-floppy-image"),

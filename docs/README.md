@@ -11,6 +11,9 @@ The documentation under this directory is written in
   npm install -g mystmd
   ```
 
+- [Python 3.11 or later](https://www.python.org/) for version metadata and the
+  PDF helper.
+
 - For PDF output only: [Typst](https://typst.app/), which MyST uses as the
   PDF renderer:
 
@@ -28,9 +31,21 @@ The documentation under this directory is written in
 
 ```sh
 cd docs
+python3 ../tools/prepare-docs.py # regenerate version identity after checkout changes
 myst build --html        # static site in docs/_build/html
 myst start               # or: live-reloading local preview server
 ```
+
+Run `prepare-docs.py` before `myst build` or `myst start`, and rerun it after
+a version bump or switching revisions. It generates ignored `_version.md`
+from `Cargo.toml` and Git: the HTML banner, persistent sidebar footer, and
+manual opening page share the same version identity. The version label follows
+`build.rs` and **About**: at any exact Git tag it is the package version;
+otherwise it adds `+g` and the same short revision. Tracked local changes are
+noted separately, since **About** does not include a dirty-tree suffix. Source
+archives without Git metadata use the package version and report the revision
+as unavailable. CI and publication run this step; the PDF helper runs it
+automatically.
 
 The HTML site is themed to match copperline.dev via `site.css` (wired up
 through the `style` option in `myst.yml`). On every `v*` tag the
@@ -65,6 +80,7 @@ Run the same checks as CI before submitting documentation changes:
 
 ```sh
 cd docs
+python3 ../tools/prepare-docs.py
 myst build --html --ci --strict --check-links
 python3 ../tools/build-docs-pdf.py --ci --strict
 test -s _build/exports/copperline.pdf
@@ -76,6 +92,8 @@ to check their format and control-protocol integration.
 
 ## Conventions
 
+- `../CHANGELOG.md` is the canonical changelog. `changelog.md` includes it in
+  both HTML and PDF; edit the root file rather than copying entries.
 - Screenshots live in `docs/images/`. Emulator screenshots are taken with
   deterministic headless runs (`--screenshot-after`). Software UI images
   come from the UI tests run with `COPPERLINE_UI_PREVIEW=1` (output in

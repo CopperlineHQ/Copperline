@@ -208,7 +208,9 @@ cargo test --release -- --ignored   # Integration tests (requires local test med
 The ignored integration tests in `tests/` need Kickstart ROMs and disk images
 that are not part of the repository. They look for them in the directory
 named by `COPPERLINE_TEST_ASSETS`, then in `test-assets/` at the repository
-root, and pass without running when their assets are absent.
+root. Selected `image_regression` tests fail when their assets are absent;
+some older asset-backed suites still pass without running, so check their
+missing-asset diagnostics.
 [`tests/README.md`](https://github.com/CopperlineHQ/Copperline/blob/main/tests/README.md)
 lists what each test needs.
 
@@ -221,8 +223,10 @@ a build report to `target/cargo-timings/cargo-timing.html`.
 
 The golden renders live in `timing-test/golden/`. A hardware-model change
 that alters them on purpose is re-blessed with
-`COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden`, and the
-render differences are reviewed as part of the change.
+`COPPERLINE_BLESS_GOLDEN=ddfprobe cargo test --release --test probe_golden golden_ddfprobe -- --exact`
+(replace both names for the probe being updated). Only that reference is
+replaced; review the render difference as part of the change. Debug builds
+report slow optimized-only suites as ignored.
 
 ## First boot
 
@@ -362,6 +366,9 @@ in the root of the repository. Copy it to `copperline.toml` or pass it via `--co
 ```sh
 ./target/release/copperline --config copperline.example.toml
 ```
+
+For configuration errors, failed boots, save-state compatibility and hardware
+limits, start with [Troubleshooting and known limits](troubleshooting.md).
 
 ## Logging and crash reports
 

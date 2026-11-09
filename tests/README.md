@@ -1,18 +1,22 @@
 # Integration tests and their assets
 
-`cargo test` runs the unit suite, which needs no external assets. The tests
-in this directory are different: they drive the built emulator against
-**local Kickstart ROMs and disk images that are not part of this
-repository** (they are copyrighted and/or third-party). Every such test is
-marked `#[ignore]`, so it never runs under a plain `cargo test`, and each
-one checks for its assets first and **skips cleanly (passing) when they are
-absent**. A contributor without the assets sees them no-op; they never fail
-the build.
+`cargo test` runs the unit suite and fast integration tests without external
+assets. Slow optimized-only tests, including probe goldens and save-state
+round trips, are reported as **ignored** in debug builds. Run them with
+`cargo test --profile ci --locked` or `cargo test --release`; explicitly
+forcing them with debug `--ignored` fails with an optimized-build instruction.
 
-Run them, once the assets are in place, with:
+Tests requiring local Kickstart ROMs or disk images remain `#[ignore]`d.
+In `image_regression.rs`, explicitly selecting a test now **fails** if its
+required assets are absent. The live-audio test also requires
+`COPPERLINE_LIVE_AUDIO_ACCEPTANCE=1` and a working audio device. Older
+asset-backed suites still contain skip-as-pass checks; an ignored test or a
+missing-asset message is not evidence that its scenario was exercised.
+
+Run a selected image regression once its assets are installed:
 
 ```sh
-cargo test --release --test image_regression -- --ignored --nocapture
+cargo test --release --test image_regression kickstart_boot_screen -- --ignored --nocapture
 ```
 
 `tests/debugger_security.rs` runs in the default suite without external
@@ -22,6 +26,12 @@ asserting that tokens never appear in process logs. Child processes have
 20-second deadlines and are killed on test failure.
 
 ## Contributor regression workflow
+
+CPU dependency updates also run the standalone
+[CPU conformance gate](../crates/cputest-runner/README.md). Root `cargo test`
+does not execute that crate or the dependency's own tests. The gate needs no
+Amiga ROMs/disks and covers a fixed instruction subset on 68020/030/040/060,
+MMU translation and fault frames, and native JIT versus interpreter behavior.
 
 The fast gate for a CPU, memory, bus, IRQ, or chipset change is:
 
@@ -44,6 +54,12 @@ needed. Outputs live in `target/ci/` (or `target/<triple>/ci/` with
 `--release` and its fat LTO. Linux retains Cargo's artifact paths from the
 full suite and directly reuses those executables for the extra ignored
 audio and network checks, avoiding further build-script runs and recompiles.
+macOS and both Windows architectures stage and run every integration test
+target too; asset-backed tests remain ignored. Probe goldens run in separate
+jobs. Audio-stem determinism runs explicitly on all three host platforms.
+Native CI jobs have wall-clock limits; golden captures time out after 120 s,
+and image-regression subprocesses after 300 s, killing and reaping a stalled
+emulator while retaining its output.
 
 The standard desktop suite includes the shared inspector's egui tests; no extra
 feature flag, GPU, or display is needed. The macOS **Inspector UI tests** step
@@ -68,15 +84,30 @@ New dependency/profile combinations first populate the shared cache after
 merging; until then, a PR may need a cold build.
 
 The golden renders live under `timing-test/golden/`. A hardware-model change
-that intentionally alters them must be re-blessed with
-`COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden`, with the
-render differences reviewed as part of the change. Run the ignored image
+that intentionally alters one must name that probe when blessing it:
+`COPPERLINE_BLESS_GOLDEN=ddfprobe cargo test --release --test probe_golden golden_ddfprobe -- --exact`.
+Only the named golden is replaced; a bare `1` or an unknown name fails.
+Review each render difference as part of the change. CI also reassembles
+all tracked timing-test binaries with pinned vasm 2.0b and checks their bytes;
+run `python3 tools/check-probe-binaries.py --vasm /path/to/vasmm68k_mot` locally. Run the ignored image
 suite above when the required local assets are available, followed by any
 subsystem-specific private smoke configurations.
 
 Promote a repeated manual smoke path into a focused unit test, an ignored
 image regression, or a deterministic input script. Completed investigations
 belong in commits and PR descriptions rather than a permanent done-log.
+
+### Parser fuzz regressions
+
+`cargo test --test fuzz_regressions` runs retained inputs through all nine
+parser harnesses on stable Rust, with no guest assets. `control` and `dap`
+enable their corresponding cases. The shared harnesses live in
+`fuzz/harnesses/`; the integration test and libFuzzer call the same code.
+The [retention workflow](fuzz-regressions/README.md) explains how to promote
+a minimized campaign crash into a committed regression. Initial synthetic
+boundary inputs keep every replay path exercised before a campaign finds
+a defect. See [fuzz/README.md](../fuzz/README.md) for campaign commands,
+limits and artifact retention.
 
 ### Hostfs boot round trips
 
@@ -575,9 +606,10 @@ public repository.
 
 Unlike the suites above, `probe_golden.rs` (the golden-render suite for
 those probes) needs no external assets: it boots the bundled AROS ROM and
-runs in CI on every push. `hrtmon_freeze.rs` is similarly self-contained
-(using bundled AROS and the bundled HRTMon ROM) and gated on `--release`
-(`cargo test --release --test hrtmon_freeze -- --ignored`): it verifies
+runs in CI on every push, including an NTSC A1200-profile sprite render.
+`hrtmon_freeze.rs` is similarly self-contained
+(using bundled AROS and the bundled HRTMon ROM) and runs in optimized builds
+(`cargo test --profile ci --test hrtmon_freeze`): it verifies
 freezer cartridge behavior both via the library interface and the
 `--freeze-after` CLI flag, asserting the monitor's active status, screen
 output, and save state roundtripping.

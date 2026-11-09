@@ -481,6 +481,29 @@ emulator times code differently depending on whether it runs from slow or chip
 RAM, rows 13 and 14 diverge -- which matters for any program (like a demo) that
 runs from slow/trapdoor RAM.
 
+## Zero-origin fetch and AGA scroll observation probes
+
+`ddfprobe-zero` selects OCS DDFSTRT/DDFSTOP `$00/$00` between standard
+`$38/$D0` and `$08/$08` control bands. The surviving SHW latch causes
+alternating fetched and empty lines. A per-line DDFSTRT rewrite to `$10`
+behind the beam leaves the captured run anchored at CCK 0; its real word
+count and placement must survive that register rewrite. The complete
+corrected render matches the vAmiga v5 OCS reference after alignment and
+palette mapping. `ddfprobe-agaresfold` sweeps hi-res/SHRES,
+32/64-bit fetches, absolute-grid phases and scroll taps in 48 four-line bands.
+Its assembly header defines the band order. Both are ROM-independent probes
+and have named golden tests in `tests/probe_golden.rs`.
+
+Build with `VASM=/path/to/vasmm68k_mot ./build.sh ddfprobe-zero` (or
+`ddfprobe-agaresfold`). Run on A500 OCS and A1200 AGA respectively. The AGA
+golden is an observation baseline; physical AGA evidence is still required
+before treating the hi-res/SHRES pipeline scaling as verified. Compare band
+interiors separately from the first line, which also exercises mode latency.
+After correcting the native scroll mask, the remaining vAmiga disagreement
+is 284 aligned pixels (0.140%): the first line plus bands 40/44 (SHRES BPL64,
+DDFSTRT `$42`, taps 0/16). See [video internals](../docs/internals/video.md) for the exact
+comparison scope; do not bless this residual as a hardware expectation.
+
 ## Programmable SHRES/interlace reproducer
 
 `dblpal-hires-lace.asm` is a ROM-independent reproducer for the programmable
@@ -576,8 +599,8 @@ as well as sprite-playfield bit 1 when the enabled plane match fails.
 These fixture updates introduce no further emulation changes.
 
 Each probe is its own `#[test]`, so the harness runs the emulator boots in
-parallel on the available cores (the full suite of 47 takes ~20 s on an
-8-core host vs ~90 s sequentially).
+parallel on the available cores. The debug profile reports these tests as
+ignored; `--profile ci` and `--release` execute the comparisons.
 
 ### vAmiga AGA cross-check (2026-08-27)
 
@@ -836,11 +859,30 @@ race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
 committed.
 
-When a hardware-model fix intentionally moves calibrated output, re-bless
-and review the render diff as part of the change:
+When a hardware-model fix intentionally moves calibrated output, name each
+changed probe explicitly and review its render diff as part of the change:
 
 ```sh
-COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test probe_golden
+COPPERLINE_BLESS_GOLDEN=ddfprobe cargo test --release --test probe_golden golden_ddfprobe -- --exact
+```
+
+The blessing variable takes one probe name, not `1` or `all`; every other
+probe still compares against its reference if it runs. An unknown name fails.
+Debug builds report the suite as ignored; forcing it in debug fails.
+Each emulator capture has a 120-second wall-clock timeout.
+
+`ntsc-aga-sprites` runs `agashres-sprites.bin` on the NTSC A1200 profile,
+pinning the shorter field geometry and AGA sprite widths. Before blessing,
+the test also requires the visible 4:4:2:1 sprite-width staircase.
+If that check fails, the actual capture is saved in `target/probe-golden/`
+before the assertion fails, including during a rejected bless.
+This is a deterministic model regression, not a physical NTSC reference.
+CI builds pinned vasm 2.0b from a source mirror and requires every tracked
+`timing-test/*.bin` (including the boot block) to match its adjacent source.
+Run the same check locally with:
+
+```sh
+python3 tools/check-probe-binaries.py --vasm /path/to/vasmm68k_mot
 ```
 
 On a mismatch, CI uploads the actual renders and diff masks

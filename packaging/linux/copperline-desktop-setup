@@ -81,7 +81,7 @@ def main():
                     if sum(line.startswith("Exec=") for line in lines) != 1:
                         raise ValueError("packaged desktop entry needs exactly one Exec line")
                     content = ("\n".join(
-                        f"Exec={quoted} -- %F" if line.startswith("Exec=") else line
+                        f"Exec={quoted} --desktop -- %F" if line.startswith("Exec=") else line
                         for line in lines
                     ) + "\n").encode()
                 contents[destination] = content

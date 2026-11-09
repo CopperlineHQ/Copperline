@@ -73,18 +73,33 @@ corrected to exact totals across the SingleStepTests 68000 cycle corpus
 ([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.13.0#validation--testing)),
 which is what makes cycle-budgeted pacing trustworthy. Instruction
 semantics are also checked against Toni Wilen's WinUAE cputest suites
-(every opcode of a CPU model, hundreds of register and memory states each,
-including exception stack frames): `crates/cputest-runner` drives the
-generated test sets against the same `m68k` release as the emulator,
-and the nightly `cputest.yml` workflow runs the full 68000 suite
-(`crates/cputest-runner/tools/cputest-gen.sh` generates the data for any
-model locally).
+(generated register and memory states): `crates/cputest-runner` drives the
+test sets against the same `m68k` release as the emulator. Every PR runs a
+fixed 68020/030/040/060 subset with full extension addressing and 32-bit
+addresses, plus asset-free MMU translation/protection/fault-frame tests and
+interpreter-versus-native-JIT comparisons, including MMU-on and rewritten
+hot code. The JIT test requires compiled trace execution; decoded fallback
+cannot satisfy it. Scheduled/manual `cputest.yml` runs add the full generated
+instruction sets for 68000 and 68010; the bounded 020+ gate runs there too.
+
+The generated corpus checks registers, stores and exception numbers. Its
+length-prefixed detailed exception-frame records are **not validated** by
+the current C adapter; the separate MMU tests cover selected fault-frame
+fields, not exhaustive pipeline/exception conformance. These are functional
+checks, not a 020+ cycle-timing qualification. See the
+[runner instructions](../../crates/cputest-runner/README.md) for local commands
+and the exact PR opcode list. Empty, incomplete, stale and zero-case corpora
+fail instead of reporting success.
 
 The lockfile workflow also runs `python3 tools/check-m68k-locks.py`, which
 requires the root application, player, web, libretro and conformance runner to
 resolve the same m68k version and source. The core's own unit and native JIT
 suites run in the core repository's CI; Cargo does not run dependency unit
-tests as part of Copperline's suite.
+tests as part of Copperline's suite. The standalone runner tests execute our
+checks against that resolved package directly. Require the stable
+`CPU conformance (020+)` check in branch protection alongside lockfile sync
+to block an untested dependency bump; a workflow file alone does not make a
+check mandatory in GitHub repository settings.
 
 ## The batch/JIT execution mode
 

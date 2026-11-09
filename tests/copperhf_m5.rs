@@ -49,6 +49,8 @@
 //! deterministic and needs no quiesce), and only start earning their keep
 //! once doorbells actually complete off-thread.
 
+mod common;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -353,7 +355,7 @@ fn run_boot(
         .arg(screenshot_at_secs.to_string())
         .arg(screenshot_path);
 
-    cmd.output().unwrap()
+    common::output_with_timeout(&mut cmd, std::time::Duration::from_secs(300)).unwrap()
 }
 
 fn assert_ran_ok(tag: &str, output: &std::process::Output) {
@@ -364,17 +366,6 @@ fn assert_ran_ok(tag: &str, output: &std::process::Output) {
         tail(&output.stdout, 40),
         tail(&output.stderr, 80),
     );
-}
-
-fn skip_if_debug(test_name: &str) -> bool {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping copperhf.device M5 test ({test_name}); run with --release \
-             (a debug emulator is far too slow for a full AROS autoboot)"
-        );
-        return true;
-    }
-    false
 }
 
 /// Byte-for-byte determinism under real copperhf I/O load: the same
@@ -415,10 +406,9 @@ fn machine_body(tag: &str, bytes: &[u8]) -> Vec<u8> {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn determinism_across_repeated_boots() {
-    if skip_if_debug("determinism_across_repeated_boots") {
-        return;
-    }
+    common::require_optimized();
 
     let scratch = scratch_dir("determinism");
     let _ = std::fs::remove_dir_all(&scratch);
@@ -536,10 +526,9 @@ fn determinism_across_repeated_boots() {
 /// paused -- either way the two screenshots would diverge, and very likely
 /// the resumed run would also fail to ever produce a bootmark.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn savestate_quiesce_and_resume() {
-    if skip_if_debug("savestate_quiesce_and_resume") {
-        return;
-    }
+    common::require_optimized();
 
     let scratch = scratch_dir("quiesce");
     let _ = std::fs::remove_dir_all(&scratch);
@@ -617,22 +606,24 @@ fn savestate_quiesce_and_resume() {
         ),
     )
     .unwrap();
-    let out_c = Command::new(env!("CARGO_BIN_EXE_copperline"))
-        .current_dir(repo_root())
-        .env("RUST_LOG", "copperline=warn")
-        .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
-        .env("XDG_CONFIG_HOME", &config_home)
-        .arg("--factory")
-        .arg("--config")
-        .arg(&config)
-        .arg("--noaudio")
-        .arg("--load-state")
-        .arg(&split_state)
-        .arg("--screenshot-after")
-        .arg(resume_at.to_string())
-        .arg(&resumed_shot)
-        .output()
-        .unwrap();
+    let out_c = common::output_with_timeout(
+        Command::new(env!("CARGO_BIN_EXE_copperline"))
+            .current_dir(repo_root())
+            .env("RUST_LOG", "copperline=warn")
+            .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
+            .env("XDG_CONFIG_HOME", &config_home)
+            .arg("--factory")
+            .arg("--config")
+            .arg(&config)
+            .arg("--noaudio")
+            .arg("--load-state")
+            .arg(&split_state)
+            .arg("--screenshot-after")
+            .arg(resume_at.to_string())
+            .arg(&resumed_shot),
+        std::time::Duration::from_secs(300),
+    )
+    .unwrap();
     assert_ran_ok("quiesce-resume", &out_c);
 
     let uninterrupted_bytes = std::fs::read(&uninterrupted_shot).unwrap();

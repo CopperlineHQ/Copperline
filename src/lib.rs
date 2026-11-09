@@ -15,6 +15,7 @@ pub mod a2091;
 pub mod a4091;
 pub mod akiko;
 pub mod amigaos;
+pub mod archive;
 pub mod ata;
 pub mod audio;
 // Host block devices: a real disk (an SD card, a CF card, an Amiga's own

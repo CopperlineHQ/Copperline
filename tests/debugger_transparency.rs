@@ -24,12 +24,14 @@
 //! Asset-free: the bundled AROS ROM boots with an empty DF0. The guest clock
 //! is pinned with a fixed RTC seed so the two builds agree.
 //!
-//! Release-only, like tests/savestate_roundtrip.rs: a debug-build emulator is
+//! Optimized-only, like tests/savestate_roundtrip.rs: a debug-build emulator is
 //! far too slow for a multi-second emulated boot.
 //!
 //! ```sh
 //! cargo test --release --test debugger_transparency -- --nocapture
 //! ```
+
+mod common;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -196,14 +198,9 @@ fn run_side_by_side(plain: &mut Emulator, armed: &mut Emulator) -> anyhow::Resul
 /// and every CPU-level diagnostic observer leaves every frame of the boot
 /// byte-identical to an undebugged run.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
 fn armed_headless_debugger_leaves_the_timeline_unchanged() {
-    if cfg!(debug_assertions) {
-        eprintln!(
-            "skipping debugger transparency; run with --release \
-             (a debug emulator is too slow for the emulated boot)"
-        );
-        return;
-    }
+    common::require_optimized();
     pin_bundled_aros();
 
     let started = Instant::now();

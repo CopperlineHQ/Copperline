@@ -3,8 +3,12 @@
 //! Command-line argument parsing for the Copperline binary: the flag
 //! grammar, `--script` file expansion, and the parsed `CliArgs` shape.
 
-use anyhow::{anyhow, bail, Result};
 use std::path::PathBuf;
+
+use anyhow::{anyhow, bail, Result};
+
+mod tokens;
+use tokens::Arguments;
 
 use copperline::config::ConfigOverrides;
 use copperline::expect::{ExpectShotSpec, Tolerance};
@@ -254,10 +258,6 @@ pub enum CliDiskChange {
     Configured { secs: f32, drive_idx: usize },
 }
 
-pub fn parse_args() -> Result<CliArgs> {
-    parse_args_from(std::env::args().skip(1))
-}
-
 /// Scripted-input directives accepted inside a `--script` file. These are
 /// the flag names (without the leading dashes) whose effects accumulate;
 /// anything else in a script is an error so a typo cannot silently change
@@ -316,51 +316,35 @@ fn tokenize_script_line(line: &str) -> Result<Vec<String>> {
     Ok(tokens)
 }
 
-/// Expand every `--script FILE` argument in place: each non-empty,
-/// non-`#` line of the file is a scripted-input directive in the flag
-/// syntax without the leading dashes (`key-after 14.0 ctrl 500`), and
-/// expands to the equivalent flags for the main parser. Scripts cannot
-/// include other scripts.
-fn expand_script_files(args: Vec<String>) -> Result<Vec<String>> {
-    let mut out = Vec::with_capacity(args.len());
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        if arg != "--script" {
-            out.push(arg);
+/// Expand one script when the parser reaches its option. Values belonging
+/// to other options (for example `--run-args --script`) stay literal.
+fn expand_script_file(path: &str) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    let text = std::fs::read_to_string(path).map_err(|e| anyhow!("reading script {path}: {e}"))?;
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let path = iter
-            .next()
-            .ok_or_else(|| anyhow!("--script requires a path"))?;
-        let text =
-            std::fs::read_to_string(&path).map_err(|e| anyhow!("reading script {path}: {e}"))?;
-        for (lineno, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let tokens = tokenize_script_line(line)?;
-            let Some((directive, rest)) = tokens.split_first() else {
-                continue;
-            };
-            if !SCRIPT_DIRECTIVES.contains(&directive.as_str()) {
-                return Err(anyhow!(
-                    "{path}:{}: {directive:?} is not a scripted-input directive \
-                     (allowed: {})",
-                    lineno + 1,
-                    SCRIPT_DIRECTIVES.join(", ")
-                ));
-            }
-            // `type SECS TEXT` is the natural spelling in a script; the
-            // flag it stands for is --type-after.
-            let flag = if directive == "type" {
-                "type-after"
-            } else {
-                directive.as_str()
-            };
-            out.push(format!("--{flag}"));
-            out.extend(rest.iter().cloned());
+        let tokens = tokenize_script_line(line)?;
+        let Some((directive, rest)) = tokens.split_first() else {
+            continue;
+        };
+        if !SCRIPT_DIRECTIVES.contains(&directive.as_str()) {
+            return Err(anyhow!(
+                "{path}:{}: {directive:?} is not a scripted-input directive \
+                 (allowed: {})",
+                lineno + 1,
+                SCRIPT_DIRECTIVES.join(", ")
+            ));
         }
+        let flag = if directive == "type" {
+            "type-after"
+        } else {
+            directive.as_str()
+        };
+        out.push(format!("--{flag}"));
+        out.extend(rest.iter().cloned());
     }
     Ok(out)
 }
@@ -387,10 +371,7 @@ fn next_arg<T: std::str::FromStr>(
 /// and yields the flag's traditional default port. (A positional ROM/disk
 /// path literally named "1" or "2" therefore cannot directly follow one
 /// of these flags; name it "./1" instead.)
-fn take_port_token(
-    args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
-    default_port: u8,
-) -> u8 {
+fn take_port_token(args: &mut Arguments, default_port: u8) -> u8 {
     take_port_token_upto(args, 2).unwrap_or(default_port - 1)
 }
 
@@ -399,10 +380,7 @@ fn take_port_token(
 /// leave the argument stream alone when the next token is not one. The
 /// game ports are 1 and 2; the parallel-port adapter's sockets are 3 and 4,
 /// which only the joystick directive can address.
-fn take_port_token_upto(
-    args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
-    max_port: u8,
-) -> Option<u8> {
+fn take_port_token_upto(args: &mut Arguments, max_port: u8) -> Option<u8> {
     let port = match args.peek().map(String::as_str) {
         Some("1") => 0,
         Some("2") => 1,
@@ -414,11 +392,74 @@ fn take_port_token_upto(
     Some(port)
 }
 
+fn unknown_option(option: &str) -> anyhow::Error {
+    // Help is the public, feature-filtered option list. Keeping suggestions
+    // tied to it avoids advertising internal broker flags or disabled code.
+    let help = help_text();
+    let options = help
+        .split_once("Options:\n")
+        .expect("help option section")
+        .1;
+    let mut candidates: Vec<_> = options
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+        .filter(|word| word.starts_with("--") && word.len() > 2)
+        .collect();
+    candidates.sort_unstable();
+    candidates.dedup();
+    let suggestion = if option.is_ascii() && (5..=64).contains(&option.len()) {
+        let mut scored: Vec<_> = candidates
+            .into_iter()
+            .map(|candidate| (option_distance(option, candidate), candidate))
+            .filter(|(distance, _)| *distance <= 2)
+            .collect();
+        scored.sort_unstable();
+        match scored.as_slice() {
+            [(distance, candidate), rest @ ..]
+                if rest.first().is_none_or(|next| next.0 > *distance) =>
+            {
+                Some(*candidate)
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    match suggestion {
+        Some(candidate) => {
+            anyhow!("unknown option {option:?}; did you mean {candidate:?}? (see --help)")
+        }
+        None => anyhow!("unknown option {option:?} (see --help)"),
+    }
+}
+
+/// Edit distance including adjacent transpositions, a common flag typo.
+fn option_distance(a: &str, b: &str) -> usize {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut rows = vec![vec![0; b.len() + 1]; a.len() + 1];
+    for (i, row) in rows.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, value) in rows[0].iter_mut().enumerate() {
+        *value = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            rows[i][j] = (rows[i - 1][j] + 1)
+                .min(rows[i][j - 1] + 1)
+                .min(rows[i - 1][j - 1] + usize::from(a[i - 1] != b[j - 1]));
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                rows[i][j] = rows[i][j].min(rows[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    rows[a.len()][b.len()]
+}
+
 pub fn parse_args_from<I>(args: I) -> Result<CliArgs>
 where
     I: IntoIterator<Item = String>,
 {
-    let args: Vec<String> = args.into_iter().collect();
     let mut netplay_host = None::<PathBuf>;
     let mut netplay_join = None::<String>;
     let mut netplay_relay = None::<String>;
@@ -506,18 +547,14 @@ where
     let mut list_sampler_inputs = false;
     let mut list_drive_profiles = false;
     let mut overrides = ConfigOverrides::default();
-    let mut args = args.into_iter().peekable();
-    while let Some(a) = args.next() {
+    let mut args = Arguments::new(args);
+    while let Some(a) = args.next_option()? {
         match a.as_str() {
             "--script" => {
                 let path = args
                     .next()
                     .ok_or_else(|| anyhow!("--script requires a path"))?;
-                // Expand only at a flag boundary: a value that happens to be
-                // `--` or `--script` must remain a value.
-                let mut expanded = expand_script_files(vec![a, path])?;
-                expanded.extend(args);
-                args = expanded.into_iter().peekable();
+                args.prepend(expand_script_file(&path)?);
             }
             "--calibrate-gamepad" => {
                 calibrate_gamepad = true;
@@ -1608,22 +1645,26 @@ where
                 explicit_audio_live = true;
             }
             "--help" | "-h" => {
-                print_help();
+                args.finish_option(&a)?;
+                println!("{}", help_text());
                 std::process::exit(0);
             }
             "--version" | "-V" => {
+                args.finish_option(&a)?;
                 println!("copperline {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--" => {
-                positional.extend(args.map(PathBuf::from));
+                args.finish_option(&a)?;
+                positional.extend(args.by_ref().map(PathBuf::from));
                 break;
             }
             other if other.starts_with("--") => {
-                return Err(anyhow!("unknown option {:?} (see --help)", other));
+                return Err(unknown_option(other));
             }
-            _ => positional.push(PathBuf::from(a)),
+            _ => positional.push(PathBuf::from(&a)),
         }
+        args.finish_option(&a)?;
     }
     // Classify after parsing options, so conflicts do not depend on order.
     for path in positional {
@@ -2031,7 +2072,7 @@ where
     })
 }
 
-fn print_help() {
+fn help_text() -> String {
     let shortcut = HOST_SHORTCUT_MODIFIER_LABEL;
     // The MIDI endpoint options only do anything in a `midi`-feature build, so
     // list them only there. `--serial` itself is always shown: off/stdout work
@@ -2086,10 +2127,13 @@ fn print_help() {
     };
     #[cfg(not(feature = "fluxbridge"))]
     let floppy_bridge = String::new();
-    eprintln!(
+    format!(
         "copperline - Amiga emulator\n\
          \n\
          Usage: copperline [OPTIONS] [ROM] [MEDIA ...]\n\
+         \n\
+         Long options with a value also accept --flag=VALUE. For options\n\
+         with several values, = supplies the first; the rest follow separately.\n\
          \n\
          Options:\n  \
          -c, --config FILE              load configuration from FILE (default: ./copperline.toml,\n  \
@@ -2361,7 +2405,7 @@ fn print_help() {
          the config. If no config file exists, built-in defaults are used:\n  \
          CPU: 68000   chip RAM: 512K   slow RAM: 512K   fast RAM: 0   chipset: ECS\n  \
          ROM: bundled AROS"
-    );
+    )
 }
 
 fn parse_floppy_drive_idx(s: &str, option: &str) -> Result<usize> {

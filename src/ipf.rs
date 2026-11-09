@@ -38,10 +38,11 @@
 //! weak (5). Sync and raw are already-encoded MFM written through untouched --
 //! that is how an address mark like `4489 4489` keeps its illegal clocking --
 //! while data and gap hold decoded bytes that this decoder MFM-encodes,
-//! setting the clock bit only between two zero data bits. So a sample's
-//! contribution is its bit count for raw kinds and twice that for encoded
-//! kinds, and the sum across the stream is exactly the `block_bits` the
-//! descriptor promised, which [`decode`] checks track by track.
+//! setting the clock bit only between two zero data bits.
+//! Weak samples have no payload and reserve twice their bit count as weak
+//! cells. The other samples' contribution is their bit count for raw kinds
+//! and twice that for encoded kinds. The sum across the stream is exactly the
+//! `block_bits` the descriptor promised, which [`decode`] checks track by track.
 //!
 //! Gap streams are richer, because a gap is where the write splice falls and
 //! its length depends on how fast the drive that wrote it was turning. A gap
@@ -60,11 +61,13 @@
 //!
 //! # What comes out
 //!
-//! One whole revolution per track as packed MFM, in the same shape a flux
+//! Whole revolutions per track as packed MFM, in the same shape a flux
 //! capture already takes in [`crate::floppy`] -- so the rotation, PLL and
 //! sync-word machinery reads an IPF with no special case in the hot path.
 //! The revolution is rotated to start at the index, as a capture does, using
 //! the start position the `IMGE` records.
+//! Weak tracks carry eight deterministic noise realizations; only their weak
+//! spans vary, and the existing raw-track reader cycles through them.
 
 use anyhow::{bail, ensure, Context, Result};
 use flate2::Crc;
@@ -84,6 +87,8 @@ const MAX_TRACKS: usize = 2 * 84;
 /// A revolution longer than this is a corrupt descriptor rather than a disk:
 /// a 300 RPM DD revolution is close to 100,000 cells.
 const MAX_TRACK_BITS: usize = 1_000_000;
+
+const WEAK_REVOLUTIONS: u8 = 8;
 
 // INFO encoder identifiers.
 const ENCODER_CAPS: u32 = 1;
@@ -128,8 +133,8 @@ const BLOCK_FLAG_FWGAP: u32 = 1 << 0;
 const BLOCK_FLAG_BWGAP: u32 = 1 << 1;
 const BLOCK_FLAG_BIT_LENGTHS: u32 = 1 << 2;
 
-/// One decoded revolution: packed MFM words, MSB first, and the exact bit
-/// length it wraps at. `density` is the track's mastered cell-rate profile as
+/// Decoded revolutions: packed MFM words, MSB first, and the exact bit
+/// length each wraps at. `density` is the track's mastered cell-rate profile as
 /// `(start_bit, permille)` spans in ascending bit order, each holding until
 /// the next one: cells from `start_bit` are written at `permille` / 1000 of
 /// the nominal cell time. Empty for a track written at one rate throughout.
@@ -137,6 +142,8 @@ const BLOCK_FLAG_BIT_LENGTHS: u32 = 1 << 2;
 pub struct IpfTrack {
     pub words: Vec<u16>,
     pub bit_len: u32,
+    /// Word-aligned revolutions concatenated in `words`.
+    pub revolutions: u8,
     pub density: Vec<(u32, u16)>,
 }
 
@@ -505,8 +512,8 @@ fn decode_track(imge: &Imge, area: Option<&[u8]>, info: &Info) -> Result<Option<
     // are zero, so the very first clock of the revolution depends on the last
     // data bit of the revolution before it -- the same one, since the track
     // loops. Encode once to learn that bit, then again with it in hand.
-    let seed = encode_blocks(imge, area, info, false)?.1;
-    let (bits, _) = encode_blocks(imge, area, info, seed)?;
+    let seed = encode_blocks(imge, area, info, false)?.last_data_bit;
+    let EncodedTrack { mut bits, weak, .. } = encode_blocks(imge, area, info, seed)?;
     ensure!(
         bits.len() == track_bits,
         "IPF track holds {} bits, not the {track_bits} its descriptor declares",
@@ -517,11 +524,30 @@ fn decode_track(imge: &Imge, area: Option<&[u8]>, info: &Info) -> Result<Option<
     // past the index that block begins, so rotating by it puts the revolution
     // back the way the head met it.
     let start = imge.start_bit_pos as usize % track_bits;
-    let mut words = vec![0u16; track_bits.div_ceil(16)];
-    for (i, bit) in bits.iter().enumerate() {
-        if *bit {
-            let pos = (start + i) % track_bits;
-            words[pos / 16] |= 0x8000 >> (pos % 16);
+    let revolutions = if weak.is_empty() { 1 } else { WEAK_REVOLUTIONS };
+    let words_per_rev = track_bits.div_ceil(16);
+    let mut words = vec![0u16; words_per_rev * usize::from(revolutions)];
+    // Local fixed-seed noise keeps decoding, save/restore and netplay
+    // reproducible. No host RNG or runtime state enters disk reads.
+    let mut noise =
+        0x6A09_E667_F3BC_C909u64 ^ (u64::from(imge.cylinder) << 32) ^ u64::from(imge.head);
+    for rev in 0..usize::from(revolutions) {
+        // Weak readback includes clock positions. Like the preservation
+        // decoder, generate raw cells rather than MFM-encoded data, and
+        // allow accidental sync matches instead of filtering the noise.
+        for span in &weak {
+            for bit in &mut bits[span.clone()] {
+                noise ^= noise << 13;
+                noise ^= noise >> 7;
+                noise ^= noise << 17;
+                *bit = noise & 1 != 0;
+            }
+        }
+        for (i, bit) in bits.iter().enumerate() {
+            if *bit {
+                let pos = (start + i) % track_bits;
+                words[rev * words_per_rev + pos / 16] |= 0x8000 >> (pos % 16);
+            }
         }
     }
 
@@ -534,6 +560,7 @@ fn decode_track(imge: &Imge, area: Option<&[u8]>, info: &Info) -> Result<Option<
     Ok(Some(IpfTrack {
         words,
         bit_len: imge.track_bits,
+        revolutions,
         density,
     }))
 }
@@ -634,19 +661,29 @@ fn density_profile(
     spans
 }
 
-/// Encode every block of a track back to back, returning the cells and the
-/// last decoded data bit written (the seed the next revolution starts from).
-fn encode_blocks(imge: &Imge, area: &[u8], info: &Info, seed: bool) -> Result<(Vec<bool>, bool)> {
+struct EncodedTrack {
+    bits: Vec<bool>,
+    last_data_bit: bool,
+    weak: Vec<std::ops::Range<usize>>,
+}
+
+/// Encode every block, keeping weak spans separate from the stable cells.
+fn encode_blocks(imge: &Imge, area: &[u8], info: &Info, seed: bool) -> Result<EncodedTrack> {
     let flags_meaningful = info.block_flags_meaningful();
     let mut out: Vec<bool> = Vec::with_capacity(imge.track_bits as usize);
     let mut prev = seed;
     let mut total_gap = 0usize;
+    let mut weak = Vec::new();
 
     for index in 0..imge.block_count as usize {
         let block = Block::parse(area, index, flags_meaningful)?;
         let start = out.len();
         if block.block_bits > 0 {
-            decode_data_stream(area, &block, &mut out, &mut prev)
+            ensure!(
+                block.block_bits <= (imge.track_bits as usize).saturating_sub(out.len()),
+                "IPF block {index} exceeds the declared track length"
+            );
+            decode_data_stream(area, &block, &mut out, &mut prev, &mut weak)
                 .with_context(|| format!("in block {index} data stream"))?;
             let written = out.len() - start;
             ensure!(
@@ -656,6 +693,10 @@ fn encode_blocks(imge: &Imge, area: &[u8], info: &Info, seed: bool) -> Result<(V
             );
         }
         if block.gap_bits > 0 {
+            ensure!(
+                block.gap_bits <= (imge.track_bits as usize).saturating_sub(out.len()),
+                "IPF block {index} gap exceeds the declared track length"
+            );
             fill_gap(area, &block, &mut out, &mut prev)
                 .with_context(|| format!("in block {index} gap"))?;
             total_gap += block.gap_bits;
@@ -667,7 +708,11 @@ fn encode_blocks(imge: &Imge, area: &[u8], info: &Info, seed: bool) -> Result<(V
         "IPF track gap totals {total_gap} bits, not the {} the track declares",
         imge.gap_bits
     );
-    Ok((out, prev))
+    Ok(EncodedTrack {
+        bits: out,
+        last_data_bit: prev,
+        weak,
+    })
 }
 
 /// Walk a data stream, appending the cells each sample stands for.
@@ -676,14 +721,42 @@ fn decode_data_stream(
     block: &Block,
     out: &mut Vec<bool>,
     prev: &mut bool,
+    weak: &mut Vec<std::ops::Range<usize>>,
 ) -> Result<()> {
     let mut pos = block.data_offset;
+    let block_end = out.len() + block.block_bits;
     loop {
         let Some((kind, size, next)) = read_sample_header(area, pos)? else {
             return Ok(());
         };
         let in_bits = block.sample_lengths_in_bits();
-        let bits = if in_bits { size } else { size * 8 };
+        let bits = if in_bits {
+            size
+        } else {
+            size.checked_mul(8).context("IPF data bit count overflow")?
+        };
+        let cells = if matches!(kind, DATA_DATA | DATA_GAP | DATA_WEAK) {
+            bits.checked_mul(2)
+                .context("IPF data cell count overflow")?
+        } else {
+            bits
+        };
+        ensure!(
+            cells <= block_end - out.len(),
+            "IPF data sample exceeds its block length"
+        );
+        // Weak samples describe unrecorded cells, not bytes in the stream.
+        // Like decoded data, their length is before MFM expansion. Reset
+        // the following encoder's context, as the preservation decoder does.
+        if kind == DATA_WEAK {
+            if cells != 0 {
+                weak.push(out.len()..out.len() + cells);
+                out.resize(out.len() + cells, false);
+            }
+            *prev = false;
+            pos = next;
+            continue;
+        }
         // A bit-counted sample is padded out so the next one starts on a byte
         // boundary.
         let bytes = bits.div_ceil(8);
@@ -700,12 +773,6 @@ fn decode_data_stream(
             // Already-encoded cells: written through exactly as stored, which
             // is what keeps a sync mark's illegal clocking intact.
             DATA_SYNC | DATA_RAW => push_raw(out, prev, sample, bits),
-            // Weak cells read back differently every revolution on real media.
-            // Copperline reads a deterministic revolution, so the stored
-            // sample is written through as it stands.
-            // TODO: carry the weak spans through to FloppyTrackImage::RawMfm
-            // as extra revolutions with the fuzzy runs varied per revolution.
-            DATA_WEAK => push_raw(out, prev, sample, bits),
             // Decoded payload: one cell per data bit, the clock bit set only
             // where it separates two zero data bits.
             DATA_DATA | DATA_GAP => {
@@ -1261,10 +1328,85 @@ pub(crate) mod tests {
 
     // -- tests ---------------------------------------------------------------
 
+    pub(crate) fn weak_ipf_image() -> Vec<u8> {
+        weak_image(true, 31, 94)
+    }
+
+    fn weak_image(in_bits: bool, weak_size: usize, track_bits: u32) -> Vec<u8> {
+        let mut area = block_descriptor(
+            track_bits as usize,
+            0,
+            0,
+            if in_bits { BLOCK_FLAG_BIT_LENGTHS } else { 0 },
+            0,
+            BLOCK_DESCRIPTOR_LEN,
+        );
+        let sync_size = if in_bits { 16 } else { 2 };
+        area.extend(sample(DATA_SYNC, sync_size, &[0x44, 0x89]));
+        // No payload follows the weak sample header.
+        area.extend(sample(DATA_WEAK, weak_size, &[]));
+        area.extend(sample(DATA_SYNC, sync_size, &[0xA5, 0x5A]));
+        area.push(0);
+        image(
+            Track {
+                start_bit: 13,
+                data_bits: track_bits,
+                track_bits,
+                ..Track::default()
+            },
+            &area,
+            2,
+            2,
+        )
+    }
+
+    #[test]
+    fn weak_samples_have_no_payload_and_vary_only_their_rotated_cells() {
+        // Both length modes count decoded bits: weak bytes occupy 16
+        // cells each. The bit-counted fixture also exercises word padding.
+        for (in_bits, size, len) in [(true, 31, 94), (false, 4, 96)] {
+            let image = weak_image(in_bits, size, len);
+            let track = only_track(&image);
+            let again = only_track(&image);
+            assert_eq!(track.words, again.words);
+            assert_eq!(track.revolutions, WEAK_REVOLUTIONS);
+            let words_per_rev = (len as usize).div_ceil(16);
+            assert_eq!(
+                track.words.len(),
+                words_per_rev * usize::from(WEAK_REVOLUTIONS)
+            );
+            let revs: Vec<_> = track.words.chunks_exact(words_per_rev).collect();
+            for pair in revs.windows(2) {
+                assert_ne!(pair[0], pair[1]);
+            }
+            for rev in revs {
+                let cell = |i: usize| {
+                    let pos = (13 + i) % len as usize;
+                    rev[pos / 16] & (0x8000 >> (pos % 16)) != 0
+                };
+                for (offset, value) in [(0, 0x4489u16), (len as usize - 16, 0xA55A)] {
+                    for bit in 0..16 {
+                        assert_eq!(cell(offset + bit), value & (0x8000 >> bit) != 0);
+                    }
+                }
+                for padding in len as usize..words_per_rev * 16 {
+                    assert_eq!(rev[padding / 16] & (0x8000 >> (padding % 16)), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn weak_sample_cannot_expand_past_its_declared_block() {
+        let err = decode(&weak_image(true, MAX_TRACK_BITS, 94)).unwrap_err();
+        assert!(format!("{err:#}").contains("exceeds its block length"));
+    }
+
     #[test]
     fn amigados_track_decodes_to_its_declared_revolution() {
         let track = only_track(&amigados_ipf_image());
         assert_eq!(track.bit_len, AMIGADOS_TRACK_BITS);
+        assert_eq!(track.revolutions, 1);
         assert_eq!(
             track.words.len(),
             (AMIGADOS_TRACK_BITS as usize).div_ceil(16)

@@ -1,0 +1,24 @@
+# Fixed AROS cold boot, empty DF0. No local ROMs or media are needed.
+[machine]
+profile = "A500"
+rtc_time = 1111111109
+rtc_frozen = true
+battmem = ""
+rom_scsi_device_disable = true
+
+[cpu]
+model = "68000"
+clock_mhz = 7.09379
+jit = false
+speed = "fixed"
+
+[memory]
+chip = "512K"
+slow = "512K"
+fast = "0"
+init = "zero"
+
+[chipset]
+agnus = "8372A"
+denise = "OCS"
+video = "PAL"

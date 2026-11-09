@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Match the emulator dependency; CI checks all CPU consumer lockfiles.
-m68k = "0.15.0"
+m68k = { version = "0.15.0", features = ["jit", "trace-profile"] }
 
 [build-dependencies]
 cc = "1"

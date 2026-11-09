@@ -663,11 +663,11 @@ pub(super) fn decode_ipf_image(data: &[u8]) -> Result<FloppyImageData> {
                 stored_len: track.words.len() * 2,
                 words: track.words,
                 bit_len: track.bit_len,
-                // The format describes one canonical revolution, and its cell
+                // Weak tracks carry several realizations; their nominal cell
                 // rate is the nominal 2 us that `word_cck_for_track_words`
                 // already paces a raw track at -- except where the track's
                 // density model marks sectors mastered at another rate.
-                revolutions: 1,
+                revolutions: track.revolutions,
                 legacy_sync: None,
                 bitcell_ns: None,
                 density: (!track.density.is_empty()).then(|| {

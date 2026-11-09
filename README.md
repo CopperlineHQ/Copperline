@@ -9,12 +9,19 @@ Copperline is a cycle-driven Commodore Amiga emulator (OCS, ECS, and AGA) writte
 
 It boots out of the box with the bundled open-source AROS Kickstart replacement, and supports official Kickstart ROMs (1.x through 3.2, plus the CDTV and CD32 extended ROMs), DiagROM, and standard disk, hardfile, and CD media.
 
+The [manual](https://copperline.dev/docs/),
+[troubleshooting and known limits](docs/guide/troubleshooting.md), and
+[changelog](CHANGELOG.md) cover setup and upgrades. Match the manual's version
+label to **About**, which includes the revision for an untagged source build;
+`copperline --version` prints only the package version. Each release carries
+its own PDF manual.
+
 ## Features
 
 - **Chipset and machine models**: OCS, ECS, and AGA support with profiles from the A500 through the A4000, plus CDTV and CD32.
 - **Configurable CPU and memory**: Motorola 68000 through 68060, optional FPU and MMU support, and configurable Chip, Fast, and Slow RAM.
 - **Accelerated execution**: Optional 68020+ JIT, either at a fixed, reproducible clock or in a `fastest` mode that gives the CPU whatever host time the real-time chipset leaves. See [CPU configuration](docs/guide/configuration.md).
-- **Storage and media**: Floppy disk images (ADF, ADZ, DMS, IPF, SCP, and ZIP-packed ADF), physical floppy drives via Greaseweazle (FluxBridge), IDE (Gayle/A4000 and expansion boards), SCSI (A2091, A3000, A4091), virtual hard disks (`copperhf.device`), CD-ROM, and host directory mounts.
+- **Storage and media**: Floppy disk images (ADF, ADZ, DMS, IPF with deterministic weak-bit revolutions, SCP, and ZIP-packed ADF), physical floppy drives via Greaseweazle (FluxBridge), IDE (Gayle/A4000 and expansion boards), SCSI (A2091, A3000, A4091), virtual hard disks (`copperhf.device`), CD-ROM, and host directory mounts.
 - **Audio and video**: 4-channel Paula audio, RTG graphics cards (Picasso II/II+, Z3660), host MIDI in/out bridging, and built-in Roland MT-32 and General MIDI synthesis.
 - **Expansion and networking**: Zorro II/III autoconfig, A2065 Ethernet, host-backed bsdsocket.library, and sandboxed WebAssembly expansion plugins.
 - **Debugging**: CPU and chipset debugger, reverse stepping, live Kickstart/AROS symbols, frame and [instruction profiling](docs/debugger/profiling.md) with bounded sample buffering and overflow reporting, VCD waveforms, and source debugging through GDB or DAP. Both the native VS Code extension and the [Copperline fork of Bartman's extension](docs/debugger/vscode-bartman.md) are supported.
@@ -131,6 +138,12 @@ CD images require a CD32/CDTV configuration. Desktop packages offer **Open with*
 see [Opening files](docs/guide/getting-started.md#opening-files) for registration
 and supported formats.
 
+Long options also accept `--model=A1200` or `--config=machine.toml`.
+For options with several arguments, `=` supplies the first:
+`--screenshot-after=10 out.png`. `--help` writes to stdout, and mistyped
+option names suggest a close match. Desktop launches show fatal session
+errors in a native dialog; terminal and headless commands report to stderr.
+
 For a build pipeline, use `copperline --run build/hello --window-scale 2` to
 start at twice the normal window width and height. `--maximized` opens a
 maximized window with its title bar and desktop taskbar visible;
@@ -218,17 +231,41 @@ cd docs && myst build --html
 
 ## Testing
 
-Run the unit test suite:
+Every PR runs a curated 68020/030/040/060 instruction corpus and asset-free
+MMU/native-JIT regressions against the resolved `m68k` dependency. See
+[CPU conformance](crates/cputest-runner/README.md) for local commands and
+coverage limits; scheduled runs add full generated instruction sets.
+
+Run the unit suite and fast integration tests:
 
 ```sh
 cargo test
 ```
 
-Integration tests requiring local ROM and disk assets can be run with:
+Run the optimized native suite, including probe goldens and save-state checks:
 
 ```sh
-cargo test --release -- --ignored
+cargo test --profile ci --locked
 ```
+
+Slow tests are reported as ignored in debug builds. Select asset-backed tests
+explicitly once their required files are installed, for example:
+
+```sh
+cargo test --release --test image_regression kickstart_boot_screen -- --ignored
+```
+
+Selected image regressions fail if their assets are missing.
+
+Every PR also runs the [AROS performance gate](docs/internals/jit-performance.md#ci-aros-performance-gate):
+release builds of the candidate and a tracked baseline run on the same host,
+covering A500/A1200 core execution and rendering. A median slowdown over 10%
+fails the check; raw samples and build provenance are retained.
+
+`cargo test --test fuzz_regressions` replays retained parser inputs without
+nightly or external media. [Fuzzing instructions](fuzz/README.md) cover the
+nine libFuzzer targets, brief PR smoke runs, and daily sustained campaigns.
+WHDLoad archive reads and extraction have [decompression limits](docs/guide/whdload.md).
 
 See [`tests/README.md`](tests/README.md) for details on asset paths and test configuration.
 

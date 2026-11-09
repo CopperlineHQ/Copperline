@@ -38,6 +38,7 @@ fn indexed_cache_reuses_tables_across_sample_and_composition_controls() {
         // Name every control field: a new field must be considered here as
         // well as in the cache key. All omitted fields vary independently.
         let control = ControlState {
+            captured_ddf_window: next_word(&mut random) & 1 != 0,
             agnus_revision: match next_word(&mut random) & 3 {
                 0 => AgnusRevision::Ocs,
                 1 => AgnusRevision::Ecs8372Rev4,
