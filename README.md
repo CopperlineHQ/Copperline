@@ -216,6 +216,11 @@ cd docs && myst build --html
 
 ## Testing
 
+Every PR runs a curated 68020/030/040/060 instruction corpus and asset-free
+MMU/native-JIT regressions against the resolved `m68k` dependency. See
+[CPU conformance](crates/cputest-runner/README.md) for local commands and
+coverage limits; scheduled runs add full generated instruction sets.
+
 Run the unit suite and fast integration tests:
 
 ```sh

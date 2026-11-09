@@ -21,6 +21,12 @@ cargo test --release --test image_regression kickstart_boot_screen -- --ignored 
 
 ## Contributor regression workflow
 
+CPU dependency updates also run the standalone
+[CPU conformance gate](../crates/cputest-runner/README.md). Root `cargo test`
+does not execute that crate or the dependency's own tests. The gate needs no
+Amiga ROMs/disks and covers a fixed instruction subset on 68020/030/040/060,
+MMU translation and fault frames, and native JIT versus interpreter behavior.
+
 The fast gate for a CPU, memory, bus, IRQ, or chipset change is:
 
 ```sh

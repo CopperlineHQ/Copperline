@@ -1,18 +1,12 @@
-name: cputest conformance
+name: CPU conformance
 
-# Nightly m68k instruction conformance: crates/cputest-runner drives the
-# WinUAE cputest-generated test sets (every opcode of a CPU model,
-# hundreds of state combinations each) against the same m68k core revision used by the emulator.
-# The crate is wired into no push/pull-request workflow because the .dat
-# sets are generated locally (~25MB per CPU model) by its
-# tools/cputest-gen.sh -- but that script is fully self-contained on a
-# hosted x86-64 Linux runner: it clones emoon/m68k_cpu_tester_api pinned
-# to the commit the vendored runner sources were taken from, builds the
-# generator chain with the preinstalled g++/python3, and emits the data.
-# So the nightly runs the full 68000 suite rather than stopping at a
-# compile check. A workflow_dispatch trigger allows running it manually
-# on any ref.
+# PRs run a bounded 020+ corpus plus asset-free MMU/native-JIT regressions.
+# Scheduled/manual runs also generate the full 68000/010 corpora. See the
+# runner README for current full-corpus 020+ adapter replay limits.
 on:
+  push:
+    branches: [main, v1]
+  pull_request:
   schedule:
     - cron: "23 4 * * *"
   workflow_dispatch:
@@ -24,19 +18,84 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
+  pr:
+    # Stable, unfiltered check: require this in branch protection to gate core
+    # version bumps too. Lockfile sync ties all consumers to the same m68k.
+    name: CPU conformance (020+)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Match the emulator CPU dependency
+        run: python3 tools/check-m68k-locks.py
+      - name: Conformance workflow failure propagation
+        run: python3 -m unittest discover -s tools/tests -p test_cputest_workflow.py -v
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          workspaces: crates/cputest-runner
+      - name: Install generator dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zlib1g-dev
+      - name: Runner formatting and lint
+        working-directory: crates/cputest-runner
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+      - name: MMU, native JIT and corpus integrity regressions
+        working-directory: crates/cputest-runner
+        run: cargo test --release --locked
+      - name: Curated 68020, 68030, 68040 and 68060 instruction suites
+        run: |
+          mkdir -p "$RUNNER_TEMP/cputest-logs"
+          conformance_status=0
+          for cpu in 68020 68030 68040 68060; do
+            echo "::group::$cpu generation"
+            crates/cputest-runner/tools/cputest-gen.sh "$RUNNER_TEMP/cputest-pr" "$cpu" "$RUNNER_TEMP/cputest-build" pr \
+              > "$RUNNER_TEMP/cputest-logs/generate-$cpu.log" 2>&1 \
+              || { tail -200 "$RUNNER_TEMP/cputest-logs/generate-$cpu.log"; exit 1; }
+            tail -5 "$RUNNER_TEMP/cputest-logs/generate-$cpu.log"
+            echo "::endgroup::"
+            echo "::group::$cpu conformance"
+            crates/cputest-runner/target/release/cputest-runner "$RUNNER_TEMP/cputest-pr" all "$cpu" --pr 2>&1 \
+              | tee "$RUNNER_TEMP/cputest-logs/run-$cpu.log" || conformance_status=1
+            echo "::endgroup::"
+          done
+          exit "$conformance_status"
+      - name: Retain conformance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cputest-pr-logs
+          path: ${{ runner.temp }}/cputest-logs/
+          if-no-files-found: ignore
+          retention-days: 7
+
   cputest:
-    name: WinUAE cputest conformance (68000)
+    name: WinUAE cputest conformance (${{ matrix.cpu }})
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Generating the test set and executing every opcode's tests is the
     # slow part; cap the job so a hung generator fails fast instead of
     # idling for the default 6h.
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        cpu: [68000, 68010]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           workspaces: crates/cputest-runner
       - name: Install build dependencies
         # zlib headers for the generator's -lz link; g++, git, and python3
@@ -44,13 +103,28 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends zlib1g-dev
-      - name: Compile check
+      - name: Build the runner
         working-directory: crates/cputest-runner
-        run: cargo check --locked
-      - name: Generate the 68000 test set
-        run: crates/cputest-runner/tools/cputest-gen.sh "$RUNNER_TEMP/cputest-data" 68000
+        run: cargo build --release --locked
+      - name: Generate the full instruction set
+        run: |
+          mkdir -p "$RUNNER_TEMP/cputest-logs"
+          crates/cputest-runner/tools/cputest-gen.sh "$RUNNER_TEMP/cputest-data" "${{ matrix.cpu }}" \
+            > "$RUNNER_TEMP/cputest-logs/generate.log" 2>&1 \
+            || { tail -200 "$RUNNER_TEMP/cputest-logs/generate.log"; exit 1; }
+          tail -5 "$RUNNER_TEMP/cputest-logs/generate.log"
       - name: Run the conformance suite
         # The runner exits nonzero on any mismatch (continue_on_error is
         # only so one bad opcode does not hide the rest of the report).
         working-directory: crates/cputest-runner
-        run: cargo run --release --locked -- "$RUNNER_TEMP/cputest-data" all 68000
+        run: |
+          target/release/cputest-runner "$RUNNER_TEMP/cputest-data" all "${{ matrix.cpu }}" 2>&1 \
+            | tee "$RUNNER_TEMP/cputest-logs/run.log"
+      - name: Retain conformance diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cputest-full-${{ matrix.cpu }}-logs
+          path: ${{ runner.temp }}/cputest-logs/
+          if-no-files-found: ignore
+          retention-days: 7
