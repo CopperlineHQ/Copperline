@@ -469,8 +469,23 @@ CAPS library's definitions: Copylock Amiga masters key sectors at -5.5%,
 and Brierley models apply +/-5-15% weighting per block. Scaling the cell
 clock (`TrackRev::prefix_cck`) lets timing loops that poll `DSKBYTR`
 detect the intended cell density differences (the Copylock check on
-*Lemmings*, for example). Weak bits currently replay as the single
-deterministic revolution stored in the file.
+*Lemmings*, for example). A weak sample carries only a length, with no
+payload; each decoded bit reserves two weak cells. The decoder records those
+spans before index rotation, resets the following MFM context, and produces
+eight realizations using a local fixed-seed PRNG. Only weak cells change.
+Each revolution is separately word-padded, so partial-word track ends do not
+shift the next revolution. `RawMfm.revolutions` feeds the existing cyclic
+reader, save states and netplay transport without adding runtime RNG state.
+Tracks without weak samples still contain one revolution. The eight-pass
+cycle is a deterministic approximation, not a physical noise distribution.
+The generated bits represent raw readback cells, including clock positions;
+they are not constrained to legal MFM or filtered to exclude `DSKSYNC`
+matches. This follows the preservation decoder's
+[`CCapsImageStd::UpdateWeakBit`](https://raw.githubusercontent.com/rsn8887/capsimg/c92d17b4383ebf432788f7b5a38fdd6902376f00/CAPSImg/CapsImageStd.cpp),
+which writes pseudo-random raw bitfields directly. An accidental sync in a
+weak span can therefore reframe Paula's following words; that is part of
+this readback approximation. MFM-encoding the noise or rejecting sync values
+would impose a constraint absent from the weak-medium representation.
 
 The drive sounds ([](../guide/configuration)) are driven by this model's
 real state transitions -- motor spin-up, seeks, the empty-drive poll click.

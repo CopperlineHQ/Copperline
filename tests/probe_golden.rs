@@ -487,6 +487,11 @@ probe_tests! {
     // survives the truncated unit (the Microcosm CD32 status-panel
     // regression class).
     golden_ddfprobe_ddfmiss => probe_aga("ddfprobe-ddfmiss", "ddfprobe-ddfmiss.bin", 16.0);
+    // A captured OCS run at CCK 0 remains distinct from unset registers.
+    golden_ddfprobe_zero => probe("ddfprobe-zero", "ddfprobe-zero.bin", 16.0);
+    // Observation baseline: hi-res/SHRES wide-fetch scroll scaling. This
+    // pins Copperline output; physical AGA verification is still required.
+    golden_ddfprobe_agaresfold => probe_aga("ddfprobe-agaresfold", "ddfprobe-agaresfold.bin", 16.0);
     // FMODE.SSCAN2 masks the sprite horizontal comparator's high bit:
     // HSTART $165 aliases $065 while $080 remains distinct (the DblPAL
     // High Res Laced invisible-pointer regression class, issue #270);

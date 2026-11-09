@@ -478,6 +478,9 @@ struct ControlState {
     diwhigh: DiwHigh,
     ddfstrt: u16,
     ddfstop: u16,
+    /// A captured fetch run can start at CCK 0, which the register-only
+    /// fallback otherwise treats as an unprogrammed DDF window.
+    captured_ddf_window: bool,
     bpl1mod: i16,
     bpl2mod: i16,
 }
@@ -921,6 +924,7 @@ impl ControlState {
             diwhigh: state.diwhigh,
             ddfstrt: state.ddfstrt,
             ddfstop: state.ddfstop,
+            captured_ddf_window: false,
             bpl1mod: state.bpl1mod,
             bpl2mod: state.bpl2mod,
         }
@@ -1289,12 +1293,6 @@ impl ControlState {
                 | ((self.bplcon1 >> 4) & 0x0040)
                 | ((self.bplcon1 >> 4) & 0x0080)
         } as usize;
-        let fetch_mask = match self.fetch_quantum() {
-            1 => 0x3F,
-            2 => 0x7F,
-            _ => 0xFF,
-        };
-        let shres_scroll = shres_scroll & fetch_mask;
         let samples_per_native = if self.shres() {
             1
         } else if self.hires() {
@@ -1302,6 +1300,11 @@ impl ControlState {
         } else {
             4
         };
+        // The reload tap wraps within the fetched 16/32/64 native samples,
+        // not that many lores pixels. In SHRES BPL32, legacy tap 8 already
+        // wraps; a lores-sized mask incorrectly keeps it 32 samples late.
+        let fetch_mask = 16 * self.fetch_quantum() as usize * samples_per_native - 1;
+        let shres_scroll = shres_scroll & fetch_mask;
         shres_scroll / samples_per_native
     }
 
@@ -1467,13 +1470,7 @@ impl ControlState {
 
     fn words_per_row(&self, native_w: usize) -> usize {
         let fallback = native_w / 16;
-        let Some((start, stop)) = effective_ddf_window(
-            self.agnus_revision,
-            self.hires() || self.shres(),
-            self.ddfstrt,
-            self.ddfstop,
-            self.ddf_hard_stop_lifted(),
-        ) else {
+        let Some((start, stop)) = self.ddf_window() else {
             return fallback;
         };
         let unit = self.fetch_unit();
@@ -1487,15 +1484,21 @@ impl ControlState {
         let hires_like = self.hires() || self.shres();
         let start = effective_ddf_start_hpos_raw(self.agnus_revision, hires_like, self.ddfstrt);
         let stop = effective_ddf_stop_hpos(self.agnus_revision, hires_like, self.ddfstop);
-        (start == 0 && stop == 0)
-            || effective_ddf_window(
+        (start == 0 && stop == 0) || self.ddf_window().is_some()
+    }
+
+    fn ddf_window(&self) -> Option<(u16, u16)> {
+        if self.captured_ddf_window {
+            (self.ddfstop >= self.ddfstrt).then_some((self.ddfstrt, self.ddfstop))
+        } else {
+            effective_ddf_window(
                 self.agnus_revision,
-                hires_like,
+                self.hires() || self.shres(),
                 self.ddfstrt,
                 self.ddfstop,
                 self.ddf_hard_stop_lifted(),
             )
-            .is_some()
+        }
     }
 
     /// Horizontal extent, in DIWSTRT/DIWSTOP H coordinates, of the bitplane
@@ -1513,13 +1516,7 @@ impl ControlState {
         let hires_like = self.hires() || self.shres();
         // Reuse `words_per_row`'s own validity check (same arguments): a
         // valid window guarantees a non-fallback word count below.
-        effective_ddf_window(
-            self.agnus_revision,
-            hires_like,
-            self.ddfstrt,
-            self.ddfstop,
-            self.ddf_hard_stop_lifted(),
-        )?;
+        self.ddf_window()?;
         let words = self.words_per_row(0) as i32;
         if words == 0 {
             return None;
@@ -3109,18 +3106,13 @@ fn apply_captured_fetch_geometry(control: &mut ControlState, origin: u16, words:
     if control.fetch_quantum() != 1 || words == 0 {
         return;
     }
-    // DDFSTRT 0 doubles as the "no window programmed" sentinel throughout
-    // the register-derived paths, so a run genuinely armed at colour clock
-    // 0 (DDFSTRT=$00 with a surviving SHW latch) cannot be expressed as a
-    // synthesized window; keep the register view. TODO: replace the zero
-    // sentinel with an explicit window-valid flag so origin-0 runs can be
-    // placed exactly.
-    if origin == 0 {
-        return;
-    }
     let words_per_unit = (8 / control.fetch_cck_per_word() as usize).max(1);
     let units = words.div_ceil(words_per_unit);
     let synth_stop = origin + ((units.saturating_sub(1)) as u16) * 8;
+    // Capture is positive evidence of a run even at CCK 0. Keep that fact
+    // separate from the register value so fetch plans and content bounds
+    // do not mistake it for an unprogrammed window.
+    control.captured_ddf_window = origin == 0;
     if control.ddfstrt == origin && control.ddfstop == synth_stop {
         return;
     }
