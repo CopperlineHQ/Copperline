@@ -599,7 +599,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-          components: rustfmt
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -608,6 +608,13 @@ jobs:
             crates/copperline-web -> target
       - name: Core without the desktop frontend
         run: cargo check --no-default-features --locked
+      - name: Clippy on the portable core (browser and libretro feature set)
+        # The browser and libretro frontends build the core with
+        # default-features = false. The lint job's --all-features pass
+        # never sees code compiled only in that set (cfg(not(feature))
+        # stand-ins, items whose only users are feature-gated), so lint
+        # the library there too.
+        run: cargo clippy --no-default-features --lib --locked -- -D warnings
       - name: Save-state fixture across optional features
         run: |
           cargo test --locked --no-default-features --lib zorro_device::state::tests
