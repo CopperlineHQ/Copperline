@@ -43,6 +43,13 @@ volumes:
    The guest loads the binary directly from this volume, and any files the
    program writes land in the same host directory.
 
+The program can therefore change or delete anything in its own directory, as
+well as read it. Run an executable you do not trust from a directory that
+holds nothing else you care about. One file is protected: a guest can read a
+`copperline.toml` but cannot create, overwrite or rename onto one, because a
+later Copperline run started from that directory would load it as its
+configuration without being asked.
+
 `--run-args STRING` appends arguments to the program's command line.
 `--run-stack BYTES` accepts 2048 through 2147483644 bytes and issues an
 AmigaDOS `Stack` command before the executable; invalid sizes are rejected

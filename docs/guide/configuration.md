@@ -2838,6 +2838,16 @@ names (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, with or
 without an extension) and names ending in a dot or a space are refused too,
 because Windows would open a device or a differently named file instead.
 
+A file named `copperline.toml` (in any letter case, in any directory of the
+mount) is read-only to the guest: it cannot be created, written, truncated or
+renamed onto. A Copperline run started from a directory that holds one loads
+it as its configuration without being asked, so a guest that could write one
+would choose the host directories and devices of that later machine.
+
+A mount keeps at most 96 files open at once; a further `Open()` fails with
+"not enough memory" until one is closed. The volume's root directory cannot
+be deleted, and a `Read()` or `Write()` with a negative length fails.
+
 `volume` sets the AmigaDOS volume name (up to 30 characters, no `:` or
 `/`). `bootpri` enters the volume in the boot-device vote (-128..127;
 the default -128 means mounted but never booted from): hard-disk boot

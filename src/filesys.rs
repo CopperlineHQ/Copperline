@@ -71,6 +71,18 @@ const MOUNT_KIND_OFFSET: usize = MOUNT_ENTRY_SIZE - 1;
 /// Maximum host mounts (units), and the divisor for each unit's fixed
 /// board-window lock-pool slice.
 pub const MOUNT_MAX_COUNT: usize = 8;
+
+/// Most files one mount keeps open at once. Each is a host descriptor, and
+/// those are a process-wide resource the emulator also needs for its own
+/// images, save states and sockets; a guest that leaks handles must run out
+/// of its own allowance first. Far above what AmigaDOS software holds open
+/// (a handle costs the guest a FileHandle and a buffer of its own RAM).
+const MAX_OPEN_FILES: usize = 96;
+
+/// Most unfinished ExAll() scans one mount remembers. A scan the caller
+/// abandons without ExAllEnd() (which only exists from V39) is never
+/// finished, so the oldest is forgotten when a new one would exceed this.
+const MAX_EXALL_SCANS: usize = 32;
 /// Longest AmigaDOS volume label: a DosList BSTR holds 30 bytes.
 pub const VOLUME_NAME_MAX: usize = 30;
 
@@ -676,6 +688,31 @@ impl FilesysUnit {
         self.mount.readonly.then_some(ERROR_DISK_WRITE_PROTECTED)
     }
 
+    /// The error for a packet that would open another file, when the unit
+    /// already holds [`MAX_OPEN_FILES`].
+    fn open_refusal(&self) -> Option<u32> {
+        (self.files.len() >= MAX_OPEN_FILES).then_some(ERROR_NO_FREE_STORE)
+    }
+
+    /// Remember an unfinished ExAll() scan, forgetting the oldest ones
+    /// beyond [`MAX_EXALL_SCANS`]. Scan ids only grow (they wrap after 2^32
+    /// scans), so the smallest id is the oldest.
+    fn keep_exall_scan(&mut self, id: u32, scan: ExAllScan) {
+        self.exalls.insert(id, scan);
+        while self.exalls.len() > MAX_EXALL_SCANS {
+            let Some(&oldest) = self.exalls.keys().filter(|&&k| k != id).min() else {
+                break;
+            };
+            self.exalls.remove(&oldest);
+        }
+    }
+
+    /// The error for a packet that would create or change `rec`, when `rec`
+    /// names a file the host loads by itself (see [`IMPLICIT_CONFIG_NAME`]).
+    fn host_config_refusal(rec: &LockRec) -> Option<u32> {
+        names_implicit_config(&rec.rel).then_some(ERROR_WRITE_PROTECTED)
+    }
+
     /// Allocate a FileLock in this unit's board-window sub-pool and register
     /// it. The handler port and volume node come from the unit.
     fn alloc_lock(
@@ -1200,7 +1237,7 @@ impl FilesysUnit {
                         // Not even one entry fits the caller's buffer.
                         return (DOSFALSE, ERROR_NO_FREE_STORE);
                     }
-                    self.exalls.insert(scan_id, scan);
+                    self.keep_exall_scan(scan_id, scan);
                     (DOSTRUE, 0)
                 } else {
                     // Done. The final batch is delivered on this failing
@@ -1297,6 +1334,9 @@ impl FilesysUnit {
                 if path.is_dir() {
                     return (DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
                 }
+                if let Some(err) = self.open_refusal() {
+                    return (DOSFALSE, err);
+                }
                 match open_existing(&path) {
                     Ok(f) => {
                         self.next_file_key += 1;
@@ -1344,6 +1384,9 @@ impl FilesysUnit {
                 let path = self.lock_path(&rec);
                 if path.is_dir() {
                     return (DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
+                }
+                if let Some(err) = self.open_refusal() {
+                    return (DOSFALSE, err);
                 }
                 match open_existing(&path) {
                     Ok(f) => {
@@ -1395,7 +1438,11 @@ impl FilesysUnit {
                 use std::io::Read;
                 let key = arg(bus, 1);
                 let buf = arg(bus, 2);
-                let len = arg(bus, 3) as usize;
+                // The length is a LONG: a negative one is an error, not a
+                // request for up to 4 GiB.
+                let Ok(len) = usize::try_from(arg(bus, 3) as i32) else {
+                    return (DOSTRUE, ERROR_BAD_NUMBER); // res1 = -1
+                };
                 let Some((f, _)) = self.files.get_mut(&key) else {
                     return (DOSTRUE, ERROR_INVALID_LOCK); // res1 = -1
                 };
@@ -1499,6 +1546,13 @@ impl FilesysUnit {
                 if path.is_dir() {
                     return (DOSFALSE, ERROR_OBJECT_WRONG_TYPE);
                 }
+                if let Some(err) = Self::host_config_refusal(&rec) {
+                    return (DOSFALSE, err);
+                }
+                // Checked before the open: MODE_NEWFILE truncates.
+                if let Some(err) = self.open_refusal() {
+                    return (DOSFALSE, err);
+                }
                 let mut opts = std::fs::OpenOptions::new();
                 opts.read(true).write(true).create(true);
                 if dp_type == ACTION_FINDOUTPUT {
@@ -1525,13 +1579,19 @@ impl FilesysUnit {
                 note_host_write();
                 let key = arg(bus, 1);
                 let buf = arg(bus, 2);
-                let len = arg(bus, 3) as usize;
+                let Ok(len) = usize::try_from(arg(bus, 3) as i32) else {
+                    return (DOSTRUE, ERROR_BAD_NUMBER); // res1 = -1
+                };
                 if let Some(err) = self.write_refusal() {
                     return (DOSTRUE, err); // res1 = -1
                 }
-                let Some((f, _)) = self.files.get_mut(&key) else {
+                let Some((f, rec)) = self.files.get_mut(&key) else {
                     return (DOSTRUE, ERROR_INVALID_LOCK);
                 };
+                // Open(MODE_OLDFILE) hands out a writable handle too.
+                if let Some(err) = Self::host_config_refusal(rec) {
+                    return (DOSTRUE, err); // res1 = -1
+                }
                 // Chunked for the same reason as ACTION_READ: the length comes
                 // from the guest, so a bogus one must not size a host buffer.
                 const WRITE_CHUNK: usize = 64 * 1024;
@@ -1559,9 +1619,12 @@ impl FilesysUnit {
                 if let Some(err) = self.write_refusal() {
                     return (DOSTRUE, err); // res1 = -1
                 }
-                let Some((f, _)) = self.files.get_mut(&key) else {
+                let Some((f, rec)) = self.files.get_mut(&key) else {
                     return (DOSTRUE, ERROR_INVALID_LOCK);
                 };
+                if let Some(err) = Self::host_config_refusal(rec) {
+                    return (DOSTRUE, err); // res1 = -1
+                }
                 let (pos, end) = match (f.stream_position(), f.metadata()) {
                     (Ok(p), Ok(m)) => (p as i64, m.len() as i64),
                     _ => return (DOSTRUE, ERROR_SEEK_ERROR),
@@ -1621,6 +1684,13 @@ impl FilesysUnit {
                 let Some(rec) = self.resolve(arg(bus, 1), &name) else {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 };
+                // An empty name on the root lock (or "Volume:") is the
+                // volume's own root directory. It is the mount, not an
+                // entry in it: the guest cannot remove the host directory
+                // it was given, empty or not.
+                if rec.rel.as_os_str().is_empty() {
+                    return (DOSFALSE, ERROR_OBJECT_IN_USE);
+                }
                 let path = self.lock_path(&rec);
                 let meta = match std::fs::symlink_metadata(&path) {
                     Ok(m) => m,
@@ -1670,6 +1740,9 @@ impl FilesysUnit {
                 let Some(to) = self.resolve_for_create(arg(bus, 3), &to_name) else {
                     return (DOSFALSE, ERROR_DIRECTORY_NOT_FOUND);
                 };
+                if let Some(err) = Self::host_config_refusal(&to) {
+                    return (DOSFALSE, err);
+                }
                 let (from_path, to_path) = (self.lock_path(&from), self.lock_path(&to));
                 // A rename that only changes case is not an overwrite: on a
                 // case-insensitive host the two paths are the same file.
@@ -1779,6 +1852,39 @@ struct GuestBus<'a> {
     base: u32,
     image: Vec<u8>,
     mem: &'a mut Memory,
+    /// Accesses outside guest memory so far. A packet with a bogus buffer
+    /// makes one per byte, so only the first is logged as it happens; the
+    /// rest are summarized when the bus is dropped.
+    faults: u64,
+}
+
+impl GuestBus<'_> {
+    fn new(base: u32, image: Vec<u8>, mem: &mut Memory) -> GuestBus<'_> {
+        GuestBus {
+            base,
+            image,
+            mem,
+            faults: 0,
+        }
+    }
+
+    fn fault(&mut self, what: &str, addr: u32) {
+        if self.faults == 0 {
+            log::warn!("filesys: guest {what} at {addr:#010X}");
+        }
+        self.faults += 1;
+    }
+}
+
+impl Drop for GuestBus<'_> {
+    fn drop(&mut self) {
+        if self.faults > 1 {
+            log::warn!(
+                "filesys: {} more guest accesses outside its memory in the same request",
+                self.faults - 1
+            );
+        }
+    }
 }
 
 impl GuestBus<'_> {
@@ -1823,14 +1929,14 @@ impl GuestBus<'_> {
         if a >= self.mem.extended_rom_base && ext < self.mem.extended_rom.len() {
             return self.mem.extended_rom[ext];
         }
-        log::warn!("filesys: guest read outside RAM/ROM at {addr:#010X}");
+        self.fault("read outside RAM/ROM", addr);
         0
     }
 
     fn put(&mut self, addr: u32, value: u8) {
         match self.byte_mut(addr) {
             Some(b) => *b = value,
-            None => log::warn!("filesys: guest write outside RAM at {addr:#010X}"),
+            None => self.fault("write outside RAM", addr),
         }
     }
 }
@@ -1912,13 +2018,9 @@ impl FilesysBoard {
         base: u32,
         f: impl FnOnce(&mut Self, &mut GuestBus) -> R,
     ) -> R {
-        let mut bus = GuestBus {
-            base,
-            image: std::mem::take(&mut self.image),
-            mem: host.memory_mut(),
-        };
+        let mut bus = GuestBus::new(base, std::mem::take(&mut self.image), host.memory_mut());
         let r = f(self, &mut bus);
-        self.image = bus.image;
+        self.image = std::mem::take(&mut bus.image);
         r
     }
 
@@ -2368,6 +2470,21 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 /// When the host denies write only because the file or its filesystem is
 /// read-only, fall back to a read-only handle, so a later write fails as it
 /// would on a protected Amiga file. Any other error propagates unchanged.
+/// The configuration file a later run loads from its working directory
+/// without being asked (`implicit_config_file` in main.rs). A guest that
+/// could write one into a mounted directory would choose the host paths,
+/// plugins and network access of the next machine started there, which is
+/// more than the directory it was given. So a guest may read a file of this
+/// name but not create, overwrite, extend, truncate or rename onto one, in
+/// any directory of any mount.
+const IMPLICIT_CONFIG_NAME: &str = "copperline.toml";
+
+fn names_implicit_config(rel: &Path) -> bool {
+    rel.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(IMPLICIT_CONFIG_NAME))
+}
+
 fn open_existing(path: &Path) -> std::io::Result<std::fs::File> {
     use std::io::ErrorKind as K;
     std::fs::OpenOptions::new()
@@ -3135,12 +3252,9 @@ mod tests {
         mem.mb_ram[0x10..0x14].copy_from_slice(&tag.to_be_bytes());
         mem.mb_ram[0x14..0x18].copy_from_slice(&0u32.to_be_bytes());
 
-        let mut bus = GuestBus {
-            base: 0x00E9_0000,
-            image: Vec::new(),
-            mem: &mut mem,
-        };
+        let mut bus = GuestBus::new(0x00E9_0000, Vec::new(), &mut mem);
         assert_eq!(crate::romtags::cull_rom_device(&mut bus, "scsi.device"), 1);
+        drop(bus);
         // The slot in motherboard RAM was rewritten into a jump entry
         // (bit 31 | next slot), unlinking the tag.
         assert_eq!(
@@ -3150,13 +3264,10 @@ mod tests {
 
         // CPU-slot accelerator RAM is reachable the same way.
         let accel = crate::memory::ACCEL_RAM_BASE as u32;
-        let mut bus = GuestBus {
-            base: 0x00E9_0000,
-            image: Vec::new(),
-            mem: &mut mem,
-        };
+        let mut bus = GuestBus::new(0x00E9_0000, Vec::new(), &mut mem);
         bus.write_long(accel + 8, 0xDEAD_BEEF);
         assert_eq!(bus.read_long(accel + 8), 0xDEAD_BEEF);
+        drop(bus);
         assert_eq!(&mem.accel_ram[8..12], &0xDEAD_BEEFu32.to_be_bytes());
     }
 
@@ -3366,6 +3477,186 @@ mod tests {
         // Nothing was created under any spelling, and the source is intact.
         assert_eq!(listing(&fs.root), ["source.txt"]);
         assert_eq!(std::fs::read(fs.root.join("source.txt")).unwrap(), b"data");
+    }
+
+    /// A later run loads `copperline.toml` from its working directory without
+    /// being asked, so a guest that could write one into a mount would pick
+    /// the next machine's host access. It may read the file, nothing else.
+    #[test]
+    fn the_implicitly_loaded_config_name_is_read_only_to_the_guest() {
+        let mut fs = FsTester::mounted("implicit-config");
+        let config = fs.root.join("Copperline.toml");
+        std::fs::write(&config, b"# mine\n").unwrap();
+        std::fs::write(fs.root.join("payload.txt"), b"[[filesys]]").unwrap();
+        std::fs::create_dir(fs.root.join("Sub")).unwrap();
+        fs.set_buf(b"evil");
+
+        // Open(MODE_NEWFILE) and Open(MODE_READWRITE) on the existing file,
+        // under a different case than the host's.
+        for action in [ACTION_FINDOUTPUT, ACTION_FINDUPDATE] {
+            fs.set_name(b"copperline.toml");
+            assert_eq!(
+                fs.send(action, [FsTester::FH >> 2, 0, FsTester::NAME >> 2]),
+                (DOSFALSE, ERROR_WRITE_PROTECTED),
+                "open for writing"
+            );
+        }
+        // Creating one where none exists, in a subdirectory.
+        fs.set_name(b"Sub/COPPERLINE.TOML");
+        assert_eq!(
+            fs.send(
+                ACTION_FINDOUTPUT,
+                [FsTester::FH >> 2, 0, FsTester::NAME >> 2]
+            ),
+            (DOSFALSE, ERROR_WRITE_PROTECTED),
+            "create"
+        );
+        assert!(!fs.root.join("Sub/COPPERLINE.TOML").exists());
+
+        // Open(MODE_OLDFILE) succeeds and reads, but its handle cannot write
+        // or resize the file.
+        fs.set_name(b"copperline.toml");
+        assert_eq!(
+            fs.send(
+                ACTION_FINDINPUT,
+                [FsTester::FH >> 2, 0, FsTester::NAME >> 2]
+            ),
+            (DOSTRUE, 0),
+            "open for reading"
+        );
+        let cookie = fs.bus.read_long(FsTester::FH + FILEHANDLE_ARG1);
+        assert_eq!(
+            fs.send(ACTION_WRITE, [cookie, FsTester::BUF, 4]),
+            (DOSTRUE, ERROR_WRITE_PROTECTED),
+            "write through a read handle"
+        );
+        assert_eq!(
+            fs.send(ACTION_SET_FILE_SIZE, [cookie, 0, OFFSET_BEGINNING as u32]),
+            (DOSTRUE, ERROR_WRITE_PROTECTED),
+            "truncate through a read handle"
+        );
+        assert_eq!(fs.send(ACTION_READ, [cookie, FsTester::BUF, 6]).0, 6);
+        fs.send(ACTION_END, [cookie, 0, 0]);
+
+        // Renaming another file onto the name.
+        fs.set_name(b"payload.txt");
+        let target = b"Sub/copperline.toml";
+        let mut bstr = vec![target.len() as u8];
+        bstr.extend_from_slice(target);
+        fs.set_buf(&bstr);
+        fs.bus
+            .write_long(FsTester::PKT + 20 + 4 * 3, FsTester::BUF >> 2);
+        assert_eq!(
+            fs.send(ACTION_RENAME_OBJECT, [0, FsTester::NAME >> 2, 0]),
+            (DOSFALSE, ERROR_WRITE_PROTECTED),
+            "rename onto the name"
+        );
+
+        assert_eq!(std::fs::read(&config).unwrap(), b"# mine\n");
+        assert!(fs.root.join("payload.txt").exists());
+        assert_eq!(std::fs::read_dir(fs.root.join("Sub")).unwrap().count(), 0);
+
+        // An ordinary TOML file is not affected.
+        fs.set_name(b"other.toml");
+        assert_eq!(
+            fs.send(
+                ACTION_FINDOUTPUT,
+                [FsTester::FH >> 2, 0, FsTester::NAME >> 2]
+            )
+            .0,
+            DOSTRUE
+        );
+    }
+
+    /// Host descriptors are shared with the rest of the emulator, so one
+    /// mount's open files are capped; closing one makes room again.
+    #[test]
+    fn open_files_per_mount_are_capped() {
+        let mut fs = FsTester::mounted("handle-cap");
+        std::fs::write(fs.root.join("file"), b"x").unwrap();
+        fs.set_name(b"file");
+        let open = |fs: &mut FsTester, action| {
+            fs.send(action, [FsTester::FH >> 2, 0, FsTester::NAME >> 2])
+        };
+        let mut cookies = Vec::new();
+        for _ in 0..MAX_OPEN_FILES {
+            assert_eq!(open(&mut fs, ACTION_FINDINPUT), (DOSTRUE, 0));
+            cookies.push(fs.bus.read_long(FsTester::FH + FILEHANDLE_ARG1));
+        }
+        for action in [ACTION_FINDINPUT, ACTION_FINDUPDATE, ACTION_FINDOUTPUT] {
+            assert_eq!(open(&mut fs, action), (DOSFALSE, ERROR_NO_FREE_STORE));
+        }
+        // The refused MODE_NEWFILE did not truncate the file.
+        assert_eq!(std::fs::read(fs.root.join("file")).unwrap(), b"x");
+        fs.send(ACTION_END, [cookies.pop().unwrap(), 0, 0]);
+        assert_eq!(open(&mut fs, ACTION_FINDINPUT), (DOSTRUE, 0));
+    }
+
+    /// A scan abandoned without ExAllEnd() is never finished; the oldest
+    /// are forgotten instead of accumulating directory snapshots.
+    #[test]
+    fn abandoned_exall_scans_are_bounded() {
+        let mut fs = FsTester::mounted("exall-cap");
+        let unit = &mut fs.board.units[0];
+        let total = MAX_EXALL_SCANS as u32 + 5;
+        for id in 1..=total {
+            unit.keep_exall_scan(
+                id,
+                ExAllScan {
+                    rel: PathBuf::new(),
+                    names: Vec::new(),
+                    next: 0,
+                },
+            );
+        }
+        assert_eq!(unit.exalls.len(), MAX_EXALL_SCANS);
+        assert!(!unit.exalls.contains_key(&5));
+        assert!(unit.exalls.contains_key(&6));
+        assert!(unit.exalls.contains_key(&total));
+    }
+
+    /// Read() and Write() take a LONG length; a negative one fails instead
+    /// of being read as a transfer of up to 4 GiB.
+    #[test]
+    fn a_negative_transfer_length_is_an_error() {
+        let mut fs = FsTester::mounted("negative-length");
+        std::fs::write(fs.root.join("file"), b"data").unwrap();
+        fs.set_name(b"file");
+        assert_eq!(
+            fs.send(
+                ACTION_FINDINPUT,
+                [FsTester::FH >> 2, 0, FsTester::NAME >> 2]
+            ),
+            (DOSTRUE, 0)
+        );
+        let cookie = fs.bus.read_long(FsTester::FH + FILEHANDLE_ARG1);
+        for action in [ACTION_READ, ACTION_WRITE] {
+            assert_eq!(
+                fs.send(action, [cookie, FsTester::BUF, 0xFFFF_FFFF]),
+                (DOSTRUE, ERROR_BAD_NUMBER)
+            );
+            assert_eq!(
+                fs.send(action, [cookie, FsTester::BUF, 0x8000_0000]),
+                (DOSTRUE, ERROR_BAD_NUMBER)
+            );
+        }
+        fs.send(ACTION_END, [cookie, 0, 0]);
+        assert_eq!(std::fs::read(fs.root.join("file")).unwrap(), b"data");
+    }
+
+    /// The volume root is the host directory the mount was given, not an
+    /// entry in it: Delete("Volume:") fails even when the directory is empty.
+    #[test]
+    fn the_mount_root_cannot_be_deleted() {
+        let mut fs = FsTester::mounted("delete-root");
+        for name in [&b""[..], b"Test:"] {
+            fs.set_name(name);
+            assert_eq!(
+                fs.send(ACTION_DELETE_OBJECT, [0, FsTester::NAME >> 2, 0]),
+                (DOSFALSE, ERROR_OBJECT_IN_USE)
+            );
+        }
+        assert!(fs.root.is_dir());
     }
 
     #[test]

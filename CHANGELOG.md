@@ -17,6 +17,14 @@ for the earlier release notes.
   `[[filesys]]` host directory on Windows by putting a drive letter in the
   name, nor open a DOS device such as `NUL` or `COM1` through one. Names
   containing `:` are refused on every host.
+- A guest can no longer create, overwrite or rename a file onto
+  `copperline.toml` in a `[[filesys]]`, `--run` or WHDLoad host directory,
+  where a later run started from that directory would load it as its
+  configuration.
+- A `[[filesys]]` mount holds at most 96 open files and 32 unfinished
+  directory scans, refuses negative `Read()`/`Write()` lengths and deletion
+  of its own root, and logs an out-of-memory guest buffer once per request
+  instead of once per byte.
 - Loading a save state logs a warning for each host file, directory, plugin
   module or network backend the state names that the running session had not
   opened. `SECURITY.md` now states which inputs are trusted: a save state has
