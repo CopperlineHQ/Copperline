@@ -4616,6 +4616,7 @@ fn build_machine_inner(
         }
     }
     bus.set_video_standard(cfg.video_standard);
+    bus.set_genlock(cfg.genlock);
     bus.set_chipset_revisions(cfg.agnus_revision, cfg.denise_revision);
     bus.set_rtc_present(cfg.rtc_present);
     bus.set_rtc_chip(cfg.rtc_chip);

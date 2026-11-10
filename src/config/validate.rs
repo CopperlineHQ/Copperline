@@ -1516,6 +1516,7 @@ impl TryFrom<RawConfig> for Config {
             detect_smc: raw.debug.detect_smc,
             mem_controller,
             video_standard,
+            genlock: raw.chipset.genlock.unwrap_or(false),
             audio,
             ide,
             scsi,

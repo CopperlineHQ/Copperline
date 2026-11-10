@@ -557,8 +557,10 @@ const H_COUNTER_TICKS_PER_LINE: i32 = 454;
 const H_COUNTER_WRAP: i32 = 0x1C8;
 const H_COUNTER_WRAP_TARGET: i32 = 2;
 /// Scan tick (lores steps from the line origin) at which the framebuffer
-/// begins.
-const H_COUNTER_FB_START_TICK: i32 = DIW_HSTART_FB0 - H_COUNTER_LINE_ORIGIN;
+/// begins, for the running render's canvas origin.
+fn h_counter_fb_start_tick() -> i32 {
+    diw_hstart_fb0() - H_COUNTER_LINE_ORIGIN
+}
 /// A DIWSTRT/DIWSTOP write reaches Denise's window comparators one colour
 /// clock after the write cycle (vAmiga applies the Denise-side register
 /// change with a DMA_CYCLES(1) delay).
@@ -570,7 +572,7 @@ const DIW_COMPARATOR_WRITE_DELAY_FB: i32 = 4;
 /// fetch -> display pipeline, plus the one-colour-clock write delay.
 fn diw_segment_effect_tick(seg_x: usize) -> i32 {
     (seg_x as i32 - BITPLANE_CONTROL_PIPELINE_FB as i32 + DIW_COMPARATOR_WRITE_DELAY_FB) / 2
-        + H_COUNTER_FB_START_TICK
+        + h_counter_fb_start_tick()
 }
 
 fn h_counter_match_tick(start: i32, target: i32, free_run: bool) -> Option<i32> {
@@ -629,7 +631,7 @@ fn scan_static_h_window_line(
         while event_idx + 1 < event_ticks.len() && event_ticks[event_idx + 1] == tick {
             event_idx += 1;
         }
-        if !framebuffer_started && tick >= H_COUNTER_FB_START_TICK {
+        if !framebuffer_started && tick >= h_counter_fb_start_tick() {
             framebuffer_started = true;
             if record.is_some() && *flop {
                 open_from = Some(0);
@@ -645,7 +647,7 @@ fn scan_static_h_window_line(
         }
         if *flop != was_open {
             if let Some(row) = record.as_deref_mut() {
-                let fb_tick = tick - H_COUNTER_FB_START_TICK;
+                let fb_tick = tick - h_counter_fb_start_tick();
                 if (0..FB_WIDTH as i32 / 2).contains(&fb_tick) {
                     let x = (fb_tick * 2) as usize;
                     if *flop {
@@ -702,7 +704,7 @@ fn scan_h_window_line(
         );
     }
     let free_run = beam_line < 9 && !is_ecs;
-    let fb_start_tick = H_COUNTER_FB_START_TICK;
+    let fb_start_tick = h_counter_fb_start_tick();
     // On a programmable (VARBEAMEN) scan Denise's counter restarts with
     // the line instead of free-running at the standard 15 kHz phase; see
     // ACTIVE_CANVAS_SHIFT_H (the shift equals H_COUNTER_LINE_ORIGIN
@@ -1080,7 +1082,7 @@ impl ControlState {
         if display_window_unprogrammed(self.diwstrt, self.diwstop) {
             return (0, FB_WIDTH);
         }
-        let anchor = DIW_HSTART_FB0 - active_canvas_shift_h();
+        let anchor = diw_hstart_fb0() - active_canvas_shift_h();
         let start = self.diw_h_start() as i32;
         let mut stop = self.diw_h_stop() as i32;
         if stop <= start {
@@ -1670,7 +1672,7 @@ impl ControlState {
         // content shifted right by (DIW_HSTART_FB0 - diw_h_start) lores pixels
         // and lost its right edge off the framebuffer.
         let clamped_window_native =
-            ((DIW_HSTART_FB0 - active_canvas_shift_h() - diw_h_start as i32).max(0)
+            ((diw_hstart_fb0() - active_canvas_shift_h() - diw_h_start as i32).max(0)
                 * native_per_h_unit_num)
                 / pixel_repeat as i32;
         // Lo-res FMODE=0 placement is linear in DDFSTRT: moving DDFSTRT one
@@ -2507,8 +2509,8 @@ impl RenderState {
         if stop <= start {
             stop += 0x100;
         }
-        let left = ((start - DIW_HSTART_FB0).max(0) as usize * 2).min(FB_WIDTH);
-        let mut right = ((stop - DIW_HSTART_FB0).max(0) as usize * 2).min(FB_WIDTH);
+        let left = ((start - diw_hstart_fb0()).max(0) as usize * 2).min(FB_WIDTH);
+        let mut right = ((stop - diw_hstart_fb0()).max(0) as usize * 2).min(FB_WIDTH);
         if FB_WIDTH.saturating_sub(right) <= 2 {
             right = FB_WIDTH;
         }
@@ -2524,7 +2526,7 @@ impl RenderState {
         if display_window_unprogrammed(self.diwstrt, self.diwstop) {
             return 0;
         }
-        ((DIW_HSTART_FB0 - self.diw_h_start() as i32).max(0) as usize * 2).min(FB_WIDTH)
+        ((diw_hstart_fb0() - self.diw_h_start() as i32).max(0) as usize * 2).min(FB_WIDTH)
     }
 
     #[cfg(test)]
@@ -2721,6 +2723,12 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
                 let (entry, loct) = palette_entry_for_write(state.bplcon3, control.aga(), idx);
                 palette.write_entry(usize::from(entry), loct, value);
                 state.palette.write_entry(usize::from(entry), loct, value);
+                // An earlier event of the same (or an earlier) beam line
+                // may already have seeded row 0's base palette; this write
+                // still precedes row 0's first pixel, so patch it in.
+                for base in &mut base_palettes[..next_base_line] {
+                    base.write_entry(usize::from(entry), loct, value);
+                }
             }
             continue;
         }
@@ -2862,7 +2870,19 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
                 }
             }
             control = next_control;
-            push_control_segment(control_segments, line, beam_x, base_controls[line], control);
+            if before_visible_lines {
+                // A write above the first rendered line is folded into row
+                // 0's base control rather than recorded as a segment at x 0:
+                // the horizontal-window scan (and the row-0 fill above,
+                // which seeded the base with the pre-write state) must see
+                // it in force from the line's first comparator tick, not
+                // from the framebuffer's left edge.
+                if let Some(base) = base_controls.first_mut() {
+                    *base = control;
+                }
+            } else {
+                push_control_segment(control_segments, line, beam_x, base_controls[line], control);
+            }
             if matches!(off, 0x102 | 0x108 | 0x10A) {
                 if let Some(events_by_line) = display_line_events.as_deref_mut() {
                     if line < events_by_line.len() {
@@ -2942,7 +2962,7 @@ fn beam_to_framebuffer_pos_with_visible_line0(
 }
 
 fn beam_to_framebuffer_x_unclamped(hpos: u32) -> i32 {
-    (hpos as i32 - COPPER_WAIT_HPOS_FB0) * 4
+    (hpos as i32 - copper_wait_hpos_fb0()) * 4
 }
 
 /// Framebuffer x where a manual BPLxDAT write's 16-pixel batch starts: the
@@ -2950,7 +2970,7 @@ fn beam_to_framebuffer_x_unclamped(hpos: u32) -> i32 {
 /// (see [`MANUAL_BPL_LOAD_LOOKBACK_FB`] for the model and its calibration).
 /// The slot cadence follows the resolution in force at the write.
 fn manual_bpl_serializer_load_x(hpos: u32, control: &ControlState) -> i32 {
-    let landing_x = hpos as i32 * 4 - DIW_HSTART_FB0 * 2 - MANUAL_BPL_LOAD_LOOKBACK_FB;
+    let landing_x = hpos as i32 * 4 - diw_hstart_fb0() * 2 - MANUAL_BPL_LOAD_LOOKBACK_FB;
     let word_px: i32 = if control.shres() {
         8
     } else if control.hires() {
@@ -2963,7 +2983,7 @@ fn manual_bpl_serializer_load_x(hpos: u32, control: &ControlState) -> i32 {
 }
 
 fn color_write_framebuffer_x(hpos: u32, aga: bool) -> usize {
-    let x = (hpos as i32 - COLOR_WRITE_HPOS_FB0) * 4 + i32::from(aga);
+    let x = (hpos as i32 - color_write_hpos_fb0()) * 4 + i32::from(aga);
     x.clamp(0, FB_WIDTH as i32) as usize
 }
 
@@ -2972,12 +2992,13 @@ fn color_write_wraps_to_previous_output_line(hpos: u32) -> bool {
 }
 
 fn color_write_wrapped_framebuffer_x(hpos: u32, aga: bool) -> usize {
-    let x = (hpos as i32 + COLORCLOCKS_PER_LINE as i32 - COLOR_WRITE_HPOS_FB0) * 4 + i32::from(aga);
+    let x =
+        (hpos as i32 + COLORCLOCKS_PER_LINE as i32 - color_write_hpos_fb0()) * 4 + i32::from(aga);
     x.clamp(0, FB_WIDTH as i32) as usize
 }
 
 fn sprite_palette_control_framebuffer_x(hpos: u32) -> usize {
-    ((hpos as i32 - SPRITE_PALETTE_CONTROL_HPOS_FB0) * 4).clamp(0, FB_WIDTH as i32) as usize
+    ((hpos as i32 - sprite_palette_control_hpos_fb0()) * 4).clamp(0, FB_WIDTH as i32) as usize
 }
 
 fn fill_base_palettes(
@@ -3411,7 +3432,7 @@ fn bitplane_fetch_hpos(control: ControlState, word_idx: usize) -> u32 {
 }
 
 fn bitplane_fetch_framebuffer_x(hpos: u32) -> usize {
-    ((hpos as i32 * 2 - DIW_HSTART_FB0) * 2).clamp(0, FB_WIDTH as i32) as usize
+    ((hpos as i32 * 2 - diw_hstart_fb0()) * 2).clamp(0, FB_WIDTH as i32) as usize
 }
 
 fn apply_bitplane_pointer_write(ptrs: &mut [u32; 8], off: u16, val: u16) {
@@ -3938,6 +3959,9 @@ pub struct RenderInput {
     /// its input. Applied to colour resolution only, never collisions.
     debug_plane_mask: u8,
     debug_sprite_mask: u8,
+    /// Horizontal canvas origin shift in colour clocks (see
+    /// `ACTIVE_CANVAS_ORIGIN_CCK`); 0 for the display.
+    canvas_origin_cck: i32,
     /// CD32 FMV signal behind Denise/Lisa's genlock-transparent pixels.
     #[cfg(feature = "cd32-fmv")]
     fmv: Option<crate::cd32_fmv::FmvPresentation>,
@@ -3973,6 +3997,7 @@ struct RenderContentPrefix {
     programmable_horizontal_blank: Option<(u32, u32)>,
     debug_plane_mask: u8,
     debug_sprite_mask: u8,
+    canvas_origin_cck: i32,
     #[cfg(feature = "cd32-fmv")]
     fmv: Option<crate::cd32_fmv::FmvPresentation>,
 }
@@ -3998,6 +4023,7 @@ impl RenderContentPrefix {
             programmable_horizontal_blank: input.programmable_horizontal_blank,
             debug_plane_mask: input.debug_plane_mask,
             debug_sprite_mask: input.debug_sprite_mask,
+            canvas_origin_cck: input.canvas_origin_cck,
             #[cfg(feature = "cd32-fmv")]
             fmv: input.fmv.clone(),
         }
@@ -4031,6 +4057,7 @@ impl RenderContentPrefix {
         different!(programmable_horizontal_blank);
         different!(debug_plane_mask);
         different!(debug_sprite_mask);
+        different!(canvas_origin_cck);
         #[cfg(feature = "cd32-fmv")]
         different!(fmv);
         None
@@ -4197,9 +4224,97 @@ impl RenderInput {
             emulated_frames: bus.emulated_frames(),
             debug_plane_mask: bus.ui_layer_masks().planes,
             debug_sprite_mask: bus.ui_layer_masks().sprites,
+            canvas_origin_cck: 0,
             #[cfg(feature = "cd32-fmv")]
             fmv: bus.fmv_presentation(),
         }
+    }
+
+    /// Snapshot the frame the beam is in now (see
+    /// [`Bus::in_progress_render_parts`]). Rows above the beam render exactly
+    /// as the completed frame later will; rows at or below it are partial.
+    ///
+    /// With `first_vpos`, the snapshot starts at that beam line instead of
+    /// the frame's first captured line: row 0 is `first_vpos`, and the
+    /// register writes above it fold into row 0's start state the way
+    /// lines above a frame's visible start always do. A render of one line
+    /// then costs one row, not a frame.
+    ///
+    /// With `first_vpos`, the render starts at that line and stops there:
+    /// writes from later lines are left out, so a line the beam has passed
+    /// shows what it showed then. When the line is not the capture's first,
+    /// the render starts one line earlier (a lead row, for the caller to
+    /// drop): the painter folds every write on its first row into that
+    /// row's starting palette, so the lead row keeps the requested line's
+    /// own writes at their beam positions, as on any other row.
+    pub(crate) fn from_bus_in_progress(bus: &Bus, first_vpos: Option<u32>) -> Self {
+        let parts = bus.in_progress_render_parts();
+        let start = first_vpos.map(|v| {
+            if v > parts.visible_start_vpos {
+                v - 1
+            } else {
+                v
+            }
+        });
+        let skip = start
+            .map(|v| v.saturating_sub(parts.visible_start_vpos) as usize)
+            .unwrap_or(0)
+            .min(parts.geometry.visible_lines);
+        let frame_render_events = match first_vpos {
+            Some(last) => parts
+                .render_events
+                .iter()
+                .filter(|e| e.vpos <= last)
+                .copied()
+                .collect(),
+            None => parts.render_events.to_vec(),
+        };
+        let mut geometry = parts.geometry;
+        geometry.visible_start_vpos += skip as u32;
+        geometry.visible_lines -= skip;
+        Self {
+            geometry,
+            presentation_h_window: parts.presentation_h_window,
+            presentation_v_window: parts.presentation_v_window,
+            visible_start_vpos: parts.visible_start_vpos + skip as u32,
+            palette_split: parts.palette_split,
+            render_base: parts.render_base,
+            frame_render_events,
+            // Nothing of the following frame exists yet.
+            current_render_base: parts.render_base,
+            current_render_events: Vec::new(),
+            bottom_palette_events: parts.bottom_palette_events.to_vec(),
+            top_palette_end: parts.top_palette_end,
+            chip_ram: std::sync::Arc::new(parts.chip_ram.to_vec()),
+            chip_ram_writes: parts.chip_ram_writes.to_vec(),
+            captured_bitplane_rows: std::sync::Arc::new(
+                parts.captured_bitplane_rows[skip.min(parts.captured_bitplane_rows.len())..]
+                    .to_vec(),
+            ),
+            captured_sprite_lines: parts.captured_sprite_lines.to_vec(),
+            held_sprites: parts.held_sprites,
+            sprite_display_enable_x_by_y: parts.sprite_display_enable_x_by_y
+                [skip.min(parts.sprite_display_enable_x_by_y.len())..]
+                .to_vec(),
+            sprite_dma_observed: parts.sprite_dma_observed,
+            frame_lines: parts.frame_lines,
+            programmable_vertical_blank: bus.agnus.programmable_vertical_blank(),
+            programmable_horizontal_blank: bus.agnus.programmable_horizontal_blank(),
+            emulated_seconds: bus.emulated_seconds(),
+            emulated_frames: bus.emulated_frames(),
+            // A peripheral sees the real picture, never debugger masking.
+            debug_plane_mask: 0xFF,
+            debug_sprite_mask: 0xFF,
+            canvas_origin_cck: 0,
+            #[cfg(feature = "cd32-fmv")]
+            fmv: None,
+        }
+    }
+
+    /// Move the canvas origin: framebuffer column 0 then sits `cck` colour
+    /// clocks later on the line than the display's (negative: earlier).
+    pub(crate) fn set_canvas_origin_cck(&mut self, cck: i32) {
+        self.canvas_origin_cck = cck;
     }
 
     /// Re-snapshot the just-finished frame into this bundle, reusing the
@@ -4245,6 +4360,7 @@ impl RenderInput {
         self.emulated_frames = bus.emulated_frames();
         self.debug_plane_mask = bus.ui_layer_masks().planes;
         self.debug_sprite_mask = bus.ui_layer_masks().sprites;
+        self.canvas_origin_cck = 0;
         #[cfg(feature = "cd32-fmv")]
         {
             self.fmv = bus.fmv_presentation();
@@ -4624,6 +4740,73 @@ pub fn render_display_only_with_content(bus: &Bus, fb: &mut [u32]) -> Option<Con
     })
 }
 
+/// Geometry of a [`render_wide`] canvas.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct WideRender {
+    /// Rows painted.
+    pub rows: usize,
+    /// Row stride in pixels.
+    pub stride: usize,
+    /// Beam line of row 0.
+    pub visible_start_vpos: u32,
+    /// Horizontal supersample factor (see [`canvas_scale_for`]).
+    pub canvas_scale: usize,
+    pub interlaced: bool,
+}
+
+/// Framebuffer width in colour clocks: the span one render covers.
+const FB_CCK: usize = FB_WIDTH / 4;
+
+/// Paint a field across a canvas wider than the framebuffer: colour clocks
+/// `first_cck..first_cck + span_cck`, four hi-res pixels each (times the
+/// canvas scale), stitched from as many origin-shifted renders of the same
+/// field as it takes (`RenderInput::set_canvas_origin_cck`). At most
+/// `rows_limit` rows are painted, from the top. Side-effect free like
+/// [`render_display_only`]. This is the video-slot tap's view of Denise's
+/// output (`crate::videoslot`); the display never paints through it.
+pub(crate) fn render_wide(
+    input: &mut RenderInput,
+    first_cck: i32,
+    span_cck: usize,
+    rows_limit: usize,
+    out: &mut Vec<u32>,
+    scratch: &mut Vec<u32>,
+) -> WideRender {
+    let scale = canvas_scale_for(
+        input.geometry.programmable,
+        input.render_base.bplcon0,
+        &input.frame_render_events,
+    );
+    let rows = input.geometry.visible_lines.min(rows_limit);
+    let stride = span_cck * 4 * scale;
+    let fb_w = FB_WIDTH * scale;
+    out.clear();
+    out.resize(stride * rows, 0);
+    if scratch.len() < fb_w * rows {
+        scratch.resize(fb_w * rows, 0);
+    }
+    let mut pass_cck = 0usize;
+    while pass_cck < span_cck {
+        input.set_canvas_origin_cck(first_cck + pass_cck as i32 - COPPER_WAIT_HPOS_FB0);
+        let _ = render_from_input(input, &mut scratch[..fb_w * rows]);
+        let x0 = pass_cck * 4 * scale;
+        let take = fb_w.min(stride - x0);
+        for y in 0..rows {
+            out[y * stride + x0..y * stride + x0 + take]
+                .copy_from_slice(&scratch[y * fb_w..y * fb_w + take]);
+        }
+        pass_cck += FB_CCK;
+    }
+    input.set_canvas_origin_cck(0);
+    WideRender {
+        rows,
+        stride,
+        visible_start_vpos: input.visible_start_vpos,
+        canvas_scale: scale,
+        interlaced: input.geometry.lace,
+    }
+}
+
 /// Side-effect-free display render with final Denise/Lisa output provenance.
 /// The normal render path remains unchanged; this diagnostic switch is
 /// thread-local and is consumed by the same painter used for screenshots.
@@ -4708,6 +4891,47 @@ thread_local! {
 
 pub(super) fn active_canvas_scale() -> usize {
     ACTIVE_CANVAS_SCALE.with(|scale| scale.get())
+}
+
+thread_local! {
+    /// The running render's horizontal canvas origin shift in colour
+    /// clocks, captured from the [`RenderInput`] at [`render_from_input`]'s
+    /// entry like the masks above. Positive moves framebuffer column 0
+    /// later on the line. Every display render uses 0, which leaves the
+    /// calibrated beam-to-column anchors ([`DIW_HSTART_FB0`],
+    /// [`COPPER_WAIT_HPOS_FB0`]) the exact constants they are; only the
+    /// video-slot tap renders a field with the origin moved, so a card in
+    /// the slot can see the parts of the line the display framebuffer
+    /// does not capture (`crate::videoslot`). Both anchors move together,
+    /// so comparator-anchored and beam-anchored positions keep their
+    /// calibrated relation and the picture simply slides on the canvas.
+    static ACTIVE_CANVAS_ORIGIN_CCK: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
+
+pub(super) fn active_canvas_origin_cck() -> i32 {
+    ACTIVE_CANVAS_ORIGIN_CCK.with(|shift| shift.get())
+}
+
+/// [`DIW_HSTART_FB0`] for the running render: the lo-res comparator
+/// position at framebuffer column 0.
+pub(super) fn diw_hstart_fb0() -> i32 {
+    DIW_HSTART_FB0 + 2 * active_canvas_origin_cck()
+}
+
+/// [`COPPER_WAIT_HPOS_FB0`] for the running render: the beam colour clock
+/// at framebuffer column 0.
+pub(super) fn copper_wait_hpos_fb0() -> i32 {
+    COPPER_WAIT_HPOS_FB0 + active_canvas_origin_cck()
+}
+
+/// [`COLOR_WRITE_HPOS_FB0`] for the running render.
+fn color_write_hpos_fb0() -> i32 {
+    COLOR_WRITE_HPOS_FB0 + active_canvas_origin_cck()
+}
+
+/// [`SPRITE_PALETTE_CONTROL_HPOS_FB0`] for the running render.
+fn sprite_palette_control_hpos_fb0() -> i32 {
+    SPRITE_PALETTE_CONTROL_HPOS_FB0 + active_canvas_origin_cck()
 }
 
 /// The canvas supersample factor for a frame: 2 (35 ns pixel pitch) when a
@@ -4864,6 +5088,7 @@ fn render_from_input_with_scratch(
 ) -> RenderResult {
     let render_started = render_timing_start();
     ACTIVE_DEBUG_MASKS.with(|masks| masks.set((input.debug_plane_mask, input.debug_sprite_mask)));
+    ACTIVE_CANVAS_ORIGIN_CCK.with(|shift| shift.set(input.canvas_origin_cck));
     ACTIVE_CANVAS_SHIFT_H.with(|shift| {
         shift.set(if input.geometry.programmable {
             H_COUNTER_LINE_ORIGIN
@@ -5962,7 +6187,7 @@ fn blank_window_contains(pos: u32, strt: u32, stop: u32) -> bool {
 /// colour clock spans two lo-res DIW positions, i.e. four hi-res
 /// framebuffer pixels.
 fn framebuffer_column_cck(x: usize) -> u32 {
-    let diw_pos = DIW_HSTART_FB0 + (x as i32) / 2;
+    let diw_pos = diw_hstart_fb0() + (x as i32) / 2;
     (diw_pos / 2).max(0) as u32
 }
 

@@ -157,6 +157,7 @@ pub mod update;
 pub mod uss;
 pub mod verdict;
 pub mod video;
+pub mod videoslot;
 pub mod warpboot;
 pub mod wasm_manifest;
 #[cfg(feature = "wasm-boards")]

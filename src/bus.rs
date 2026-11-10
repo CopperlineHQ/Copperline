@@ -778,6 +778,20 @@ pub struct Bus {
     /// therefore survives save-state loads like Paula's audio/serial sinks.
     #[serde(skip, default = "crate::parallel::null_parallel_port")]
     parallel_port: Box<dyn crate::parallel::ParallelPort>,
+    /// Card in the video slot (`crate::videoslot`), watching Denise's
+    /// output and optionally driving the parallel data pins. Host-attached
+    /// like the parallel peripheral, so it survives save-state loads.
+    #[serde(skip)]
+    video_slot: Option<Box<dyn crate::videoslot::VideoSlotDevice>>,
+    #[serde(skip)]
+    video_slot_live: crate::videoslot::LiveFieldCache,
+    #[serde(skip)]
+    video_slot_fb: Vec<u32>,
+    #[serde(skip)]
+    video_slot_scratch: Vec<u32>,
+    /// `[chipset] genlock`: a stand-alone genlock is fitted.
+    #[serde(default)]
+    genlock_configured: bool,
     pub rtc: Rtc,
     /// Whether the $DC0000 RTC is fitted (machine-profile flag; the base
     /// A600 shipped without one). The CPU memory map consults this before
@@ -3755,6 +3769,11 @@ impl Bus {
             blitter: Blitter::new(),
             floppy,
             parallel_port: crate::parallel::null_parallel_port(),
+            video_slot: None,
+            video_slot_live: Default::default(),
+            video_slot_fb: Vec::new(),
+            video_slot_scratch: Vec::new(),
+            genlock_configured: false,
             rtc: Rtc::default(),
             rtc_present: true,
             gayle: None,
@@ -5418,6 +5437,11 @@ impl Bus {
         self.copper = Copper::new();
         self.copper_wake_bound = CopperWakeBound::Unknown;
         self.denise = Denise::new();
+        // The genlock and the video-slot card stay fitted across the reset.
+        self.apply_genlock_sync();
+        // A reset restarts the frame count, so a cached render of the field
+        // in progress could match a new beam position by accident.
+        self.video_slot_live.invalidate();
         self.blitter = Blitter::new();
         self.configure_chip_dma_masks();
         self.rtc.reset();
@@ -6313,6 +6337,10 @@ impl Bus {
         );
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
         std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
+        std::mem::swap(&mut self.video_slot, &mut live.video_slot);
+        // The card is the live session's, the genlock setting the state's:
+        // Agnus's restored sync must follow both.
+        self.apply_genlock_sync();
         self.blitter_trace = live.blitter_trace.take();
         self.paula.adopt_host_taps(&mut live.paula);
         // Bus-event subscriptions belong to live control connections, not to
@@ -6390,6 +6418,9 @@ impl Bus {
         }
         if !self.parallel_port.runahead_safe() {
             return Some("parallel host peripheral");
+        }
+        if self.video_slot.as_ref().is_some_and(|d| !d.runahead_safe()) {
+            return Some("video-slot card");
         }
         if self.wave_on {
             return Some("waveform capture");
@@ -6562,8 +6593,8 @@ impl Bus {
         if self.current_frame_geometry.programmable {
             self.current_frame_visible_start_vpos = self.current_frame_geometry.visible_start_vpos;
         } else {
-            self.current_frame_visible_start_vpos = RENDER_MIN_OVERSCAN_START_VPOS;
-            self.current_frame_geometry.visible_start_vpos = RENDER_MIN_OVERSCAN_START_VPOS;
+            self.current_frame_visible_start_vpos = self.capture_start_vpos();
+            self.current_frame_geometry.visible_start_vpos = self.current_frame_visible_start_vpos;
         }
         self.last_frame_visible_start_vpos = self.current_frame_visible_start_vpos;
         self.last_frame_geometry.visible_start_vpos = self.current_frame_visible_start_vpos;
@@ -6636,6 +6667,150 @@ impl Bus {
     /// Attach a Centronics peripheral to CIA-A port B. The default is a null
     /// peripheral (unplugged cable), so attaching one is an explicit host-side
     /// choice and does not change ordinary machine behavior.
+    /// Fit a card in the video slot, replacing any fitted one.
+    pub fn attach_video_slot(&mut self, device: Box<dyn crate::videoslot::VideoSlotDevice>) {
+        if device.supplies_sync() {
+            self.agnus.set_genlock_sync(true);
+        }
+        self.video_slot = Some(device);
+        self.video_slot_live = Default::default();
+    }
+
+    /// Remove the video-slot card, returning it. Its sync goes with it
+    /// unless a genlock is configured independently.
+    pub fn detach_video_slot(&mut self) -> Option<Box<dyn crate::videoslot::VideoSlotDevice>> {
+        let device = self.video_slot.take();
+        if device.as_ref().is_some_and(|d| d.supplies_sync()) && !self.genlock_configured {
+            self.agnus.set_genlock_sync(false);
+        }
+        device
+    }
+
+    /// Fit or remove a stand-alone genlock (`[chipset] genlock`).
+    pub fn set_genlock(&mut self, present: bool) {
+        self.genlock_configured = present;
+        self.apply_genlock_sync();
+    }
+
+    /// Give Agnus the sync actually present: a stand-alone genlock, or a
+    /// video-slot card that supplies it. Called wherever Agnus or the card
+    /// changes under the other (a reset's new Agnus, a state load that
+    /// keeps the live card), and then reconciles the ERSY latch with
+    /// BPLCON0 as it stands: without sync, ERSY set freezes the counters
+    /// from here, as a write of it would have.
+    fn apply_genlock_sync(&mut self) {
+        let card_sync = self.video_slot.as_ref().is_some_and(|d| d.supplies_sync());
+        self.agnus
+            .set_genlock_sync(self.genlock_configured || card_sync);
+        self.agnus.set_ersy(self.denise.bplcon0 & 0x0002 != 0);
+    }
+
+    pub fn video_slot(&self) -> Option<&dyn crate::videoslot::VideoSlotDevice> {
+        self.video_slot.as_deref()
+    }
+
+    pub fn video_slot_mut(
+        &mut self,
+    ) -> Option<&mut (dyn crate::videoslot::VideoSlotDevice + 'static)> {
+        self.video_slot.as_deref_mut()
+    }
+
+    /// Live in-progress renders the video-slot tap has performed.
+    pub fn video_slot_live_renders(&self) -> u64 {
+        self.video_slot_live.renders
+    }
+
+    /// First beam line the frame capture keeps on a standard scan: the
+    /// deep-overscan minimum, or with a video-slot card fitted the first
+    /// line sprite DMA can run on (NTSC `$14`, PAL `$19`), since a card
+    /// reads the line headers software puts on those lines (the Toaster's
+    /// sprite table starts at line `$15`).
+    pub(crate) fn capture_start_vpos(&self) -> u32 {
+        if self.video_slot.is_some() {
+            sprite_dma_first_active_vpos(self.agnus.video_standard())
+                .min(RENDER_MIN_OVERSCAN_START_VPOS)
+        } else {
+            RENDER_MIN_OVERSCAN_START_VPOS
+        }
+    }
+
+    fn video_slot_beam(&self) -> crate::videoslot::BeamPos {
+        crate::videoslot::BeamPos {
+            vpos: self.agnus.vpos,
+            hpos: self.agnus.hpos,
+            cck: self.emulated_cck,
+            long_frame: self.agnus.lof,
+            frame: self.emulated_frames,
+        }
+    }
+
+    /// Frame-wrap hook: hand the just-completed field to the video-slot
+    /// card. Called after `begin_new_beam_frame` promoted the capture, so
+    /// the `frame_*` accessors describe that field.
+    pub(super) fn notify_video_slot_field_complete(&mut self) {
+        let Some(mut device) = self.video_slot.take() else {
+            return;
+        };
+        if device.wants_completed_fields() && self.last_frame_render_base.is_some() {
+            let mut fb = std::mem::take(&mut self.video_slot_fb);
+            let mut scratch = std::mem::take(&mut self.video_slot_scratch);
+            let mut input = crate::video::bitplane::RenderInput::from_bus(self);
+            let wide = crate::video::bitplane::render_wide(
+                &mut input,
+                crate::videoslot::SLOT_FIRST_CCK,
+                crate::videoslot::SLOT_LINE_CCK,
+                usize::MAX,
+                &mut fb,
+                &mut scratch,
+            );
+            // LOF has already toggled for the new field on a laced screen;
+            // the completed field was the other one.
+            let long_frame = if wide.interlaced {
+                !self.agnus.lof
+            } else {
+                self.agnus.lof
+            };
+            let field = crate::videoslot::FieldPixels {
+                pixels: &fb,
+                width: wide.stride,
+                rows: wide.rows,
+                visible_start_vpos: wide.visible_start_vpos,
+                first_cck: crate::videoslot::SLOT_FIRST_CCK,
+                canvas_scale: wide.canvas_scale,
+                long_frame,
+                interlaced: wide.interlaced,
+                valid_rows: wide.rows,
+            };
+            // The counter already moved on to the new field.
+            let mut at = self.video_slot_beam();
+            at.frame = at.frame.saturating_sub(1);
+            device.field_complete(&field, at);
+            self.video_slot_fb = fb;
+            self.video_slot_scratch = scratch;
+        }
+        self.video_slot = Some(device);
+    }
+
+    /// `$BFE101` read hook: let the video-slot card drive the data pins.
+    fn video_slot_parallel_read(&mut self) -> Option<u8> {
+        let mut device = self.video_slot.take()?;
+        let mut cache = std::mem::take(&mut self.video_slot_live);
+        let ddrb = self.cia_a.port_b_ddr();
+        let beam = self.video_slot_beam();
+        let byte = {
+            let mut live = crate::videoslot::LiveField {
+                bus: self,
+                cache: &mut cache,
+                beam,
+            };
+            device.parallel_read(&mut live, ddrb)
+        };
+        self.video_slot_live = cache;
+        self.video_slot = Some(device);
+        // Output pins stay CIA-driven whatever the card does.
+        byte.map(|b| (b & !ddrb) | (self.cia_a.port_b_pins() & ddrb))
+    }
+
     pub fn attach_parallel_port(&mut self, port: Box<dyn crate::parallel::ParallelPort>) {
         self.parallel_port = port;
     }
@@ -8234,6 +8409,7 @@ impl Bus {
             self.denise.diwstrt,
             self.denise.diwstop,
             self.effective_diwhigh(),
+            self.capture_start_vpos(),
         )
     }
 
@@ -9564,6 +9740,45 @@ impl Bus {
         }
     }
 
+    /// Every render-input part of the frame the beam is in now, taken from
+    /// the capture side whether or not a completed frame is waiting for the
+    /// renderer (the `else` arms of the `frame_*` accessors, which already
+    /// describe the in-progress frame before the first wrap). Used by the
+    /// video-slot tap ([`crate::videoslot::LiveField`]); only the lines the
+    /// beam has passed are final.
+    pub(crate) fn in_progress_render_parts(&self) -> InProgressRenderParts<'_> {
+        let chip_ram = if self.current_frame_display_snapshot_taken
+            && self.current_frame_chip_ram.len() == self.mem.chip_ram.len()
+        {
+            &self.current_frame_chip_ram[..]
+        } else {
+            &self.mem.chip_ram[..]
+        };
+        InProgressRenderParts {
+            geometry: self.current_frame_geometry,
+            presentation_h_window: self.current_frame_presentation_h_window,
+            presentation_v_window: self.current_frame_presentation_v_window,
+            visible_start_vpos: self.current_frame_visible_start_vpos,
+            palette_split: (
+                self.beam_top_palette,
+                self.beam_bottom_palette,
+                self.beam_bottom_palette_valid,
+            ),
+            render_base: self.current_frame_render_base,
+            render_events: &self.current_frame_render_events,
+            bottom_palette_events: &self.beam_bottom_palette_events,
+            top_palette_end: self.beam_top_palette,
+            chip_ram,
+            chip_ram_writes: &self.current_frame_chip_ram_writes,
+            captured_bitplane_rows: &self.current_frame_bitplane_rows,
+            captured_sprite_lines: &self.current_frame_sprite_lines,
+            held_sprites: self.current_frame_held_sprites,
+            sprite_display_enable_x_by_y: &self.current_frame_sprite_display_enable_x_by_y,
+            sprite_dma_observed: self.current_frame_sprite_dma_observed,
+            frame_lines: self.agnus.current_frame_lines(),
+        }
+    }
+
     pub fn frame_held_sprites(&self) -> [Option<HeldSpriteLine>; 8] {
         if crate::envcfg::flag("COPPERLINE_RENDER_LIVE_CHIP_RAM") {
             return [None; 8];
@@ -9668,7 +9883,9 @@ impl Bus {
             // The parallel data pins are CIA-A port B. An input peripheral (an
             // audio sampler digitizing the data lines) drives them, so let it
             // override the byte the guest reads back from $BFE101.
-            if let Some(byte) = self.parallel_port.read_data(self.emulated_cck) {
+            if let Some(byte) = self.video_slot_parallel_read() {
+                v = byte;
+            } else if let Some(byte) = self.parallel_port.read_data(self.emulated_cck) {
                 v = byte;
             }
             // The four-player adapter's direction switches short data pins
@@ -10933,12 +11150,16 @@ fn display_window_unprogrammed(diwstrt: u16, diwstop: u16) -> bool {
     diwstrt == 0 && diwstop == 0
 }
 
-fn visible_start_vpos_for_diw(diwstrt: u16, diwstop: u16, diwhigh: DiwHigh) -> u32 {
+fn visible_start_vpos_for_diw(
+    diwstrt: u16,
+    diwstop: u16,
+    diwhigh: DiwHigh,
+    min_start_vpos: u32,
+) -> u32 {
     if display_window_unprogrammed(diwstrt, diwstop) {
         return RENDER_VISIBLE_START_VPOS;
     }
-    u32::from(diw_v_start(diwstrt, diwhigh))
-        .clamp(RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_START_VPOS)
+    u32::from(diw_v_start(diwstrt, diwhigh)).clamp(min_start_vpos, RENDER_VISIBLE_START_VPOS)
 }
 
 fn clipped_display_rows_before_visible(
@@ -13394,3 +13615,24 @@ mod wave;
 
 #[cfg(test)]
 mod tests;
+
+/// Borrowed in-progress frame capture; see [`Bus::in_progress_render_parts`].
+pub(crate) struct InProgressRenderParts<'a> {
+    pub geometry: FrameGeometry,
+    pub presentation_h_window: Option<(i32, u32)>,
+    pub presentation_v_window: Option<(i32, u32)>,
+    pub visible_start_vpos: u32,
+    pub palette_split: (Palette, Palette, bool),
+    pub render_base: RenderRegisterSnapshot,
+    pub render_events: &'a [BeamRegisterWrite],
+    pub bottom_palette_events: &'a [BeamRegisterWrite],
+    pub top_palette_end: Palette,
+    pub chip_ram: &'a [u8],
+    pub chip_ram_writes: &'a [BeamChipRamWrite],
+    pub captured_bitplane_rows: &'a [Option<CapturedBitplaneRow>],
+    pub captured_sprite_lines: &'a [CapturedSpriteLine],
+    pub held_sprites: [Option<HeldSpriteLine>; 8],
+    pub sprite_display_enable_x_by_y: &'a [Option<usize>],
+    pub sprite_dma_observed: bool,
+    pub frame_lines: u32,
+}

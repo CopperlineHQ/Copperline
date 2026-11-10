@@ -622,6 +622,75 @@ made the conservative pre-render key reject the frame. Recording still emits
 the duplicate video frame, and status/UI changes still redraw over a held
 Amiga picture.
 
+## Video-slot tap (`videoslot.rs`)
+
+A card in the A2000/A3000/A4000 video slot watches Denise's digital output
+as it is generated, which the replay architecture above does not provide by
+itself. The tap gives such a card (the NewTek Video Toaster is the
+motivating case) two views of the picture, both side-effect free and both
+painted by the same `render_from_input` the display uses:
+
+- **Completed fields.** At each frame wrap, after `begin_new_beam_frame` has
+  promoted the capture, `Bus::notify_video_slot_field_complete` renders the
+  finished field once more on the main thread and passes it to
+  `VideoSlotDevice::field_complete`. A card that does not need it opts out
+  with `wants_completed_fields`, which skips the extra render.
+- **The field in progress.** A card that reacts within the same field gets
+  a `LiveField` on every guest read of `$BFE101`. Its `pixels()` call
+  renders a `RenderInput` built from the capture side
+  (`RenderInput::from_bus_in_progress`, the in-progress halves of the
+  `frame_*`/`last_frame_*` pairs: the frame-start chip-RAM snapshot and its
+  beam-timed write log, captured bitplane rows and sprite lines, and the
+  frame's register events so far) for the beam's own line alone, whose
+  captured words reach the beam; `line(v)` renders a line the beam has
+  passed the same way. A line render leaves out register writes from later
+  lines, so a passed line shows what it showed then, and starts one line
+  early (a lead row, then dropped) because the painter folds every write on
+  its first row into that row's starting palette: on the lead row, the
+  line's own colour writes keep their beam positions. The render is reused
+  while the beam stays put; a reset, which restarts the frame count,
+  forgets it.
+- **Sync.** A card that supplies sync, or a configured stand-alone genlock,
+  keeps BPLCON0.ERSY from freezing the beam counters. Agnus's flag is
+  recomputed from both wherever either changes under the other: a reset's
+  new Agnus, and a state load, which keeps the live session's card but the
+  state's genlock setting (and freezes the counters at once when ERSY is set
+  and nothing supplies sync).
+
+Both views paint a line wider than the display framebuffer. A video card
+samples the whole active line -- the Toaster's 768 pixels start at lo-res
+`$5C`, left of the capture's `$62`, and run past the capture's right edge --
+so `bitplane::render_wide` paints colour clocks `SLOT_FIRST_CCK` (`$24`)
+onwards for `SLOT_LINE_CCK` clocks, stitched from origin-shifted renders of
+the same field. The shift is `RenderInput::canvas_origin_cck`, installed as
+the thread-local `ACTIVE_CANVAS_ORIGIN_CCK` for the render: every
+beam-to-column anchor (`DIW_HSTART_FB0`, `COPPER_WAIT_HPOS_FB0`,
+`COLOR_WRITE_HPOS_FB0`, `SPRITE_PALETTE_CONTROL_HPOS_FB0`, the H-counter
+framebuffer start tick) is read through a function that adds it, so
+comparator-anchored and beam-anchored positions move together and the
+picture slides on the canvas. Display renders use 0 and keep the calibrated
+constants bit-for-bit. The per-line sprite display enable column is recorded
+in display coordinates, clamped at the capture's edge; a clamped 0 stays
+"from the canvas start" on a shifted render.
+
+Rows start at the capture's first line. With a card fitted the capture
+starts at the first line sprite DMA can run on (`Bus::capture_start_vpos`:
+NTSC `$14`, PAL `$19`) instead of the deep-overscan `$1C`, because the
+Toaster's line headers are sprites on lines from `$15`.
+`FieldPixels::column_for_hpos`, `column_for_lores`, `pixel_at_beam` and
+`rgb12_at_beam` map beam positions to the canvas.
+
+The card can also drive the parallel data pins (`parallel_read`), ahead of
+the Centronics peripheral and the joystick adapter; pins the guest has made
+outputs (DDRB set) stay CIA-driven. A card that supplies genlock sync
+(`supplies_sync`, the Toaster) puts Agnus in genlock mode while fitted:
+`BPLCON0.ERSY` then leaves the beam counters live instead of freezing them
+(`Agnus::set_genlock_sync`; `[chipset] genlock` does the same without a
+card). A fitted card blocks run-ahead, since
+it holds state run-ahead cannot rewind. Like the parallel peripheral it is
+host-attached (`Bus::attach_video_slot`) and survives save-state loads; it
+is not itself serialised.
+
 ## Interlace (`video/deinterlace.rs`)
 
 Interlaced (LACE) content is presented through a motion-adaptive

@@ -195,6 +195,9 @@ impl Hardware {
                     }
                     .into(),
                 ),
+                // A genlock changes what the guest reads back from the beam
+                // counters, so peers must agree on it.
+                genlock: Some(cfg.genlock),
             },
             // No floppy_sounds_set: which drive sample set a peer plays
             // is never part of the machine state (drive_sounds.rs), so

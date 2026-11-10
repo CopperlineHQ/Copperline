@@ -1673,6 +1673,10 @@ pub(crate) struct RawChipset {
     pub(crate) agnus: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) denise: Option<String>,
+    /// A genlock is attached and supplying sync, so `BPLCON0.ERSY` slaves
+    /// the beam instead of stopping it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) genlock: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

@@ -261,6 +261,8 @@ pub struct Config {
     /// RP5C01 is fitted.
     pub battmem_path: Option<PathBuf>,
     pub video_standard: VideoStandard,
+    /// `[chipset] genlock`: an external genlock supplies sync.
+    pub genlock: bool,
     pub audio: AudioConfig,
     /// Gayle IDE drive images (raw flat HDF, RDB inside), opened
     /// read/write. Only valid on machines with a Gayle gate array.
@@ -2914,6 +2916,7 @@ impl Default for Config {
             rtc_frozen: false,
             battmem_path: None,
             video_standard: VideoStandard::Pal,
+            genlock: false,
             audio: AudioConfig::default(),
             ide: IdeConfig::default(),
             pcmcia: PcmciaConfig::default(),
