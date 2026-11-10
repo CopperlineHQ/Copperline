@@ -360,6 +360,7 @@ impl TcpSerialSink {
                 log::info!("serial: client connected from {peer}");
                 let _ = stream.set_nodelay(true);
                 let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
+                let _ = stream.set_read_timeout(Some(TCP_READ_POLL));
                 match stream.try_clone() {
                     Ok(w) => *acceptor_writer.lock().unwrap() = Some(w),
                     Err(e) => {
@@ -373,6 +374,11 @@ impl TcpSerialSink {
                 'client: loop {
                     use std::io::Read;
                     match stream.read(&mut buf) {
+                        Err(e) if tcp_read_poll_elapsed(&e) => {
+                            if !acceptor_connected.load(std::sync::atomic::Ordering::Acquire) {
+                                break;
+                            }
+                        }
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             for &b in &buf[..n] {
@@ -411,6 +417,7 @@ impl TcpSerialSink {
         let peer = stream.peer_addr()?;
         let _ = stream.set_nodelay(true);
         let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
+        let _ = stream.set_read_timeout(Some(TCP_READ_POLL));
         log::info!("serial: connected to tcp://{peer}");
         let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let writer = std::sync::Arc::new(std::sync::Mutex::new(Some(stream.try_clone()?)));
@@ -427,6 +434,11 @@ impl TcpSerialSink {
                 let mut buf = [0u8; 512];
                 'link: loop {
                     match stream.read(&mut buf) {
+                        Err(e) if tcp_read_poll_elapsed(&e) => {
+                            if !reader_connected.load(std::sync::atomic::Ordering::Acquire) {
+                                break;
+                            }
+                        }
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             for &b in &buf[..n] {
@@ -471,6 +483,21 @@ pub(crate) const TCP_INBOUND_QUEUE: usize = 64 * 1024;
 /// write only waits at all once the peer has stopped reading.
 pub(crate) const TCP_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// How long a reader thread waits on a quiet socket before checking that its
+/// link is still the live one. Shutting a socket down ends a blocked read on
+/// Unix but not on Windows, where only this check gets a reader off a link
+/// that a write timeout retired while the peer keeps its end open.
+pub(crate) const TCP_READ_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Whether a read failed only because [`TCP_READ_POLL`] elapsed with nothing
+/// to read (reported as `WouldBlock` on Unix and `TimedOut` on Windows).
+pub(crate) fn tcp_read_poll_elapsed(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
 /// What became of a byte offered to a link's inbound queue.
 enum Queued {
     Yes,
@@ -513,9 +540,12 @@ impl SerialSink for TcpSerialSink {
             if w.write_all(&[b]).is_err() {
                 // Close the connection, not just this handle to it. After a
                 // write timeout the peer still holds its end open, and the
-                // reader thread's clone would stay blocked in read(): a
-                // listener would never get back to accept() and the next
-                // client would connect to a bridge that serves nobody.
+                // reader thread's clone would stay in read(): a listener
+                // would never get back to accept() and the next client would
+                // connect to a bridge that serves nobody. The shutdown tells
+                // the peer now and ends a blocked read on Unix; the reader's
+                // own check of `connected` (every TCP_READ_POLL) is what
+                // releases it on Windows.
                 let _ = w.shutdown(std::net::Shutdown::Both);
                 *guard = None;
                 self.connected

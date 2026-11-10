@@ -27,7 +27,10 @@ mod session;
 mod telnet;
 
 use crate::chipset::paula::PAULA_CLOCK_HZ;
-use crate::serial::{SerialSink, SerialTimeAnchor, TCP_INBOUND_QUEUE, TCP_WRITE_TIMEOUT};
+use crate::serial::{
+    tcp_read_poll_elapsed, SerialSink, SerialTimeAnchor, TCP_INBOUND_QUEUE, TCP_READ_POLL,
+    TCP_WRITE_TIMEOUT,
+};
 use crate::timebase::Instant;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -167,6 +170,17 @@ fn spawn_modem_reader(
             let mut buf = [0u8; 512];
             loop {
                 match stream.read(&mut buf) {
+                    Err(e) if tcp_read_poll_elapsed(&e) => {
+                        // Nothing to read for a poll interval: leave if this
+                        // connection was hung up or replaced meanwhile. A
+                        // shutdown alone does not end a blocked read on
+                        // Windows.
+                        let retired = writer.lock().unwrap().is_none()
+                            || generation.load(Ordering::Acquire) != my_generation;
+                        if retired {
+                            break;
+                        }
+                    }
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         for &b in &buf[..n] {
@@ -322,6 +336,7 @@ impl ModemTransport for TcpModemTransport {
         })?;
         let _ = stream.set_nodelay(true);
         let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
+        let _ = stream.set_read_timeout(Some(TCP_READ_POLL));
         let writer_clone = stream.try_clone().map_err(|_| DialError::Unreachable)?;
         let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let generation = self.install_connection(writer_clone);
@@ -425,6 +440,7 @@ impl ModemTransport for TcpModemTransport {
                     }
                     let _ = stream.set_nodelay(true);
                     let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
+                    let _ = stream.set_read_timeout(Some(TCP_READ_POLL));
                     *accept_pending.lock().unwrap() = Some(stream);
                     accept_ringing.store(true, Ordering::Release);
                 }
