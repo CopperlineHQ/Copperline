@@ -356,6 +356,11 @@ impl ModemTransport for TcpModemTransport {
         let mut guard = self.writer.lock().unwrap();
         if let Some(w) = guard.as_mut() {
             if w.write_all(&[b]).is_err() {
+                // Close the connection, not just this handle: after a write
+                // timeout the peer still holds its end open and the reader
+                // thread would stay blocked on it, keeping the call's socket
+                // alive after carrier was reported lost.
+                let _ = w.shutdown(Shutdown::Both);
                 *guard = None;
                 drop(guard);
                 self.carrier.store(false, Ordering::Release);
@@ -2595,6 +2600,42 @@ mod tests {
     }
 
     // ---- Real TCP tests ---------------------------------------------------
+
+    /// A peer that stops reading loses the call: the write timeout drops
+    /// carrier and closes the socket, so the peer sees the hang-up rather
+    /// than a connection that stays open with the reader still attached.
+    #[test]
+    fn tcp_dial_closes_the_call_when_the_peer_stops_reading() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = thread::spawn(move || listener.accept().unwrap().0);
+        let mut transport = TcpModemTransport::new();
+        assert!(transport.dial(&addr.to_string()).is_ok());
+        let mut peer = accepted.join().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while transport.carrier() {
+            assert!(
+                Instant::now() < deadline,
+                "writes to a stalled peer never timed out"
+            );
+            for _ in 0..4096 {
+                transport.write_byte(b'x');
+            }
+        }
+
+        // The peer drains what was sent and then reads the end of the call.
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut scratch = [0u8; 64 * 1024];
+        loop {
+            match peer.read(&mut scratch) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => break,
+                Err(e) => panic!("the call stayed open after carrier dropped: {e}"),
+            }
+        }
+    }
 
     #[test]
     fn tcp_dial_connects_and_relays_both_directions() {
