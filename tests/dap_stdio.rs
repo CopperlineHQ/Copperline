@@ -408,6 +408,12 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
             "entryPoint": "entry",
             "sourceMap": source_map,
             "timeoutMs": 120000,
+            // Pin the guest clock. Left unset, the adapter seeds it from
+            // the host clock at launch, and the cycle count of the
+            // profiled frame below depends on the time the guest reads,
+            // so whether the profile matched its golden depended on when
+            // the test ran. 1794340000 is 2026-11-10 19:46:40 UTC.
+            "rtcTime": 1794340000u64,
         }),
     );
     c.event("initialized");
