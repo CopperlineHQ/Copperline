@@ -2830,6 +2830,14 @@ the guest has no way to create one, so a symlink is treated as the host
 user deliberately grafting a directory into the mount, the same trust
 model as the UAE family.
 
+A name the guest creates has to be one ordinary file name to the host as
+well. Names containing `:`, `/`, `\` or a NUL, the names `.` and `..`, and
+names ending in `.uaem` are refused, so a created file, directory or rename
+target always lands inside the mount. On a Windows host the DOS device
+names (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, with or
+without an extension) and names ending in a dot or a space are refused too,
+because Windows would open a device or a differently named file instead.
+
 `volume` sets the AmigaDOS volume name (up to 30 characters, no `:` or
 `/`). `bootpri` enters the volume in the boot-device vote (-128..127;
 the default -128 means mounted but never booted from): hard-disk boot

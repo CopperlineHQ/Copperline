@@ -13,6 +13,10 @@ for the earlier release notes.
 - External floppy drives answer the /RDY ID probe while their motor is off,
   including before the first motor cycle, so boot-time probes can find DF1.
 - Covered or minimised windows no longer leak GPU staging memory.
+- A guest can no longer create a file, directory or rename target outside a
+  `[[filesys]]` host directory on Windows by putting a drive letter in the
+  name, nor open a DOS device such as `NUL` or `COM1` through one. Names
+  containing `:` are refused on every host.
 - Command-line help is written to stdout. Options accept `--flag=value`,
   misspelled options suggest close matches, and fatal desktop-launch errors
   appear in a native dialog.

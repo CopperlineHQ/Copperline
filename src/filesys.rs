@@ -2515,9 +2515,59 @@ fn is_creatable_name(comp: &str) -> bool {
         && !comp.contains('/')
         && !comp.contains('\\')
         && !comp.contains('\0')
+        // ':' ends a device or volume name on AmigaDOS and is never part of a
+        // file name there. A Windows host reads one as a drive-relative path
+        // ("D:x", which replaces the whole path it is joined to instead of
+        // extending it) or as an alternate data stream ("file:stream").
+        && !comp.contains(':')
         // The .uaem sidecars are ours: a guest file by that name would shadow
         // another file's attributes and vanish from directory listings.
         && !comp.to_ascii_lowercase().ends_with(".uaem")
+        && is_single_host_component(comp)
+        && !(cfg!(windows) && is_windows_alias_name(comp))
+}
+
+/// Whether the host's own path parser reads `comp` as exactly one ordinary
+/// name. The character checks in `is_creatable_name` are the rules we know
+/// about; this asks the host, so a spelling it treats as a root, a drive
+/// prefix, or a "here"/"up" step is refused even where no rule names it.
+fn is_single_host_component(comp: &str) -> bool {
+    let mut parts = Path::new(comp).components();
+    matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(name)), None) if name == std::ffi::OsStr::new(comp)
+    )
+}
+
+/// Whether Win32 would open something other than a file called `comp`. A DOS
+/// device name (CON, NUL, COM1, ...) names the device in every directory, with
+/// or without an extension, and trailing dots and spaces are dropped, so
+/// "x.uaem." is "x.uaem". Only a Windows host applies this (other hosts store
+/// these names as written); the predicate itself is host-independent so every
+/// platform's tests cover it.
+fn is_windows_alias_name(comp: &str) -> bool {
+    if comp.ends_with('.') || comp.ends_with(' ') {
+        return true;
+    }
+    let stem = comp.split('.').next().unwrap_or(comp).trim_end_matches(' ');
+    let stem = stem.to_ascii_uppercase();
+    if matches!(
+        stem.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) {
+        return true;
+    }
+    // COM0-COM9 and LPT0-LPT9. Win32 also accepts the Latin-1 superscript
+    // digits 1-3 as the unit, which an Amiga file name can carry.
+    ["COM", "LPT"].iter().any(|port| {
+        stem.strip_prefix(port).is_some_and(|unit| {
+            let mut unit = unit.chars();
+            matches!(
+                (unit.next(), unit.next()),
+                (Some('0'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'), None)
+            )
+        })
+    })
 }
 
 fn match_component_uncached(dir: &Path, comp: &str) -> Option<std::ffi::OsString> {
@@ -3229,6 +3279,13 @@ mod tests {
             b"Sub/../../outside.txt",
             b".",
             b"ReadMe.txt.uaem",
+            // A second ':' is not a volume prefix, so it stays in the leaf. A
+            // Windows host would read that leaf as a path on another drive or
+            // as an alternate data stream.
+            b"Test:D:outside.txt",
+            b"Sub/D:outside.txt",
+            b"Test:Sub/D:outside.txt",
+            b"Test:ReadMe.txt:stream",
         ] {
             assert!(
                 unit.resolve_for_create(0, escape).is_none(),
@@ -3237,7 +3294,119 @@ mod tests {
             );
         }
 
+        // The first ':' is still only the volume or assign prefix.
+        let rec = unit.resolve_for_create(0, b"Test:Sub/new.txt").unwrap();
+        assert!(rec.rel.file_name().unwrap() == "new.txt");
+
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The three packets that create a host name -- open for output, create
+    /// directory, and rename -- all refuse a leaf containing ':'. On a
+    /// Windows host "D:tmp" joined to the mount path replaces it, so the
+    /// object would land on another drive, and ParentDir() on the returned
+    /// lock would then hand the guest that drive's root.
+    #[test]
+    fn create_packets_refuse_a_drive_relative_leaf() {
+        let mut fs = FsTester::mounted("drive-leaf");
+        std::fs::write(fs.root.join("source.txt"), b"data").unwrap();
+        let listing = |root: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        fs.set_name(b"Test:D:tmp");
+        let (res1, _) = fs.send(ACTION_CREATE_DIR, [0, FsTester::NAME >> 2, 0]);
+        assert_eq!(res1, DOSFALSE, "CreateDir");
+
+        fs.set_name(b"Test:C:copperline.toml");
+        let (res1, _) = fs.send(
+            ACTION_FINDOUTPUT,
+            [FsTester::FH >> 2, 0, FsTester::NAME >> 2],
+        );
+        assert_eq!(res1, DOSFALSE, "Open(MODE_NEWFILE)");
+
+        // Rename takes a fourth argument: the target name, laid at BUF.
+        fs.set_name(b"source.txt");
+        let target = b"Test:D:moved.txt";
+        let mut bstr = vec![target.len() as u8];
+        bstr.extend_from_slice(target);
+        fs.set_buf(&bstr);
+        fs.bus
+            .write_long(FsTester::PKT + 20 + 4 * 3, FsTester::BUF >> 2);
+        let (res1, _) = fs.send(ACTION_RENAME_OBJECT, [0, FsTester::NAME >> 2, 0]);
+        assert_eq!(res1, DOSFALSE, "Rename");
+
+        // Nothing was created under any spelling, and the source is intact.
+        assert_eq!(listing(&fs.root), ["source.txt"]);
+        assert_eq!(std::fs::read(fs.root.join("source.txt")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn a_creatable_name_is_one_ordinary_host_component() {
+        for name in ["ReadMe.txt", "Shell-Startup", ".info", "a b", "caf\u{e9}"] {
+            assert!(is_creatable_name(name), "{name:?}");
+        }
+        for name in ["D:tmp", "C:", "file:stream", ":", "a/b", "a\\b", "..", "."] {
+            assert!(!is_creatable_name(name), "{name:?}");
+        }
+        assert!(is_single_host_component("plain"));
+        for name in ["", ".", "..", "a/b", "/abs"] {
+            assert!(!is_single_host_component(name), "{name:?}");
+        }
+    }
+
+    /// The names Win32 resolves to something other than the file asked for.
+    /// The predicate is host-independent; `is_creatable_name` applies it on a
+    /// Windows host only, where it keeps a guest away from the DOS devices
+    /// and from another file's `.uaem` sidecar.
+    #[test]
+    fn windows_alias_names_are_recognised() {
+        for name in [
+            "NUL",
+            "nul",
+            "CON",
+            "PRN",
+            "AUX",
+            "aux.txt",
+            "NUL.tar.gz",
+            "NUL .txt",
+            "COM1",
+            "com9.log",
+            "LPT0",
+            "COM\u{b9}",
+            "LPT\u{b3}",
+            "CONIN$",
+            "conout$",
+            "trailing.",
+            "trailing ",
+            "ReadMe.txt.uaem.",
+        ] {
+            assert!(is_windows_alias_name(name), "{name:?}");
+        }
+        for name in [
+            "NULL",
+            "CONSOLE",
+            "COM",
+            "COM10",
+            "COMA",
+            "LPT",
+            "auxiliary.txt",
+            "my.nul",
+            "ReadMe.txt",
+            ".info",
+            " leading",
+        ] {
+            assert!(!is_windows_alias_name(name), "{name:?}");
+        }
+        // Every host refuses what its own parser would misread; only Windows
+        // refuses the aliases, since other hosts store those names as written.
+        assert_eq!(is_creatable_name("NUL"), !cfg!(windows));
+        assert_eq!(is_creatable_name("trailing."), !cfg!(windows));
     }
 
     /// A handle on an existing file is writable, whichever way it was opened.
