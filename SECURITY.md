@@ -59,8 +59,11 @@ vulnerabilities on their own:
 - With a network board set to `net = "nat"`, open outbound connections,
   including to services listening on the host's loopback interface through
   the gateway address.
-- Stop the session or change its speed through the documented `uaelib` calls,
-  and write text to the terminal Copperline was started from.
+- Stop the session or change its speed through the documented `uaelib` calls.
+- Write bytes to the terminal Copperline was started from, through serial
+  output sent to stdout and the `uaelib` debug text call. Only NUL is
+  removed, so a guest can emit terminal control sequences; send that output
+  to a file when running software you do not trust.
 - Consume CPU time, and memory and disk space in proportion to the machine
   and media it was given.
 

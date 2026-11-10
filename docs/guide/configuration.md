@@ -3083,7 +3083,11 @@ host network backend:
   virtual gateway with no host privileges or setup, identically on Linux,
   macOS, and Windows. Configure the guest's TCP/IP stack with IP
   `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`, DNS `10.0.2.3`
-  (or let it BOOTP/DHCP). Outbound only, IPv4 only.
+  (or let it BOOTP/DHCP). Outbound only, IPv4 only. "Outbound" includes the
+  host itself: a connection to the gateway address `10.0.2.2` reaches the
+  host's loopback interface on the same port, so guest software can talk to
+  services listening on `127.0.0.1`. Do not enable NAT for a guest you would
+  not let connect to those.
 - `"bridge"` -- attaches complete Ethernet frames directly to `interface`, so
   the Amiga is a separate station on the physical LAN and can accept inbound
   connections from LAN peers. Use `copperline --list-net-interfaces` for exact
@@ -3205,6 +3209,10 @@ reason for wanting bridge mode, with none of its setup. `interface`,
 no interface of its own to configure. Raw ICMP (ping) is unaffected:
 `"host"` only handles TCP and UDP, and ICMP still goes through the board's
 smoltcp interface, which is fixed to `"loopback"` under `"host"`.
+Because the sockets are the host's own, guest software under `"host"` can
+connect to anything the host can, including services on `127.0.0.1`, and a
+guest server that binds the wildcard address listens on every host
+interface, where other machines on the network can reach it.
 
 `address` and `gateway` matter only under `"bridge"`. The defaults
 (`10.0.2.15/24` and `10.0.2.2`) are Copperline NAT's own virtual addresses:

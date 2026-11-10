@@ -31,6 +31,8 @@ for the earlier release notes.
 - A TCP serial or modem peer that stops reading no longer freezes the
   emulator: a write that cannot progress for one second drops the link.
   Input the guest has not read yet is limited to 64 KiB per link.
+- The browser build stops downloading a linked disk image as soon as it
+  passes the 64 MiB limit, including when the server sends no length.
 - Loading a save state logs a warning for each host file, directory, plugin
   module or network backend the state names that the running session had not
   opened. `SECURITY.md` now states which inputs are trusted: a save state has
