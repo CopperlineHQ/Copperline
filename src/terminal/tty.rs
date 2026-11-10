@@ -8,16 +8,23 @@
 //! the terminal is pointed at a log file instead -- the log would otherwise be
 //! printed over the picture -- and put back when the session ends, by `Drop`
 //! or by the panic hook, whichever comes first.
+//!
+//! Raw mode turns the terminal's own Ctrl+C and Ctrl+\ off, but the process
+//! can still be signalled from outside (`kill`, `timeout`, a closing SSH
+//! session). SIGTERM, SIGHUP, SIGQUIT and SIGINT are caught for the life of
+//! the session and reported through [`Terminal::end_signal`], so the session loop
+//! leaves the way F12 q does and the terminal is given back.
 
 use super::graphics::{self, FrameEncoder, Geometry, Placement, FRAME_IMAGE_IDS};
 use super::input::{Event, Parser};
+use super::LogTarget;
 use anyhow::{anyhow, bail, Context as _, Result};
 use std::fs::{File, OpenOptions};
 use std::io::Write as _;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -70,27 +77,211 @@ pub struct Capabilities {
 /// still gets its terminal mode restored.
 const RESTORE_WRITE_BUDGET: Duration = Duration::from_secs(1);
 
-/// What the panic hook needs to give the terminal back.
+/// How long the terminal must stay quiet, after it was told to stop
+/// reporting, for its input to count as drained, and the longest the
+/// drain waits for that on a terminal that keeps talking.
+const DRAIN_QUIET: Duration = Duration::from_millis(40);
+const DRAIN_BUDGET: Duration = Duration::from_millis(300);
+
+/// What it takes to give the terminal back: held by the session, and by the
+/// panic hook through [`RESTORE`].
+#[derive(Clone)]
 struct Restore {
     /// The blocking handle the terminal mode was read from.
     fd: RawFd,
     /// The non-blocking output handle, for writes that must not hang.
     out_fd: RawFd,
+    /// The non-blocking input handle, to discard what is still queued.
+    in_fd: RawFd,
     termios: libc::termios,
     log_path: Option<PathBuf>,
+    /// The protocol modes were turned on, so they are to be turned off. A
+    /// session that fails before that must not send [`LEAVE`]: it would
+    /// clear a screen the session never took over.
+    entered: bool,
+    /// Stops the writer thread, once one runs.
+    cancel: Option<Arc<AtomicBool>>,
 }
 
+/// The process's own session, for the panic hook. The session's `Drop`
+/// takes it back; whichever comes first does the restoring.
 static RESTORE: Mutex<Option<Restore>> = Mutex::new(None);
 
 fn restore_terminal(restore: &Restore) {
-    let deadline = Instant::now() + RESTORE_WRITE_BUDGET;
-    let _ = write_until(restore.out_fd, LEAVE.as_bytes(), || {
-        Instant::now() >= deadline
-    });
+    // The writer first: nothing may follow the restore sequence onto a
+    // screen that has been given back.
+    if let Some(cancel) = &restore.cancel {
+        cancel.store(true, Ordering::Relaxed);
+    }
+    if restore.entered {
+        let deadline = Instant::now() + RESTORE_WRITE_BUDGET;
+        let _ = write_until(restore.out_fd, LEAVE.as_bytes(), || {
+            Instant::now() >= deadline
+        });
+        discard_input(restore.in_fd);
+    }
+    // TCSANOW, not TCSAFLUSH: the latter waits for output to drain first,
+    // which a stalled link never does. The input was discarded above.
     // SAFETY: fd is the terminal this session opened and still owns, and
     // termios is the state tcgetattr read from it.
     unsafe {
         libc::tcsetattr(restore.fd, libc::TCSANOW, &restore.termios);
+    }
+}
+
+/// Throw away the input the terminal has queued and is still sending. Mouse
+/// and key reports made before the terminal acted on [`LEAVE`] are on their
+/// way or already waiting; left alone, the shell would read them as typed
+/// text once the session ends. Reads until the terminal has been quiet for
+/// [`DRAIN_QUIET`], for at most [`DRAIN_BUDGET`].
+fn discard_input(fd: RawFd) {
+    let started = Instant::now();
+    let mut quiet_since = started;
+    let mut buf = [0u8; 1024];
+    while started.elapsed() < DRAIN_BUDGET {
+        // SAFETY: buf is a live, writable slice; fd is an open descriptor.
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            quiet_since = Instant::now();
+            continue;
+        }
+        if n == 0 {
+            break;
+        }
+        let err = std::io::Error::last_os_error();
+        if !matches!(
+            err.kind(),
+            std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+        ) {
+            break;
+        }
+        let quiet = quiet_since.elapsed();
+        if quiet >= DRAIN_QUIET || wait_fd(fd, false, DRAIN_QUIET - quiet).is_err() {
+            break;
+        }
+    }
+    // Whatever arrived between the last read and now, in the line
+    // discipline's own queue.
+    // SAFETY: tcflush on an open descriptor; a failure (not a terminal)
+    // leaves nothing to flush.
+    unsafe {
+        libc::tcflush(fd, libc::TCIFLUSH);
+    }
+}
+
+/// The signals that end a session: what `kill`, `timeout`, a closing
+/// terminal or SSH connection, and `kill -INT`/`-QUIT` send. (The keyboard's
+/// own Ctrl+C and Ctrl+\ are keys for the machine in raw mode.)
+const END_SIGNALS: [libc::c_int; 4] = [libc::SIGTERM, libc::SIGHUP, libc::SIGQUIT, libc::SIGINT];
+
+/// The first end signal received, or 0.
+static END_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn on_end_signal(signal: libc::c_int) {
+    // Only an atomic store: async-signal-safe.
+    let _ = END_SIGNAL.compare_exchange(0, signal, Ordering::SeqCst, Ordering::SeqCst);
+}
+
+fn end_signal() -> Option<i32> {
+    match END_SIGNAL.load(Ordering::SeqCst) {
+        0 => None,
+        signal => Some(signal),
+    }
+}
+
+/// The session's handlers for [`END_SIGNALS`], put back as they were when
+/// dropped.
+struct SignalHandlers {
+    previous: Vec<(libc::c_int, libc::sigaction)>,
+}
+
+impl SignalHandlers {
+    fn install() -> Self {
+        END_SIGNAL.store(0, Ordering::SeqCst);
+        let mut previous = Vec::new();
+        for signal in END_SIGNALS {
+            // SAFETY: sigaction is plain data; the handler only stores to an
+            // atomic. SA_RESTART keeps other threads' system calls from
+            // failing with EINTR; the session loop polls, so it needs no
+            // interruption to notice.
+            unsafe {
+                let mut action: libc::sigaction = std::mem::zeroed();
+                action.sa_sigaction =
+                    on_end_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+                action.sa_flags = libc::SA_RESTART;
+                libc::sigemptyset(&mut action.sa_mask);
+                let mut old: libc::sigaction = std::mem::zeroed();
+                if libc::sigaction(signal, &action, &mut old) != 0 {
+                    continue;
+                }
+                if old.sa_sigaction == libc::SIG_IGN {
+                    // Ignored on purpose (nohup): stay ignored.
+                    libc::sigaction(signal, &old, std::ptr::null_mut());
+                    continue;
+                }
+                previous.push((signal, old));
+            }
+        }
+        Self { previous }
+    }
+}
+
+impl Drop for SignalHandlers {
+    fn drop(&mut self) {
+        for (signal, old) in self.previous.drain(..) {
+            // SAFETY: old is the action sigaction reported for this signal.
+            unsafe {
+                libc::sigaction(signal, &old, std::ptr::null_mut());
+            }
+        }
+    }
+}
+
+/// Create the session's log file. A named file is the user's own choice and
+/// is replaced like any output file. The default one goes in a directory
+/// other users may write to under a name they can predict, so it is only
+/// ever created -- never an existing file, never through a symlink -- and
+/// is readable by the owner alone.
+fn create_log(target: &LogTarget) -> Result<(File, PathBuf)> {
+    match target {
+        LogTarget::Named(path) => {
+            let file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .with_context(|| format!("creating the log file {}", path.display()))?;
+            Ok((file, path.clone()))
+        }
+        LogTarget::Private(dir) => {
+            let pid = std::process::id();
+            for attempt in 0..100u32 {
+                let name = if attempt == 0 {
+                    format!("copperline-terminal-{pid}.log")
+                } else {
+                    format!("copperline-terminal-{pid}-{attempt}.log")
+                };
+                let path = dir.join(name);
+                match OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&path)
+                {
+                    Ok(file) => return Ok((file, path)),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(e) => {
+                        return Err(e)
+                            .with_context(|| format!("creating the log file {}", path.display()))
+                    }
+                }
+            }
+            bail!(
+                "no free log file name in {} (pass --terminal-log PATH)",
+                dir.display()
+            )
+        }
     }
 }
 
@@ -188,32 +379,58 @@ pub struct Terminal {
     /// stdout/stderr descriptors pointed at the log, with their originals.
     redirected: Vec<(RawFd, OwnedFd)>,
     log_path: Option<PathBuf>,
+    /// How to give the terminal back.
+    restore: Restore,
+    /// This is the process's session: its restore data is also in
+    /// [`RESTORE`] for the panic hook, and it owns the process-wide pieces
+    /// (signal handlers, the stdout/stderr redirection).
+    process_session: bool,
+    signals: Option<SignalHandlers>,
     restored: bool,
 }
 
 impl Terminal {
     /// Open the controlling terminal, put it in raw mode, point a stdout or
-    /// stderr that is the terminal at `log_path`, and turn on the protocol
+    /// stderr that is the terminal at the log, and turn on the protocol
     /// modes. Fails without changing anything when there is no terminal.
-    pub fn open(log_path: &Path) -> Result<Self> {
+    pub fn open(log: &LogTarget) -> Result<Self> {
+        Self::open_device(Path::new("/dev/tty"), Some(log))
+    }
+
+    /// Open the terminal at `device`. With `process_log` this is the
+    /// process's own session: the log redirection, the panic hook and the
+    /// signal handlers are set up for it. Without, only the device itself
+    /// is touched, so tests can run sessions on pseudo-terminals side by
+    /// side.
+    fn open_device(device: &Path, process_log: Option<&LogTarget>) -> Result<Self> {
+        let open = |options: &mut OpenOptions, what: &str| {
+            options
+                .open(device)
+                .with_context(|| format!("opening {} {what}", device.display()))
+        };
         let tty = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC)
-            .open("/dev/tty")
-            .context("--terminal needs a terminal (opening /dev/tty)")?;
-        let input = OpenOptions::new()
-            .read(true)
-            .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open("/dev/tty")
-            .context("opening /dev/tty for input")?;
-        let output = OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK)
-            .open("/dev/tty")
-            .context("opening /dev/tty for output")?;
+            .open(device)
+            .with_context(|| {
+                format!("--terminal needs a terminal (opening {})", device.display())
+            })?;
+        let input = open(
+            OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK),
+            "for input",
+        )?;
+        let output = open(
+            OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NOCTTY | libc::O_CLOEXEC | libc::O_NONBLOCK),
+            "for output",
+        )?;
         let fd = tty.as_raw_fd();
         let out_fd = output.as_raw_fd();
+        let in_fd = input.as_raw_fd();
         // SAFETY: termios is plain data; tcgetattr fills it from an open fd.
         let mut termios: libc::termios = unsafe { std::mem::zeroed() };
         if unsafe { libc::tcgetattr(fd, &mut termios) } != 0 {
@@ -234,22 +451,43 @@ impl Terminal {
             output,
             redirected: Vec::new(),
             log_path: None,
+            restore: Restore {
+                fd,
+                out_fd,
+                in_fd,
+                termios,
+                log_path: None,
+                entered: false,
+                cancel: None,
+            },
+            process_session: process_log.is_some(),
+            signals: None,
             restored: false,
         };
-        *RESTORE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Restore {
-            fd,
-            out_fd,
-            termios,
-            log_path: None,
-        });
-        install_panic_hook();
-        terminal.redirect_output(log_path)?;
+        // From here on a failure drops `terminal`, which puts the terminal
+        // mode back; the screen is left alone until the modes go on.
+        if let Some(log) = process_log {
+            terminal.publish_restore();
+            install_panic_hook();
+            terminal.signals = Some(SignalHandlers::install());
+            terminal.redirect_output(log)?;
+        }
+        terminal.restore.entered = true;
+        terminal.publish_restore();
         terminal.write(ENTER.as_bytes())?;
         terminal.write(format!("\x1b[>{KEYBOARD_FLAGS}u").as_bytes())?;
         Ok(terminal)
     }
 
-    fn redirect_output(&mut self, log_path: &Path) -> Result<()> {
+    /// Give the panic hook the current restore data, if this is the
+    /// process's session.
+    fn publish_restore(&self) {
+        if self.process_session {
+            *RESTORE.lock().unwrap_or_else(|e| e.into_inner()) = Some(self.restore.clone());
+        }
+    }
+
+    fn redirect_output(&mut self, target: &LogTarget) -> Result<()> {
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
         let ttys: Vec<RawFd> = [libc::STDOUT_FILENO, libc::STDERR_FILENO]
@@ -260,8 +498,7 @@ impl Terminal {
         if ttys.is_empty() {
             return Ok(());
         }
-        let log = File::create(log_path)
-            .with_context(|| format!("creating the log file {}", log_path.display()))?;
+        let (log, log_path) = create_log(target)?;
         for fd in ttys {
             // SAFETY: dup/dup2 on open descriptors; the duplicate is owned.
             let saved = unsafe { libc::dup(fd) };
@@ -274,11 +511,15 @@ impl Terminal {
             }
             self.redirected.push((fd, saved));
         }
-        self.log_path = Some(log_path.to_path_buf());
-        if let Some(restore) = RESTORE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
-            restore.log_path = self.log_path.clone();
-        }
+        self.restore.log_path = Some(log_path.clone());
+        self.log_path = Some(log_path);
         Ok(())
+    }
+
+    /// The signal asking this session to end, once one has arrived. The
+    /// session loop polls this every pass and leaves as for a quit request.
+    pub fn end_signal(&self) -> Option<i32> {
+        self.signals.as_ref().and_then(|_| end_signal())
     }
 
     /// Where the log went, if it was redirected.
@@ -290,12 +531,22 @@ impl Terminal {
         write_fd(self.tty.as_raw_fd(), bytes).context("writing to the terminal")
     }
 
-    /// A handle on the terminal's non-blocking output, for the writer
-    /// thread.
-    pub fn output_handle(&self) -> Result<File> {
-        self.output
+    /// Start the writer thread on the terminal's non-blocking output (see
+    /// [`Output::start`]). Giving the terminal back, from `Drop` or the
+    /// panic hook, stops it first.
+    pub fn start_output(
+        &mut self,
+        geometry: Geometry,
+        min_interval: Option<Duration>,
+    ) -> Result<Output> {
+        let handle = self
+            .output
             .try_clone()
-            .context("duplicating the terminal handle")
+            .context("duplicating the terminal handle")?;
+        let output = Output::start(handle, geometry, min_interval)?;
+        self.restore.cancel = Some(Arc::clone(&output.shared.cancel));
+        self.publish_restore();
+        Ok(output)
     }
 
     /// Read what input is there, waiting up to `timeout` for some when there
@@ -398,9 +649,22 @@ impl Terminal {
         if std::mem::replace(&mut self.restored, true) {
             return;
         }
-        if let Some(restore) = RESTORE.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            restore_terminal(&restore);
+        // The process's session shares the job with the panic hook: when
+        // the hook got there first there is nothing left in RESTORE and
+        // nothing left to do to the terminal.
+        let pending = if self.process_session {
+            RESTORE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .take()
+                .is_some()
+        } else {
+            true
+        };
+        if pending {
+            restore_terminal(&self.restore);
         }
+        self.signals = None;
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
         for (fd, saved) in self.redirected.drain(..) {
@@ -429,18 +693,25 @@ fn install_panic_hook() {
         // mouse-reporting alternate screen; the panic itself goes to the log
         // with the rest of the output.
         if let Some(restore) = RESTORE.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            restore_terminal(&restore);
-            let note = match &restore.log_path {
-                Some(path) => format!("copperline: panicked; details in {}\r\n", path.display()),
-                None => "copperline: panicked\r\n".to_string(),
-            };
-            let deadline = Instant::now() + RESTORE_WRITE_BUDGET;
-            let _ = write_until(restore.out_fd, note.as_bytes(), || {
-                Instant::now() >= deadline
-            });
+            give_back_after_panic(&restore);
         }
         previous(info);
     }));
+}
+
+/// The panic hook's work: stop the writer, give the terminal back, and say
+/// where the details went. The session loop sees the stopped writer and
+/// ends (a panic on another thread does not unwind the loop's own).
+fn give_back_after_panic(restore: &Restore) {
+    restore_terminal(restore);
+    let note = match &restore.log_path {
+        Some(path) => format!("copperline: panicked; details in {}\r\n", path.display()),
+        None => "copperline: panicked\r\n".to_string(),
+    };
+    let deadline = Instant::now() + RESTORE_WRITE_BUDGET;
+    let _ = write_until(restore.out_fd, note.as_bytes(), || {
+        Instant::now() >= deadline
+    });
 }
 
 /// A frame for the writer thread.
@@ -488,8 +759,9 @@ struct Shared {
     mailbox: Mutex<Mailbox>,
     wake: Condvar,
     /// Set to stop at once: the writer gives up a write in progress and any
-    /// frame-rate wait instead of finishing them.
-    cancel: AtomicBool,
+    /// frame-rate wait instead of finishing them. Shared with the terminal's
+    /// restore data, so giving the terminal back stops the writer too.
+    cancel: Arc<AtomicBool>,
     stats: Stats,
     shown: Mutex<Shown>,
 }
@@ -523,7 +795,7 @@ impl Output {
                 ..Mailbox::default()
             }),
             wake: Condvar::new(),
-            cancel: AtomicBool::new(false),
+            cancel: Arc::new(AtomicBool::new(false)),
             stats: Stats::default(),
             shown: Mutex::new(Shown::default()),
         });
@@ -594,6 +866,18 @@ impl Output {
         *self.shared.shown.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Whether the writer is no longer writing: it was told to stop (by the
+    /// panic hook giving the terminal back, for one), its thread ended on a
+    /// failed write, or it panicked. Frames posted now go nowhere, so the
+    /// session should end.
+    pub fn stopped(&self) -> bool {
+        self.shared.cancel.load(Ordering::Relaxed)
+            || self
+                .thread
+                .as_ref()
+                .is_none_or(|thread| thread.is_finished())
+    }
+
     /// Stop the writer now. A frame still going out is cut short and a
     /// frame-rate wait ends early, so quitting never waits on the link; the
     /// terminal's restore sequence closes whatever command was cut.
@@ -638,6 +922,9 @@ fn writer(tty: File, shared: &Shared, min_interval: Option<Duration>) {
             let mut mailbox = shared.mailbox.lock().unwrap_or_else(|e| e.into_inner());
             while !mailbox.has_work() {
                 mailbox = shared.wake.wait(mailbox).unwrap_or_else(|e| e.into_inner());
+            }
+            if cancelled() {
+                return;
             }
             (
                 mailbox.frame.take(),
@@ -757,8 +1044,162 @@ fn writer(tty: File, shared: &Shared, min_interval: Option<Duration>) {
     }
 }
 
+/// A pseudo-terminal standing in for the user's terminal, so whole sessions
+/// can be tested without one.
+#[cfg(test)]
+pub(crate) mod testing {
+    use super::*;
+
+    /// The master side is the "terminal emulator": what the session writes
+    /// is read from it, and what is written to it is the session's input.
+    pub(crate) struct Pty {
+        pub master: File,
+        /// Kept open so the device outlives any one session on it.
+        _slave: File,
+        pub path: PathBuf,
+    }
+
+    impl Pty {
+        /// A pseudo-terminal of 160x50 cells, 10x20 pixels each (wide enough
+        /// that the status line is never cut short), left in a raw, no-echo
+        /// mode: the mode a session finds and must put back.
+        pub(crate) fn open() -> Self {
+            let (mut master, mut slave) = (0, 0);
+            let mut name = [0 as libc::c_char; 1024];
+            let mut size = libc::winsize {
+                ws_row: 50,
+                ws_col: 160,
+                ws_xpixel: 1600,
+                ws_ypixel: 1000,
+            };
+            // The window-size parameter is a const pointer on Linux and a
+            // mutable one on macOS; a raw mutable pointer suits both.
+            let size: *mut libc::winsize = &mut size;
+            // SAFETY: openpty fills two fresh descriptors and a path of at
+            // most PATH_MAX bytes into buffers this function owns, and
+            // reads the window size from a live value.
+            let rc = unsafe {
+                libc::openpty(
+                    &mut master,
+                    &mut slave,
+                    name.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    size,
+                )
+            };
+            assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+            // SAFETY: both descriptors are open and owned from here on; the
+            // name is NUL-terminated.
+            let (master, slave, path) = unsafe {
+                (
+                    File::from_raw_fd(master),
+                    File::from_raw_fd(slave),
+                    std::ffi::CStr::from_ptr(name.as_ptr())
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            };
+            // SAFETY: termios calls on the open slave.
+            unsafe {
+                let mut mode: libc::termios = std::mem::zeroed();
+                assert_eq!(libc::tcgetattr(slave.as_raw_fd(), &mut mode), 0);
+                libc::cfmakeraw(&mut mode);
+                assert_eq!(libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &mode), 0);
+                let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+                libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+            Self {
+                master,
+                _slave: slave,
+                path: path.into(),
+            }
+        }
+
+        /// A session on this pseudo-terminal that touches nothing else in
+        /// the process (no log redirection, panic hook or signal handlers).
+        pub(crate) fn session(&self) -> Result<Terminal> {
+            Terminal::open_device(&self.path, None)
+        }
+
+        /// Send `bytes` to the session, as the terminal's input.
+        pub(crate) fn send(&self, bytes: &[u8]) {
+            write_fd(self.master.as_raw_fd(), bytes).expect("writing to the pty");
+        }
+
+        /// Read what the session has written since the last call, waiting
+        /// up to `wait` for something when there is nothing yet.
+        pub(crate) fn take_output(&self, wait: Duration) -> Vec<u8> {
+            let fd = self.master.as_raw_fd();
+            let mut out = Vec::new();
+            let mut buf = [0u8; 8192];
+            let deadline = Instant::now() + wait;
+            loop {
+                // SAFETY: buf is a live, writable slice; fd is open.
+                let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+                if n > 0 {
+                    out.extend_from_slice(&buf[..n as usize]);
+                    continue;
+                }
+                let left = deadline.saturating_duration_since(Instant::now());
+                if !out.is_empty() || left.is_zero() || n == 0 {
+                    return out;
+                }
+                let _ = wait_fd(fd, false, left.min(Duration::from_millis(20)));
+            }
+        }
+
+        /// Read the session's output until it contains `needle`, returning
+        /// everything read. Panics after ten seconds without it.
+        pub(crate) fn output_until(&self, needle: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !contains(&out, needle) {
+                assert!(
+                    Instant::now() < deadline,
+                    "the session never wrote {:?}; it wrote {:?}",
+                    String::from_utf8_lossy(needle),
+                    String::from_utf8_lossy(&out)
+                );
+                out.extend(self.take_output(Duration::from_millis(50)));
+            }
+            out
+        }
+
+        /// The terminal mode the device is in now.
+        pub(crate) fn mode(&self) -> libc::termios {
+            // SAFETY: tcgetattr fills plain data from the open slave.
+            unsafe {
+                let mut mode: libc::termios = std::mem::zeroed();
+                assert_eq!(libc::tcgetattr(self._slave.as_raw_fd(), &mut mode), 0);
+                mode
+            }
+        }
+
+        /// Input the session left unread, as the shell would find it.
+        pub(crate) fn unread_input(&self) -> Vec<u8> {
+            let slave = OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+                .open(&self.path)
+                .expect("reopening the pty");
+            let mut buf = [0u8; 4096];
+            // SAFETY: buf is a live, writable slice; the descriptor is open.
+            let n = unsafe { libc::read(slave.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            buf[..n.max(0) as usize].to_vec()
+        }
+    }
+
+    pub(crate) fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    pub(crate) const ENTER_BYTES: &[u8] = ENTER.as_bytes();
+    pub(crate) const LEAVE_BYTES: &[u8] = LEAVE.as_bytes();
+}
+
 #[cfg(test)]
 mod tests {
+    use super::testing::{contains, Pty};
     use super::*;
     use std::io::Read as _;
 
@@ -858,5 +1299,251 @@ mod tests {
             started.elapsed()
         );
         drain.join().unwrap();
+    }
+    fn nonblocking(file: &File) {
+        let fd = file.as_raw_fd();
+        // SAFETY: fcntl on a descriptor the caller owns.
+        unsafe {
+            libc::fcntl(
+                fd,
+                libc::F_SETFL,
+                libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+            );
+        }
+    }
+
+    /// Restore data over pipes: what the session writes to give the
+    /// terminal back comes out of the first, and the second holds input
+    /// the terminal sent that nobody read.
+    fn piped_restore(entered: bool) -> (Restore, File, File, File, File) {
+        let (out_read, out_write) = pipe();
+        let (in_read, in_write) = pipe();
+        for file in [&out_read, &out_write, &in_read] {
+            nonblocking(file);
+        }
+        let restore = Restore {
+            // Not a terminal: setting its mode fails and changes nothing.
+            fd: out_write.as_raw_fd(),
+            out_fd: out_write.as_raw_fd(),
+            in_fd: in_read.as_raw_fd(),
+            // SAFETY: termios is plain data.
+            termios: unsafe { std::mem::zeroed() },
+            log_path: None,
+            entered,
+            cancel: None,
+        };
+        (restore, out_read, out_write, in_read, in_write)
+    }
+
+    fn read_available(file: &mut File) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let _ = file.read_to_end(&mut bytes);
+        bytes
+    }
+
+    #[test]
+    fn a_session_that_never_entered_leaves_the_screen_alone() {
+        let (restore, mut out_read, _out_write, _in_read, _in_write) = piped_restore(false);
+        restore_terminal(&restore);
+        assert_eq!(read_available(&mut out_read), b"");
+
+        let (restore, mut out_read, _out_write, _in_read, _in_write) = piped_restore(true);
+        restore_terminal(&restore);
+        assert_eq!(read_available(&mut out_read), LEAVE.as_bytes());
+    }
+
+    /// Reports the terminal sent before it stopped reporting are thrown
+    /// away with the session, not left for the shell to read as typing.
+    #[test]
+    fn restoring_discards_input_the_session_never_read() {
+        let (restore, _out_read, _out_write, mut in_read, mut in_write) = piped_restore(true);
+        in_write.write_all(b"\x1b[<35;120;80M\x1b[97;1:3u").unwrap();
+        // More arrives while the restore is already under way.
+        let late = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(15));
+            in_write.write_all(b"\x1b[<35;121;80M").unwrap();
+            in_write
+        });
+        let started = Instant::now();
+        restore_terminal(&restore);
+        let _in_write = late.join().unwrap();
+        assert_eq!(read_available(&mut in_read), b"");
+        assert!(started.elapsed() >= DRAIN_QUIET);
+        assert!(started.elapsed() < DRAIN_BUDGET + Duration::from_secs(1));
+    }
+
+    /// A terminal that never stops sending cannot hold the restore up.
+    #[test]
+    fn draining_a_terminal_that_keeps_talking_is_bounded() {
+        let (restore, _out_read, _out_write, _in_read, mut in_write) = piped_restore(true);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_writer = Arc::clone(&stop);
+        let chatter = std::thread::spawn(move || {
+            while !stop_writer.load(Ordering::Relaxed) {
+                if in_write.write_all(b"\x1b[<35;1;1M").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let started = Instant::now();
+        restore_terminal(&restore);
+        let took = started.elapsed();
+        stop.store(true, Ordering::Relaxed);
+        chatter.join().unwrap();
+        // No lower bound beyond the quiet period: on a loaded machine the
+        // chatter itself can pause for longer than that.
+        assert!(took >= DRAIN_QUIET, "gave up after {took:?}");
+        assert!(
+            took < DRAIN_BUDGET + Duration::from_secs(1),
+            "took {took:?}"
+        );
+    }
+
+    /// After a panic the terminal is given back at once, so the writer must
+    /// stop: a frame it finished afterwards would land on the user's shell.
+    #[test]
+    fn giving_the_terminal_back_after_a_panic_stops_the_writer() {
+        let (frames_read, frames_write) = pipe();
+        let drain = std::thread::spawn(move || {
+            let mut frames_read = frames_read;
+            let mut sink = Vec::new();
+            let _ = frames_read.read_to_end(&mut sink);
+        });
+        let output = Output::start(frames_write, PANE, None).unwrap();
+        output.post_frame(&noisy_frame(64, 40, 3), 64, 40);
+        wait_for("the first frame", || {
+            output.stats().frames.load(Ordering::Relaxed) == 1
+        });
+        assert!(!output.stopped());
+
+        let (mut restore, mut out_read, _out_write, _in_read, _in_write) = piped_restore(true);
+        restore.cancel = Some(Arc::clone(&output.shared.cancel));
+        restore.log_path = Some(PathBuf::from("/tmp/session.log"));
+        give_back_after_panic(&restore);
+        assert!(output.stopped());
+        let written = read_available(&mut out_read);
+        assert!(written.starts_with(LEAVE.as_bytes()));
+        assert!(contains(&written, b"panicked; details in /tmp/session.log"));
+
+        // A frame posted now is not written, and the thread ends.
+        output.post_frame(&noisy_frame(64, 40, 4), 64, 40);
+        wait_for("the writer to end", || {
+            output.thread.as_ref().unwrap().is_finished()
+        });
+        assert_eq!(output.stats().frames.load(Ordering::Relaxed), 1);
+        drop(output);
+        drain.join().unwrap();
+    }
+
+    fn handler_of(signal: libc::c_int) -> libc::sighandler_t {
+        // SAFETY: a null new action only queries the current one.
+        unsafe {
+            let mut current: libc::sigaction = std::mem::zeroed();
+            libc::sigaction(signal, std::ptr::null(), &mut current);
+            current.sa_sigaction
+        }
+    }
+
+    /// kill, timeout and a closing SSH session reach the process as
+    /// signals; the session notes them and puts the old handling back when
+    /// it ends.
+    #[test]
+    fn end_signals_are_noted_and_the_old_handlers_come_back() {
+        let ours = on_end_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        let before: Vec<_> = END_SIGNALS.iter().map(|&s| handler_of(s)).collect();
+        let handlers = SignalHandlers::install();
+        assert_eq!(end_signal(), None);
+        for &signal in &END_SIGNALS {
+            assert_eq!(handler_of(signal), ours, "signal {signal}");
+        }
+        // SAFETY: the handler for SIGTERM is ours and only stores a flag.
+        unsafe {
+            libc::raise(libc::SIGTERM);
+        }
+        assert_eq!(end_signal(), Some(libc::SIGTERM));
+        // The first signal is the one reported.
+        unsafe {
+            libc::raise(libc::SIGHUP);
+        }
+        assert_eq!(end_signal(), Some(libc::SIGTERM));
+        drop(handlers);
+        let after: Vec<_> = END_SIGNALS.iter().map(|&s| handler_of(s)).collect();
+        assert_eq!(after, before);
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-terminal-test-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The default log lives in the shared temporary directory under a
+    /// name anyone can predict: it is created new and private, and a file
+    /// or symlink already at that name is left exactly as it was.
+    #[test]
+    fn the_default_log_is_created_new_and_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = scratch_dir("log");
+        let pid = std::process::id();
+        let first = dir.join(format!("copperline-terminal-{pid}.log"));
+        let second = dir.join(format!("copperline-terminal-{pid}-1.log"));
+        let victim = dir.join("victim");
+        std::fs::write(&victim, b"keep me").unwrap();
+        std::fs::write(&first, b"someone else's").unwrap();
+        std::os::unix::fs::symlink(&victim, &second).unwrap();
+
+        let (mut log, path) = create_log(&LogTarget::Private(dir.clone())).unwrap();
+        log.write_all(b"session log").unwrap();
+        assert_eq!(path, dir.join(format!("copperline-terminal-{pid}-2.log")));
+        assert_eq!(std::fs::read(&path).unwrap(), b"session log");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(std::fs::read(&first).unwrap(), b"someone else's");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
+
+        // A log the user named is theirs to replace.
+        let named = dir.join("named.log");
+        std::fs::write(&named, b"an older, longer log").unwrap();
+        let (mut log, path) = create_log(&LogTarget::Named(named.clone())).unwrap();
+        log.write_all(b"new").unwrap();
+        assert_eq!(path, named);
+        assert_eq!(std::fs::read(&named).unwrap(), b"new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A whole session on a pseudo-terminal: the modes go on, raw mode is
+    /// set, and ending it turns the modes off, puts the terminal mode back
+    /// and leaves no unread reports behind.
+    #[test]
+    fn a_session_takes_the_terminal_and_gives_it_back() {
+        let pty = Pty::open();
+        let before = pty.mode();
+        let terminal = pty.session().unwrap();
+        let entered = pty.output_until(format!("\x1b[>{KEYBOARD_FLAGS}u").as_bytes());
+        assert!(entered.starts_with(ENTER.as_bytes()));
+        assert_eq!(pty.mode().c_lflag & (libc::ICANON | libc::ISIG), 0);
+
+        // Reports the session has not read by the time it ends.
+        pty.send(b"\x1b[<35;120;80M\x1b[97;1:3u");
+        drop(terminal);
+        let left = pty.output_until(LEAVE.as_bytes());
+        assert!(left.ends_with(LEAVE.as_bytes()));
+        assert_eq!(pty.unread_input(), b"");
+        let after = pty.mode();
+        assert_eq!(after.c_lflag, before.c_lflag);
+        assert_eq!(after.c_iflag, before.c_iflag);
+        assert_eq!(after.c_oflag, before.c_oflag);
+    }
+
+    #[test]
+    fn opening_a_device_that_is_not_there_changes_nothing() {
+        let missing = Path::new("/nonexistent/copperline-no-such-tty");
+        let error = Terminal::open_device(missing, None).err().unwrap();
+        assert!(format!("{error:#}").contains("/nonexistent/copperline-no-such-tty"));
     }
 }

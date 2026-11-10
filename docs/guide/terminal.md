@@ -55,7 +55,14 @@ Keys reach the Amiga as in a window: the same keymap (F11 is Help, the Super
 keys are the Amiga keys), and the same keyboard joystick bindings from
 `[input]`. Copperline uses the physical key the terminal reports, so the
 layout set on the Amiga decides which character a key types. Pasted text is
-typed on the Amiga keyboard, as with Paste as Keystrokes in the window.
+typed on the Amiga keyboard, as with Paste as Keystrokes in the window: the
+typing starts about a third of a second after the paste, once the paste
+shortcut's own modifier keys are up again, and a single paste is limited to
+64 KiB (the status line says when one was cut short).
+
+On a terminal without the keyboard protocol, Alt+`[` and Alt+`O` send the two
+bytes that also begin a control sequence. Copperline takes them for the keys
+when nothing follows within a twentieth of a second.
 
 The terminal's pointer moves the Amiga mouse by the distance it travels over the
 picture, as an uncaptured window does. The terminal cannot capture the pointer,
@@ -84,11 +91,34 @@ The status line at the bottom shows the emulated time, whether the machine is
 running, paused or warping, the frame rate and bandwidth of the picture, and
 messages such as a saved screenshot's path.
 
+## Ending a session
+
+F12 then `q` is the way out from the keyboard. The terminal is in raw mode
+while Copperline owns it, so Ctrl+C and Ctrl+\ are keys for the Amiga, not
+interrupts.
+
+A session also ends cleanly when the process is sent SIGTERM, SIGHUP, SIGINT
+or SIGQUIT -- by `kill`, by `timeout`, or because the terminal window or SSH
+connection closed. Copperline then leaves as it does for a quit and exits
+with status 128 plus the signal number (143 for SIGTERM). It likewise ends,
+with an error, when the terminal stops accepting output or goes away, and
+when a capture flag has written its capture.
+
+However the session ends, including after an internal error, Copperline turns
+off the modes it turned on (alternate screen, mouse and focus reporting,
+bracketed paste, the keyboard protocol), restores the terminal's own mode,
+and discards the mouse and key reports the terminal had already sent, so they
+do not appear at the shell prompt as typed text. SIGKILL cannot be handled:
+after `kill -9`, type `reset` and press Enter to get the terminal back.
+
 ## Log output and sound
 
 While Copperline owns the terminal, its log goes to a file instead of the
 screen: `copperline-terminal-PID.log` in the temporary directory, or the path
 given with `--terminal-log PATH`. The path is printed when the session ends.
+The default file is always a new one, readable only by you: if a file of that
+name is already there, a number is added to the name instead of the file
+being reused. A file named with `--terminal-log` is replaced.
 
 Sound plays on the machine Copperline runs on, as in a window. On a remote
 machine with no sound device, pass `--noaudio`.

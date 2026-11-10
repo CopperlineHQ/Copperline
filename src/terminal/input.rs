@@ -153,7 +153,12 @@ pub enum Event {
     Key(KeyReport),
     Mouse(MouseReport),
     Focus(bool),
-    Paste(String),
+    /// A bracketed paste. `truncated` when it was longer than [`MAX_PASTE`]
+    /// or was cut short because its end marker never came.
+    Paste {
+        text: String,
+        truncated: bool,
+    },
     /// `CSI ? flags u`: the Kitty keyboard enhancement flags in force.
     KeyboardFlags(u32),
     /// `CSI ? ... c`: the primary device attributes reply. Terminals answer
@@ -184,17 +189,55 @@ const PASTE_END: &[u8] = b"\x1b[201~";
 /// Real reports are tens of bytes; past this it is noise, and dropped.
 const MAX_PENDING: usize = 64 * 1024;
 
+/// The most bytes of one bracketed paste kept. A paste is typed into the
+/// machine a key at a time, so this is already hours of typing; the rest of
+/// a longer one is read and dropped, up to its end marker.
+pub const MAX_PASTE: usize = 64 * 1024;
+
+/// A bracketed paste being collected.
+#[derive(Default)]
+struct PasteBuffer {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl PasteBuffer {
+    fn extend(&mut self, bytes: &[u8]) {
+        let room = MAX_PASTE - self.bytes.len();
+        self.truncated |= bytes.len() > room;
+        self.bytes
+            .extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
+
+    fn finish(self, truncated: bool) -> Event {
+        Event::Paste {
+            text: String::from_utf8_lossy(&self.bytes).into_owned(),
+            truncated: self.truncated || truncated,
+        }
+    }
+}
+
 /// Incremental parser: bytes go in as they arrive, complete events come out,
 /// and a sequence split across reads waits for the rest.
 #[derive(Default)]
 pub struct Parser {
     pending: Vec<u8>,
-    paste: Option<Vec<u8>>,
+    paste: Option<PasteBuffer>,
+    /// The terminal does not disambiguate escape codes (no Kitty keyboard
+    /// protocol): Alt+`[` and Alt+`O` arrive as the two bytes that also
+    /// start a control sequence. See [`Parser::ambiguous_prefix_pending`].
+    legacy_keyboard: bool,
 }
 
 impl Parser {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Say whether the terminal reports keys the legacy way, where a key can
+    /// send the first bytes of a control sequence.
+    pub fn set_legacy_keyboard(&mut self, legacy: bool) {
+        self.legacy_keyboard = legacy;
     }
 
     /// Parse `bytes` and append the events completed so far to `out`.
@@ -205,16 +248,15 @@ impl Parser {
             if let Some(paste) = self.paste.as_mut() {
                 let rest = &self.pending[pos..];
                 if let Some(end) = find(rest, PASTE_END) {
-                    paste.extend_from_slice(&rest[..end]);
-                    let text = String::from_utf8_lossy(paste).into_owned();
-                    self.paste = None;
-                    out.push(Event::Paste(text));
+                    paste.extend(&rest[..end]);
+                    let paste = self.paste.take().unwrap_or_default();
+                    out.push(paste.finish(false));
                     pos += end + PASTE_END.len();
                     continue;
                 }
                 // Keep a possible partial terminator for the next read.
                 let keep = partial_suffix(rest, PASTE_END);
-                paste.extend_from_slice(&rest[..rest.len() - keep]);
+                paste.extend(&rest[..rest.len() - keep]);
                 pos = self.pending.len() - keep;
                 break;
             }
@@ -222,7 +264,7 @@ impl Parser {
                 Parsed::Event(event, used) => {
                     pos += used;
                     match event {
-                        Some(Inner::PasteStart) => self.paste = Some(Vec::new()),
+                        Some(Inner::PasteStart) => self.paste = Some(PasteBuffer::default()),
                         Some(Inner::Event(event)) => out.push(event),
                         None => {}
                     }
@@ -236,20 +278,67 @@ impl Parser {
         }
     }
 
-    /// Whether all that is waiting is a lone ESC: the Escape key on a
-    /// terminal not reporting it as a sequence, or the first byte of a
-    /// sequence still on its way. Only time tells which.
-    pub fn lone_escape_pending(&self) -> bool {
-        self.pending == [ESC]
+    /// Whether all that is waiting is a prefix only time can tell apart
+    /// from a key. A lone ESC is the Escape key on a terminal not reporting
+    /// it as a sequence, or the first byte of a sequence still on its way.
+    /// On a legacy keyboard, `ESC [` and `ESC O` are Alt+`[` and Alt+`O`,
+    /// or the start of a control sequence; left waiting for a final byte
+    /// that is never coming, they would swallow the keys typed next.
+    pub fn ambiguous_prefix_pending(&self) -> bool {
+        if self.paste.is_some() {
+            return false;
+        }
+        match self.pending.as_slice() {
+            [ESC] => true,
+            [ESC, b'[' | b'O'] => self.legacy_keyboard,
+            _ => false,
+        }
     }
 
-    /// No more bytes followed a lone ESC: it was the Escape key. Any other
-    /// unfinished sequence is left waiting for the rest of its bytes, however
-    /// long the link takes to deliver them.
-    pub fn flush_lone_escape(&mut self, out: &mut Vec<Event>) {
-        if self.lone_escape_pending() {
-            out.push(Event::Key(tap(TermKey::Escape, Mods::default())));
-            self.pending.clear();
+    /// Whether the ambiguous prefix waiting is a lone ESC (as opposed to a
+    /// legacy two-byte one).
+    pub fn lone_escape_pending(&self) -> bool {
+        self.paste.is_none() && self.pending == [ESC]
+    }
+
+    /// No more bytes followed an ambiguous prefix: it was the key. Any
+    /// longer unfinished sequence is left waiting for the rest of its bytes,
+    /// however long the link takes to deliver them.
+    pub fn flush_ambiguous_prefix(&mut self, out: &mut Vec<Event>) {
+        if !self.ambiguous_prefix_pending() {
+            return;
+        }
+        let pending = std::mem::take(&mut self.pending);
+        match pending.as_slice() {
+            [ESC] => out.push(Event::Key(tap(TermKey::Escape, Mods::default()))),
+            [ESC, key] => {
+                if let Parsed::Event(Some(Inner::Event(Event::Key(mut report))), _) =
+                    parse_legacy_text(&[*key])
+                {
+                    report.mods.0 |= Mods::ALT;
+                    out.push(Event::Key(report));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether a bracketed paste has started and its end marker has not
+    /// come yet. Everything read meanwhile is paste text, host keys
+    /// included.
+    pub fn paste_open(&self) -> bool {
+        self.paste.is_some()
+    }
+
+    /// The terminal went quiet inside a paste: its end marker was lost.
+    /// Deliver what came, marked truncated, and go back to reading keys.
+    pub fn end_stale_paste(&mut self, out: &mut Vec<Event>) {
+        if let Some(mut paste) = self.paste.take() {
+            // What is left waiting is paste text that only looked like the
+            // start of the end marker.
+            let rest = std::mem::take(&mut self.pending);
+            paste.extend(&rest);
+            out.push(paste.finish(true));
         }
     }
 }
@@ -865,10 +954,117 @@ mod tests {
         let mut out = Vec::new();
         parser.feed(b"\x1b", &mut out);
         assert!(out.is_empty());
-        assert!(parser.lone_escape_pending());
-        parser.flush_lone_escape(&mut out);
+        assert!(parser.ambiguous_prefix_pending());
+        parser.flush_ambiguous_prefix(&mut out);
         assert_eq!(out, vec![key(TermKey::Escape, 0, KeyAction::Press, true)]);
-        assert!(!parser.lone_escape_pending());
+        assert!(!parser.ambiguous_prefix_pending());
+    }
+
+    /// On a terminal without the Kitty keyboard protocol, Alt+[ and Alt+O
+    /// send the bytes that start a CSI or SS3 sequence. Nothing follows
+    /// them, so they must not wait for a final byte and take the next keys
+    /// typed as its parameters.
+    #[test]
+    fn a_legacy_alt_key_that_looks_like_a_sequence_start_times_out() {
+        for (bytes, ch, mods) in [
+            (&b"\x1b["[..], '[', Mods::ALT),
+            (&b"\x1bO"[..], 'o', Mods::ALT | Mods::SHIFT),
+        ] {
+            let mut parser = Parser::new();
+            parser.set_legacy_keyboard(true);
+            let mut out = Vec::new();
+            parser.feed(bytes, &mut out);
+            assert!(out.is_empty());
+            assert!(parser.ambiguous_prefix_pending());
+            parser.flush_ambiguous_prefix(&mut out);
+            assert_eq!(
+                out,
+                vec![key(TermKey::Char(ch), mods, KeyAction::Press, true)]
+            );
+            // The keys typed afterwards are keys, not the sequence's tail.
+            out.clear();
+            parser.feed(b"1a", &mut out);
+            assert_eq!(
+                out,
+                vec![
+                    key(TermKey::Char('1'), 0, KeyAction::Press, true),
+                    key(TermKey::Char('a'), 0, KeyAction::Press, true),
+                ]
+            );
+        }
+        // With the Kitty protocol those keys arrive as CSI u, so the same
+        // bytes can only be a sequence split across reads: they wait.
+        let mut parser = Parser::new();
+        let mut out = Vec::new();
+        parser.feed(b"\x1b[", &mut out);
+        assert!(!parser.ambiguous_prefix_pending());
+        parser.flush_ambiguous_prefix(&mut out);
+        parser.feed(b"A", &mut out);
+        assert_eq!(out, vec![key(TermKey::Up, 0, KeyAction::Press, false)]);
+        // A legacy sequence that has got past its introducer waits too.
+        let mut parser = Parser::new();
+        parser.set_legacy_keyboard(true);
+        out.clear();
+        parser.feed(b"\x1b[1;", &mut out);
+        assert!(!parser.ambiguous_prefix_pending());
+        parser.feed(b"5A", &mut out);
+        assert_eq!(
+            out,
+            vec![key(TermKey::Up, Mods::CTRL, KeyAction::Press, false)]
+        );
+    }
+
+    /// A paste is typed into the machine a key at a time, so the parser
+    /// keeps a bounded amount and drops the rest up to the end marker.
+    #[test]
+    fn a_paste_is_bounded_and_the_keys_after_it_still_arrive() {
+        let mut parser = Parser::new();
+        let mut out = Vec::new();
+        parser.feed(b"\x1b[200~", &mut out);
+        let chunk = vec![b'x'; 4096];
+        for _ in 0..(MAX_PASTE / chunk.len()) + 8 {
+            parser.feed(&chunk, &mut out);
+            assert!(out.is_empty());
+            assert!(parser.paste.as_ref().unwrap().bytes.len() <= MAX_PASTE);
+            assert!(parser.pending.len() < PASTE_END.len());
+        }
+        parser.feed(b"\x1b[201~q", &mut out);
+        assert_eq!(out.len(), 2);
+        match &out[0] {
+            Event::Paste { text, truncated } => {
+                assert_eq!(text.len(), MAX_PASTE);
+                assert!(truncated);
+            }
+            other => panic!("expected a paste, got {other:?}"),
+        }
+        assert_eq!(out[1], key(TermKey::Char('q'), 0, KeyAction::Press, true));
+    }
+
+    /// A paste whose end marker is lost must not hold the keyboard for the
+    /// rest of the session: the session ends it once the terminal is quiet.
+    #[test]
+    fn a_paste_without_its_end_marker_can_be_ended() {
+        let mut parser = Parser::new();
+        let mut out = Vec::new();
+        parser.feed(b"\x1b[200~hello\x1b[20", &mut out);
+        assert!(out.is_empty());
+        assert!(parser.paste_open());
+        assert!(!parser.ambiguous_prefix_pending());
+        parser.end_stale_paste(&mut out);
+        assert_eq!(
+            out,
+            vec![Event::Paste {
+                text: "hello\x1b[20".into(),
+                truncated: true
+            }]
+        );
+        assert!(!parser.paste_open());
+        out.clear();
+        parser.feed(b"q", &mut out);
+        assert_eq!(
+            out,
+            vec![key(TermKey::Char('q'), 0, KeyAction::Press, true)]
+        );
     }
 
     #[test]
@@ -878,8 +1074,8 @@ mod tests {
         let mut parser = Parser::new();
         let mut out = Vec::new();
         parser.feed(b"\x1b[97;", &mut out);
-        assert!(!parser.lone_escape_pending());
-        parser.flush_lone_escape(&mut out);
+        assert!(!parser.ambiguous_prefix_pending());
+        parser.flush_ambiguous_prefix(&mut out);
         assert!(out.is_empty());
         parser.feed(b"1:3u", &mut out);
         assert_eq!(
@@ -889,9 +1085,15 @@ mod tests {
         // The same for a paste's terminator split across reads.
         out.clear();
         parser.feed(b"\x1b[200~hi\x1b[20", &mut out);
-        parser.flush_lone_escape(&mut out);
+        parser.flush_ambiguous_prefix(&mut out);
         parser.feed(b"1~", &mut out);
-        assert_eq!(out, vec![Event::Paste("hi".into())]);
+        assert_eq!(
+            out,
+            vec![Event::Paste {
+                text: "hi".into(),
+                truncated: false
+            }]
+        );
     }
 
     #[test]
@@ -980,7 +1182,10 @@ mod tests {
         assert_eq!(
             out,
             vec![
-                Event::Paste("echo hi".into()),
+                Event::Paste {
+                    text: "echo hi".into(),
+                    truncated: false,
+                },
                 key(TermKey::Char('x'), 0, KeyAction::Press, true),
             ]
         );

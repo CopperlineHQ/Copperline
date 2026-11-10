@@ -14,7 +14,10 @@ for the earlier release notes.
   Kitty graphics and keyboard protocols (kitty, Ghostty, WezTerm) instead of
   a window, including over SSH with no display server. F12 is the host key;
   `--terminal-fps` caps the frame rate and `--terminal-log` sets the log file
-  (see docs/guide/terminal.md).
+  (see docs/guide/terminal.md). The terminal is given back however the
+  session ends, including on SIGTERM, SIGHUP, SIGINT and SIGQUIT (exit status
+  128 plus the signal number), and the default log file is always a new,
+  owner-only file.
 
 ### Changed
 
