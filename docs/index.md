@@ -36,6 +36,7 @@ Spaceballs' *State of the Art* (1992) running in Copperline.
   compatibility, common failures and known emulation limits.
 - [Changelog](changelog.md) -- User-visible changes and earlier compatibility milestones.
 - [](guide/ui) -- Window controls, status bar, keyboard shortcuts, and gamepad mapping.
+- [](guide/terminal) -- Showing and driving the machine inside a Kitty-protocol terminal, including over SSH.
 - [](guide/whdload) -- Direct launching and library management for WHDLoad packages.
 - [](guide/run) -- Booting straight into cross-compiled Amiga executables.
 - [](guide/fluxbridge) -- Using physical floppy drives through a Greaseweazle.

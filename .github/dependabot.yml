@@ -5,14 +5,13 @@ updates:
   # only one lockfile leaves the others unable to build with --locked.
   # group-by makes one PR per non-patch dependency across every affected
   # directory; patch releases stay in one consolidated PR, except for the
-  # coupled desktop renderer crates below. The fuzz lockfile
+  # coupled desktop renderer crates below. The web, player and libretro
+  # crates are members of the root workspace on this branch and share its
+  # lockfile, so the root entry covers them. The fuzz lockfile
   # is derived in CI because its path dependency mirrors the entire root graph.
   - package-ecosystem: cargo
     directories:
       - /
-      - /crates/copperline-web
-      - /crates/copperline-player
-      - /crates/copperline-libretro
       - /crates/cputest-runner
       - /crates/hostsocket-plugin
       - /crates/zz9k-plugin
@@ -70,7 +69,9 @@ updates:
   # dependency's new minor series. Security fixes in a minor or major release
   # are not covered here: Dependabot raises security PRs against the default
   # branch only, so port those to v1 by hand (cargo-deny in CI on v1 flags
-  # them). Dependabot reads this file from the default branch only.
+  # them). Dependabot reads this file from the default branch only. On v1
+  # the web, player and libretro crates are still workspaces of their own,
+  # each with its lockfile, so they are listed here.
   - package-ecosystem: cargo
     target-branch: v1
     directories:

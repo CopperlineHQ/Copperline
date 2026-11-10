@@ -19,7 +19,7 @@ use crate::terminal::input::{
     Event as TermEvent, KeyAction, KeyReport, KeypadKey, ModifierKey, Mods,
     MouseButton as TermMouseButton, MouseReport, Parser, Side, TermKey,
 };
-use crate::terminal::tty::{Output, Terminal, KEYBOARD_FLAGS};
+use crate::terminal::tty::{EndedBySignal, Output, Terminal, KEYBOARD_FLAGS};
 use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
@@ -35,6 +35,26 @@ const STATUS_INTERVAL: Duration = Duration::from_millis(500);
 /// Cell size assumed when the terminal reports none.
 const FALLBACK_CELL: (u16, u16) = (8, 16);
 
+/// How long a lone ESC waits for the rest of a sequence before it is the
+/// Escape key, and how long `ESC [` / `ESC O` wait on a legacy keyboard
+/// before they are Alt+[ / Alt+O. The two-byte forms wait longer: taking a
+/// real sequence's start for a key would type the rest of it into the
+/// machine.
+const ESCAPE_WAIT: Duration = Duration::from_millis(15);
+const LEGACY_PREFIX_WAIT: Duration = Duration::from_millis(50);
+
+/// How long the terminal may stay silent inside a bracketed paste before
+/// the paste is taken as finished without its end marker. A paste arrives
+/// in one burst; without this a lost marker would leave every later key,
+/// F12 included, as paste text.
+const PASTE_IDLE: Duration = Duration::from_secs(2);
+
+/// Emulated time between a paste arriving and its first key. With the Kitty
+/// keyboard protocol the terminal reports the paste shortcut's own
+/// modifiers as held keys; typing at once would turn the first characters
+/// into chords with them. The window's Paste as Keystrokes waits the same.
+const PASTE_START_DELAY_MS: u32 = 300;
+
 /// Terminal-side state of a `--terminal` session.
 struct TermSession {
     // Declared before `terminal`: fields drop in order, and the writer must
@@ -45,6 +65,8 @@ struct TermSession {
     geometry: Geometry,
     probed_cell: Option<(u16, u16)>,
     keys: HostKeys,
+    /// When the terminal last sent anything.
+    last_input: Instant,
     /// Keys pressed as taps, with the emulated frame they are let go at.
     taps: Vec<(KeyCode, u64)>,
     /// The pointer's last position, in frame pixels, while over the picture.
@@ -70,6 +92,31 @@ impl TermSession {
     }
 }
 
+/// The outcome of a session that failed while starting: a signal asking it
+/// to end is the same clean exit the loop makes for one, with the status a
+/// shell reports for a process the signal killed; anything else is the
+/// error.
+fn ended_by_signal(error: anyhow::Error) -> Result<i32> {
+    match error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<EndedBySignal>())
+    {
+        Some(ended) => {
+            info!("terminal: ending on signal {} during start-up", ended.0);
+            Ok(128 + ended.0)
+        }
+        None => Err(error),
+    }
+}
+
+fn ambiguity_wait(lone_escape: bool) -> Duration {
+    if lone_escape {
+        ESCAPE_WAIT
+    } else {
+        LEGACY_PREFIX_WAIT
+    }
+}
+
 fn read_geometry(terminal: &Terminal, probed_cell: Option<(u16, u16)>) -> Option<Geometry> {
     let (cols, rows, xpixel, ypixel) = terminal.window_size()?;
     let (cell_width, cell_height) = if xpixel >= cols && ypixel >= rows {
@@ -88,10 +135,29 @@ fn read_geometry(terminal: &Terminal, probed_cell: Option<(u16, u16)>) -> Option
 impl App {
     /// Drive the session in the controlling terminal until it ends; the value
     /// is the process exit status it concluded on (src/verdict.rs).
-    pub fn run_terminal(mut self, options: crate::terminal::Options) -> Result<i32> {
-        let log_path = options.resolved_log_path();
-        let terminal = Terminal::open(&log_path)?;
-        let caps = terminal.probe()?;
+    pub fn run_terminal(self, options: crate::terminal::Options) -> Result<i32> {
+        let terminal = match Terminal::open(&options.log_target()) {
+            Ok(terminal) => terminal,
+            Err(error) => return ended_by_signal(error),
+        };
+        self.run_terminal_on(terminal, &options)
+    }
+
+    /// The session on an open terminal: probe it, run the loop, and give
+    /// the terminal back before returning.
+    fn run_terminal_on(
+        mut self,
+        mut terminal: Terminal,
+        options: &crate::terminal::Options,
+    ) -> Result<i32> {
+        let caps = match terminal.probe() {
+            Ok(caps) => caps,
+            Err(error) => {
+                // Give the terminal back before the status is reported.
+                drop(terminal);
+                return ended_by_signal(error);
+            }
+        };
         if !caps.graphics {
             drop(terminal);
             let tmux = if std::env::var_os("TMUX").is_some() {
@@ -111,19 +177,20 @@ impl App {
         );
         let geometry = read_geometry(&terminal, caps.cell_pixels)
             .ok_or_else(|| anyhow!("--terminal: the terminal reports no window size"))?;
-        let output = Output::start(
-            terminal.output_handle()?,
-            geometry,
-            options.min_frame_interval(),
-        )?;
+        let output = terminal.start_output(geometry, options.min_frame_interval())?;
+        let mut parser = Parser::new();
+        // Without the protocol's disambiguation (flag 1) a key can send the
+        // first bytes of a control sequence.
+        parser.set_legacy_keyboard(caps.keyboard_flags.is_none_or(|flags| flags & 1 == 0));
         let now = Instant::now();
         let mut session = TermSession {
             output: Some(output),
             terminal,
-            parser: Parser::new(),
+            parser,
             geometry,
             probed_cell: caps.cell_pixels,
             keys: HostKeys::new(key_releases),
+            last_input: now,
             taps: Vec::new(),
             pointer: None,
             notice: None,
@@ -174,18 +241,29 @@ impl App {
                     break;
                 }
                 s.parser.feed(&buf[..n], &mut events);
+                s.last_input = Instant::now();
                 wait = Duration::ZERO;
             }
-            if s.parser.lone_escape_pending() {
+            if s.parser.ambiguous_prefix_pending() {
                 // A lone ESC is the Escape key unless more of its sequence
-                // is just behind it. (Any longer unfinished sequence simply
-                // waits for its remaining bytes.)
-                let n = s.terminal.read(&mut buf, Duration::from_millis(15))?;
-                if n == 0 {
-                    s.parser.flush_lone_escape(&mut events);
-                } else {
+                // is just behind it; the same for the two bytes a legacy
+                // Alt+[ or Alt+O sends. (Any longer unfinished sequence
+                // simply waits for its remaining bytes.)
+                // One pass waits no longer than the Escape key does, so a
+                // legacy prefix's longer wait is spread over passes and
+                // never holds the machine up for more than that.
+                let due = s.last_input + ambiguity_wait(s.parser.lone_escape_pending());
+                let left = due.saturating_duration_since(Instant::now());
+                let n = s.terminal.read(&mut buf, left.min(ESCAPE_WAIT))?;
+                if n > 0 {
                     s.parser.feed(&buf[..n], &mut events);
+                    s.last_input = Instant::now();
+                } else if Instant::now() >= due {
+                    s.parser.flush_ambiguous_prefix(&mut events);
                 }
+            }
+            if s.parser.paste_open() && s.last_input.elapsed() >= PASTE_IDLE {
+                s.parser.end_stale_paste(&mut events);
             }
             for event in events.drain(..) {
                 self.terminal_event(s, event);
@@ -193,12 +271,23 @@ impl App {
             if self.quit_requested {
                 return Ok(self.exit_status());
             }
-            if s.output()
-                .stats()
-                .failed
-                .load(std::sync::atomic::Ordering::Relaxed)
-            {
-                return Err(anyhow!("--terminal: the terminal stopped taking output"));
+            if let Some(signal) = s.terminal.end_signal() {
+                // Asked to stop from outside: leave as for a quit, with the
+                // status a shell reports for a process the signal killed.
+                info!("terminal: ending on signal {signal}");
+                return Ok(128 + signal);
+            }
+            if s.output().stopped() {
+                let failed = s
+                    .output()
+                    .stats()
+                    .failed
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                return Err(anyhow!(if failed {
+                    "--terminal: the terminal stopped taking output"
+                } else {
+                    "--terminal: the terminal writer stopped"
+                }));
             }
             self.terminal_track_resize(s);
             if self.netplay.is_none() {
@@ -269,9 +358,11 @@ impl App {
             TermEvent::Key(report) => self.terminal_key(s, report),
             TermEvent::Mouse(report) => self.terminal_mouse(s, report),
             TermEvent::Focus(false) => self.terminal_release_all(s),
-            TermEvent::Paste(text) => {
-                let (queued, skipped) = self.type_text(&text, 0);
-                if !skipped.is_empty() {
+            TermEvent::Paste { text, truncated } => {
+                let (queued, skipped) = self.terminal_paste(&text);
+                if truncated {
+                    s.notify(format!("pasted {queued} keys; the paste was cut short"));
+                } else if !skipped.is_empty() {
                     s.notify(format!(
                         "pasted {queued} keys; {} characters have no US Amiga key",
                         skipped.len()
@@ -280,6 +371,12 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Type a pasted text into the machine, starting a moment from now (see
+    /// [`PASTE_START_DELAY_MS`]).
+    fn terminal_paste(&mut self, text: &str) -> (usize, Vec<char>) {
+        self.type_text(text, PASTE_START_DELAY_MS)
     }
 
     fn terminal_key(&mut self, s: &mut TermSession, report: KeyReport) {
@@ -800,5 +897,139 @@ mod tests {
         let mods: Vec<_> = modifier_keycodes(Mods(Mods::SHIFT | Mods::CTRL)).collect();
         assert_eq!(mods, vec![KeyCode::ShiftLeft, KeyCode::ControlLeft]);
         assert_eq!(modifier_keycodes(Mods::default()).count(), 0);
+    }
+    /// The paste shortcut's modifiers are still reported as held when the
+    /// pasted text arrives, so its first key waits for them to come up.
+    #[test]
+    fn pasted_text_starts_after_the_shortcut_modifiers_are_released() {
+        let mut app = crate::video::window::tests::test_app();
+        let now = app.emu.bus().emulated_seconds();
+        let (queued, skipped) = app.terminal_paste("dir");
+        assert_eq!((queued, skipped.len()), (3, 0));
+        let first = app
+            .auto_keys
+            .iter()
+            .map(|key| key.press_at_emulated_secs)
+            .fold(f64::INFINITY, f64::min);
+        let delay = f64::from(PASTE_START_DELAY_MS) / 1000.0;
+        assert!(
+            first >= now + delay,
+            "first key at {first}, pasted at {now}"
+        );
+        assert!(first < now + delay + 0.05);
+    }
+
+    use crate::terminal::tty::testing::{contains, Pty, ENTER_BYTES, LEAVE_BYTES};
+
+    /// One step of a fake terminal's script: once the session has written
+    /// `after`, send it `keys`.
+    type Step = (&'static [u8], &'static [u8]);
+
+    /// What the fake terminal does.
+    #[derive(Clone, Copy)]
+    struct Fake {
+        /// Speaks the Kitty keyboard protocol (flags 15) or reports keys
+        /// the legacy way.
+        kitty_keyboard: bool,
+        script: &'static [Step],
+        /// Close the terminal after the script instead of waiting for the
+        /// session to leave.
+        hang_up: bool,
+    }
+
+    /// The terminal side of a session, on the pseudo-terminal's master:
+    /// answer the probe as a Kitty-graphics terminal would, then follow the
+    /// script. Returns everything the session wrote.
+    fn fake_terminal(pty: Pty, fake: Fake) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut seen = pty.output_until(b"\x1b[c");
+            if fake.kitty_keyboard {
+                pty.send(b"\x1b[?15u");
+            }
+            pty.send(b"\x1b_Gi=31;OK\x1b\\\x1b[6;20;10t\x1b[?62;4c");
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let wait_for = |seen: &mut Vec<u8>, what: &[u8]| {
+                while !contains(seen, what) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "the session never wrote {:?}",
+                        String::from_utf8_lossy(what)
+                    );
+                    seen.extend(pty.take_output(Duration::from_millis(50)));
+                }
+            };
+            for (after, keys) in fake.script {
+                wait_for(&mut seen, after);
+                pty.send(keys);
+            }
+            if !fake.hang_up {
+                wait_for(&mut seen, LEAVE_BYTES);
+            }
+            seen
+        })
+    }
+
+    fn run_session(fake: Fake) -> (Result<i32>, Vec<u8>) {
+        let pty = Pty::open();
+        let terminal = pty.session().unwrap();
+        let emulator = fake_terminal(pty, fake);
+        let app = crate::video::window::tests::test_app();
+        let result = app.run_terminal_on(terminal, &crate::terminal::Options::default());
+        (result, emulator.join().unwrap())
+    }
+
+    /// The whole loop on a pseudo-terminal: probe, frames and status out,
+    /// F12 q in, and the terminal given back.
+    #[test]
+    fn a_session_shows_frames_and_quits_on_f12_q() {
+        let (result, seen) = run_session(Fake {
+            kitty_keyboard: true,
+            // Once a frame has been shown: F12 press and release, then q
+            // press and release.
+            script: &[(
+                b"\x1b_Ga=T,f=24",
+                b"\x1b[24;1:1~\x1b[24;1:3~\x1b[113;1:1u\x1b[113;1:3u",
+            )],
+            hang_up: false,
+        });
+        assert_eq!(result.unwrap(), 0);
+        assert!(seen.starts_with(ENTER_BYTES));
+        assert!(
+            contains(&seen, b"\x1b_Ga=T,f=24"),
+            "no frame was sent: {:?}",
+            String::from_utf8_lossy(&seen[..seen.len().min(600)])
+        );
+        assert!(seen.ends_with(LEAVE_BYTES));
+    }
+
+    /// On a terminal without the Kitty keyboard protocol, Alt+[ sends the
+    /// two bytes that start a control sequence and nothing more. Pressed in
+    /// the F12 menu it is an unknown command, which the status line says;
+    /// left waiting for the rest of a sequence it would never be seen, and
+    /// would take the next key typed as that sequence's end.
+    #[test]
+    fn a_legacy_alt_bracket_is_a_key_and_not_the_start_of_a_sequence() {
+        let (result, seen) = run_session(Fake {
+            kitty_keyboard: false,
+            script: &[
+                (b"F12 menu", b"\x1b[24~\x1b["),
+                (b"F12 then q, p, w, r or s", b"\x1b[24~q"),
+            ],
+            hang_up: false,
+        });
+        assert_eq!(result.unwrap(), 0);
+        assert!(seen.ends_with(LEAVE_BYTES));
+    }
+
+    /// A terminal that goes away ends the session with an error instead of
+    /// leaving it running with nothing to show it on.
+    #[test]
+    fn a_terminal_that_goes_away_ends_the_session() {
+        let (result, _) = run_session(Fake {
+            kitty_keyboard: true,
+            script: &[(b"F12 menu", b"")],
+            hang_up: true,
+        });
+        assert!(result.is_err(), "the session outlived its terminal");
     }
 }

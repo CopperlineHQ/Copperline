@@ -24,6 +24,17 @@ pub mod tty;
 
 use std::path::PathBuf;
 
+/// Where a `--terminal` session's log output goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LogTarget {
+    /// `--terminal-log PATH`: this file, replaced if it exists.
+    Named(PathBuf),
+    /// A new `copperline-terminal-<pid>.log` in this directory, readable by
+    /// the owner only. An existing file of that name is never opened: the
+    /// directory is the shared temporary one.
+    Private(PathBuf),
+}
+
 /// `--terminal` session options from the command line.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
@@ -37,11 +48,12 @@ pub struct Options {
 }
 
 impl Options {
-    /// The log file this session writes to.
-    pub fn resolved_log_path(&self) -> PathBuf {
-        self.log_path.clone().unwrap_or_else(|| {
-            std::env::temp_dir().join(format!("copperline-terminal-{}.log", std::process::id()))
-        })
+    /// Where this session's log goes.
+    pub fn log_target(&self) -> LogTarget {
+        match &self.log_path {
+            Some(path) => LogTarget::Named(path.clone()),
+            None => LogTarget::Private(std::env::temp_dir()),
+        }
     }
 
     /// The writer thread's minimum spacing between frames.

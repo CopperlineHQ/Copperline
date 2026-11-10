@@ -53,7 +53,6 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 const STANDARD_DIW_HSTART: i32 = 0x81;
 const STANDARD_VISIBLE_X0: usize = ((STANDARD_DIW_HSTART - RENDER_DIW_HSTART_FB0) * 2) as usize;
@@ -1944,28 +1943,28 @@ fn sprite_fetch_control_words_at_reset_line(bus: &mut Bus) {
     }
 }
 
+/// A state written while the device clock still had a wall-clock mode
+/// carries that mode's fields. They are ignored: the state loads, and
+/// nothing in it can put device time on the host's clock.
 #[test]
-fn realtime_clock_produces_paula_cck_from_elapsed_wall_time() {
-    let mut clock = DeviceClock::default();
-    clock.set_realtime_enabled(true);
-    let start = Instant::now();
-    clock.realtime_anchor = Some(start);
-
-    assert_eq!(
-        clock.realtime_cck_due(start + Duration::from_secs(1)),
-        PAULA_CLOCK_HZ
-    );
-}
-
-#[test]
-fn realtime_clock_carries_fractional_cck() {
-    let mut clock = DeviceClock::default();
-    clock.set_realtime_enabled(true);
-    let start = Instant::now();
-    clock.realtime_anchor = Some(start);
-
-    assert_eq!(clock.realtime_cck_due(start + Duration::from_nanos(1)), 0);
-    assert_eq!(clock.realtime_cck_due(start + Duration::from_nanos(282)), 1);
+fn a_device_clock_from_an_older_state_loads_without_its_wall_clock_fields() {
+    #[derive(serde::Serialize)]
+    struct OlderDeviceClock {
+        realtime_enabled: bool,
+        realtime_cck_remainder: u128,
+        realtime_delay_remainder: u128,
+        cia_tick_remainder_cck: u32,
+    }
+    let older = OlderDeviceClock {
+        realtime_enabled: true,
+        realtime_cck_remainder: 123_456_789,
+        realtime_delay_remainder: 42,
+        cia_tick_remainder_cck: 3,
+    };
+    let mut bytes = Vec::new();
+    crate::savestate::chunk::encode(&older, &mut bytes).unwrap();
+    let clock: DeviceClock = crate::savestate::chunk::decode(&bytes).unwrap();
+    assert_eq!(clock.cia_tick_remainder_cck, 3);
 }
 
 #[test]
@@ -2352,9 +2351,8 @@ fn cia_event_deadline_includes_divider_phase_and_deferred_time() {
 }
 
 #[test]
-fn realtime_slice_bus_advance_ticks_shared_device_clock() {
+fn slice_bus_advance_ticks_shared_device_clock() {
     let mut bus = empty_bus();
-    bus.device_clock.realtime_enabled = true;
 
     bus.record_slice_bus_advance(2, AgnusTick::default());
     bus.flush_timed_devices();
