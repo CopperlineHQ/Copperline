@@ -400,9 +400,20 @@ writes the same five components as unframed positional bincode for the
 reverse-debugging ring and run-ahead (`emulator.rs`), where speed matters
 and only the build that wrote a blob ever reads it. Netplay rollback
 checkpoints use `write_rollback_state`, which prefixes the same blob with
-the rollback latches file states omit (the Bus rollback state and the
-CPU's sampled interrupt level). `write_chunks` is the file-format twin;
-all of them go through the same `adopt_state` tail on restore.
+the rollback latches (the Bus rollback state and the CPU's sampled
+interrupt level). `write_chunks` is the file-format twin; all of them go
+through the same `adopt_state` tail on restore.
+
+A file state carries the CPU's interrupt sample too (`sampled_irq_level`
+and `ipl_sample_held` in `MachineRuntimeState`) and the last value driven on
+the chip data bus (`Bus::data_bus`): both are live at the instruction
+boundary a state is taken on, where the next boundary compares the live
+interrupt level against the sample and an open-bus read returns the bus
+value. States written before these fields existed resume with the reset
+values. The Bus rollback state's presentation fields stay out of file
+states, which block rendering of the partly reconstructed field instead.
+`DeviceClock::realtime_enabled` is host policy and is never read from a
+state.
 
 (versioning)=
 ## Versioning

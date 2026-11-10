@@ -349,10 +349,22 @@ struct MachineRuntimeState {
     /// from a fast bank, as those builds always chose.
     #[serde(default)]
     jit_window_bank: Option<u32>,
+    /// `CpuBus::sampled_irq_level` and `ipl_sample_held`: the interrupt
+    /// level the last instruction's accesses latched, which the next
+    /// instruction boundary compares the live level against. They are live
+    /// state at the boundary a state is taken on: without them an interrupt
+    /// recognisable exactly there is taken one instruction late after a
+    /// load. Saves from before they were written read None and resume with
+    /// the reset values, as a fresh process loading them always did.
+    #[serde(default)]
+    sampled_irq_level: Option<u8>,
+    #[serde(default)]
+    ipl_sample_held: Option<bool>,
 }
 
-/// Same-process rollback also needs the interrupt sample consumed at the next
-/// instruction boundary. File saves intentionally omit these adapter latches.
+/// Same-process rollback restores the interrupt sample alongside the bus
+/// latches it captures; a file state carries the same two values in
+/// [`MachineRuntimeState`].
 #[derive(serde::Serialize, serde::Deserialize)]
 pub(crate) struct MachineRollbackState {
     bus: crate::bus::RollbackState,
@@ -1691,6 +1703,8 @@ impl M68kMachine {
             cpu_clock_carry: self.cpu_clock_carry,
             stop_poll_phase: self.stop_poll_phase,
             jit_window_bank: self.bus.jit_window_bank,
+            sampled_irq_level: Some(self.bus.sampled_irq_level),
+            ipl_sample_held: Some(self.bus.ipl_sample_held),
         }
     }
 
@@ -1864,10 +1878,15 @@ impl M68kMachine {
 
         bus.adopt_host_resources(&mut self.bus.bus)?;
         bus.adopt_ui_debug_state(&mut self.bus.bus);
-        if let Some(runtime) = rollback {
-            bus.restore_rollback_state(runtime.bus);
-            self.bus.sampled_irq_level = runtime.sampled_irq_level;
-            self.bus.ipl_sample_held = runtime.ipl_sample_held;
+        // The interrupt sample belongs to the restored timeline, never to
+        // the one being abandoned: take it from the state, or the reset
+        // values for a state that predates the fields.
+        self.bus.sampled_irq_level = runtime.sampled_irq_level.unwrap_or(0);
+        self.bus.ipl_sample_held = runtime.ipl_sample_held.unwrap_or(false);
+        if let Some(rollback) = rollback {
+            bus.restore_rollback_state(rollback.bus);
+            self.bus.sampled_irq_level = rollback.sampled_irq_level;
+            self.bus.ipl_sample_held = rollback.ipl_sample_held;
         } else {
             bus.reset_transient_video_after_state_load();
         }
@@ -9384,6 +9403,35 @@ mod tests {
     /// A save from before the window bank was carried has no
     /// `jit_window_bank` field and reads as None: the largest bank until
     /// code runs from a fast bank.
+    /// The interrupt level the last instruction sampled, and the value last
+    /// driven on the chip data bus, are live at the instruction boundary a
+    /// state is taken on. A file state restores them; it does not leave the
+    /// loading machine's own values in place.
+    #[test]
+    fn a_file_state_carries_the_interrupt_sample_and_the_data_bus() -> Result<()> {
+        let mut machine = machine_with_program(0x1000, &[0x4E71, 0x4E71])?;
+        machine.bus.sampled_irq_level = 3;
+        machine.bus.ipl_sample_held = true;
+        machine.bus.bus.data_bus = 0xBEEF;
+        let mut blob = Vec::new();
+        crate::savestate::save_to_writer(
+            &machine,
+            &crate::config::MachineDescriptor::default(),
+            None,
+            &mut blob,
+        )?;
+
+        let mut other = machine_with_program(0x1000, &[0x4E71, 0x4E71])?;
+        other.bus.sampled_irq_level = 6;
+        other.bus.ipl_sample_held = false;
+        other.bus.bus.data_bus = 0x1234;
+        crate::savestate::load_from_reader(&mut other, blob.as_slice())?;
+        assert_eq!(other.bus.sampled_irq_level, 3);
+        assert!(other.bus.ipl_sample_held);
+        assert_eq!(other.bus.bus.data_bus, 0xBEEF);
+        Ok(())
+    }
+
     #[test]
     fn machine_runtime_state_without_window_bank_reads_none() -> Result<()> {
         #[derive(serde::Serialize)]
@@ -9405,6 +9453,8 @@ mod tests {
         assert_eq!(state.last_cacr, 0x0101);
         assert_eq!(state.cpu_clock_carry, 1);
         assert_eq!(state.jit_window_bank, None);
+        assert_eq!(state.sampled_irq_level, None);
+        assert_eq!(state.ipl_sample_held, None);
         Ok(())
     }
 

@@ -33,6 +33,10 @@ for the earlier release notes.
   Input the guest has not read yet is limited to 64 KiB per link.
 - The browser build stops downloading a linked disk image as soon as it
   passes the 64 MiB limit, including when the server sends no length.
+- Save states carry the CPU's interrupt-sample latches and the chip data
+  bus value, so a resumed run takes an interrupt that was recognisable at
+  the save point on the same instruction as an uninterrupted run. A state
+  can no longer switch the emulator's device clock to wall-clock time.
 - Loading a save state logs a warning for each host file, directory, plugin
   module or network backend the state names that the running session had not
   opened. `SECURITY.md` now states which inputs are trusted: a save state has
