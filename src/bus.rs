@@ -319,7 +319,6 @@ const BITPLANE_DDF_HARD_STOP: u16 = 0x00D8;
 /// the CTL/DATB word follows two clocks later). Hardware slot chart (and
 /// vAmiga's DAS table): sprite N fetches at $15+4N / $17+4N.
 const SPRITE_DMA_SLOT1_HPOS: [u32; 8] = [0x15, 0x19, 0x1D, 0x21, 0x25, 0x29, 0x2D, 0x31];
-const NANOS_PER_SECOND: u128 = 1_000_000_000;
 const VIDEO_FETCH_TIMING_SAMPLE_RATE: u128 = 128;
 const VIDEO_COLLISION_TIMING_SAMPLE_RATE: u128 = 16;
 
@@ -3215,74 +3214,21 @@ pub struct InputState {
     pub light_pen: LightPenState,
 }
 
+/// Sub-tick carry of the devices clocked off the colour clock. Device time
+/// is emulated time only: it advances with the colour clocks the CPU and
+/// chip bus consume, never with the host's clock.
+///
+/// States written before the wall-clock device mode was removed carry
+/// `realtime_enabled`, `realtime_cck_remainder` and
+/// `realtime_delay_remainder` here as well; they are ignored on load.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct DeviceClock {
-    realtime_enabled: bool,
-    // Wall-clock instant corresponding to the current device timeline.
-    // CPU chip-bus slots push this into the future; hardware barriers
-    // wait for it so chip RAM/custom access cannot outrun real time.
-    // Not part of a save state: the loader re-anchors to the host clock.
-    #[serde(skip)]
-    realtime_anchor: Option<Instant>,
-    realtime_cck_remainder: u128,
-    realtime_delay_remainder: u128,
     cia_tick_remainder_cck: u32,
 }
 
 impl DeviceClock {
-    fn set_realtime_enabled(&mut self, enabled: bool) {
-        self.realtime_enabled = enabled;
-        self.reset();
-    }
-
     fn reset(&mut self) {
-        self.realtime_anchor = self.realtime_enabled.then(Instant::now);
-        self.realtime_cck_remainder = 0;
-        self.realtime_delay_remainder = 0;
         self.cia_tick_remainder_cck = 0;
-    }
-
-    fn wait_duration(&self, now: Instant) -> Option<Duration> {
-        if !self.realtime_enabled {
-            return None;
-        }
-        let anchor = self.realtime_anchor?;
-        (anchor > now).then(|| anchor.duration_since(now))
-    }
-
-    fn realtime_cck_due(&mut self, now: Instant) -> u32 {
-        if !self.realtime_enabled {
-            return 0;
-        }
-        let Some(anchor) = self.realtime_anchor else {
-            self.realtime_anchor = Some(now);
-            return 0;
-        };
-        if now <= anchor {
-            return 0;
-        }
-
-        let elapsed = now.duration_since(anchor);
-        let total = self
-            .realtime_cck_remainder
-            .saturating_add(elapsed.as_nanos().saturating_mul(PAULA_CLOCK_HZ as u128));
-        self.realtime_cck_remainder = total % NANOS_PER_SECOND;
-        self.realtime_anchor = Some(now);
-        (total / NANOS_PER_SECOND).min(u32::MAX as u128) as u32
-    }
-
-    fn note_realtime_device_advance(&mut self, cck: u32) {
-        if !self.realtime_enabled || cck == 0 {
-            return;
-        }
-        let anchor = self.realtime_anchor.unwrap_or_else(Instant::now);
-        let total = self
-            .realtime_delay_remainder
-            .saturating_add(cck as u128 * NANOS_PER_SECOND);
-        let nanos = total / PAULA_CLOCK_HZ as u128;
-        self.realtime_delay_remainder = total % PAULA_CLOCK_HZ as u128;
-        let delay = Duration::from_nanos(nanos.min(u64::MAX as u128) as u64);
-        self.realtime_anchor = Some(anchor + delay);
     }
 
     fn cia_ticks_for_cck(&mut self, cck: u32) -> u32 {
@@ -6302,9 +6248,7 @@ impl Bus {
 
     /// Move the host-side resources that a save state does not capture from
     /// the currently live Bus into this freshly deserialized one: the Paula
-    /// audio/serial sinks, serial observer, and the open blitter trace file. The realtime
-    /// device-clock anchor needs no carry-over -- it deserializes as None
-    /// and `realtime_cck_due` re-anchors to the host clock on first use.
+    /// audio/serial sinks, serial observer, and the open blitter trace file.
     pub(crate) fn adopt_host_resources(&mut self, live: &mut Bus) -> anyhow::Result<()> {
         // Open fallible resources before moving anything out of the live bus,
         // preserving apply_state's all-or-nothing contract on bridge failure.
@@ -7410,28 +7354,6 @@ impl Bus {
         self.cpu_chip_clock_phase
     }
 
-    pub fn set_realtime_devices_enabled(&mut self, enabled: bool) {
-        self.device_clock.set_realtime_enabled(enabled);
-    }
-
-    pub fn sync_realtime_devices(&mut self) -> u32 {
-        if !self.device_clock.realtime_enabled {
-            return 0;
-        }
-        if let Some(wait) = self.device_clock.wait_duration(Instant::now()) {
-            std::thread::sleep(wait);
-        }
-        self.sync_realtime_devices_to(Instant::now())
-    }
-
-    pub(crate) fn sync_realtime_devices_to(&mut self, now: Instant) -> u32 {
-        let cck = self.device_clock.realtime_cck_due(now);
-        if cck != 0 {
-            self.advance_devices(cck);
-        }
-        cck
-    }
-
     pub fn take_slice_bus_advance(&mut self) -> (u32, AgnusTick) {
         let cck = std::mem::take(&mut self.slice_bus_advanced_cck);
         let tick = std::mem::take(&mut self.slice_bus_tick);
@@ -7482,10 +7404,6 @@ impl Bus {
     ) {
         if !self.cpu_bus_arbitration_enabled {
             return;
-        }
-
-        if matches!(kind, CpuBusAccessKind::Custom) {
-            self.sync_realtime_devices();
         }
 
         let wide_bus = self.aga_enabled();
@@ -9854,7 +9772,6 @@ impl Bus {
     }
 
     pub fn cia_a_read(&mut self, addr: u64, size: usize) -> u64 {
-        self.sync_realtime_devices();
         let reg = reg_from_addr(addr);
         let mut v = if self.cpu_bus_arbitration_enabled {
             self.cia_a.read_at_transfer(reg)
@@ -9906,7 +9823,6 @@ impl Bus {
     }
 
     pub fn cia_a_write(&mut self, addr: u64, size: usize, val: u64) -> CiaSideEffect {
-        self.sync_realtime_devices();
         let byte = (val & 0xFF) as u8;
         let reg = reg_from_addr(addr);
         self.annotate_cia_access(false, reg, addr, byte, size, true);
@@ -9994,7 +9910,6 @@ impl Bus {
     }
 
     pub fn cia_b_read(&mut self, addr: u64, size: usize) -> u64 {
-        self.sync_realtime_devices();
         let reg = reg_from_addr(addr);
         let mut v = if self.cpu_bus_arbitration_enabled {
             self.cia_b.read_at_transfer(reg)
@@ -10044,7 +9959,6 @@ impl Bus {
     }
 
     pub fn cia_b_write(&mut self, addr: u64, size: usize, val: u64) -> CiaSideEffect {
-        self.sync_realtime_devices();
         let byte = if size == 2 {
             ((val >> 8) & 0xFF) as u8
         } else {

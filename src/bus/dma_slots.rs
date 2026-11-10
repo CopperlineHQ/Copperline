@@ -1770,9 +1770,6 @@ impl Bus {
     pub(super) fn record_slice_bus_advance(&mut self, cck: u32, tick: AgnusTick) {
         self.slice_bus_advanced_cck = self.slice_bus_advanced_cck.saturating_add(cck);
         add_agnus_tick(&mut self.slice_bus_tick, tick);
-        if self.device_clock.realtime_enabled {
-            self.device_clock.note_realtime_device_advance(cck);
-        }
         // Defer timed devices exactly as the ordinary path does. When detailed
         // tracing is armed, the quantum stepper has also recorded compact
         // raster spans so events returned by this batch can be placed at their
