@@ -17,6 +17,10 @@ for the earlier release notes.
   `[[filesys]]` host directory on Windows by putting a drive letter in the
   name, nor open a DOS device such as `NUL` or `COM1` through one. Names
   containing `:` are refused on every host.
+- Loading a save state logs a warning for each host file, directory, plugin
+  module or network backend the state names that the running session had not
+  opened. `SECURITY.md` now states which inputs are trusted: a save state has
+  the same access to the host as a configuration file.
 - Command-line help is written to stdout. Options accept `--flag=value`,
   misspelled options suggest close matches, and fatal desktop-launch errors
   appear in a native dialog.

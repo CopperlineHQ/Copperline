@@ -198,6 +198,29 @@ in memory (`FloppyImageData::StandardAdf(Vec<u8>)` or per-track
 structures), so inserted disks travel inside the state, unsaved track
 writes included.
 
+### Host bindings a state carries
+
+Reopening by path means a state file names host resources, and a load opens
+what it names: hard-drive, CD and file-backed floppy image paths (a
+file-backed floppy writes the guest's changes back to its path), each
+`[[filesys]]` mount's `MountSpec` (path and `readonly`), a WebAssembly
+board's module path and manifest (capabilities, network backend, resource
+files), and an A2065's `NetConfig`. Only the `uaelib` host file root is
+carried over from the running session instead. State files are therefore
+trusted like configuration files (`SECURITY.md`).
+
+`hostbind` keeps a process-wide set of the host resources the configuration,
+command line or UI opened, recorded where each is opened
+(`HardDriveImage::open_inner` and `open_device`, `cdrom::Source::open` and
+`CdImage::load_chd`, `FloppyImage` with a file backing,
+`FilesysBoard::set_mounts`, `WasmBoard::from_file`, `A2065::new`). The
+restore paths ask it about each resource a state names -- during
+deserialization for images and plugins, in `Bus::adopt_host_resources` for
+floppies and mounts -- and log one warning per resource the session had not
+opened. The kind of access is part of the identity, so a directory the
+session mounted read-only does not cover a state that mounts it writable.
+The check does not refuse the load.
+
 ## File format
 
 ```

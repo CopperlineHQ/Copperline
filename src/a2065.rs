@@ -161,6 +161,12 @@ impl A2065 {
         let mac = [0x02, 0x00, 0x10, 0x00, 0x00, 0x01];
         let mut net =
             make_backend(&net_config, Some(mac)).context("bringing up A2065 network backend")?;
+        if net.is_some() {
+            crate::hostbind::opened_named(
+                crate::hostbind::Kind::Network,
+                &format!("{net_config:?}"),
+            );
+        }
         if let Some(backend) = net.as_mut() {
             backend.set_guest_mac(mac);
         }
@@ -194,6 +200,12 @@ impl A2065 {
     pub(crate) fn reattach_backend(&mut self) -> Result<()> {
         let backend = make_backend(&self.net_config, Some(self.mac))
             .context("restoring A2065 network backend")?;
+        if backend.is_some() {
+            crate::hostbind::restored_named(
+                crate::hostbind::Kind::Network,
+                &format!("{:?}", self.net_config),
+            );
+        }
         self.attach_backend(backend);
         Ok(())
     }

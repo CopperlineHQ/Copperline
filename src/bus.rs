@@ -6291,6 +6291,12 @@ impl Bus {
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.materialize_saved_host_disks()?;
+        // Hard-drive and CD images and plugin modules report themselves as
+        // they are reopened; these two are restored as plain data.
+        self.floppy.note_restored_images();
+        if let Some(board) = self.filesys_board() {
+            board.note_restored_mounts();
+        }
         std::mem::swap(&mut self.paula.serial, &mut live.paula.serial);
         // A host sink is not serialized. Give a stateful one one explicit
         // timeline-jump boundary after it moves, so it cannot retain data

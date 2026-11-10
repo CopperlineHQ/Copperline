@@ -166,6 +166,16 @@ pub struct MountSpec {
     pub readonly: bool,
 }
 
+impl MountSpec {
+    fn host_binding(&self) -> crate::hostbind::Kind {
+        if self.readonly {
+            crate::hostbind::Kind::DirectoryReadOnly
+        } else {
+            crate::hostbind::Kind::DirectoryReadWrite
+        }
+    }
+}
+
 /// DOS device name of mount `unit` (`HOSTFS0`, `HOSTFS1`, ...).
 pub fn device_name(unit: usize) -> String {
     format!("HOSTFS{unit}")
@@ -603,6 +613,15 @@ impl FilesysBoard {
         self.cull_rom_scsi_device = cull;
     }
 
+    /// A save state was restored into this board: its mounts name host
+    /// directories the state chose, so check each against what the running
+    /// session had opened.
+    pub(crate) fn note_restored_mounts(&self) {
+        for unit in &self.units {
+            crate::hostbind::restored(unit.mount.host_binding(), &unit.mount.path);
+        }
+    }
+
     pub fn set_mounts(&mut self, mounts: Vec<MountSpec>) {
         // Give each unit a fixed, non-overlapping slice of the board-window
         // lock pool. Size the slices by the board's *maximum* unit count, not
@@ -610,6 +629,9 @@ impl FilesysBoard {
         // no matter how many are active -- outstanding lock addresses must not
         // move when units are added or removed at runtime (the eventual
         // mount/eject-on-the-fly goal).
+        for mount in &mounts {
+            crate::hostbind::opened(mount.host_binding(), &mount.path);
+        }
         let chunk = (POOL_END - POOL_OFFSET) / MOUNT_MAX_COUNT as u32;
         self.units = mounts
             .into_iter()
