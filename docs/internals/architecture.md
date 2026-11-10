@@ -458,8 +458,12 @@ snapshot:
   `[machine] rtc_time` / `--rtc-time`. A seed advances in emulated time;
   `--rtc-frozen` holds it constant. `COPPERLINE_RTC_FIXED_SECS` is the
   older fixed-UTC override.
-- Live host-directory mounts expose file contents and timestamps. File-backed
-  hard disks and physical disks retain writes made after a snapshot.
+- Live host-directory mounts expose file contents and timestamps. Each
+  mounted volume's DosList date is the host time its handler started,
+  unless the guest clock is pinned (a seed or `COPPERLINE_RTC_FIXED_SECS`):
+  then it is the clock's power-on instant, so the only host time a pinned
+  run reads is the files' own. File-backed hard disks and physical disks
+  retain writes made after a snapshot.
 - Network, serial, MIDI, and sampler input can depend on external devices
   or services. A real host serial port (`[serial] mode = "device"`) is
   live I/O like networking: its bytes and handshake lines arrive on the

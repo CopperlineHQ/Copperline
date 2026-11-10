@@ -527,6 +527,16 @@ pub struct FilesysBoard {
     /// too: writes latch into the image (with side effects for the
     /// doorbells), so the read side is plain memory at any size/alignment.
     image: Vec<u8>,
+    /// The date, in Unix seconds, every volume node this board builds
+    /// carries: the guest clock's power-on instant when that clock is
+    /// pinned ([`crate::rtc::pinned_power_on_unix`]). `None` dates each
+    /// volume at the host wall clock when its handler starts, which is
+    /// what an unpinned guest clock reads too. Left at the host clock, a
+    /// pinned guest would still read host time through its volume dates,
+    /// and DOS's handling of them would vary its timing from run to run.
+    /// Configuration, like `cull_rom_scsi_device`.
+    #[serde(default)]
+    volume_date_unix: Option<u64>,
     /// Set when a DosPacket is handled, drained by `take_activity` to blink
     /// the HDD LED. Transient: not part of the save state.
     #[serde(skip)]
@@ -556,17 +566,20 @@ impl FilesysBoard {
     }
 
     /// Rebuild to power-on state keeping only configuration: the mounts,
-    /// the scsi.device cull, the clipboard unit and its host-side sharing
-    /// switch (and what the host last saw on its clipboard).
+    /// the scsi.device cull, the volume date, the clipboard unit and its
+    /// host-side sharing switch (and what the host last saw on its
+    /// clipboard).
     fn rebuild_from_config(&mut self) {
         let mounts: Vec<MountSpec> = std::mem::take(&mut self.units)
             .into_iter()
             .map(|u| u.mount)
             .collect();
         let cull = self.cull_rom_scsi_device;
+        let volume_date = self.volume_date_unix;
         let mut clipboard = std::mem::take(&mut self.clipboard);
         *self = FilesysBoard::new_with_clipboard(mounts, self.clipboard_fitted);
         self.cull_rom_scsi_device = cull;
+        self.volume_date_unix = volume_date;
         clipboard.reset(&mut self.image);
         self.clipboard = clipboard;
     }
@@ -625,6 +638,13 @@ impl FilesysBoard {
         self.cull_rom_scsi_device = cull;
     }
 
+    /// Date every volume at `unix` (Unix seconds) instead of the host wall
+    /// clock: the pinned guest clock's power-on instant, from
+    /// [`crate::rtc::pinned_power_on_unix`]. `None` restores the host clock.
+    pub fn set_volume_date_unix(&mut self, unix: Option<u64>) {
+        self.volume_date_unix = unix;
+    }
+
     /// A save state was restored into this board: its mounts name host
     /// directories the state chose, so check each against what the running
     /// session had opened.
@@ -671,7 +691,8 @@ impl FilesysBoard {
             return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
         }
         let base = self.board_base.expect("packet before DiagPoint");
-        self.units[unit].handle_packet(bus, base, port, pkt, guest_op)
+        let volume_date = self.volume_date_unix;
+        self.units[unit].handle_packet(bus, base, volume_date, port, pkt, guest_op)
     }
 }
 
@@ -951,11 +972,22 @@ impl FilesysBoard {
 impl FilesysUnit {
     /// Build this unit's volume DosList node in the board window; the guest
     /// handler AddDosEntry's it (only guest code may take the DosList
-    /// semaphore). Returns the node's guest address.
-    fn build_volume_node(&mut self, bus: &mut dyn AddressBus, board_base: u32) -> u32 {
+    /// semaphore). Returns the node's guest address. The node is dated at
+    /// `volume_date_unix` (Unix seconds) when the board has one, else at
+    /// the host wall clock.
+    fn build_volume_node(
+        &mut self,
+        bus: &mut dyn AddressBus,
+        board_base: u32,
+        volume_date_unix: Option<u64>,
+    ) -> u32 {
         let vol = board_base + VOLUMES_OFFSET + self.index as u32 * VOLUME_SLOT_SIZE;
         let fixed = std::mem::size_of::<VolumeNode>() as u32;
-        let (days, mins, ticks) = amiga_datestamp(Some(std::time::SystemTime::now()));
+        let date = match volume_date_unix {
+            Some(secs) => std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs),
+            None => std::time::SystemTime::now(),
+        };
+        let (days, mins, ticks) = amiga_datestamp(Some(date));
         let node = VolumeNode {
             next: long(0),
             r#type: long(2), // DLT_VOLUME
@@ -979,11 +1011,13 @@ impl FilesysUnit {
     /// semaphore); `guest_op` tells the handler what to do after replying.
     /// `port` is the handler's MsgPort, captured at the startup packet and
     /// stamped into the dn_Task/dol_Task/fl_Task fields DOS uses to reach the
-    /// handler; `board_base` locates this unit's board-window structures.
+    /// handler; `board_base` locates this unit's board-window structures, and
+    /// `volume_date_unix` is the board's volume date for the startup packet.
     fn handle_packet(
         &mut self,
         bus: &mut dyn AddressBus,
         board_base: u32,
+        volume_date_unix: Option<u64>,
         port: u32,
         pkt: u32,
         guest_op: &mut Option<GuestOp>,
@@ -1009,7 +1043,7 @@ impl FilesysUnit {
             }
             self.device_node = Some(dn);
             self.port = Some(port);
-            let vol = self.build_volume_node(bus, board_base);
+            let vol = self.build_volume_node(bus, board_base, volume_date_unix);
             *guest_op = Some(GuestOp::AddVolume(vol));
             log::info!(
                 "filesys: {}: handler started ({}: -> {})",
@@ -2868,6 +2902,12 @@ mod tests {
 
         /// Mount `tag` and send the startup packet, so the unit is wired.
         fn mounted(tag: &str) -> Self {
+            Self::mounted_with_volume_date(tag, None)
+        }
+
+        /// [`Self::mounted`] on a board whose volumes are dated at
+        /// `volume_date_unix` (a pinned guest clock's power-on instant).
+        fn mounted_with_volume_date(tag: &str, volume_date_unix: Option<u64>) -> Self {
             let root = std::env::temp_dir().join(format!("clfs-{tag}-{}", std::process::id()));
             std::fs::create_dir_all(&root).unwrap();
             let mut board = FilesysBoard::default();
@@ -2877,6 +2917,7 @@ mod tests {
                 boot_pri: -128,
                 readonly: false,
             }]);
+            board.set_volume_date_unix(volume_date_unix);
             let mut fs = Self {
                 root,
                 board,
@@ -2893,9 +2934,11 @@ mod tests {
             for (i, a) in args.iter().enumerate() {
                 self.bus.write_long(Self::PKT + 20 + 4 * i as u32, *a);
             }
+            let volume_date = self.board.volume_date_unix;
             self.board.units[0].handle_packet(
                 &mut self.bus,
                 Self::BOARD_BASE,
+                volume_date,
                 Self::PORT,
                 Self::PKT,
                 &mut self.guest_op,
@@ -2919,6 +2962,29 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    /// With the guest clock pinned, the volume node the startup packet
+    /// builds carries the clock's power-on instant, not the host's wall
+    /// clock, and the per-boot rebuild keeps that date for the next boot.
+    #[test]
+    fn pinned_guest_clock_dates_the_volume_node_at_power_on() {
+        const PINNED: u64 = 1_794_340_000; // 2026-11-10 19:46:40 UTC
+        let mut fs = FsTester::mounted_with_volume_date("volume-date", Some(PINNED));
+        let vol = fs.board.units[0]
+            .volume
+            .expect("startup built a volume node");
+        let at = vol + std::mem::offset_of!(VolumeNode, volume_date) as u32;
+        let date = (
+            fs.bus.read_long(at),
+            fs.bus.read_long(at + 4),
+            fs.bus.read_long(at + 8),
+        );
+        let pinned = std::time::UNIX_EPOCH + std::time::Duration::from_secs(PINNED);
+        assert_eq!(date, amiga_datestamp(Some(pinned)));
+
+        fs.board.rebuild_from_config();
+        assert_eq!(fs.board.volume_date_unix, Some(PINNED));
     }
 
     /// The whole MMIO surface, end to end through [`ZorroDevice`]: the
@@ -4031,7 +4097,7 @@ mod tests {
             bus.write_long(PKT + 28, bufsize);
             bus.write_long(PKT + 32, ED_COMMENT);
             bus.write_long(PKT + 36, CONTROL);
-            unit.handle_packet(bus, 0xEA_0000, 0, PKT, &mut None)
+            unit.handle_packet(bus, 0xEA_0000, None, 0, PKT, &mut None)
         };
 
         // 64 bytes fit exactly one ED_COMMENT entry for "alpha.txt" (36 fixed

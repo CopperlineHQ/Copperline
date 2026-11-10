@@ -4371,6 +4371,9 @@ fn build_machine_inner(
         zorro.add_board(crate::zorro::BoardSpec::copperline_services(slot))?;
         let mut board =
             crate::filesys::FilesysBoard::new_with_clipboard(cfg.filesys.clone(), clipboard);
+        // A pinned guest clock dates the mounted volumes too, so no host
+        // time reaches the guest through them.
+        board.set_volume_date_unix(crate::rtc::pinned_power_on_unix(cfg.rtc_seed_unix));
         if cfg.rom_scsi_device_disable {
             info!("romtags: the ROM's scsi.device will not be initialised");
             board.set_cull_rom_scsi_device(true);
