@@ -19,15 +19,17 @@ on:
 
 concurrency:
   group: homebrew-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   audit:
     name: Style and audit
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: Homebrew/actions/setup-homebrew@main
+      # Pinned to a commit: the action has no release tags.
+      - uses: Homebrew/actions/setup-homebrew@63a2d4d8d4193eab3e62b1b782ff3ab8408f5b29 # main, 2026-11-06
       - name: Style
         run: brew style "$GITHUB_WORKSPACE/Formula/copperline.rb"
       - name: Audit

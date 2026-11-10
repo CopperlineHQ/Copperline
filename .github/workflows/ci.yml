@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -172,7 +172,7 @@ jobs:
           workspaces: fuzz
           key: fuzz-linux
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Build all fuzz targets
         working-directory: fuzz
         run: cargo fuzz build --codegen-units=16
@@ -673,7 +673,7 @@ jobs:
         with:
           node-version: 24
       - name: Install MyST CLI
-        run: npm install -g mystmd
+        run: npm install -g mystmd@1.12.0
       - name: Install Typst (PDF renderer)
         # MyST shells out to Typst for PDF export. Latest release, like the
         # brew install documented in docs/README.md.

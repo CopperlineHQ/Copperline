@@ -19,6 +19,7 @@ jobs:
   check:
     name: Check the tag is on a release branch
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       publish: ${{ steps.check.outputs.publish }}
     steps:

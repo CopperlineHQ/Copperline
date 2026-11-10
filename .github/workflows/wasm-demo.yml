@@ -23,7 +23,7 @@ on:
 
 concurrency:
   group: wasm-demo-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   release-branch:
@@ -35,6 +35,7 @@ jobs:
     needs: release-branch
     if: needs.release-branch.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - name: Install the wasm target
@@ -57,9 +58,12 @@ jobs:
         run: |
           set -euo pipefail
           V=version_131
-          curl --location --silent --show-error --fail \
-            https://github.com/WebAssembly/binaryen/releases/download/$V/binaryen-$V-x86_64-linux.tar.gz \
-            | tar xz
+          SHA256=b5bf1f0eaf17c63ee588ff7a5954dc8f6ce2c26989051c66f24dfe9ece3e46db
+          curl --location --silent --show-error --fail --output binaryen.tar.gz \
+            https://github.com/WebAssembly/binaryen/releases/download/$V/binaryen-$V-x86_64-linux.tar.gz
+          echo "$SHA256  binaryen.tar.gz" | sha256sum --check --strict -
+          tar xzf binaryen.tar.gz
+          rm binaryen.tar.gz
           echo "$PWD/binaryen-$V/bin" >> "$GITHUB_PATH"
       - name: Build the web crate
         working-directory: crates/copperline-web
