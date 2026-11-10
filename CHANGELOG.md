@@ -34,6 +34,9 @@ for the earlier release notes.
 - Command-line help is written to stdout. Options accept `--flag=value`,
   misspelled options suggest close matches, and fatal desktop-launch errors
   appear in a native dialog.
+- Opening a selection of files Copperline cannot combine from a file manager
+  (two CD images, an archive with a disk image) shows the reason in a dialog
+  instead of exiting with nothing shown.
 - WHDLoad archive extraction limits each member to 256 MiB, each operation
   to 1 GiB of decoded data and 16,384 entries. Oversized or malformed packages
   fail with an error and incomplete staging is removed.

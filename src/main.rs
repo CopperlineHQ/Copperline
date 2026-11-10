@@ -882,6 +882,10 @@ fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> 
 
     // Syntax errors stay on stderr. Once a session mode is known, fatal
     // interactive desktop errors also get a dialog; headless commands never do.
+    // The exception is a desktop launch of nothing but files ("Open With"):
+    // the parser rejects selections it cannot combine, and that launch has
+    // no stderr anyone will read.
+    *error_dialog = startup::file_open_launch(desktop, &args);
     let cli = parse_args_from(args)?;
     if cli.load_uss.is_some()
         && (cli.load_state.is_some() || cli.run.is_some() || cli.whdload.is_some())

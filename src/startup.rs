@@ -14,6 +14,16 @@ pub fn arguments(args: impl IntoIterator<Item = String>) -> (bool, Vec<String>) 
     (desktop, args.collect())
 }
 
+/// Whether a desktop launch that failed to parse may still show its error
+/// in a dialog. A command line of nothing but paths is what a file manager
+/// builds for "Open With": it names no session mode that could be headless,
+/// and its mistakes are the user's selection (two CD images, an archive
+/// with a disk), not syntax. Any option leaves the error on stderr, since
+/// the mode it asked for is unknown until the line parses.
+pub fn file_open_launch(desktop: bool, args: &[String]) -> bool {
+    desktop && !args.is_empty() && args.iter().all(|arg| !arg.starts_with('-'))
+}
+
 pub fn error_dialog_allowed(desktop: bool, cli: &CliArgs) -> bool {
     desktop
         && cli.screenshot_after.is_empty()
@@ -61,6 +71,25 @@ mod tests {
         let (desktop, args) = arguments(["--run-args", "--desktop"].map(str::to_owned));
         assert!(!desktop);
         assert_eq!(args, ["--run-args", "--desktop"]);
+    }
+
+    /// A file manager opening a selection Copperline cannot combine must
+    /// say so: the launch has no terminal for the error to go to.
+    #[test]
+    fn a_desktop_file_selection_that_does_not_parse_gets_a_dialog() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        let two_cds = args(&["first.iso", "second.iso"]);
+        assert!(parse_args_from(two_cds.clone()).is_err());
+        assert!(file_open_launch(true, &two_cds));
+        // Not a desktop launch, no files at all, or an option on the line:
+        // the error stays on stderr.
+        assert!(!file_open_launch(false, &two_cds));
+        assert!(!file_open_launch(true, &[]));
+        assert!(!file_open_launch(
+            true,
+            &args(&["--screenshot-after", "1", "a.iso", "b.iso"])
+        ));
+        assert!(!file_open_launch(true, &args(&["--bogus"])));
     }
 
     #[test]
