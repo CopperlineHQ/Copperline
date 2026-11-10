@@ -25,6 +25,9 @@ for the earlier release notes.
   directory scans, refuses negative `Read()`/`Write()` lengths and deletion
   of its own root, and logs an out-of-memory guest buffer once per request
   instead of once per byte.
+- A `copperhf.device` read or write whose buffer is not guest RAM fails
+  before any host I/O instead of first allocating and reading the full
+  request length.
 - Loading a save state logs a warning for each host file, directory, plugin
   module or network backend the state names that the running session had not
   opened. `SECURITY.md` now states which inputs are trusted: a save state has
