@@ -217,7 +217,7 @@ host-serial = ["dep:serialport"]
 # 0.15.0 is the floor: earlier releases have no AddressBus::batch_boundary
 # callback and no physical RAM/ROM regions beyond the primary fastmem window.
 # Keep the conformance runner on this same version (tools/check-m68k-locks.py).
-m68k = { version = "0.15.0", features = ["serde"] }
+m68k = { version = "0.16.0", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "aa54c40c232a826f3d6f117ac8a0b165e7571f32", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
