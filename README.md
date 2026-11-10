@@ -31,6 +31,25 @@ its own PDF manual.
 - **WebAssembly build**: Run directly in modern web browsers at [copperline.dev/try](https://copperline.dev/try/).
 - **Libretro core**: [Run Amiga and CD32 software in RetroArch](docs/guide/libretro.md), with embedded AROS ROMs, WHDLoad, disk playlists, save states and RetroArch rollback netplay.
 
+**Video Settings -> Framing -> Smart** automatically corrects small horizontal
+display offsets. Combine it with **Autocrop** and **Integer** scaling to fit
+the detected display at the largest whole-pixel scale, including artwork
+outside the normal TV aperture. See [display configuration](docs/guide/configuration.md).
+RTG integer scaling fits the board's native resolution to the available display
+area: a 640x480 desktop reaches 2x on a 1920x1080 screen, with room for the status bar.
+The RTG picture stays at native pixel quality while menus and panels keep
+their usual proportions and translucency.
+
+The [Debug workspace](docs/debugger/window.md) puts the Amiga display beside
+its debugger, Frame Analyzer, and Console in one desktop window. Open
+**Debugger...** in the menu or press
+`Cmd+B` on macOS or `Alt+B` on Linux/Windows. Drag the display divider to resize
+the panes; **Return to Play** restores the display layout while keeping the
+inspectors and their state. Click the display to send input to the Amiga, and
+use `Cmd+G` / `Alt+G` to return input to the debugger. Monospace readouts use
+Hack with a slashed zero. Audio scopes stay beside fixed-height channel
+details as DMA and interrupt events change.
+
 ## Installation
 
 ### macOS (Homebrew)
@@ -86,25 +105,6 @@ cargo build --release
 Run the resulting `target/release/copperline` binary. `--release` is a Cargo
 build option; unoptimized debug builds are too slow for real-time emulation.
 
-**Video Settings -> Framing -> Smart** automatically corrects small horizontal
-display offsets. Combine it with **Autocrop** and **Integer** scaling to fit
-the detected display at the largest whole-pixel scale, including artwork
-outside the normal TV aperture. See [display configuration](docs/guide/configuration.md).
-RTG integer scaling fits the board's native resolution to the available display
-area: a 640x480 desktop reaches 2x on a 1920x1080 screen, with room for the status bar.
-The RTG picture stays at native pixel quality while menus and panels keep
-their usual proportions and translucency.
-
-The [Debug workspace](docs/debugger/window.md) puts the Amiga display beside
-its debugger, Frame Analyzer, and Console in one desktop window. Open
-**Debugger...** in the menu or press
-`Cmd+B` on macOS or `Alt+B` on Linux/Windows. Drag the display divider to resize
-the panes; **Return to Play** restores the display layout while keeping the
-inspectors and their state. Click the display to send input to the Amiga, and
-use `Cmd+G` / `Alt+G` to return input to the debugger. Monospace readouts use
-Hack with a slashed zero. Audio scopes stay beside fixed-height channel
-details as DMA and interrupt events change.
-
 Dependencies:
 
 - Rust 1.95+ (tested on stable)
@@ -121,6 +121,8 @@ Run Copperline from the terminal:
 ```
 
 Running with no arguments and no `copperline.toml` (in the working directory or beside the executable) opens the interactive configuration launcher (defaulting to an A500 profile with the bundled AROS ROM).
+
+An installed build is run as `copperline`; the `./target/release/` prefix applies to a build from source. A machine booted on the bundled AROS ROM with no disk inserted shows the AROS logo on a black screen with the message "Waiting for bootable media" above a row of boot-media icons.
 
 To boot directly into a Kickstart ROM, configuration file, or floppy image:
 
@@ -218,8 +220,12 @@ To build the documentation locally:
 
 ```sh
 npm install -g mystmd
-cd docs && myst build --html
+cd docs
+python3 ../tools/prepare-docs.py
+myst build --html
 ```
+
+`docs/README.md` covers the PDF build and the full set of checks CI runs.
 
 ## Testing
 

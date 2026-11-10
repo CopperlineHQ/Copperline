@@ -2,11 +2,11 @@
 
 A status-first A500 probe (kind71) reads DMACONR before its first beam sample,
 then a second status and INTREQR, retaining beam brackets and settled data.
-Its1536-case matrix covers AD widths1/2/16, normal/hog priority, display-DMA,
+Its 1536-case matrix covers AD widths 1/2/16, normal/hog priority, display-DMA,
 no-start controls and neighboring instruction offsets. Both physical runs
 restore the previous OneROM state and verify reset release.
 
-Baseline b8a97ac6 matches1328 cases;208 differ. Two hundred have different
+Baseline b8a97ac6 matches 1328 cases; 208 differ. Two hundred have different
 observation beams, so their busy-status differences do not isolate an event
 edge. Eight sixteen-word, normal-priority/no-display-DMA cases have matching
 observation beams but expose INTREQ.BLIT one colour clock late. The no-start
@@ -21,7 +21,7 @@ DEFAULT_IRQ_LATENCY_CCK are unchanged. Delayed terminal D writes remain
 independent of the source countdown; fixed-DMA tests exercise this ordering.
 
 The candidate repairs all eight fields without new field or qualification
-regressions. The remaining200 arbitration differences are retained. Neighbor
+regressions. The remaining 200 arbitration differences are retained. Neighbor
 checks cover operand/CPU-DMA, onset/completion/pressure and handoff read/write
 matrices. Two older kind50 request snapshots also become matches at equal
 beam brackets; their incomplete restoration provenance makes them historical

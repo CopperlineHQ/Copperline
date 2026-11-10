@@ -159,7 +159,7 @@ Only target 57's BZERO changes between runs, from set to clear.
 | Current Copperline vs A500 | 36 BZERO words | 37 | 0 |
 | WinUAE Best Compatibility vs A500 | 48 BZERO words | 49 | 0 |
 
-Copperline has two false clears, targets 129 and257, in both captures:
+Copperline has two false clears, targets 129 and 257, in both captures:
 A shifts 2/4 respectively, B shift0, A=8000, B=C=0, LF=ca, B DMA off,
 two pixels. The other differences are hardware-clear/emulator-set.
 The two older hardware runs differ from the first current run on 115/117
