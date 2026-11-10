@@ -100,9 +100,13 @@ interrupts.
 A session also ends cleanly when the process is sent SIGTERM, SIGHUP, SIGINT
 or SIGQUIT -- by `kill`, by `timeout`, or because the terminal window or SSH
 connection closed. Copperline then leaves as it does for a quit and exits
-with status 128 plus the signal number (143 for SIGTERM). It likewise ends,
-with an error, when the terminal stops accepting output or goes away, and
-when a capture flag has written its capture.
+with status 128 plus the signal number (143 for SIGTERM). That holds while
+the session is still starting, too: a signal ends it even if the terminal's
+output is stopped (Ctrl+S, or a link that has stopped draining), and a
+terminal that takes no output for ten seconds at start-up ends the session
+with an error. It likewise ends, with an error, when the terminal stops
+accepting output or goes away, and when a capture flag has written its
+capture.
 
 However the session ends, including after an internal error, Copperline turns
 off the modes it turned on (alternate screen, mouse and focus reporting,

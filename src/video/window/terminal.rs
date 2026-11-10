@@ -19,7 +19,7 @@ use crate::terminal::input::{
     Event as TermEvent, KeyAction, KeyReport, KeypadKey, ModifierKey, Mods,
     MouseButton as TermMouseButton, MouseReport, Parser, Side, TermKey,
 };
-use crate::terminal::tty::{Output, Terminal, KEYBOARD_FLAGS};
+use crate::terminal::tty::{EndedBySignal, Output, Terminal, KEYBOARD_FLAGS};
 use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
@@ -92,6 +92,23 @@ impl TermSession {
     }
 }
 
+/// The outcome of a session that failed while starting: a signal asking it
+/// to end is the same clean exit the loop makes for one, with the status a
+/// shell reports for a process the signal killed; anything else is the
+/// error.
+fn ended_by_signal(error: anyhow::Error) -> Result<i32> {
+    match error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<EndedBySignal>())
+    {
+        Some(ended) => {
+            info!("terminal: ending on signal {} during start-up", ended.0);
+            Ok(128 + ended.0)
+        }
+        None => Err(error),
+    }
+}
+
 fn ambiguity_wait(lone_escape: bool) -> Duration {
     if lone_escape {
         ESCAPE_WAIT
@@ -119,7 +136,10 @@ impl App {
     /// Drive the session in the controlling terminal until it ends; the value
     /// is the process exit status it concluded on (src/verdict.rs).
     pub fn run_terminal(self, options: crate::terminal::Options) -> Result<i32> {
-        let terminal = Terminal::open(&options.log_target())?;
+        let terminal = match Terminal::open(&options.log_target()) {
+            Ok(terminal) => terminal,
+            Err(error) => return ended_by_signal(error),
+        };
         self.run_terminal_on(terminal, &options)
     }
 
@@ -130,7 +150,14 @@ impl App {
         mut terminal: Terminal,
         options: &crate::terminal::Options,
     ) -> Result<i32> {
-        let caps = terminal.probe()?;
+        let caps = match terminal.probe() {
+            Ok(caps) => caps,
+            Err(error) => {
+                // Give the terminal back before the status is reported.
+                drop(terminal);
+                return ended_by_signal(error);
+            }
+        };
         if !caps.graphics {
             drop(terminal);
             let tmux = if std::env::var_os("TMUX").is_some() {

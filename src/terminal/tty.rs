@@ -77,6 +77,24 @@ pub struct Capabilities {
 /// still gets its terminal mode restored.
 const RESTORE_WRITE_BUDGET: Duration = Duration::from_secs(1);
 
+/// How long a write made while the session starts may wait for the terminal
+/// to take it. These are a few dozen bytes; a terminal that has not taken
+/// them by now has its output stopped or its link down.
+const STARTUP_WRITE_BUDGET: Duration = Duration::from_secs(10);
+
+/// The session was asked to end by this signal before its loop was
+/// running. The caller leaves with the status the loop would have.
+#[derive(Debug)]
+pub struct EndedBySignal(pub i32);
+
+impl std::fmt::Display for EndedBySignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ended by signal {}", self.0)
+    }
+}
+
+impl std::error::Error for EndedBySignal {}
+
 /// How long the terminal must stay quiet, after it was told to stop
 /// reporting, for its input to count as drained, and the longest the
 /// drain waits for that on a terminal that keeps talking.
@@ -350,6 +368,8 @@ fn wait_fd(fd: RawFd, writable: bool, timeout: Duration) -> std::io::Result<()> 
     Ok(())
 }
 
+/// A blocking write of all of `bytes`, for the tests' pseudo-terminal.
+#[cfg(test)]
 fn write_fd(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
     while !bytes.is_empty() {
         // SAFETY: bytes is a live slice; fd is an open descriptor.
@@ -368,8 +388,7 @@ fn write_fd(fd: RawFd, mut bytes: &[u8]) -> std::io::Result<()> {
 
 /// The terminal, owned for the life of the session.
 pub struct Terminal {
-    /// Blocking handle: the terminal mode, the window size, and the start-up
-    /// writes.
+    /// Blocking handle: the terminal mode and the window size.
     tty: File,
     /// Non-blocking opens of the terminal for reading, and for the writer
     /// thread and the restore, which must never hang on a stalled link. Each
@@ -527,8 +546,28 @@ impl Terminal {
         self.log_path.as_deref()
     }
 
+    /// Write `bytes` to the terminal while the session starts, before the
+    /// writer thread runs. Like every write to the terminal this one must
+    /// not hang: on a terminal with its output stopped or a link that has
+    /// stopped draining, a blocking write would never return, and a signal
+    /// asking the session to end would only set a flag nobody gets to read.
+    /// So it goes through the non-blocking handle and gives up when an end
+    /// signal arrives or [`STARTUP_WRITE_BUDGET`] runs out.
     pub fn write(&self, bytes: &[u8]) -> Result<()> {
-        write_fd(self.tty.as_raw_fd(), bytes).context("writing to the terminal")
+        let deadline = Instant::now() + STARTUP_WRITE_BUDGET;
+        self.write_or_give_up(bytes, || Instant::now() >= deadline)
+    }
+
+    fn write_or_give_up(&self, bytes: &[u8], give_up: impl Fn() -> bool) -> Result<()> {
+        let written = write_until(self.output.as_raw_fd(), bytes, || {
+            self.end_signal().is_some() || give_up()
+        })
+        .context("writing to the terminal")?;
+        match (written, self.end_signal()) {
+            (true, _) => Ok(()),
+            (false, Some(signal)) => Err(EndedBySignal(signal).into()),
+            (false, None) => bail!("the terminal is not taking output"),
+        }
     }
 
     /// Start the writer thread on the terminal's non-blocking output (see
@@ -624,7 +663,12 @@ impl Terminal {
             if left.is_zero() {
                 break;
             }
-            let n = self.read(&mut buf, left)?;
+            if let Some(signal) = self.end_signal() {
+                return Err(EndedBySignal(signal).into());
+            }
+            // Short waits, so an end signal is noticed without relying on
+            // it interrupting the wait.
+            let n = self.read(&mut buf, left.min(Duration::from_millis(50)))?;
             parser.feed(&buf[..n], &mut events);
             let mut done = false;
             for event in events.drain(..) {
@@ -1436,6 +1480,13 @@ mod tests {
         drain.join().unwrap();
     }
 
+    /// The end-signal handlers and the flag they set are process-wide, so
+    /// the tests that install them run one at a time.
+    fn signal_tests() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: Mutex<()> = Mutex::new(());
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn handler_of(signal: libc::c_int) -> libc::sighandler_t {
         // SAFETY: a null new action only queries the current one.
         unsafe {
@@ -1448,28 +1499,136 @@ mod tests {
     /// kill, timeout and a closing SSH session reach the process as
     /// signals; the session notes them and puts the old handling back when
     /// it ends.
+    ///
+    /// A signal the process was started ignoring (SIGHUP under nohup, SIGINT
+    /// in a background shell job) stays ignored, so what the test expects of
+    /// each signal depends on how the test run itself was started.
     #[test]
     fn end_signals_are_noted_and_the_old_handlers_come_back() {
+        let _serial = signal_tests();
         let ours = on_end_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
         let before: Vec<_> = END_SIGNALS.iter().map(|&s| handler_of(s)).collect();
         let handlers = SignalHandlers::install();
         assert_eq!(end_signal(), None);
-        for &signal in &END_SIGNALS {
-            assert_eq!(handler_of(signal), ours, "signal {signal}");
+        let mut caught = Vec::new();
+        for (&signal, &was) in END_SIGNALS.iter().zip(&before) {
+            if was == libc::SIG_IGN {
+                assert_eq!(handler_of(signal), libc::SIG_IGN, "signal {signal}");
+            } else {
+                assert_eq!(handler_of(signal), ours, "signal {signal}");
+                caught.push(signal);
+            }
         }
-        // SAFETY: the handler for SIGTERM is ours and only stores a flag.
-        unsafe {
-            libc::raise(libc::SIGTERM);
+        // An ignored signal is not noted: it never reaches the handler.
+        for (&signal, &was) in END_SIGNALS.iter().zip(&before) {
+            if was == libc::SIG_IGN {
+                // SAFETY: raising a signal this process ignores does nothing.
+                unsafe {
+                    libc::raise(signal);
+                }
+                assert_eq!(end_signal(), None, "signal {signal}");
+            }
         }
-        assert_eq!(end_signal(), Some(libc::SIGTERM));
-        // The first signal is the one reported.
-        unsafe {
-            libc::raise(libc::SIGHUP);
+        // The first caught signal is the one reported, whatever follows.
+        for &signal in &caught {
+            // SAFETY: the handler for this signal is ours and only stores a
+            // flag.
+            unsafe {
+                libc::raise(signal);
+            }
+            assert_eq!(end_signal(), Some(caught[0]));
         }
-        assert_eq!(end_signal(), Some(libc::SIGTERM));
         drop(handlers);
         let after: Vec<_> = END_SIGNALS.iter().map(|&s| handler_of(s)).collect();
         assert_eq!(after, before);
+    }
+
+    /// The first caught end signal of this test run, with its handler
+    /// installed on `terminal`. `None` when the run ignores all of them.
+    fn catch_end_signals(terminal: &mut Terminal) -> Option<libc::c_int> {
+        let ignored: Vec<_> = END_SIGNALS
+            .iter()
+            .map(|&s| handler_of(s) == libc::SIG_IGN)
+            .collect();
+        terminal.signals = Some(SignalHandlers::install());
+        END_SIGNALS
+            .iter()
+            .zip(ignored)
+            .find_map(|(&signal, ignored)| (!ignored).then_some(signal))
+    }
+
+    /// Stop or resume the pseudo-terminal's output, as Ctrl+S and Ctrl+Q
+    /// (or a link that stops draining) do to a real one.
+    fn suspend_output(terminal: &Terminal, suspend: bool) {
+        let action = if suspend { libc::TCOOFF } else { libc::TCOON };
+        // SAFETY: tcflow on the session's own open terminal.
+        assert_eq!(unsafe { libc::tcflow(terminal.tty.as_raw_fd(), action) }, 0);
+    }
+
+    /// While the session starts, its writes go out before the loop that
+    /// polls for end signals runs. On a terminal that has stopped taking
+    /// output such a write must still end when the session is signalled,
+    /// or kill and a closing SSH session would leave it stuck with the
+    /// terminal taken until SIGKILL.
+    #[test]
+    fn a_startup_write_to_a_stopped_terminal_ends_on_a_signal() {
+        let _serial = signal_tests();
+        let pty = Pty::open();
+        let mut terminal = pty.session().unwrap();
+        let _ = pty.output_until(format!("\x1b[>{KEYBOARD_FLAGS}u").as_bytes());
+        let Some(signal) = catch_end_signals(&mut terminal) else {
+            return; // every end signal is ignored in this run
+        };
+        suspend_output(&terminal, true);
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            // SAFETY: the handler for this signal only stores a flag.
+            unsafe {
+                libc::kill(libc::getpid(), signal);
+            }
+        });
+        let started = Instant::now();
+        let error = terminal.write(&vec![b' '; 1 << 20]).err().unwrap();
+        killer.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let ended = error
+            .downcast_ref::<EndedBySignal>()
+            .unwrap_or_else(|| panic!("not a signal: {error:#}"));
+        assert_eq!(ended.0, signal);
+        // The probe ends the same way instead of waiting for answers.
+        let error = terminal.probe().err().unwrap();
+        assert!(error.downcast_ref::<EndedBySignal>().is_some(), "{error:#}");
+        suspend_output(&terminal, false);
+    }
+
+    /// With no signal, a startup write to a terminal that takes nothing
+    /// fails once its time is up rather than hanging.
+    #[test]
+    fn a_startup_write_to_a_stopped_terminal_runs_out_of_time() {
+        let pty = Pty::open();
+        let terminal = pty.session().unwrap();
+        let _ = pty.output_until(format!("\x1b[>{KEYBOARD_FLAGS}u").as_bytes());
+        suspend_output(&terminal, true);
+        let deadline = Instant::now() + Duration::from_millis(100);
+        let started = Instant::now();
+        let error = terminal
+            .write_or_give_up(&vec![b' '; 1 << 20], || Instant::now() >= deadline)
+            .err()
+            .unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            format!("{error:#}").contains("not taking output"),
+            "{error:#}"
+        );
+        suspend_output(&terminal, false);
     }
 
     fn scratch_dir(name: &str) -> PathBuf {
