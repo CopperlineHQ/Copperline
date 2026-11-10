@@ -499,8 +499,10 @@ socket2 = "0.6"
 # while the present worker holds a frame spins it forever rebuilding the
 # swapchain, and the main thread hangs waiting to reclaim the GPU side. This
 # revision is 0.17.2 plus upstream's bounded retry (parasyte/pixels#462) and
-# an examples-only clippy pass. crates/copperline-player and fuzz carry the
-# same patch. Remove all of them once a pixels release includes #462.
+# an examples-only clippy pass. A [patch] applies only at a workspace root:
+# the player crate is a member of this workspace and gets it from here, and
+# the fuzz workspace builds without the desktop frontend, so this is the
+# only copy. Remove it once a pixels release includes #462.
 pixels = { git = "https://github.com/parasyte/pixels", rev = "c681486feaaaf413b2db5c7b57d342677f0dfd87" }
 
 [lints.clippy]
