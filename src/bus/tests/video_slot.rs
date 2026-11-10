@@ -471,3 +471,58 @@ fn live_field_renders_the_beam_line_alone() {
     assert_eq!(header, Some(RED), "the sprite's first pixel at $5C");
     assert_eq!(border, Some(GREEN), "this line's own colour write");
 }
+
+/// Whether ERSY now freezes the beam readback: set it and watch VHPOSR.
+fn ersy_freezes(bus: &mut Bus) -> bool {
+    assert!(!bus.custom_write(0x100, 2, 0x0200));
+    assert!(!bus.custom_write(0x100, 2, 0x0202));
+    let a = vhposr(bus);
+    bus.advance_devices(64);
+    let frozen = vhposr(bus) == a;
+    assert!(!bus.custom_write(0x100, 2, 0x0200));
+    frozen
+}
+
+#[test]
+fn genlock_sync_survives_a_machine_reset() {
+    // A configured genlock.
+    let mut bus = empty_bus();
+    bus.set_genlock(true);
+    bus.reset_for_keyboard_reset();
+    assert!(!ersy_freezes(&mut bus), "configured genlock after reset");
+
+    // A card that supplies sync, still fitted after the reset.
+    let mut bus = empty_bus();
+    bus.attach_video_slot(Box::new(SyncCard));
+    bus.reset_for_keyboard_reset();
+    assert!(!ersy_freezes(&mut bus), "sync card after reset");
+
+    // Neither: ERSY freezes as before.
+    let mut bus = empty_bus();
+    bus.reset_for_keyboard_reset();
+    assert!(ersy_freezes(&mut bus));
+}
+
+#[test]
+fn a_loaded_state_takes_its_sync_from_the_live_card() {
+    // Saved without a card, loaded into a session that has one.
+    let mut restored = empty_bus();
+    let mut live = empty_bus();
+    live.attach_video_slot(Box::new(SyncCard));
+    restored.adopt_host_resources(&mut live).unwrap();
+    assert!(restored.video_slot().is_some());
+    assert!(!ersy_freezes(&mut restored), "the live card's sync");
+
+    // Saved with card sync and ERSY set, loaded where there is no card:
+    // the counters freeze as soon as the state resumes.
+    let mut restored = empty_bus();
+    restored.attach_video_slot(Box::new(SyncCard));
+    assert!(!restored.custom_write(0x100, 2, 0x0202));
+    let _ = std::mem::take(&mut restored.video_slot);
+    let mut live = empty_bus();
+    restored.adopt_host_resources(&mut live).unwrap();
+    assert!(restored.video_slot().is_none());
+    let a = vhposr(&mut restored);
+    restored.advance_devices(64);
+    assert_eq!(vhposr(&mut restored), a, "ERSY set, no sync: frozen");
+}

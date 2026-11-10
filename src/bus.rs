@@ -5437,6 +5437,8 @@ impl Bus {
         self.copper = Copper::new();
         self.copper_wake_bound = CopperWakeBound::Unknown;
         self.denise = Denise::new();
+        // The genlock and the video-slot card stay fitted across the reset.
+        self.apply_genlock_sync();
         self.blitter = Blitter::new();
         self.configure_chip_dma_masks();
         self.rtc.reset();
@@ -6333,6 +6335,9 @@ impl Bus {
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
         std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
         std::mem::swap(&mut self.video_slot, &mut live.video_slot);
+        // The card is the live session's, the genlock setting the state's:
+        // Agnus's restored sync must follow both.
+        self.apply_genlock_sync();
         self.blitter_trace = live.blitter_trace.take();
         self.paula.adopt_host_taps(&mut live.paula);
         // Bus-event subscriptions belong to live control connections, not to
@@ -6681,8 +6686,20 @@ impl Bus {
     /// Fit or remove a stand-alone genlock (`[chipset] genlock`).
     pub fn set_genlock(&mut self, present: bool) {
         self.genlock_configured = present;
+        self.apply_genlock_sync();
+    }
+
+    /// Give Agnus the sync actually present: a stand-alone genlock, or a
+    /// video-slot card that supplies it. Called wherever Agnus or the card
+    /// changes under the other (a reset's new Agnus, a state load that
+    /// keeps the live card), and then reconciles the ERSY latch with
+    /// BPLCON0 as it stands: without sync, ERSY set freezes the counters
+    /// from here, as a write of it would have.
+    fn apply_genlock_sync(&mut self) {
         let card_sync = self.video_slot.as_ref().is_some_and(|d| d.supplies_sync());
-        self.agnus.set_genlock_sync(present || card_sync);
+        self.agnus
+            .set_genlock_sync(self.genlock_configured || card_sync);
+        self.agnus.set_ersy(self.denise.bplcon0 & 0x0002 != 0);
     }
 
     pub fn video_slot(&self) -> Option<&dyn crate::videoslot::VideoSlotDevice> {
