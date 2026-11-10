@@ -27,7 +27,7 @@ mod session;
 mod telnet;
 
 use crate::chipset::paula::PAULA_CLOCK_HZ;
-use crate::serial::{SerialSink, SerialTimeAnchor};
+use crate::serial::{SerialSink, SerialTimeAnchor, TCP_INBOUND_QUEUE, TCP_WRITE_TIMEOUT};
 use crate::timebase::Instant;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -154,7 +154,7 @@ pub(crate) trait ModemTransport: Send {
 /// so the two cannot interleave.
 fn spawn_modem_reader(
     mut stream: TcpStream,
-    tx: std::sync::mpsc::Sender<u8>,
+    tx: std::sync::mpsc::SyncSender<u8>,
     buffered: Arc<AtomicIsize>,
     writer: Arc<Mutex<Option<TcpStream>>>,
     carrier: Arc<AtomicBool>,
@@ -321,8 +321,9 @@ impl ModemTransport for TcpModemTransport {
             _ => DialError::Unreachable,
         })?;
         let _ = stream.set_nodelay(true);
+        let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
         let writer_clone = stream.try_clone().map_err(|_| DialError::Unreachable)?;
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let generation = self.install_connection(writer_clone);
         self.carrier.store(true, Ordering::Release);
         self.rx = Some(rx);
@@ -418,6 +419,7 @@ impl ModemTransport for TcpModemTransport {
                         continue;
                     }
                     let _ = stream.set_nodelay(true);
+                    let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
                     *accept_pending.lock().unwrap() = Some(stream);
                     accept_ringing.store(true, Ordering::Release);
                 }
@@ -452,7 +454,7 @@ impl ModemTransport for TcpModemTransport {
         let Ok(clone) = stream.try_clone() else {
             return false;
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let generation = self.install_connection(clone);
         self.rx = Some(rx);
         self.carrier.store(true, Ordering::Release);

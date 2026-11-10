@@ -28,6 +28,9 @@ for the earlier release notes.
 - A `copperhf.device` read or write whose buffer is not guest RAM fails
   before any host I/O instead of first allocating and reading the full
   request length.
+- A TCP serial or modem peer that stops reading no longer freezes the
+  emulator: a write that cannot progress for one second drops the link.
+  Input the guest has not read yet is limited to 64 KiB per link.
 - Loading a save state logs a warning for each host file, directory, plugin
   module or network backend the state names that the running session had not
   opened. `SECURITY.md` now states which inputs are trusted: a save state has

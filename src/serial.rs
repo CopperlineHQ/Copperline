@@ -302,6 +302,12 @@ pub trait SerialSink: Send {
 /// A background thread owns the accept loop and the read half (pushing
 /// bytes into a channel), so Paula's idle fast path polls a channel probe,
 /// never a socket syscall.
+///
+/// The peer cannot hold the emulator up or make it buffer without bound:
+/// the inbound channel holds [`TCP_INBOUND_QUEUE`] bytes and the reader
+/// thread waits for room (so the peer sees ordinary TCP backpressure), and
+/// a write that cannot make progress for [`TCP_WRITE_TIMEOUT`] drops the
+/// connection instead of blocking the emulation thread for good.
 pub struct TcpSerialSink {
     rx: std::sync::mpsc::Receiver<u8>,
     /// Write half of the current client, shared with the acceptor thread
@@ -338,7 +344,7 @@ impl TcpSerialSink {
             local_addr.ip(),
             local_addr.port(),
         );
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let writer = std::sync::Arc::new(std::sync::Mutex::new(None::<std::net::TcpStream>));
         let acceptor_writer = std::sync::Arc::clone(&writer);
         let buffered = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
@@ -353,6 +359,7 @@ impl TcpSerialSink {
                 };
                 log::info!("serial: client connected from {peer}");
                 let _ = stream.set_nodelay(true);
+                let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
                 match stream.try_clone() {
                     Ok(w) => *acceptor_writer.lock().unwrap() = Some(w),
                     Err(e) => {
@@ -401,8 +408,9 @@ impl TcpSerialSink {
             .map_err(|e| anyhow::anyhow!("[serial] tcp-connect: connecting {addr}: {e}"))?;
         let peer = stream.peer_addr()?;
         let _ = stream.set_nodelay(true);
+        let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
         log::info!("serial: connected to tcp://{peer}");
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let writer = std::sync::Arc::new(std::sync::Mutex::new(Some(stream.try_clone()?)));
         let reader_writer = std::sync::Arc::clone(&writer);
         let buffered = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
@@ -448,6 +456,16 @@ impl TcpSerialSink {
         self.local_addr
     }
 }
+
+/// Bytes received from a TCP serial or modem peer and not yet read by the
+/// guest. The guest drains its serial port at the line rate, a few kilobytes
+/// a second at most, so this is many seconds of traffic.
+pub(crate) const TCP_INBOUND_QUEUE: usize = 64 * 1024;
+
+/// How long one serial byte may wait for room in the socket's send buffer.
+/// The buffer absorbs far more than the guest transmits in this time, so a
+/// write only waits at all once the peer has stopped reading.
+pub(crate) const TCP_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl SerialSink for TcpSerialSink {
     fn write_byte(&mut self, b: u8, _at_cck: u64) {
@@ -1064,6 +1082,75 @@ mod tests {
             .unwrap();
         peer.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"x");
+    }
+
+    /// A peer that sends faster than the guest reads is held back by TCP
+    /// once the inbound queue is full; nothing is lost and nothing more is
+    /// buffered in the process.
+    #[test]
+    fn tcp_sink_bounds_unread_input_without_losing_any() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::thread::spawn(move || listener.accept().unwrap().0);
+        let mut sink = TcpSerialSink::connect(&addr.to_string()).unwrap();
+        let mut peer = accepted.join().unwrap();
+
+        const TOTAL: usize = TCP_INBOUND_QUEUE * 3;
+        let sender = std::thread::spawn(move || {
+            let data: Vec<u8> = (0..TOTAL).map(|i| (i % 251) as u8).collect();
+            peer.write_all(&data).unwrap();
+            peer
+        });
+        let queued =
+            |sink: &TcpSerialSink| sink.buffered.load(std::sync::atomic::Ordering::Acquire);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while queued(&sink) < TCP_INBOUND_QUEUE as isize {
+            assert!(std::time::Instant::now() < deadline, "queue never filled");
+            std::thread::yield_now();
+        }
+        // Full, and it stays full rather than growing while nothing reads.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(queued(&sink), TCP_INBOUND_QUEUE as isize);
+
+        for i in 0..TOTAL {
+            let byte = loop {
+                if let Some(b) = sink.read_byte() {
+                    break b;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "byte {i} never arrived"
+                );
+                std::thread::yield_now();
+            };
+            assert_eq!(byte, (i % 251) as u8, "byte {i}");
+        }
+        drop(sender.join().unwrap());
+    }
+
+    /// A peer that stops reading cannot block the emulation thread for
+    /// good: once its receive window and the send buffer are full, a write
+    /// gives up after the timeout and the link is dropped like a lost
+    /// carrier.
+    #[test]
+    fn tcp_sink_drops_a_peer_that_stops_reading() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::thread::spawn(move || listener.accept().unwrap().0);
+        let mut sink = TcpSerialSink::connect(&addr.to_string()).unwrap();
+        let _peer = accepted.join().unwrap(); // held open, never read
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while sink.control_lines() == SerialControlLines::CONNECTED {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writes to a stalled peer never timed out"
+            );
+            for _ in 0..4096 {
+                sink.write_byte(b'x', 0);
+            }
+        }
+        assert_eq!(sink.control_lines(), SerialControlLines::READY);
     }
 
     #[test]
