@@ -67,6 +67,14 @@ ended before it returned), and a guest calling uaelib `ExitEmu` (function
 13) stops the run with status 0. Exit statuses: 0 ok, 1 Copperline error,
 3 screenshot expectation failed, 4 no guest return code.
 
+`--terminal` shows an interactive session inside the terminal it was started
+from instead of a window (Kitty graphics and keyboard protocols: kitty,
+Ghostty, WezTerm; Unix only), which also works over SSH
+(`docs/guide/terminal.md`). It needs a real terminal on `/dev/tty`, so it is
+for a person at a keyboard: an agent verifying something should still use
+the headless flags below. F12 then `q` quits, and SIGTERM ends the session
+cleanly with status 143.
+
 ## Headless verification
 
 All `SECS` timestamps below are absolute *emulated* seconds, not wall-clock.
