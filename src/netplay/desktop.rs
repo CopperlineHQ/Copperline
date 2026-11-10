@@ -327,6 +327,14 @@ impl SpectatorLink {
                 now.duration_since(self.started) < SETUP_TIMEOUT,
                 "spectator setup timed out"
             );
+            // Anyone with the session ID can claim a spectator place from
+            // any source address. A spectator receiving the bundle answers
+            // every packet, so one that stays silent is not there: stop
+            // sending to that address rather than for the whole setup time.
+            ensure!(
+                self.control.unacknowledged_for(now) < SPECTATOR_TIMEOUT,
+                "spectator stopped acknowledging setup data"
+            );
             return Ok(());
         }
         ensure!(
@@ -2130,5 +2138,78 @@ mod flush_tests {
             })?
             .join()
             .unwrap()
+    }
+
+    /// A spectator place claimed from an address that never answers gets
+    /// one packet of the bundle at a time, and is dropped once it has
+    /// acknowledged nothing for the spectator timeout.
+    #[test]
+    fn a_silent_spectator_source_gets_one_packet_and_is_dropped() -> Result<()> {
+        use std::net::UdpSocket;
+        let session = [23; 16];
+        // The host names no guest; the second address is never bound.
+        let bound = super::tests::addresses(1)?[0];
+        let mut host = super::tests::options(&[bound, bound], 0, 2, session, 1);
+        host.peers.clear();
+        let mut listener = NativeTransport::Udp(UdpTransport::listen(host)?);
+        let address = listener.socket().local_addr()?;
+        let source = UdpSocket::bind("127.0.0.1:0")?;
+        source.set_read_timeout(Some(Duration::from_millis(200)))?;
+        let mut watch = Control::new(
+            super::super::PacketQueue::default(),
+            session,
+            ROLE_SPECTATOR,
+            ROLE_HOST,
+        );
+        send_message(
+            &mut watch,
+            &Message::Watch {
+                build: env!("COPPERLINE_DISPLAY_VERSION").into(),
+            },
+        )?;
+        watch.poll()?;
+        source.send_to(&watch.inner.pop().unwrap(), address)?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let transport = loop {
+            listener.pump()?;
+            if let Some(transport) = listener.take_spectators().pop() {
+                break transport;
+            }
+            ensure!(Instant::now() < deadline, "the spectator was not admitted");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let now = Instant::now();
+        let mut link = SpectatorLink {
+            control: Control::new(transport, session, ROLE_HOST, ROLE_SPECTATOR),
+            phase: WatchPhase::Hello,
+            cursor: FeedCursor::default(),
+            started: now,
+            last_seen: now,
+            last_sent: now,
+        };
+        let bundle = [Arc::new(vec![5; 256 * 1024])];
+        // Admit the Watch, then let the bundle start moving.
+        link.step(now, [0; 32], None, Some(&bundle))?;
+        assert!(link.phase == WatchPhase::Verified);
+        link.step(now, [0; 32], None, Some(&bundle))?;
+        let mut data = 0;
+        let mut bytes = [0; MAX_PACKET + 1];
+        while let Ok(len) = source.recv(&mut bytes) {
+            // Data packets carry a payload past the control header.
+            if len > 43 {
+                data += 1;
+            }
+        }
+        assert_eq!(data, 1, "only one data packet before any acknowledgement");
+        link.step(now + Duration::from_secs(5), [0; 32], None, Some(&bundle))?;
+        assert!(link
+            .step(
+                now + SPECTATOR_TIMEOUT + Duration::from_secs(1),
+                [0; 32],
+                None,
+                Some(&bundle)
+            )
+            .is_err());
+        Ok(())
     }
 }

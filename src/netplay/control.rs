@@ -17,6 +17,16 @@ const RESEND: Duration = Duration::from_millis(200);
 /// Complete messages held for the session before further chunks wait in the
 /// receive window; queued messages awaiting transmission are bounded alike.
 const QUEUE: usize = 4;
+/// Longest message a guest or spectator sends its host. Only the host
+/// transfers the setup bundle and replacement disks; what travels the other
+/// way is a JSON setup message (at most 2048 bytes, `desktop::decode_json`)
+/// or a spectator's feed status, so a host never buffers more than this for
+/// a link it has not seated.
+const PEER_MESSAGE_LIMIT: usize = 64 * 1024;
+/// Data packets in flight before the peer has acknowledged any. A source
+/// address is not proof that anyone there asked for the data, so until the
+/// peer answers, a link resends one packet rather than a whole window.
+const UNPROVEN_WINDOW: u64 = 1;
 
 /// Role bytes carried by every control packet.
 pub(super) const ROLE_HOST: u8 = 0;
@@ -31,6 +41,18 @@ pub(super) fn is_control_packet(bytes: &[u8], session: &[u8; 16], role: u8) -> b
         && bytes[4] == 1
         && bytes[5..21] == *session
         && bytes[21] == role
+}
+
+/// Longest control message a peer in `role` may send: the host's setup
+/// bundle (with its kind byte) from a host, a small setup or status message
+/// from anyone else. Both ends apply the same rule, so a correct sender
+/// never queues what its receiver would refuse.
+fn message_limit(role: u8) -> usize {
+    if role == ROLE_HOST {
+        super::setup::MAX_BUNDLE + 1
+    } else {
+        PEER_MESSAGE_LIMIT
+    }
 }
 
 struct Outgoing {
@@ -54,6 +76,11 @@ pub(super) struct Control<T> {
     messages: VecDeque<Vec<u8>>,
     game: VecDeque<Vec<u8>>,
     ack_pending: bool,
+    /// Whether the peer has acknowledged any of our data packets.
+    proven: bool,
+    /// When the peer last acknowledged a data packet, or when data was
+    /// queued with nothing outstanding.
+    acknowledged: Option<Instant>,
 }
 
 impl<T: Transport> Control<T> {
@@ -76,6 +103,17 @@ impl<T: Transport> Control<T> {
             messages: VecDeque::new(),
             game: VecDeque::new(),
             ack_pending: false,
+            proven: false,
+            acknowledged: None,
+        }
+    }
+
+    /// How long data has been waiting for the peer to acknowledge any of
+    /// it; zero while nothing is outstanding.
+    pub fn unacknowledged_for(&self, now: Instant) -> Duration {
+        match self.acknowledged {
+            Some(since) if self.sending() => now.duration_since(since),
+            _ => Duration::ZERO,
         }
     }
 
@@ -91,9 +129,10 @@ impl<T: Transport> Control<T> {
             .try_fold(0usize, |len, part| len.checked_add(part.len()))
             .context("netplay control message length overflow")?;
         ensure!(
-            len > 0 && len <= super::setup::MAX_BUNDLE + 1 && self.can_send(),
-            "netplay control send queue is full"
+            len > 0 && len <= message_limit(self.role),
+            "netplay control message length is invalid"
         );
+        ensure!(self.can_send(), "netplay control send queue is full");
         // Parts are chunked separately, so a small leading part shares its
         // packet with the length prefix instead of costing one of its own:
         // a feed message or setup reply then travels as a single packet.
@@ -173,8 +212,13 @@ impl<T: Transport> Control<T> {
             let ack = u64::from_le_bytes(bytes[30..38].try_into()?);
             let mask = u32::from_le_bytes(bytes[38..42].try_into()?);
             ensure!(ack <= self.next_send, "peer acknowledged unsent setup data");
+            let outstanding = self.outgoing.len();
             self.outgoing
                 .retain(|&n, _| n >= ack && (n - ack >= WINDOW || mask & (1 << (n - ack)) == 0));
+            if self.outgoing.len() < outstanding {
+                self.proven = true;
+                self.acknowledged = Some(now);
+            }
             if bytes[42] == 0 {
                 ensure!(bytes.len() == HEADER, "invalid setup acknowledgement");
                 continue;
@@ -223,10 +267,14 @@ impl<T: Transport> Control<T> {
             .outgoing
             .first_key_value()
             .map_or(self.next_send, |(&n, _)| n);
-        while self.next_send - base < WINDOW {
+        let window = if self.proven { WINDOW } else { UNPROVEN_WINDOW };
+        while self.next_send - base < window {
             let Some(message) = self.sending.front_mut() else {
                 break;
             };
+            if self.outgoing.is_empty() {
+                self.acknowledged = Some(now);
+            }
             let part = message.front().unwrap();
             let end = (self.send_offset + CHUNK).min(part.len());
             let chunk = part[self.send_offset..end].to_vec();
@@ -309,8 +357,10 @@ impl<T: Transport> Control<T> {
             }
             if self.expected.is_none() {
                 let len = u32::from_le_bytes(self.assembling[..4].try_into()?) as usize;
+                // The length is checked against the sender's role before any
+                // of the message is buffered.
                 ensure!(
-                    len <= super::setup::MAX_BUNDLE + 1 && len > 0,
+                    len <= message_limit(self.peer_role) && len > 0,
                     "invalid setup message length"
                 );
                 // Grow only as data arrives, capped at the validated length.
@@ -364,13 +414,14 @@ mod tests {
 
     #[test]
     fn receive_allocation_grows_with_data_and_stays_within_message_length() -> Result<()> {
-        let mut control = Control::new(PacketQueue::default(), [3; 16], ROLE_HOST, ROLE_GUEST);
+        // A guest receives the host's bundle, the largest message there is.
+        let mut control = Control::new(PacketQueue::default(), [3; 16], ROLE_GUEST, ROLE_HOST);
         let limit = (super::super::setup::MAX_BUNDLE + 1) as u32;
         control.assemble(&limit.to_le_bytes())?;
         control.assemble(&[1])?;
         assert!(control.assembling.capacity() <= 2 * CHUNK);
 
-        let mut control = Control::new(PacketQueue::default(), [3; 16], ROLE_HOST, ROLE_GUEST);
+        let mut control = Control::new(PacketQueue::default(), [3; 16], ROLE_GUEST, ROLE_HOST);
         let len = CHUNK * 3 + 1;
         control.assemble(&(len as u32).to_le_bytes())?;
         for chunk in vec![7; len].chunks(CHUNK) {
@@ -380,6 +431,72 @@ mod tests {
         let message = control.take_message().unwrap();
         assert_eq!(message, vec![7; len]);
         assert!(message.capacity() <= len);
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_host_may_send_or_be_received_past_the_small_message_limit() -> Result<()> {
+        let bundle = super::super::setup::MAX_BUNDLE + 1;
+        for (role, peer) in [(ROLE_HOST, ROLE_GUEST), (ROLE_HOST, ROLE_SPECTATOR)] {
+            // The host refuses a large length from a guest or spectator
+            // before buffering any of the message.
+            let mut host = Control::new(PacketQueue::default(), [3; 16], role, peer);
+            assert!(host
+                .assemble(&((PEER_MESSAGE_LIMIT + 1) as u32).to_le_bytes())
+                .is_err());
+            assert!(host.assemble(&(bundle as u32).to_le_bytes()).is_err());
+            let mut host = Control::new(PacketQueue::default(), [3; 16], role, peer);
+            host.assemble(&(PEER_MESSAGE_LIMIT as u32).to_le_bytes())?;
+            assert_eq!(host.expected, Some(PEER_MESSAGE_LIMIT));
+            // Sending the other way, the host may still send its bundle.
+            assert!(host.send_message(vec![0; PEER_MESSAGE_LIMIT + 1]).is_ok());
+
+            // The guest or spectator never queues what its host refuses.
+            let mut peer = Control::new(PacketQueue::default(), [3; 16], peer, ROLE_HOST);
+            assert!(peer.send_message(vec![0; PEER_MESSAGE_LIMIT + 1]).is_err());
+            assert!(peer.send_message(vec![0; PEER_MESSAGE_LIMIT]).is_ok());
+            peer.assemble(&(bundle as u32).to_le_bytes())?;
+            assert_eq!(peer.expected, Some(bundle));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_window_opens_only_once_the_peer_acknowledges_data() -> Result<()> {
+        let mut host = Control::new(PacketQueue::default(), [3; 16], ROLE_HOST, ROLE_SPECTATOR);
+        let mut spectator =
+            Control::new(PacketQueue::default(), [3; 16], ROLE_SPECTATOR, ROLE_HOST);
+        host.send_message(vec![9; CHUNK * 40])?;
+        let start = Instant::now();
+        assert_eq!(host.unacknowledged_for(start), Duration::ZERO);
+        // Unanswered, the host resends its first packet and nothing more.
+        let mut sent = Vec::new();
+        for tick in 0..3 {
+            host.poll_at(start + RESEND * tick)?;
+            while let Some(packet) = host.inner.pop() {
+                sent.push(packet);
+            }
+        }
+        assert_eq!(sent.len(), 3);
+        assert!(sent.iter().all(|packet| packet == &sent[0]));
+        let later = start + RESEND * 3;
+        assert_eq!(host.unacknowledged_for(later), RESEND * 3);
+        // An acknowledgement opens the full window and restarts the clock.
+        spectator.inner.push(&sent[0])?;
+        spectator.poll_at(later)?;
+        host.inner.push(&spectator.inner.pop().unwrap())?;
+        host.poll_at(later)?;
+        let mut window = 0;
+        while host.inner.pop().is_some() {
+            window += 1;
+        }
+        assert_eq!(window, WINDOW);
+        assert_eq!(host.unacknowledged_for(later), Duration::ZERO);
+        assert_eq!(
+            host.unacknowledged_for(later + RESEND),
+            RESEND,
+            "data is still outstanding"
+        );
         Ok(())
     }
 
@@ -471,6 +588,8 @@ mod tests {
         let mut host = Control::new(PacketQueue::default(), session, ROLE_HOST, ROLE_SPECTATOR);
         let mut spectator =
             Control::new(PacketQueue::default(), session, ROLE_SPECTATOR, ROLE_HOST);
+        // A link whose peer has already acknowledged data sends a window.
+        host.proven = true;
         let mut sent = 0u8;
         for round in 0..2 {
             while host.can_send() {

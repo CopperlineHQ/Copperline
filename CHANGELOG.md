@@ -41,6 +41,12 @@ for the earlier release notes.
   where rollbacks replace the RAM buffers and a cached pointer would dangle.
 - The AppImage includes Copperline's licence and the AROS README and
   acknowledgements, as the other packages do.
+- Netplay: a host accepts only small control messages from guests and
+  spectators instead of buffering up to 512 MiB per link, sends one packet
+  at a time to a peer that has not answered yet, and drops a spectator that
+  acknowledges nothing for ten seconds during setup. An oversized or failed
+  UDP datagram no longer ends a session (it did on Windows), and a host
+  cannot make a guest load drive sound samples from a path of its choosing.
 - Loading a save state logs a warning for each host file, directory, plugin
   module or network backend the state names that the running session had not
   opened. `SECURITY.md` now states which inputs are trusted: a save state has

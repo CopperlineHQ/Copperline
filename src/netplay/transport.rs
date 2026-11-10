@@ -397,6 +397,9 @@ pub struct UdpTransport {
     peer: Option<SocketAddr>,
     session: [u8; 16],
     table: Option<Arc<Mutex<SlotTable>>>,
+    /// Receive errors of no known per-datagram kind since the last datagram
+    /// or empty queue.
+    receive_errors: u32,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -499,7 +502,33 @@ impl UdpTransport {
                     spectators,
                 }))
             }),
+            receive_errors: 0,
         })
+    }
+
+    /// A failed receive is a dropped datagram (`Some(0)`), so a stranger's
+    /// packet cannot end the session before any source or session check.
+    /// A socket that fails on every call still does, rather than leaving
+    /// the session to read nothing until a peer times out; callers read a
+    /// bounded number of datagrams per poll, so a failing socket costs no
+    /// more than a busy one in the meantime.
+    fn receive_failed(&mut self, error: std::io::Error) -> Result<Option<usize>> {
+        match classify_receive_error(&error) {
+            ReceiveError::Empty => {
+                self.receive_errors = 0;
+                Ok(None)
+            }
+            ReceiveError::Datagram => Ok(Some(0)),
+            ReceiveError::Other => {
+                self.receive_errors += 1;
+                ensure!(
+                    self.receive_errors < RECEIVE_ERROR_LIMIT,
+                    "netplay UDP socket failed: {error}"
+                );
+                log::debug!("netplay: dropped a datagram: {error}");
+                Ok(Some(0))
+            }
+        }
     }
 
     pub(super) fn take_links(&mut self, kind: SlotKind) -> Vec<PeerTransport> {
@@ -544,37 +573,76 @@ fn is_reset(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::ConnectionReset
 }
 
+/// Windows fails a receive with `WSAEMSGSIZE` when a datagram is larger than
+/// the buffer, where other systems truncate it. The code is not an errno on
+/// any other system, so it is matched everywhere.
+#[cfg(not(target_arch = "wasm32"))]
+const WSAEMSGSIZE: i32 = 10040;
+
+/// Consecutive receive errors of no known per-datagram kind, with no
+/// datagram or empty queue in between, after which the socket itself is
+/// taken to have failed.
+#[cfg(not(target_arch = "wasm32"))]
+const RECEIVE_ERROR_LIMIT: u32 = 64;
+
+/// How a receive error on a UDP socket bears on the session.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceiveError {
+    /// Nothing is queued.
+    Empty,
+    /// One datagram failed: oversized, or the echo of an earlier send to a
+    /// departed peer. Anyone who can reach the port can cause these, so
+    /// they never fail the session.
+    Datagram,
+    /// Of no known kind; persistent ones mean the socket has failed.
+    Other,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn classify_receive_error(error: &std::io::Error) -> ReceiveError {
+    use std::io::ErrorKind;
+    match error.kind() {
+        ErrorKind::WouldBlock => ReceiveError::Empty,
+        ErrorKind::ConnectionReset | ErrorKind::ConnectionRefused | ErrorKind::Interrupted => {
+            ReceiveError::Datagram
+        }
+        _ if error.raw_os_error() == Some(WSAEMSGSIZE) => ReceiveError::Datagram,
+        _ => ReceiveError::Other,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 impl Transport for UdpTransport {
     fn receive(&mut self, buffer: &mut [u8]) -> Result<Option<usize>> {
-        match self.socket.recv_from(buffer) {
-            Ok((len, source)) => {
-                if self.peer == Some(source) {
-                    return Ok(Some(len));
-                }
-                // A guest's or spectator's packets are queued for its own
-                // link; every other foreign datagram is discarded as before.
-                if let Some(table) = &self.table {
-                    let bytes = &buffer[..len.min(buffer.len())];
-                    let mut table = table.lock().unwrap();
-                    if !table.deliver(source, bytes) {
-                        for (kind, role) in [
-                            (SlotKind::Player, super::control::ROLE_GUEST),
-                            (SlotKind::Spectator, super::control::ROLE_SPECTATOR),
-                        ] {
-                            if super::control::is_control_packet(bytes, &self.session, role) {
-                                table.accept(kind, source, bytes);
-                                break;
-                            }
-                        }
+        let (len, source) = match self.socket.recv_from(buffer) {
+            Ok(received) => {
+                self.receive_errors = 0;
+                received
+            }
+            Err(error) => return self.receive_failed(error),
+        };
+        if self.peer == Some(source) {
+            return Ok(Some(len));
+        }
+        // A guest's or spectator's packets are queued for its own
+        // link; every other foreign datagram is discarded as before.
+        if let Some(table) = &self.table {
+            let bytes = &buffer[..len.min(buffer.len())];
+            let mut table = table.lock().unwrap();
+            if !table.deliver(source, bytes) {
+                for (kind, role) in [
+                    (SlotKind::Player, super::control::ROLE_GUEST),
+                    (SlotKind::Spectator, super::control::ROLE_SPECTATOR),
+                ] {
+                    if super::control::is_control_packet(bytes, &self.session, role) {
+                        table.accept(kind, source, bytes);
+                        break;
                     }
                 }
-                Ok(Some(0))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) if is_reset(&e) => Ok(Some(0)),
-            Err(e) => Err(e.into()),
         }
+        Ok(Some(0))
     }
 
     fn send(&mut self, packet: &[u8]) -> Result<bool> {
@@ -631,5 +699,83 @@ impl Transport for UdpPeer {
             Err(e) if is_reset(&e) => Ok(true),
             Err(e) => Err(e.into()),
         }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn receive_errors_are_sorted_by_whether_one_datagram_or_the_socket_failed() {
+        let oversized = Error::from_raw_os_error(WSAEMSGSIZE);
+        assert_eq!(classify_receive_error(&oversized), ReceiveError::Datagram);
+        for kind in [
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionRefused,
+            ErrorKind::Interrupted,
+        ] {
+            assert_eq!(
+                classify_receive_error(&Error::from(kind)),
+                ReceiveError::Datagram
+            );
+        }
+        assert_eq!(
+            classify_receive_error(&Error::from(ErrorKind::WouldBlock)),
+            ReceiveError::Empty
+        );
+        assert_eq!(
+            classify_receive_error(&Error::from(ErrorKind::InvalidInput)),
+            ReceiveError::Other
+        );
+    }
+
+    #[test]
+    fn a_failed_receive_drops_one_datagram_and_only_a_failing_socket_ends_the_link() -> Result<()> {
+        let mut transport = UdpTransport::bind(
+            "127.0.0.1:0".parse()?,
+            None,
+            [1; 16],
+            Vec::new(),
+            1,
+            0,
+            super::super::ConnectionOptions::Direct(super::super::Options {
+                bind: "127.0.0.1:0".parse()?,
+                peers: Vec::new(),
+                player: 0,
+                players: 2,
+                session: [1; 16],
+                input_delay: 0,
+                rollback_frames: 8,
+                spectators: 0,
+            }),
+        )?;
+        // An oversized datagram, however many, never fails the session.
+        for _ in 0..RECEIVE_ERROR_LIMIT * 4 {
+            assert_eq!(
+                transport.receive_failed(Error::from_raw_os_error(WSAEMSGSIZE))?,
+                Some(0)
+            );
+        }
+        // Unknown errors are dropped datagrams until they persist; an empty
+        // queue or a datagram in between shows the socket still works.
+        for _ in 0..RECEIVE_ERROR_LIMIT - 1 {
+            assert_eq!(
+                transport.receive_failed(Error::from(ErrorKind::InvalidInput))?,
+                Some(0)
+            );
+        }
+        assert_eq!(
+            transport.receive_failed(Error::from(ErrorKind::WouldBlock))?,
+            None
+        );
+        for _ in 0..RECEIVE_ERROR_LIMIT - 1 {
+            transport.receive_failed(Error::from(ErrorKind::InvalidInput))?;
+        }
+        assert!(transport
+            .receive_failed(Error::from(ErrorKind::InvalidInput))
+            .is_err());
+        Ok(())
     }
 }

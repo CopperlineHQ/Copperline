@@ -420,6 +420,9 @@ usually through port forwarding or a private VPN. A VPN also supplies
 transport encryption and authentication: the direct UDP transport sends
 inputs and game files in cleartext, and its session ID distinguishes games
 rather than authenticating a person. Connect only to a trusted peer.
+Anyone who learns the session ID can also ask the host for a spectator place
+from any address and be sent the game files, so on a network you do not
+control treat the ID as a secret, or keep spectator places at zero.
 
 Both windows wait until the transferred setup produces matching initial machine
 fingerprints. Different builds or corrupt transfers stop the connection. A
