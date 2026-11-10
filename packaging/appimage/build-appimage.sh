@@ -61,8 +61,13 @@ install -Dm644 assets/aros/aros-amiga-m68k-rom.bin \
   "$appdir/usr/share/copperline/aros/aros-amiga-m68k-rom.bin"
 install -Dm644 assets/aros/aros-amiga-m68k-ext.bin \
   "$appdir/usr/share/copperline/aros/aros-amiga-m68k-ext.bin"
-install -Dm644 assets/aros/LICENSE \
-  "$appdir/usr/share/copperline/aros/LICENSE"
+# The AROS licence, provenance notes and acknowledgements travel with the
+# ROM, as in the macOS and Windows packages.
+for f in LICENSE README.md ACKNOWLEDGEMENTS; do
+  install -Dm644 "assets/aros/$f" "$appdir/usr/share/copperline/aros/$f"
+done
+# Copperline's own licence.
+install -Dm644 LICENSE "$appdir/usr/share/licenses/copperline/LICENSE"
 install -Dm644 assets/egui/THIRD_PARTY_FONTS.txt \
   "$appdir/usr/share/copperline/THIRD_PARTY_FONTS.txt"
 

@@ -37,6 +37,10 @@ for the earlier release notes.
   bus value, so a resumed run takes an interrupt that was recognisable at
   the save point on the same instruction as an uninterrupted run. A state
   can no longer switch the emulator's device clock to wall-clock time.
+- The libretro core no longer publishes a chip-RAM pointer during netplay,
+  where rollbacks replace the RAM buffers and a cached pointer would dangle.
+- The AppImage includes Copperline's licence and the AROS README and
+  acknowledgements, as the other packages do.
 - Loading a save state logs a warning for each host file, directory, plugin
   module or network backend the state names that the running session had not
   opened. `SECURITY.md` now states which inputs are trusted: a save state has
