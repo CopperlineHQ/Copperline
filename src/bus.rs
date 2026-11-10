@@ -5439,6 +5439,9 @@ impl Bus {
         self.denise = Denise::new();
         // The genlock and the video-slot card stay fitted across the reset.
         self.apply_genlock_sync();
+        // A reset restarts the frame count, so a cached render of the field
+        // in progress could match a new beam position by accident.
+        self.video_slot_live.invalidate();
         self.blitter = Blitter::new();
         self.configure_chip_dma_masks();
         self.rtc.reset();

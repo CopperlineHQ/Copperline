@@ -4239,12 +4239,36 @@ impl RenderInput {
     /// register writes above it fold into row 0's start state the way
     /// lines above a frame's visible start always do. A render of one line
     /// then costs one row, not a frame.
+    ///
+    /// With `first_vpos`, the render starts at that line and stops there:
+    /// writes from later lines are left out, so a line the beam has passed
+    /// shows what it showed then. When the line is not the capture's first,
+    /// the render starts one line earlier (a lead row, for the caller to
+    /// drop): the painter folds every write on its first row into that
+    /// row's starting palette, so the lead row keeps the requested line's
+    /// own writes at their beam positions, as on any other row.
     pub(crate) fn from_bus_in_progress(bus: &Bus, first_vpos: Option<u32>) -> Self {
         let parts = bus.in_progress_render_parts();
-        let skip = first_vpos
+        let start = first_vpos.map(|v| {
+            if v > parts.visible_start_vpos {
+                v - 1
+            } else {
+                v
+            }
+        });
+        let skip = start
             .map(|v| v.saturating_sub(parts.visible_start_vpos) as usize)
             .unwrap_or(0)
             .min(parts.geometry.visible_lines);
+        let frame_render_events = match first_vpos {
+            Some(last) => parts
+                .render_events
+                .iter()
+                .filter(|e| e.vpos <= last)
+                .copied()
+                .collect(),
+            None => parts.render_events.to_vec(),
+        };
         let mut geometry = parts.geometry;
         geometry.visible_start_vpos += skip as u32;
         geometry.visible_lines -= skip;
@@ -4255,7 +4279,7 @@ impl RenderInput {
             visible_start_vpos: parts.visible_start_vpos + skip as u32,
             palette_split: parts.palette_split,
             render_base: parts.render_base,
-            frame_render_events: parts.render_events.to_vec(),
+            frame_render_events,
             // Nothing of the following frame exists yet.
             current_render_base: parts.render_base,
             current_render_events: Vec::new(),

@@ -526,3 +526,98 @@ fn a_loaded_state_takes_its_sync_from_the_live_card() {
     restored.advance_devices(64);
     assert_eq!(vhposr(&mut restored), a, "ERSY set, no sync: frozen");
 }
+
+/// Reads one sample per parallel read: the beam line at `hpos`, or with
+/// `line` set, that line the beam has passed.
+struct LineProbe {
+    line: Option<u32>,
+    hpos: u32,
+    seen: Arc<Mutex<Vec<Option<u16>>>>,
+}
+
+impl VideoSlotDevice for LineProbe {
+    fn name(&self) -> &'static str {
+        "lineprobe"
+    }
+    fn wants_completed_fields(&self) -> bool {
+        false
+    }
+    fn parallel_read(&mut self, live: &mut LiveField<'_>, _ddrb: u8) -> Option<u8> {
+        let sample = match self.line {
+            Some(v) => live.line(v).and_then(|f| f.rgb12_at_beam(v, self.hpos, 0)),
+            None => {
+                let v = live.beam().vpos;
+                live.pixels().rgb12_at_beam(v, self.hpos, 0)
+            }
+        };
+        self.seen.lock().unwrap().push(sample);
+        None
+    }
+}
+
+fn line_probe(bus: &mut Bus, line: Option<u32>, hpos: u32) -> Arc<Mutex<Vec<Option<u16>>>> {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    bus.attach_video_slot(Box::new(LineProbe {
+        line,
+        hpos,
+        seen: Arc::clone(&seen),
+    }));
+    bus.cia_a.write(REG_DDRB, 0x00);
+    seen
+}
+
+/// A colour write part-way along the beam line takes effect at its beam
+/// position: the line left of it keeps the colour it had.
+#[test]
+fn the_beam_line_keeps_its_colour_left_of_a_mid_line_write() {
+    let mut bus = empty_bus();
+    let seen = line_probe(&mut bus, None, 0x80);
+    advance_to_next_frame(&mut bus);
+    set_color0(&mut bus, RED);
+    advance_to(&mut bus, 0x60, 0xA0);
+    set_color0(&mut bus, GREEN);
+    advance_to(&mut bus, 0x60, 0xC0);
+    let _ = bus.cia_a_read(0xBFE101, 1);
+    assert_eq!(
+        seen.lock().unwrap()[0],
+        Some(RED),
+        "$80 was drawn before $A0"
+    );
+}
+
+/// A line the beam has passed shows what it showed then, not writes made
+/// on later lines.
+#[test]
+fn a_passed_line_is_not_repainted_by_later_writes() {
+    let mut bus = empty_bus();
+    let seen = line_probe(&mut bus, Some(0x60), 0x80);
+    advance_to_next_frame(&mut bus);
+    set_color0(&mut bus, RED);
+    advance_to(&mut bus, 0x70, 0x20);
+    set_color0(&mut bus, GREEN);
+    advance_to(&mut bus, 0x80, 0xA0);
+    let _ = bus.cia_a_read(0xBFE101, 1);
+    assert_eq!(seen.lock().unwrap()[0], Some(RED), "line $60 finished red");
+}
+
+/// After a reset the frame count starts again, so a read can land on the
+/// beam position of a read before it: it must see the new picture.
+#[test]
+fn a_reset_forgets_the_live_render() {
+    let mut bus = empty_bus();
+    let seen = line_probe(&mut bus, None, 0x80);
+    set_color0(&mut bus, RED);
+    advance_to(&mut bus, 0x60, 0xA0);
+    let at = (bus.emulated_frames(), bus.agnus.hpos);
+    let _ = bus.cia_a_read(0xBFE101, 1);
+    bus.reset_for_keyboard_reset();
+    set_color0(&mut bus, GREEN);
+    advance_to(&mut bus, 0x60, 0xA0);
+    assert_eq!(
+        (bus.emulated_frames(), bus.agnus.hpos),
+        at,
+        "the same beam position"
+    );
+    let _ = bus.cia_a_read(0xBFE101, 1);
+    assert_eq!(*seen.lock().unwrap(), vec![Some(RED), Some(GREEN)]);
+}

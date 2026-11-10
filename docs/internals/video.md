@@ -641,9 +641,21 @@ painted by the same `render_from_input` the display uses:
   (`RenderInput::from_bus_in_progress`, the in-progress halves of the
   `frame_*`/`last_frame_*` pairs: the frame-start chip-RAM snapshot and its
   beam-timed write log, captured bitplane rows and sprite lines, and the
-  frame's register events so far) down to the beam's own line, whose
-  captured words reach the beam; the render is reused while the beam stays
-  put.
+  frame's register events so far) for the beam's own line alone, whose
+  captured words reach the beam; `line(v)` renders a line the beam has
+  passed the same way. A line render leaves out register writes from later
+  lines, so a passed line shows what it showed then, and starts one line
+  early (a lead row, then dropped) because the painter folds every write on
+  its first row into that row's starting palette: on the lead row, the
+  line's own colour writes keep their beam positions. The render is reused
+  while the beam stays put; a reset, which restarts the frame count,
+  forgets it.
+- **Sync.** A card that supplies sync, or a configured stand-alone genlock,
+  keeps BPLCON0.ERSY from freezing the beam counters. Agnus's flag is
+  recomputed from both wherever either changes under the other: a reset's
+  new Agnus, and a state load, which keeps the live session's card but the
+  state's genlock setting (and freezes the counters at once when ERSY is set
+  and nothing supplies sync).
 
 Both views paint a line wider than the display framebuffer. A video card
 samples the whole active line -- the Toaster's 768 pixels start at lo-res

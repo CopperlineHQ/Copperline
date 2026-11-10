@@ -183,14 +183,26 @@ impl<'a> LiveField<'a> {
         if self.cache.rendered_at != Some(key) {
             let mut input =
                 crate::video::bitplane::RenderInput::from_bus_in_progress(self.bus, Some(vpos));
-            let wide = crate::video::bitplane::render_wide(
+            // The render may start a lead row early (see
+            // `from_bus_in_progress`): render through the line, keep it.
+            let lead = vpos.saturating_sub(input.visible_start_vpos()) as usize;
+            let mut wide = crate::video::bitplane::render_wide(
                 &mut input,
                 SLOT_FIRST_CCK,
                 SLOT_LINE_CCK,
-                1,
+                lead + 1,
                 &mut self.cache.fb,
                 &mut self.cache.scratch,
             );
+            if lead > 0 && wide.rows > lead {
+                let stride = wide.stride;
+                self.cache
+                    .fb
+                    .copy_within(lead * stride..(lead + 1) * stride, 0);
+                self.cache.fb.truncate(stride);
+                wide.rows = 1;
+                wide.visible_start_vpos += lead as u32;
+            }
             self.cache.wide = wide;
             self.cache.rendered_at = Some(key);
             self.cache.renders = self.cache.renders.saturating_add(1);
@@ -219,6 +231,14 @@ pub(crate) struct LiveFieldCache {
     rendered_at: Option<(u64, u32, u32)>,
     /// Live renders performed (diagnostics and tests).
     pub(crate) renders: u64,
+}
+
+impl LiveFieldCache {
+    /// Forget the cached render: the beam position it was keyed by can
+    /// recur on a new timeline (a reset restarts the frame count).
+    pub(crate) fn invalidate(&mut self) {
+        self.rendered_at = None;
+    }
 }
 
 pub trait VideoSlotDevice: Send {
