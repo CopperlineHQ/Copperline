@@ -2830,6 +2830,24 @@ the guest has no way to create one, so a symlink is treated as the host
 user deliberately grafting a directory into the mount, the same trust
 model as the UAE family.
 
+A name the guest creates has to be one ordinary file name to the host as
+well. Names containing `:`, `/`, `\` or a NUL, the names `.` and `..`, and
+names ending in `.uaem` are refused, so a created file, directory or rename
+target always lands inside the mount. On a Windows host the DOS device
+names (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, with or
+without an extension) and names ending in a dot or a space are refused too,
+because Windows would open a device or a differently named file instead.
+
+A file named `copperline.toml` (in any letter case, in any directory of the
+mount) is read-only to the guest: it cannot be created, written, truncated or
+renamed onto. A Copperline run started from a directory that holds one loads
+it as its configuration without being asked, so a guest that could write one
+would choose the host directories and devices of that later machine.
+
+A mount keeps at most 96 files open at once; a further `Open()` fails with
+"not enough memory" until one is closed. The volume's root directory cannot
+be deleted, and a `Read()` or `Write()` with a negative length fails.
+
 `volume` sets the AmigaDOS volume name (up to 30 characters, no `:` or
 `/`). `bootpri` enters the volume in the boot-device vote (-128..127;
 the default -128 means mounted but never booted from): hard-disk boot
@@ -3065,7 +3083,11 @@ host network backend:
   virtual gateway with no host privileges or setup, identically on Linux,
   macOS, and Windows. Configure the guest's TCP/IP stack with IP
   `10.0.2.15`, netmask `255.255.255.0`, gateway `10.0.2.2`, DNS `10.0.2.3`
-  (or let it BOOTP/DHCP). Outbound only, IPv4 only.
+  (or let it BOOTP/DHCP). Outbound only, IPv4 only. "Outbound" includes the
+  host itself: a connection to the gateway address `10.0.2.2` reaches the
+  host's loopback interface on the same port, so guest software can talk to
+  services listening on `127.0.0.1`. Do not enable NAT for a guest you would
+  not let connect to those.
 - `"bridge"` -- attaches complete Ethernet frames directly to `interface`, so
   the Amiga is a separate station on the physical LAN and can accept inbound
   connections from LAN peers. Use `copperline --list-net-interfaces` for exact
@@ -3187,6 +3209,10 @@ reason for wanting bridge mode, with none of its setup. `interface`,
 no interface of its own to configure. Raw ICMP (ping) is unaffected:
 `"host"` only handles TCP and UDP, and ICMP still goes through the board's
 smoltcp interface, which is fixed to `"loopback"` under `"host"`.
+Because the sockets are the host's own, guest software under `"host"` can
+connect to anything the host can, including services on `127.0.0.1`, and a
+guest server that binds the wildcard address listens on every host
+interface, where other machines on the network can reach it.
 
 `address` and `gateway` matter only under `"bridge"`. The defaults
 (`10.0.2.15/24` and `10.0.2.2`) are Copperline NAT's own virtual addresses:

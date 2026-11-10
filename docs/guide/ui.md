@@ -1344,6 +1344,16 @@ not silently mixed in. Two caveats:
 - CD images are likewise reopened by path; keep the cue sheet and its
   files (or the CHD) where they were.
 
+Because a state restores the machine it was saved on, it also restores that
+machine's connections to the host: the image paths above, any `[[filesys]]`
+host directories and whether the guest may write to them, plugin modules and
+their capabilities, and a network board's backend. These come from the state,
+not from the configuration you started with. A state file from someone else
+therefore deserves the same care as a configuration file from them: loading
+it runs their machine with access to whatever host paths it names. Copperline
+logs a warning for each host resource a loaded state names that the running
+session had not already opened.
+
 (load-state-browser)=
 ### Load State browser
 

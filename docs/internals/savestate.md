@@ -198,6 +198,29 @@ in memory (`FloppyImageData::StandardAdf(Vec<u8>)` or per-track
 structures), so inserted disks travel inside the state, unsaved track
 writes included.
 
+### Host bindings a state carries
+
+Reopening by path means a state file names host resources, and a load opens
+what it names: hard-drive, CD and file-backed floppy image paths (a
+file-backed floppy writes the guest's changes back to its path), each
+`[[filesys]]` mount's `MountSpec` (path and `readonly`), a WebAssembly
+board's module path and manifest (capabilities, network backend, resource
+files), and an A2065's `NetConfig`. Only the `uaelib` host file root is
+carried over from the running session instead. State files are therefore
+trusted like configuration files (`SECURITY.md`).
+
+`hostbind` keeps a process-wide set of the host resources the configuration,
+command line or UI opened, recorded where each is opened
+(`HardDriveImage::open_inner` and `open_device`, `cdrom::Source::open` and
+`CdImage::load_chd`, `FloppyImage` with a file backing,
+`FilesysBoard::set_mounts`, `WasmBoard::from_file`, `A2065::new`). The
+restore paths ask it about each resource a state names -- during
+deserialization for images and plugins, in `Bus::adopt_host_resources` for
+floppies and mounts -- and log one warning per resource the session had not
+opened. The kind of access is part of the identity, so a directory the
+session mounted read-only does not cover a state that mounts it writable.
+The check does not refuse the load.
+
 ## File format
 
 ```
@@ -377,9 +400,20 @@ writes the same five components as unframed positional bincode for the
 reverse-debugging ring and run-ahead (`emulator.rs`), where speed matters
 and only the build that wrote a blob ever reads it. Netplay rollback
 checkpoints use `write_rollback_state`, which prefixes the same blob with
-the rollback latches file states omit (the Bus rollback state and the
-CPU's sampled interrupt level). `write_chunks` is the file-format twin;
-all of them go through the same `adopt_state` tail on restore.
+the rollback latches (the Bus rollback state and the CPU's sampled
+interrupt level). `write_chunks` is the file-format twin; all of them go
+through the same `adopt_state` tail on restore.
+
+A file state carries the CPU's interrupt sample too (`sampled_irq_level`
+and `ipl_sample_held` in `MachineRuntimeState`) and the last value driven on
+the chip data bus (`Bus::data_bus`): both are live at the instruction
+boundary a state is taken on, where the next boundary compares the live
+interrupt level against the sample and an open-bus read returns the bus
+value. States written before these fields existed resume with the reset
+values. The Bus rollback state's presentation fields stay out of file
+states, which block rendering of the partly reconstructed field instead.
+`DeviceClock::realtime_enabled` is host policy and is never read from a
+state.
 
 (versioning)=
 ## Versioning

@@ -1350,8 +1350,8 @@ pub struct Bus {
     // device is actually observed (a CIA/custom/peripheral access) or at an
     // instruction boundary (interrupt recognition). The CIA E-clock divider and
     // every device tick are exact under batching, so observable timing is
-    // unchanged. Transient (always flushed to zero at frame boundaries, where
-    // save states are taken), so skipped from serialization.
+    // unchanged. Transient: flushed to zero at the end of every CPU slice,
+    // and a state is only taken between slices, so skipped from serialization.
     #[serde(skip)]
     pending_device_cck: u32,
     #[serde(skip)]
@@ -1381,8 +1381,10 @@ pub struct Bus {
     /// audio/sprite DMA, or a mapped CPU read). CPU reads of unmapped addresses
     /// float to this, like the Agnus-arbitrated chip bus on real hardware, which
     /// is dominated by display DMA (often 0 on a blank screen) -- not a fixed
-    /// all-ones pattern. Transient; re-established by DMA after a state load.
-    #[serde(skip)]
+    /// all-ones pattern. Carried in a state so an open-bus read before the
+    /// next DMA word sees the same value after a load; states from before it
+    /// was written read 0.
+    #[serde(default)]
     pub(crate) data_bus: u16,
     device_clock: DeviceClock,
     emulated_cck: u64,
@@ -3203,6 +3205,9 @@ pub struct InputState {
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 struct DeviceClock {
+    // Host policy, not machine state: whether device time follows the wall
+    // clock. Never taken from a state, so loading one cannot switch it on.
+    #[serde(skip)]
     realtime_enabled: bool,
     // Wall-clock instant corresponding to the current device timeline.
     // CPU chip-bus slots push this into the future; hardware barriers
@@ -6291,6 +6296,12 @@ impl Bus {
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.materialize_saved_host_disks()?;
+        // Hard-drive and CD images and plugin modules report themselves as
+        // they are reopened; these two are restored as plain data.
+        self.floppy.note_restored_images();
+        if let Some(board) = self.filesys_board() {
+            board.note_restored_mounts();
+        }
         std::mem::swap(&mut self.paula.serial, &mut live.paula.serial);
         // A host sink is not serialized. Give a stateful one one explicit
         // timeline-jump boundary after it moves, so it cannot retain data

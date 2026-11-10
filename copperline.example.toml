@@ -10,7 +10,9 @@
 # images are recognised and accepted too. Omit this field (and pass no ROM
 # argument) to boot the bundled AROS open-source Kickstart replacement,
 # which ships with Copperline as the default boot ROM.
-rom = "kickstart.rom"
+# Left commented out so this example boots as-is: with no ROM named, the
+# bundled AROS ROM is used.
+# rom = "kickstart.rom"
 
 # The Copperline identification board: a small, inert Zorro board that lets
 # guest software (identify.library) detect it is running under Copperline.
@@ -486,6 +488,9 @@ slow = "512K"
 # [scsi]
 # controller = "a2091"
 # rom = "a2091-v7.0.rom"  # optional replacement for the bundled open ROM
+# rom_odd = "a2091-odd.rom"  # a2091 only: odd half of a split EPROM dump
+# timing = "period"       # drive mechanics, as for [ide] below
+# spin_up = true          # also model the power-on spin-up (opt-in)
 # unit0 = "workbench.hdf"
 # unit1 = "data.hdf"
 # unit2 = "game.cue"
@@ -524,8 +529,13 @@ slow = "512K"
 # [lide]
 # board = "ripple"
 # rom = "lide.rom"
+# rom_bank2 = "cdfs.rom"   # second flash bank (ripple/ride only)
+# timing = "period"        # drive mechanics, as for [ide] below
+# spin_up = true           # also model the power-on spin-up (opt-in)
 # drive0 = "workbench.hdf"
 # drive1 = { path = "data.hdf", bootpri = 6 }   # table form, as for [ide]
+# drive2 = "ch1-master.hdf"  # channel 1 master (ripple only)
+# drive3 = "ch1-slave.hdf"   # channel 1 slave (ripple only)
 
 # Copperline's own virtual hardfile controller, copperhf.device -- an
 # emulator-only board with no real-hardware counterpart (the Copperline
@@ -824,6 +834,7 @@ video = "PAL"
 # full_screen = false
 # maximized = false
 # monitor = "auto"
+# position = [100, 80]
 # window_scale = 1.0
 # title = "{app} {version} · {machine} · {rom}"
 # status_bar = true

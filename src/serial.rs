@@ -302,6 +302,12 @@ pub trait SerialSink: Send {
 /// A background thread owns the accept loop and the read half (pushing
 /// bytes into a channel), so Paula's idle fast path polls a channel probe,
 /// never a socket syscall.
+///
+/// The peer cannot hold the emulator up or make it buffer without bound:
+/// the inbound channel holds [`TCP_INBOUND_QUEUE`] bytes and the reader
+/// thread waits for room (so the peer sees ordinary TCP backpressure), and
+/// a write that cannot make progress for [`TCP_WRITE_TIMEOUT`] drops the
+/// connection instead of blocking the emulation thread for good.
 pub struct TcpSerialSink {
     rx: std::sync::mpsc::Receiver<u8>,
     /// Write half of the current client, shared with the acceptor thread
@@ -338,7 +344,7 @@ impl TcpSerialSink {
             local_addr.ip(),
             local_addr.port(),
         );
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let writer = std::sync::Arc::new(std::sync::Mutex::new(None::<std::net::TcpStream>));
         let acceptor_writer = std::sync::Arc::clone(&writer);
         let buffered = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
@@ -353,6 +359,8 @@ impl TcpSerialSink {
                 };
                 log::info!("serial: client connected from {peer}");
                 let _ = stream.set_nodelay(true);
+                let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
+                let _ = stream.set_read_timeout(Some(TCP_READ_POLL));
                 match stream.try_clone() {
                     Ok(w) => *acceptor_writer.lock().unwrap() = Some(w),
                     Err(e) => {
@@ -363,14 +371,21 @@ impl TcpSerialSink {
                 acceptor_connected.store(true, std::sync::atomic::Ordering::Release);
                 let mut buf = [0u8; 512];
                 let mut stream = stream;
-                loop {
+                'client: loop {
                     use std::io::Read;
                     match stream.read(&mut buf) {
+                        Err(e) if tcp_read_poll_elapsed(&e) => {
+                            if !acceptor_connected.load(std::sync::atomic::Ordering::Acquire) {
+                                break;
+                            }
+                        }
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             for &b in &buf[..n] {
-                                if tx.send(b).is_err() {
-                                    return;
+                                match queue_tcp_input(&tx, b, &acceptor_connected) {
+                                    Queued::Yes => {}
+                                    Queued::LinkRetired => break 'client,
+                                    Queued::SinkGone => return,
                                 }
                                 reader_buffered.fetch_add(1, std::sync::atomic::Ordering::Release);
                             }
@@ -401,8 +416,10 @@ impl TcpSerialSink {
             .map_err(|e| anyhow::anyhow!("[serial] tcp-connect: connecting {addr}: {e}"))?;
         let peer = stream.peer_addr()?;
         let _ = stream.set_nodelay(true);
+        let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
+        let _ = stream.set_read_timeout(Some(TCP_READ_POLL));
         log::info!("serial: connected to tcp://{peer}");
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let writer = std::sync::Arc::new(std::sync::Mutex::new(Some(stream.try_clone()?)));
         let reader_writer = std::sync::Arc::clone(&writer);
         let buffered = std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0));
@@ -415,13 +432,20 @@ impl TcpSerialSink {
                 use std::io::Read;
                 let mut stream = stream;
                 let mut buf = [0u8; 512];
-                loop {
+                'link: loop {
                     match stream.read(&mut buf) {
+                        Err(e) if tcp_read_poll_elapsed(&e) => {
+                            if !reader_connected.load(std::sync::atomic::Ordering::Acquire) {
+                                break;
+                            }
+                        }
                         Ok(0) | Err(_) => break,
                         Ok(n) => {
                             for &b in &buf[..n] {
-                                if tx.send(b).is_err() {
-                                    return;
+                                match queue_tcp_input(&tx, b, &reader_connected) {
+                                    Queued::Yes => {}
+                                    Queued::LinkRetired => break 'link,
+                                    Queued::SinkGone => return,
                                 }
                                 reader_buffered.fetch_add(1, std::sync::atomic::Ordering::Release);
                             }
@@ -449,11 +473,80 @@ impl TcpSerialSink {
     }
 }
 
+/// Bytes received from a TCP serial or modem peer and not yet read by the
+/// guest. The guest drains its serial port at the line rate, a few kilobytes
+/// a second at most, so this is many seconds of traffic.
+pub(crate) const TCP_INBOUND_QUEUE: usize = 64 * 1024;
+
+/// How long one serial byte may wait for room in the socket's send buffer.
+/// The buffer absorbs far more than the guest transmits in this time, so a
+/// write only waits at all once the peer has stopped reading.
+pub(crate) const TCP_WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long a reader thread waits on a quiet socket before checking that its
+/// link is still the live one. Shutting a socket down ends a blocked read on
+/// Unix but not on Windows, where only this check gets a reader off a link
+/// that a write timeout retired while the peer keeps its end open.
+pub(crate) const TCP_READ_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Whether a read failed only because [`TCP_READ_POLL`] elapsed with nothing
+/// to read (reported as `WouldBlock` on Unix and `TimedOut` on Windows).
+pub(crate) fn tcp_read_poll_elapsed(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    )
+}
+
+/// What became of a byte offered to a link's inbound queue.
+enum Queued {
+    Yes,
+    /// The connection the byte came from is no longer the live one.
+    LinkRetired,
+    /// The sink was dropped; nothing will ever read the queue.
+    SinkGone,
+}
+
+/// Queue one received byte for the guest. While the queue is full the reader
+/// waits for room, which is the backpressure the peer sees, but only for as
+/// long as `live` says its connection is still the current one. A link that
+/// a write timeout retired must not stay parked here: its reader would hold
+/// the connection, and a listener's accept loop with it, until the guest
+/// happened to read.
+fn queue_tcp_input(
+    tx: &std::sync::mpsc::SyncSender<u8>,
+    byte: u8,
+    live: &std::sync::atomic::AtomicBool,
+) -> Queued {
+    use std::sync::mpsc::TrySendError;
+    loop {
+        match tx.try_send(byte) {
+            Ok(()) => return Queued::Yes,
+            Err(TrySendError::Disconnected(_)) => return Queued::SinkGone,
+            Err(TrySendError::Full(_)) => {
+                if !live.load(std::sync::atomic::Ordering::Acquire) {
+                    return Queued::LinkRetired;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+}
+
 impl SerialSink for TcpSerialSink {
     fn write_byte(&mut self, b: u8, _at_cck: u64) {
         let mut guard = self.writer.lock().unwrap();
         if let Some(w) = guard.as_mut() {
             if w.write_all(&[b]).is_err() {
+                // Close the connection, not just this handle to it. After a
+                // write timeout the peer still holds its end open, and the
+                // reader thread's clone would stay in read(): a listener
+                // would never get back to accept() and the next client would
+                // connect to a bridge that serves nobody. The shutdown tells
+                // the peer now and ends a blocked read on Unix; the reader's
+                // own check of `connected` (every TCP_READ_POLL) is what
+                // releases it on Windows.
+                let _ = w.shutdown(std::net::Shutdown::Both);
                 *guard = None;
                 self.connected
                     .store(false, std::sync::atomic::Ordering::Release);
@@ -1064,6 +1157,138 @@ mod tests {
             .unwrap();
         peer.read_exact(&mut got).unwrap();
         assert_eq!(&got, b"x");
+    }
+
+    /// A peer that sends faster than the guest reads is held back by TCP
+    /// once the inbound queue is full; nothing is lost and nothing more is
+    /// buffered in the process.
+    #[test]
+    fn tcp_sink_bounds_unread_input_without_losing_any() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::thread::spawn(move || listener.accept().unwrap().0);
+        let mut sink = TcpSerialSink::connect(&addr.to_string()).unwrap();
+        let mut peer = accepted.join().unwrap();
+
+        const TOTAL: usize = TCP_INBOUND_QUEUE * 3;
+        let sender = std::thread::spawn(move || {
+            let data: Vec<u8> = (0..TOTAL).map(|i| (i % 251) as u8).collect();
+            peer.write_all(&data).unwrap();
+            peer
+        });
+        let queued =
+            |sink: &TcpSerialSink| sink.buffered.load(std::sync::atomic::Ordering::Acquire);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while queued(&sink) < TCP_INBOUND_QUEUE as isize {
+            assert!(std::time::Instant::now() < deadline, "queue never filled");
+            std::thread::yield_now();
+        }
+        // Full, and it stays full rather than growing while nothing reads.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(queued(&sink), TCP_INBOUND_QUEUE as isize);
+
+        for i in 0..TOTAL {
+            let byte = loop {
+                if let Some(b) = sink.read_byte() {
+                    break b;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "byte {i} never arrived"
+                );
+                std::thread::yield_now();
+            };
+            assert_eq!(byte, (i % 251) as u8, "byte {i}");
+        }
+        drop(sender.join().unwrap());
+    }
+
+    /// A peer that stops reading cannot block the emulation thread for
+    /// good: once its receive window and the send buffer are full, a write
+    /// gives up after the timeout and the link is dropped like a lost
+    /// carrier.
+    #[test]
+    fn tcp_sink_drops_a_peer_that_stops_reading() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::thread::spawn(move || listener.accept().unwrap().0);
+        let mut sink = TcpSerialSink::connect(&addr.to_string()).unwrap();
+        let _peer = accepted.join().unwrap(); // held open, never read
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while sink.control_lines() == SerialControlLines::CONNECTED {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writes to a stalled peer never timed out"
+            );
+            for _ in 0..4096 {
+                sink.write_byte(b'x', 0);
+            }
+        }
+        assert_eq!(sink.control_lines(), SerialControlLines::READY);
+    }
+
+    /// A client that stops reading is dropped by the write timeout, and the
+    /// listener must then serve the next client even though the stalled one
+    /// keeps its socket open. With `flood_input` the stalled client has also
+    /// filled the inbound queue, so the reader thread is parked on the queue
+    /// instead of in the socket read.
+    fn listener_serves_the_next_client_after_a_stalled_one(flood_input: bool) {
+        let mut sink = TcpSerialSink::listen("127.0.0.1:0").unwrap();
+        let mut stalled = std::net::TcpStream::connect(sink.local_addr()).unwrap();
+        wait_for_lines(&sink, SerialControlLines::CONNECTED, "first client");
+
+        if flood_input {
+            // Fill the inbound queue; the guest reads none of it.
+            stalled.set_nonblocking(true).unwrap();
+            let flood = vec![0x55u8; TCP_INBOUND_QUEUE * 2];
+            let mut sent = 0;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            let queued =
+                |sink: &TcpSerialSink| sink.buffered.load(std::sync::atomic::Ordering::Acquire);
+            while queued(&sink) < TCP_INBOUND_QUEUE as isize {
+                assert!(std::time::Instant::now() < deadline, "queue never filled");
+                if sent < flood.len() {
+                    if let Ok(n) = stalled.write(&flood[sent..]) {
+                        sent += n;
+                    }
+                }
+                std::thread::yield_now();
+            }
+        }
+
+        // The client never reads: writes back up until one times out.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while sink.control_lines() == SerialControlLines::CONNECTED {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "writes to a stalled client never timed out"
+            );
+            for _ in 0..4096 {
+                sink.write_byte(b'x', 0);
+            }
+        }
+
+        // The stalled client is still open, and a second one connects.
+        let mut next = std::net::TcpStream::connect(sink.local_addr()).unwrap();
+        wait_for_lines(&sink, SerialControlLines::CONNECTED, "second client");
+        sink.write_byte(b'n', 0);
+        next.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let mut got = [0u8; 1];
+        next.read_exact(&mut got).unwrap();
+        assert_eq!(&got, b"n");
+        drop(stalled);
+    }
+
+    #[test]
+    fn tcp_listen_sink_serves_the_next_client_after_a_stalled_one_blocked_in_read() {
+        listener_serves_the_next_client_after_a_stalled_one(false);
+    }
+
+    #[test]
+    fn tcp_listen_sink_serves_the_next_client_after_a_stalled_one_filled_the_queue() {
+        listener_serves_the_next_client_after_a_stalled_one(true);
     }
 
     #[test]

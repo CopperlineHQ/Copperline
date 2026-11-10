@@ -25,10 +25,10 @@ Hardware references and scripts live in the sibling amiga-hardware-probes repo:
 `docs/cpu-irq-investigation-2026-10-19.md`. Detailed logs and packet comparisons:
 `captures/cpu-irq-20261019/`. CIA phase neighbor (1920 cases) is byte-identical
 before/after; focused IRQ2212 and divider IRQ2560 match hardware. Broader
-validation: 3632 optimized core/network tests pass,37 ignored,548 window tests
+validation: 3632 optimized core/network tests pass, 37 ignored, 548 window tests
 excluded; strict all-feature/all-target Clippy and formatting pass. Held-out
-STORE/TST controls repair640 additional timing records; two hardware runs agree
-on all768 observations. Across main+held-out1920 cases: zero timing differences,
+STORE/TST controls repair 640 additional timing records; two hardware runs agree
+on all 768 observations. Across main+held-out 1920 cases: zero timing differences,
 1910 complete matches and ten diagnostic serial-flag differences. Ten prior
 regression packets are byte-identical; source-stage IRQ results are unchanged.
 

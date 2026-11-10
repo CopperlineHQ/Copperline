@@ -101,7 +101,8 @@ launch. An installation that already keeps unpacked games directly under
 
 To reset a game's state and re-extract it, delete its directory under
 `whdload/save/`. A game launched from an unpacked folder is mounted in place,
-so its saves are written back to that folder.
+so its saves are written back to that folder, and the game can change or
+delete anything else in it.
 
 Copperline starts each game with
 `WHDLoad "<slave>" Preload SplashDelay=0`. `args` appends further WHDLoad

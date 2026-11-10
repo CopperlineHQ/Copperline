@@ -27,7 +27,10 @@ mod session;
 mod telnet;
 
 use crate::chipset::paula::PAULA_CLOCK_HZ;
-use crate::serial::{SerialSink, SerialTimeAnchor};
+use crate::serial::{
+    tcp_read_poll_elapsed, SerialSink, SerialTimeAnchor, TCP_INBOUND_QUEUE, TCP_READ_POLL,
+    TCP_WRITE_TIMEOUT,
+};
 use crate::timebase::Instant;
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
@@ -154,7 +157,7 @@ pub(crate) trait ModemTransport: Send {
 /// so the two cannot interleave.
 fn spawn_modem_reader(
     mut stream: TcpStream,
-    tx: std::sync::mpsc::Sender<u8>,
+    tx: std::sync::mpsc::SyncSender<u8>,
     buffered: Arc<AtomicIsize>,
     writer: Arc<Mutex<Option<TcpStream>>>,
     carrier: Arc<AtomicBool>,
@@ -167,6 +170,17 @@ fn spawn_modem_reader(
             let mut buf = [0u8; 512];
             loop {
                 match stream.read(&mut buf) {
+                    Err(e) if tcp_read_poll_elapsed(&e) => {
+                        // Nothing to read for a poll interval: leave if this
+                        // connection was hung up or replaced meanwhile. A
+                        // shutdown alone does not end a blocked read on
+                        // Windows.
+                        let retired = writer.lock().unwrap().is_none()
+                            || generation.load(Ordering::Acquire) != my_generation;
+                        if retired {
+                            break;
+                        }
+                    }
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         for &b in &buf[..n] {
@@ -321,8 +335,10 @@ impl ModemTransport for TcpModemTransport {
             _ => DialError::Unreachable,
         })?;
         let _ = stream.set_nodelay(true);
+        let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
+        let _ = stream.set_read_timeout(Some(TCP_READ_POLL));
         let writer_clone = stream.try_clone().map_err(|_| DialError::Unreachable)?;
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let generation = self.install_connection(writer_clone);
         self.carrier.store(true, Ordering::Release);
         self.rx = Some(rx);
@@ -355,6 +371,11 @@ impl ModemTransport for TcpModemTransport {
         let mut guard = self.writer.lock().unwrap();
         if let Some(w) = guard.as_mut() {
             if w.write_all(&[b]).is_err() {
+                // Close the connection, not just this handle: after a write
+                // timeout the peer still holds its end open and the reader
+                // thread would stay blocked on it, keeping the call's socket
+                // alive after carrier was reported lost.
+                let _ = w.shutdown(Shutdown::Both);
                 *guard = None;
                 drop(guard);
                 self.carrier.store(false, Ordering::Release);
@@ -418,6 +439,8 @@ impl ModemTransport for TcpModemTransport {
                         continue;
                     }
                     let _ = stream.set_nodelay(true);
+                    let _ = stream.set_write_timeout(Some(TCP_WRITE_TIMEOUT));
+                    let _ = stream.set_read_timeout(Some(TCP_READ_POLL));
                     *accept_pending.lock().unwrap() = Some(stream);
                     accept_ringing.store(true, Ordering::Release);
                 }
@@ -452,7 +475,7 @@ impl ModemTransport for TcpModemTransport {
         let Ok(clone) = stream.try_clone() else {
             return false;
         };
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::sync_channel(TCP_INBOUND_QUEUE);
         let generation = self.install_connection(clone);
         self.rx = Some(rx);
         self.carrier.store(true, Ordering::Release);
@@ -2593,6 +2616,42 @@ mod tests {
     }
 
     // ---- Real TCP tests ---------------------------------------------------
+
+    /// A peer that stops reading loses the call: the write timeout drops
+    /// carrier and closes the socket, so the peer sees the hang-up rather
+    /// than a connection that stays open with the reader still attached.
+    #[test]
+    fn tcp_dial_closes_the_call_when_the_peer_stops_reading() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = thread::spawn(move || listener.accept().unwrap().0);
+        let mut transport = TcpModemTransport::new();
+        assert!(transport.dial(&addr.to_string()).is_ok());
+        let mut peer = accepted.join().unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while transport.carrier() {
+            assert!(
+                Instant::now() < deadline,
+                "writes to a stalled peer never timed out"
+            );
+            for _ in 0..4096 {
+                transport.write_byte(b'x');
+            }
+        }
+
+        // The peer drains what was sent and then reads the end of the call.
+        peer.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut scratch = [0u8; 64 * 1024];
+        loop {
+            match peer.read(&mut scratch) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => break,
+                Err(e) => panic!("the call stayed open after carrier dropped: {e}"),
+            }
+        }
+    }
 
     #[test]
     fn tcp_dial_connects_and_relays_both_directions() {

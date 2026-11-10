@@ -84,6 +84,7 @@ pub(crate) mod gzip;
 pub mod harddrive;
 pub mod hash;
 pub mod heatmap;
+pub(crate) mod hostbind;
 pub mod hostsocket;
 // The HTTP client construction the two self-initiated network users share.
 #[cfg(any(feature = "game-library", feature = "update-check"))]

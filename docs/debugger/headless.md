@@ -209,7 +209,7 @@ the most useful ones; the source has more (search for `COPPERLINE_DIAG_`).
 | `COPPERLINE_DIAG_BLT_SLOTS` | Detailed blitter pipeline slot and bus ownership trace |
 | `COPPERLINE_DIAG_IPL` | Per-frame split of CPU cycles between main code and interrupt handlers |
 | `COPPERLINE_DIAG_PCSAMPLE` | Logs the PC and SR every 50 frames, to locate CPU hotspots |
-| `COPPERLINE_DIAG_PCHIST` | Records recent PC execution history |
+| `COPPERLINE_DIAG_PCHIST` | Counts executed instructions per PC over a 4-second emulated window starting at 38 s, then logs the 30 most frequent PCs with their share, cycles per instruction, and instruction words; `COPPERLINE_DIAG_PCHIST_START=SECS` moves the window start |
 | `COPPERLINE_DIAG_COPLEN` | Measures Copper list length |
 | `COPPERLINE_DIAG_COP_WRITES` | Logs exact landing colour-clock cycle for every Copper MOVE |
 | `COPPERLINE_DIAG_CPU_BUS` | Logs CPU chip-bus request, grant, and cycle wait states |

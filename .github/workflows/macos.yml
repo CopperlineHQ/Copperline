@@ -33,6 +33,9 @@ on:
       - "assets/**"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "build.rs"
+      - "crates/**"
+      - "guest/**"
       - ".cargo/**"
       - "packaging/macos/**"
       - ".github/workflows/macos.yml"
@@ -43,6 +46,9 @@ on:
       - "assets/**"
       - "Cargo.lock"
       - "Cargo.toml"
+      - "build.rs"
+      - "crates/**"
+      - "guest/**"
       - ".cargo/**"
       - "packaging/macos/**"
       - ".github/workflows/macos.yml"
@@ -59,12 +65,13 @@ on:
 
 concurrency:
   group: macos-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     name: Build slice (${{ matrix.arch }})
     runs-on: macos-latest
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -106,6 +113,7 @@ jobs:
     name: Build macOS dmg
     needs: build
     runs-on: macos-latest
+    timeout-minutes: 120
     # Needed only by the release-attach step on v* tags.
     permissions:
       contents: write

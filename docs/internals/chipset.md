@@ -60,6 +60,10 @@ replaces only that half of the DMA-advanced value, which programs exploit
 to flip 8-bitplane double buffers with half the Copper writes: the modulo
 is sized so the end-of-frame carry lands the high half on the next
 buffer, and only the PTL half is rewritten per frame.
+The [pointer-write collision note](a500-bitplane-pointer-collision-2026-10-20.md)
+records A500 collision-witness captures in which an OCS/ECS BPLxPT half-write
+one CCK before that plane's data fetch is lost, leaving the DMA-advanced
+pointer.
 
 Agnus revisions are modelled independently of Denise (machines shipped
 mixed): OCS (8370/8371), ECS 8372A (1M chip RAM reach), ECS 8375 (2M), and
@@ -542,7 +546,7 @@ odd match independently. The matrix found no corresponding mode difference in
 sprite?PF2 or PF?PF bit0. The active paired test pins sprite matching.
 
 The consensus fixture `src/bus/tests/data/a500_playfield_modes.csv` comes from
-two independent512-case PAL A500 runs, two repeats per condition. It covers two
+two independent 512-case PAL A500 runs, two repeats per condition. It covers two
 lores planes, four constant patterns, four CLXCON enable masks and four desired
 values, sprite0 on/off, and DPF off/on. BPLDAT starts zero before constant DMA
 output. Full references are versioned in
@@ -560,7 +564,7 @@ coordinate and a two-CCK register delay, separately from render-write placement.
 The event keeps the correct scanline when those delays straddle line end.
 CLXDAT's CPU sampling phase is unchanged.
 
-The additional fixture `src/bus/tests/data/a500_playfield_gates.csv` contains896
+The additional fixture `src/bus/tests/data/a500_playfield_gates.csv` contains 896
 consensus cases from two independently repeated A500 sweeps. Finite Copper
 lists open/close CLXCON gates, with an INTREQR completion witness and zero second
 CLXDAT controls. Independent DDF/DIW shifts and isolated first/last-bit words
@@ -568,7 +572,7 @@ distinguish mask delay, startup and stream placement. References:
 `amiga-hardware-probes/references/playfield-gate-v1` and
 `amiga-hardware-probes/references/playfield-word-gate-v1`.
 
-The original late-clear matrix retains24 mismatches: Copperline clears four
+The original late-clear matrix retains 24 mismatches: Copperline clears four
 CCK later in those cases, crossing the short startup zero interval. Its strict
 512-case contract remains unchanged; these are unresolved CPU/DMA observation
 timing differences. This correction does not claim complete AGA, hires, manual

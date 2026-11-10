@@ -581,7 +581,10 @@ fn golden_path(name: &str) -> PathBuf {
 /// needed; an exact PNG-byte match is both simpler and stricter.
 fn assert_golden(tag: &str, name: &str, screenshot_path: &Path) {
     let golden = golden_path(name);
-    if std::env::var_os("COPPERLINE_BLESS_GOLDEN").is_some() {
+    // Bless only the golden the variable names. Any other value (the name of
+    // a different golden, or of a probe in another suite) compares as usual,
+    // so one bless run cannot overwrite every reference in the tree.
+    if std::env::var_os("COPPERLINE_BLESS_GOLDEN").is_some_and(|selected| selected == name) {
         std::fs::create_dir_all(golden.parent().unwrap()).unwrap();
         std::fs::copy(screenshot_path, &golden).unwrap();
         eprintln!("[{tag}] blessed {}", golden.display());
@@ -590,7 +593,7 @@ fn assert_golden(tag: &str, name: &str, screenshot_path: &Path) {
     assert!(
         golden.exists(),
         "[{tag}] missing golden {} -- generate it (with the matching local ROM \
-         present) via COPPERLINE_BLESS_GOLDEN=1 cargo test --release --test \
+         present) via COPPERLINE_BLESS_GOLDEN={name} cargo test --release --test \
          copperhf_kickstarts -- --ignored {tag}",
         golden.display()
     );

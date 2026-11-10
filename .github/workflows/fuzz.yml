@@ -49,7 +49,7 @@ jobs:
           key: fuzz-corpus-${{ github.ref_name }}-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: fuzz-corpus-${{ github.ref_name }}-${{ matrix.target }}-
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Build the fuzz target
         working-directory: fuzz
         run: cargo fuzz build --codegen-units=16 "${{ matrix.target }}"

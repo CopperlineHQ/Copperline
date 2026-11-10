@@ -1923,6 +1923,10 @@ pub struct WasmBoard {
 impl WasmBoard {
     /// Load and instantiate a plugin module from a `.wasm` file.
     pub fn from_file(path: &Path, manifest: WasmManifest) -> Result<Self> {
+        crate::hostbind::opened_named(
+            crate::hostbind::Kind::Plugin,
+            &host_binding(path, &manifest),
+        );
         Self::from_file_with_mode(path, manifest, InstantiationMode::Active)
     }
 
@@ -2100,6 +2104,24 @@ impl ZorroDevice for WasmBoard {
     }
 }
 
+/// What a board module is allowed to reach on the host, as one line: its
+/// path, capabilities, network backend and the host files its settings name.
+/// Two boards with the same line have the same host access.
+fn host_binding(path: &Path, manifest: &WasmManifest) -> String {
+    let files: Vec<&str> = manifest
+        .file_keys
+        .iter()
+        .filter_map(|key| manifest.config.get(key).map(String::as_str))
+        .collect();
+    format!(
+        "{} ({:?}, network {:?}, files {:?})",
+        path.display(),
+        manifest.caps,
+        manifest.net,
+        files
+    )
+}
+
 /// The serialized form of a [`WasmBoard`]: enough to recompile the module from
 /// its path and replay its linear memory.
 #[derive(Serialize, Deserialize)]
@@ -2152,6 +2174,12 @@ impl<'de> Deserialize<'de> for WasmBoard {
         } else {
             InstantiationMode::Active
         };
+        // The module is recompiled from the path in the state and granted
+        // the capabilities in the state's own manifest.
+        crate::hostbind::restored_named(
+            crate::hostbind::Kind::Plugin,
+            &host_binding(&state.module_path, &state.manifest),
+        );
         let board = WasmBoard::from_file_with_mode(&state.module_path, state.manifest, mode)
             .map_err(serde::de::Error::custom)?;
         let mut rt = board.rt.borrow_mut();

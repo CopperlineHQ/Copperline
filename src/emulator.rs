@@ -1470,8 +1470,9 @@ impl Emulator {
     }
 
     /// Write a save state of the whole emulated machine to `path`. Call
-    /// between frames (the event loop and the headless frame loop both run
-    /// at frame granularity, so any caller outside step_frame qualifies).
+    /// between CPU slices, at an instruction boundary; that need not be a
+    /// frame boundary (see the `savestate` module doc), so any caller
+    /// outside `step_frame` qualifies.
     ///
     /// Quiesces the copperhf.device board first (a no-op unless one is
     /// configured and something is in flight): the worker-thread I/O

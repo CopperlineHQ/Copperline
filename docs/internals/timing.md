@@ -26,9 +26,9 @@ x=62 during that clock. Reading CLXDAT at the transfer's start must not include
 that later pixel. DMA grants, rendered positions and register-write events
 are unchanged.
 
-Saved A500 kind72/73 sweeps in `amiga-hardware-probes` now match all719
-qualified cases:29 early observations repaired in total, including the final
-eight. The561 unmatched timing cohorts remain excluded, not counted as matches.
+Saved A500 kind72/73 sweeps in `amiga-hardware-probes` now match all 719
+qualified cases: 29 early observations repaired in total, including the final
+eight. The 561 unmatched timing cohorts remain excluded, not counted as matches.
 This is scoped validation, not a claim of complete collision accuracy. Named
 regressions in `src/bus/tests.rs` check the absolute DIW boundary and retention
 of bus-tail collisions across byte/word/long reads. Graphical fixture
@@ -52,7 +52,10 @@ disk, which is equivalent because their fixed slots never overlap.)
    that saturates the line needs that clock: Nexus 7's plasma-zoom text
    reloads 128+3 palette entries per 3-line band between two beam WAITs,
    and blocking E2 slips the chain ~6 cck per band until its BPLCON4
-   sprite-bank flip drifts into the sprite window.
+   sprite-bank flip drifts into the sprite window. The
+   [CPU read turnaround note](a500-copper-refresh-2026-10-19.md) records A500
+   captures in which a stock OCS/ECS CPU read immediately following Copper
+   ownership waits rather than crossing into the line-end refresh.
 2. **Disk DMA** -- fixed slots 7/9/B, when DSKEN is set and a transfer is
    live.
 3. **Audio DMA** -- one fixed slot per Paula channel (D/F/11/13), claimed
@@ -822,7 +825,9 @@ an external CIA edge: a Copper INTREQ write can set either bit. A serialized
 origin mask preserves that distinction until acknowledgement. Staged CIA inputs
 also carry an origin tag and use the common running poll phase. Other external
 devices and unmeasured CPU-written external request paths retain their previous
-qualification.
+qualification. The [CPU-written request note](a500-cpu-software-irq-2026-10-19.md)
+records A500 measurements of CPU INTREQ writes and INTENA unmasks of pending
+PORTS, EXTER and COPER requests.
 Paired A500 STOP/running/readback controls and remaining CIA request-visibility
 differences are recorded in the sibling probe repository at
 `docs/irq-stage-investigation-2026-10-19.md`. These measurements do not justify
@@ -1005,6 +1010,11 @@ or CPU IPL sampling; their separate follow-ups are described above and in
 [the CIA measurement record](a500-cia-output-readback-2026-10-19.md).
 Captures, provenance and comparison rules remain in the sibling
 `amiga-hardware-probes` repository's `docs/cia-hardware-verification-2026-10-19.md`.
+The [serial output buffering note](a500-cia-serial-buffer-2026-10-19.md)
+records A500 SDR captures supporting one pending output byte per CIA.
+The [serial flag note](a500-cia-serial-flag-2026-10-19.md) records the
+captures supporting a four-E-clock SP flag-visibility pipeline after the
+half-clock 15 output event.
 
 Synchronous CPU timer reads sample the reload data mux before the falling
 edge commits the counter. At an eligible PHI2 reload slot, internal count
@@ -1082,6 +1092,9 @@ elapsed colour clocks. WinUAE has 1,640 such pairs, also identical. In the
 six-plane, 64-iteration kernels, normal DIVU measures 4763--4767 clocks,
 worst-case DIVU measures 5102, and DIVS measures 5249--5257 on all three.
 These totals include the shared loop and observation overhead.
+The [divider ordering review](m68000-divider-review-2026-10-15.md) records
+the follow-up core fix for signed `$80000000 / -1` overflow and the early DIVS
+IPL poll, replayed against 2,560 physical A500 records.
 
 The stopped-CPU event horizon also includes the pending BLIT assertion:
 the engine can finish its final write while the interrupt countdown still has
@@ -1095,6 +1108,9 @@ Copper-generated BLIT/COPER/SOFT controls and RAM/ROM handler placement.
 After correction the native NOP-phase cases match; EXG-phase cases remain
 two CCK late. This is an inferred timing model and a documented remaining
 scheduler/poll-phase question, not a direct capture of Paula's IPL pins.
+The later [native BLIT readback note](a500-native-blit-request-2026-10-20.md)
+records an A500 status-first probe after which the native countdown exposes
+the request three CCK after the terminal E cycle starts.
 
 The Copper polling row's fixed beam values overlap after sweeping polling
 phase; they do not establish an additional fixed Copper interrupt delay.

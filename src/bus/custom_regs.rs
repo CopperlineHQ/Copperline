@@ -1028,7 +1028,8 @@ impl Bus {
                 false
             }
             // ECS Agnus programmable sync/blank latches + UHRES SPRHDAT.
-            // Stored only; no scan-rate geometry derived yet (TODO section 9).
+            // Agnus derives the programmable line and frame geometry from
+            // these (see `Agnus::write_hsstop` and its neighbours).
             0x1C2 => {
                 if self.blitter_ecs_registers_enabled() {
                     self.agnus.write_hsstop(val);

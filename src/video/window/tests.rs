@@ -5571,10 +5571,6 @@ fn vsync_menu_toggle_preserves_guest_pacing_and_configuration_choice() {
 /// `(unit number, image path)` pairs; each attaches at boot like a real
 /// `[copperhf] unitN = "..."` config line.
 fn test_app_with_copperhf_units(units: &[(usize, PathBuf)]) -> super::App {
-    std::env::set_var(
-        "COPPERLINE_AROS_DIR",
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/aros"),
-    );
     let mut toml = String::from("[copperhf]\n");
     for (unit, path) in units {
         toml.push_str(&format!("unit{unit} = {:?}\n", path.to_string_lossy()));
@@ -5656,10 +5652,6 @@ fn copperhf_test_fixture_builds_a_machine_with_the_configured_unit() {
 #[test]
 fn clipboard_unit_is_fitted_only_where_the_configuration_asked_for_it() {
     fn board_fitted(toml: &str) -> bool {
-        std::env::set_var(
-            "COPPERLINE_AROS_DIR",
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/aros"),
-        );
         let raw: crate::config::RawConfig = toml::from_str(toml).expect("test config");
         let mut cfg = crate::config::Config::try_from(raw).expect("config validates");
         cfg.resolve_clipboard_share(false);

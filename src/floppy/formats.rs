@@ -159,6 +159,9 @@ impl FloppyImage {
             decode_floppy_payload(packed, write_protected, &path)?
         };
 
+        if backing == FloppyImageBacking::File {
+            crate::hostbind::opened(crate::hostbind::Kind::Floppy, &path);
+        }
         Ok(Self {
             path,
             data,
