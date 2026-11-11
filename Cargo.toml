@@ -302,7 +302,7 @@ cpal = { version = "0.18", optional = true }
 # (src/midi/winmm.rs) also uses it; it is pure Rust and wasm-safe.
 ringbuf = "0.6"
 hound = "3.5"
-rfd = { version = "0.17.2", optional = true }
+rfd = { version = "0.18.0", optional = true }
 gilrs = { version = "0.11", optional = true }
 # Host clipboard for the debugger console's paste (text only; the default
 # image-data feature is left off). wayland-data-control covers Wayland
