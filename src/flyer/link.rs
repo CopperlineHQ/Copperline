@@ -231,6 +231,11 @@ impl FlyerLink {
         out[..len].copy_from_slice(&channel.picture[..len]);
     }
 
+    /// Drop the sound not yet taken (a loaded state takes the link over).
+    pub fn clear_sound(&self) {
+        self.lock().sound.clear();
+    }
+
     /// The Flyer's sound since the last call, at its own rate (735
     /// samples a field).
     pub fn take_sound(&self) -> Vec<(f32, f32)> {

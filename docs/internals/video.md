@@ -938,7 +938,11 @@ colour frame of black.
 The Flyer and the Toaster share a `FlyerLink` (`link.rs`), made in
 `build_machine_inner` when both are fitted and handed to each (the board
 keeps it out of its save state; a loaded board takes the live one's in
-`Bus::adopt_host_resources`). TOASTMUX sets which of Toaster inputs 3 and 4
+`Bus::adopt_host_resources`, and puts its own held pictures on it in
+place of the live session's: the player keeps what makes up each
+channel's picture, a matte and the last field of each parity, and
+`Player::republish` shows them again from black and drops the queued
+sound). TOASTMUX sets which of Toaster inputs 3 and 4
 the Flyer has (channel A on 3, B on 4); every field the player says what
 each channel shows (a clip field by reference, or a matte) and adds a
 field of sound. The Toaster's `source_picture` takes a routed input from

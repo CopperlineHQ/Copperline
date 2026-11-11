@@ -305,6 +305,12 @@ pub struct Player {
     /// A channel shows black once its clip is done.
     matte_after: [bool; VIDEO_CHANNELS],
     shown: [Shown; VIDEO_CHANNELS],
+    /// What makes up each channel's held picture, oldest first: a matte
+    /// and the last clip field of each line parity after it (as
+    /// [`crate::flyer::link::push_shown`] keeps them). The link's picture
+    /// is rebuilt from this when a loaded state takes over a live link.
+    #[serde(default)]
+    held: [Vec<Shown>; VIDEO_CHANNELS],
     /// The jog/shuttle session, while one is open.
     #[serde(default)]
     search: Option<Search>,
@@ -933,7 +939,46 @@ impl Player {
                 }
             }
         }
+        let held = &mut self.held[ch];
+        match &what {
+            Shown::Nothing => {}
+            Shown::Black => held.clear(),
+            Shown::Clip(_, n) => {
+                held.retain(|h| !matches!(h, Shown::Clip(_, m) if m & 1 == n & 1));
+            }
+        }
+        if what != Shown::Nothing {
+            held.push(what.clone());
+        }
         self.shown[ch] = what;
+    }
+
+    /// Put this player's held pictures on `link`, in place of whatever the
+    /// link holds: a loaded state's Flyer takes over the live session's
+    /// link, whose pictures, pending fields and sound belong to the
+    /// timeline that was left. Each channel starts from black, as a new
+    /// link does, and is shown its matte and held fields again.
+    pub fn republish(&mut self, link: &FlyerLink) {
+        link.clear_sound();
+        for ch in 0..VIDEO_CHANNELS {
+            link.show(ch, FieldSource::Matte(BLACK));
+            let mut held = self.held[ch].clone();
+            if held.is_empty() && self.shown[ch] != Shown::Nothing {
+                // A state from before the held fields were kept.
+                held.push(self.shown[ch].clone());
+            }
+            for what in held {
+                match what {
+                    Shown::Nothing => {}
+                    Shown::Black => link.show(ch, FieldSource::Matte(BLACK)),
+                    Shown::Clip(path, n) => {
+                        if let Some(c) = self.clip(&path) {
+                            link.show(ch, FieldSource::Clip(c, n));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // ---------------------------------------------------------------
@@ -1550,6 +1595,7 @@ pub fn action_of(sram: &[u8], slot: Slot) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::flyer::link::{PICTURE_H, PICTURE_W};
     use crate::flyer::mailbox::{STAT_DONE, STAT_INPROG};
 
     const ACTION: usize = 0x2000;
@@ -1664,6 +1710,50 @@ mod tests {
         assert_eq!(r.player.shown[0], Shown::Black);
         assert!(!r.player.busy());
         assert_eq!(r.player.dsp[0], Dsp::default());
+    }
+
+    /// A loaded state's player puts its own held picture on the live
+    /// link, whatever the link showed since.
+    #[test]
+    fn a_restored_player_puts_its_held_picture_back_on_the_link() {
+        let mut r = rig();
+        let info = info(&r.path);
+        let mut req = request(caf::VIDEO, 0);
+        req.go_clock = 40;
+        req.vid_count = 4;
+        r.player
+            .play_clip(Slot(0), req, info.clone(), 10, &mut r.sram, Some(&r.link))
+            .unwrap();
+        for clock in 40..46 {
+            r.field(clock);
+        }
+        // The clip ended without a matte: fields 2 and 3 are held.
+        let saved = r.player.clone();
+        let picture = |link: &FlyerLink| {
+            let mut out = vec![0u32; PICTURE_W * PICTURE_H];
+            link.picture(0, &mut out);
+            out
+        };
+        let held = picture(&r.link);
+        assert!(held.iter().any(|&p| p != BLACK));
+        // The session goes on to show other fields...
+        let mut req = request(caf::VIDEO, 0);
+        req.go_clock = 60;
+        req.vid_start = 4;
+        req.vid_count = 4;
+        r.player
+            .play_clip(Slot(0), req, info, 50, &mut r.sram, Some(&r.link))
+            .unwrap();
+        for clock in 60..66 {
+            r.field(clock);
+        }
+        assert_ne!(picture(&r.link), held);
+        r.link.push_sound(&[(0.5, 0.5); 10]);
+        // ...and the state is loaded: its picture is back, the queue empty.
+        let mut restored = saved;
+        restored.republish(&r.link);
+        assert_eq!(picture(&r.link), held);
+        assert!(r.link.take_sound().is_empty());
     }
 
     #[test]

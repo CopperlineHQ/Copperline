@@ -363,10 +363,14 @@ impl Firmware {
     }
 
     /// Take over the ribbon of the card this one replaces (a loaded
-    /// state), and tell the Toaster this card's routing.
+    /// state): tell the Toaster this card's routing, and put this card's
+    /// held pictures on the link in place of the live session's.
     pub fn adopt_link(&mut self, link: Option<Arc<FlyerLink>>) {
         self.link = link;
         self.publish_routing();
+        if let Some(link) = &self.link {
+            self.player.republish(link);
+        }
     }
 
     /// The Amiga was reset: so is the card (its 68000 restarts in the boot
