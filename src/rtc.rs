@@ -210,14 +210,7 @@ impl ClockSource {
         if let Some(time) = self.test_time {
             return RtcDateTime::from_system_time(time);
         }
-        // COPPERLINE_RTC_FIXED_SECS pins the clock to a fixed Unix-seconds
-        // value, making RTC reads deterministic across runs (otherwise the
-        // host wall-clock differs run-to-run, which pollutes differential
-        // traces with spurious timestamp divergences). As a diagnostic
-        // override it wins over the configured seed.
-        if let Some(secs) = crate::envcfg::var("COPPERLINE_RTC_FIXED_SECS")
-            .and_then(|s| s.trim().parse::<u64>().ok())
-        {
+        if let Some(secs) = fixed_secs_override() {
             return RtcDateTime::from_unix_seconds(secs);
         }
         if let Some(seed) = self.seed_unix {
@@ -251,9 +244,7 @@ impl ClockSource {
     /// following the same source precedence as `current_time` (the
     /// host-local path reports plain host Unix seconds).
     fn current_unix(&self, emulated_secs: f64) -> u64 {
-        if let Some(secs) = crate::envcfg::var("COPPERLINE_RTC_FIXED_SECS")
-            .and_then(|s| s.trim().parse::<u64>().ok())
-        {
+        if let Some(secs) = fixed_secs_override() {
             return secs;
         }
         if let Some(seed) = self.seed_unix {
@@ -670,6 +661,26 @@ impl Rp5c01Rtc {
         self.mode = Self::MODE_TIMER_EN;
         self.latched = None;
     }
+}
+
+/// `COPPERLINE_RTC_FIXED_SECS`: pins the clock to a fixed Unix-seconds
+/// value, making RTC reads deterministic across runs (otherwise the host
+/// wall clock differs run-to-run, which pollutes differential traces with
+/// spurious timestamp divergences). As a diagnostic override it wins over
+/// the configured seed.
+fn fixed_secs_override() -> Option<u64> {
+    crate::envcfg::var("COPPERLINE_RTC_FIXED_SECS").and_then(|s| s.trim().parse::<u64>().ok())
+}
+
+/// The guest clock's power-on instant in Unix seconds when it is pinned
+/// rather than following the host clock: the `COPPERLINE_RTC_FIXED_SECS`
+/// override, else the configured `seed_unix` (`[machine] rtc_time` /
+/// `--rtc-time`). `None` means the guest clock reads the host wall clock.
+/// Host-side state the guest reads back as a date -- the volume dates of
+/// host filesystem mounts -- takes it too, so a run with a pinned clock
+/// boots the same way every time.
+pub fn pinned_power_on_unix(seed_unix: Option<u64>) -> Option<u64> {
+    fixed_secs_override().or(seed_unix)
 }
 
 /// Parse a `[machine] rtc_time` / `--rtc-time` value: either a bare

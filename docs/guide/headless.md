@@ -421,7 +421,8 @@ To test date- and time-dependent guest software, seed the RTC with a fixed times
 
 `--rtc-time` takes Unix seconds or `"YYYY-MM-DD HH:MM[:SS]"` and fits a
 battery clock if the machine has none. The clock then ticks in emulated
-time, so every run boots to the same moment. Use `--rtc-frozen` to hold
+time, so every run boots to the same moment; host-directory mounts
+(`[[filesys]]`, `--run`) date their volumes at the seed as well. Use `--rtc-frozen` to hold
 the RTC at the seed without advancing. Kickstart 2.0 and later load the
 system time from the battery clock at boot; Kickstart 1.3 needs
 `SetClock LOAD` in the startup-sequence. A

@@ -449,7 +449,9 @@ is either an integer (Unix seconds, UTC) or a string
 at power-on. A seeded clock ticks with *emulated* time, so the time the guest
 sees is deterministic and reproducible byte-for-byte across runs -- the way
 to test time-dependent guest software (TOTP/RFC 6238 vectors, timestamped
-logs, date rollovers) or just to boot into a fixed date. Setting a time
+logs, date rollovers) or just to boot into a fixed date. Host-directory
+mounts (`[[filesys]]`, `--run`) date their volumes at the seed too, rather
+than at the host time each handler starts. Setting a time
 implies `rtc = true`; combining it with an explicit `rtc = false` is an
 error. `rtc_frozen = true` additionally stops the tick so every read returns
 `rtc_time` exactly. Both are also available as `--rtc-time` / `--rtc-frozen`
