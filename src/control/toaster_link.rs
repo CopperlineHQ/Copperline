@@ -242,9 +242,18 @@ pub fn app_body(app: &App, command: &str, args: &[serde_json::Value]) -> Result<
                 format!("call remlib('{}')\n", app.port),
             )
         };
+        // The switcher's host has one function, Switcher, taking the
+        // command code first (TAKE, AUTO, M001, TBAR 256...); the other
+        // function hosts have a function per command.
+        let call = if app.name == "switcher" {
+            let mut all = vec![serde_json::Value::String(command.to_string())];
+            all.extend_from_slice(args);
+            call_body("Switcher", &all)
+        } else {
+            call_body(command, args)
+        };
         Ok(format!(
-            "{missing}{alone}IF ~SHOW('Libraries','{port}') THEN call addlib('{port}', 0)\n{}{after}",
-            call_body(command, args),
+            "{missing}{alone}IF ~SHOW('Libraries','{port}') THEN call addlib('{port}', 0)\n{call}{after}",
             port = app.port
         ))
     } else {
@@ -349,6 +358,15 @@ mod tests {
         let body = app_body(cg, "GET_PAGE", &[]).unwrap();
         assert!(body.contains("addlib('CG_AREXX', 0)"));
         assert!(body.contains("call GET_PAGE()"));
+        // The switcher takes its command as Switcher's first argument;
+        // the project editor's commands are functions of their own.
+        let switcher = app("switcher").unwrap();
+        let body = app_body(switcher, "TAKE", &[]).unwrap();
+        assert!(body.contains("call Switcher('TAKE')"), "{body}");
+        let body = app_body(switcher, "TBAR", &[json!(256)]).unwrap();
+        assert!(body.contains("call Switcher('TBAR', 256)"), "{body}");
+        let body = app_body(app("project").unwrap(), "SET_VIEW", &[json!(3)]).unwrap();
+        assert!(body.contains("call SET_VIEW(3)"), "{body}");
         let lw = app("lightwave").unwrap();
         let body = app_body(lw, "LoadScene", &[json!("Toaster:LW/Scenes/a b")]).unwrap();
         assert!(body.contains("ADDRESS 'LightWaveARexx.port'"));
