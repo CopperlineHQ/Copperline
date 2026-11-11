@@ -936,7 +936,12 @@ impl Filesystem {
             return err::OBJNOTFOUND;
         };
         let cur = read64(sram, at + g::CURPOS_EXT, at + g::CURPOS);
-        let room = mailbox::SRAM_SIZE.saturating_sub(buffer);
+        // The buffer is an SRAM offset the Amiga chose: one outside the
+        // SRAM is its error, not ours to index with.
+        if buffer >= sram.len() {
+            return err::BADPARAM;
+        }
+        let room = sram.len() - buffer;
         let mut data = vec![0u8; length.min(room)];
         let got = match self.drives[d].read_file(index, cur, &mut data) {
             Ok(got) => got,
@@ -971,7 +976,9 @@ impl Filesystem {
         if count == 0 {
             return err::OKAY;
         }
-        if count > DRAM_BLOCKS || buffer.saturating_add(count * BLOCK) > mailbox::SRAM_SIZE {
+        if count > DRAM_BLOCKS
+            || buffer.saturating_add(count * BLOCK) > mailbox::SRAM_SIZE.min(sram.len())
+        {
             return ERR_OUTOFMEM;
         }
         if write {
@@ -1087,7 +1094,10 @@ impl Filesystem {
             let d = self.drive(n)?;
             let index = self.writable(sram, d, at)?;
             let cur = read64(sram, at + g::CURPOS_EXT, at + g::CURPOS);
-            let len = length.min(mailbox::SRAM_SIZE.saturating_sub(buffer));
+            if buffer >= sram.len() {
+                return Err(err::BADPARAM);
+            }
+            let len = length.min(sram.len() - buffer);
             let data = sram[buffer..buffer + len].to_vec();
             self.drives[d]
                 .write_file(index, cur, &data)
@@ -1724,6 +1734,15 @@ mod tests {
             r.send(op::FILESEEK, &[(4, 0x0000_7700), (8, id)]).0,
             err::BADPARAM
         );
+        // A buffer outside the SRAM is refused, read or write, not indexed.
+        for buffer in [0xFFFF_FFFF, r.sram.len() as u32] {
+            for opcode in [op::FILEREAD, op::FILEWRITE] {
+                assert_ne!(
+                    r.send(opcode, &[(4, 0), (6, id), (10, 4), (14, buffer)]).0,
+                    err::OKAY
+                );
+            }
+        }
         assert_eq!(r.send(op::FILECLOSE, &[(4, 0), (6, id)]).0, err::OKAY);
         assert_eq!(
             r.send(
