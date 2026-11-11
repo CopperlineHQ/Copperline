@@ -17,6 +17,7 @@ Code contributions from (the full list is on
 - Matt Harlum
 - Tinic Uro
 - Seppo Tomperi
+- TronMetatron
 
 ## Patreon sponsors
 
