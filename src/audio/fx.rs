@@ -50,8 +50,7 @@ pub fn play(samples: Arc<[f32]>, delay: f32, gain: f32) {
 pub(crate) fn set_live(live: bool) {
     if live {
         LIVE.fetch_add(1, Ordering::Relaxed);
-    } else if LIVE.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)) == Ok(1)
-    {
+    } else if LIVE.try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1)) == Ok(1) {
         VOICES.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 }
