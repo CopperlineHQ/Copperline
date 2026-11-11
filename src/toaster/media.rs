@@ -28,7 +28,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -55,7 +55,13 @@ const VIDEO_EXTENSIONS: &[&str] = &[
     "flv", "gif", "ogv", "3gp",
 ];
 /// How long a still holds when it is one of several in a folder.
-const STILL_HOLD: Duration = Duration::from_secs(5);
+const STILL_HOLD_FRAMES: u32 = 150;
+/// How many frames an input shows no signal for after a file that would
+/// not play, before the next one is tried.
+const FAILED_FRAMES: u32 = 45;
+/// How long a frame is waited for before the input is taken to have
+/// stalled (a decoder that hangs): far longer than any decoder start.
+const STALL: Duration = Duration::from_secs(5);
 /// How often a folder is looked at for new or removed files.
 const RESCAN: Duration = Duration::from_millis(1500);
 
@@ -267,6 +273,8 @@ pub struct InputFeed {
     sound: Option<Sound>,
     dir: PathBuf,
     shared: Arc<Shared>,
+    /// The worker stopped answering (warned once).
+    stalled: bool,
 }
 
 impl InputFeed {
@@ -295,6 +303,7 @@ impl InputFeed {
             sound: None,
             dir,
             shared,
+            stalled: false,
         }
     }
 
@@ -335,21 +344,39 @@ impl InputFeed {
         locked(&self.shared.playing).clone()
     }
 
-    /// Take the next frame, if the source has one ready: call once per
-    /// emulated video frame. A still or a stalled decoder keeps the
-    /// previous frame.
+    /// Take the next frame: call once per emulated video frame. Once
+    /// started, the worker supplies exactly one message per frame (a
+    /// picture, a still again, or no signal), and this waits for it, so
+    /// what the input shows on a given emulated frame does not depend on
+    /// how fast the host decodes. Only a worker that stops answering for
+    /// [`STALL`] is given up on: the picture holds, without sound.
     pub fn advance(&mut self) {
-        match self.rx.try_recv() {
+        if !self.started() {
+            return;
+        }
+        let wait = if self.stalled { Duration::ZERO } else { STALL };
+        match self.rx.recv_timeout(wait) {
             Ok(Message::Picture(p, sound)) => {
                 self.current = Some(p);
                 self.sound = sound;
+                self.stalled = false;
             }
             Ok(Message::NoSignal) => {
                 self.current = None;
                 self.sound = None;
+                self.stalled = false;
             }
-            // No new frame: the picture holds, the sound does not.
-            Err(_) => self.sound = None,
+            Err(RecvTimeoutError::Timeout) => {
+                if !self.stalled {
+                    self.stalled = true;
+                    log::warn!("toaster: input from {} stalled", self.dir.display());
+                }
+                self.sound = None;
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                self.current = None;
+                self.sound = None;
+            }
         }
     }
 
@@ -384,6 +411,9 @@ struct Worker {
     stop: Arc<AtomicBool>,
     shared: Arc<Shared>,
     warned_no_ffmpeg: bool,
+    /// The decoder of the file that plays next, started ahead so the
+    /// change of file does not wait on ffmpeg starting.
+    prepared: Option<(PathBuf, Decoder)>,
 }
 
 impl Worker {
@@ -403,6 +433,7 @@ impl Worker {
             stop,
             shared,
             warned_no_ffmpeg: false,
+            prepared: None,
         }
     }
 
@@ -454,6 +485,15 @@ impl Worker {
         !self.stopped()
     }
 
+    /// Send `frames` frames of no signal; `false` when stopping.
+    fn no_signal(&self, frames: u32) -> bool {
+        (0..frames).all(|_| self.send(Message::NoSignal))
+    }
+
+    /// One message per emulated frame from here on, whatever the input
+    /// holds: the owner waits for each (see [`InputFeed::advance`]). The
+    /// folder is looked at on the host's clock; what is played from it is
+    /// counted in frames.
     fn run(mut self) {
         while !self.shared.started.load(Ordering::Relaxed) {
             if !self.nap(Duration::from_millis(100)) {
@@ -462,7 +502,6 @@ impl Worker {
         }
         let mut files: Vec<PathBuf> = Vec::new();
         let mut next = 0usize;
-        let mut signal = false;
         while !self.stopped() {
             let now = self.sources();
             if now != files {
@@ -476,34 +515,35 @@ impl Worker {
                 }
                 files = now;
                 next = 0;
+                self.prepared = None;
             }
             if files.is_empty() {
                 self.set_playing(None);
-                if signal {
-                    signal = false;
+                // No signal, a frame at a time, until the folder has
+                // something.
+                let looked = Instant::now();
+                while looked.elapsed() < RESCAN {
                     if !self.send(Message::NoSignal) {
                         return;
                     }
-                }
-                if !self.nap(RESCAN) {
-                    return;
                 }
                 continue;
             }
             let file = files[next % files.len()].clone();
             next = next.wrapping_add(1);
+            let upcoming = files[next % files.len()].clone();
             self.set_playing(Some(&file));
             let played = if classify(&file) == Some(true) {
-                self.play_video(&file, &files)
+                self.play_video(&file, &upcoming, &files)
             } else {
                 self.play_still(&file, &files)
             };
             match played {
                 Played::Stop => return,
-                Played::Shown => signal = true,
+                Played::Shown => {}
                 Played::Failed => {
                     // Nothing worth showing; do not spin on a bad file.
-                    if !self.nap(RESCAN) {
+                    if !self.no_signal(FAILED_FRAMES) {
                         return;
                     }
                 }
@@ -519,26 +559,28 @@ impl Worker {
                 return Played::Failed;
             }
         };
-        if !self.send(Message::Picture(picture, None)) {
-            return Played::Stop;
-        }
         // Alone, a still holds until the folder changes; one of several,
         // it holds for a while and the next one comes up.
-        let started = Instant::now();
+        let mut frames = 0u32;
+        let mut last_scan = Instant::now();
         loop {
-            if !self.nap(RESCAN.min(STILL_HOLD)) {
+            if !self.send(Message::Picture(Arc::clone(&picture), None)) {
                 return Played::Stop;
             }
-            if self.sources() != files {
+            frames += 1;
+            if files.len() > 1 && frames >= STILL_HOLD_FRAMES {
                 return Played::Shown;
             }
-            if files.len() > 1 && started.elapsed() >= STILL_HOLD {
-                return Played::Shown;
+            if last_scan.elapsed() >= RESCAN {
+                last_scan = Instant::now();
+                if self.sources() != files {
+                    return Played::Shown;
+                }
             }
         }
     }
 
-    fn play_video(&mut self, file: &Path, files: &[PathBuf]) -> Played {
+    fn play_video(&mut self, file: &Path, upcoming: &Path, files: &[PathBuf]) -> Played {
         let Some(ffmpeg) = self.ffmpeg.clone() else {
             if !self.warned_no_ffmpeg {
                 self.warned_no_ffmpeg = true;
@@ -551,39 +593,31 @@ impl Worker {
             }
             return Played::Failed;
         };
-        let filter = format!(
-            "scale={SQUARE_W}:{PICTURE_H}:force_original_aspect_ratio=decrease,\
-             pad={SQUARE_W}:{PICTURE_H}:(ow-iw)/2:(oh-ih)/2:black,\
-             scale={PICTURE_W}:{PICTURE_H},fps=30000/1001"
-        );
-        let mut cmd = ffmpeg_command(&ffmpeg, file);
-        cmd.args([
-            "-an", "-vf", &filter, "-pix_fmt", "rgba", "-f", "rawvideo", "-",
-        ]);
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                log::warn!("toaster: input {}: starting ffmpeg: {e}", self.index + 1);
-                return Played::Failed;
-            }
+        let prepared = self.prepared.take().filter(|(f, _)| f == file);
+        let mut decoder = match prepared {
+            Some((_, d)) => d,
+            None => match Decoder::start(&ffmpeg, file) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("toaster: input {}: starting ffmpeg: {e}", self.index + 1);
+                    return Played::Failed;
+                }
+            },
         };
-        let Some(mut stdout) = child.stdout.take() else {
-            let _ = child.kill();
-            return Played::Failed;
-        };
-        // The sound comes from a second ffmpeg on the same file, read a
-        // frame's worth at a time beside each picture, so the two stay
-        // together whatever the host's pace. A file without sound plays
-        // silent.
-        let mut sound = SoundReader::start(&ffmpeg, file);
+        // Start the next file's decoder now; it waits on its pipe.
+        if classify(upcoming) == Some(true) {
+            self.prepared = Decoder::start(&ffmpeg, upcoming)
+                .ok()
+                .map(|d| (upcoming.to_path_buf(), d));
+        }
         let mut buf = vec![0u8; PICTURE_W * PICTURE_H * 4];
         let mut frames = 0u64;
         let mut last_scan = Instant::now();
-        let result = loop {
+        loop {
             if self.stopped() {
                 break Played::Stop;
             }
-            if std::io::Read::read_exact(&mut stdout, &mut buf).is_err() {
+            if std::io::Read::read_exact(&mut decoder.video, &mut buf).is_err() {
                 break if frames > 0 {
                     Played::Shown
                 } else {
@@ -600,9 +634,9 @@ impl Worker {
                 .chunks_exact(4)
                 .map(|c| u32::from_le_bytes([c[0], c[1], c[2], 0xFF]))
                 .collect();
-            let frame_sound = sound.as_mut().and_then(SoundReader::frame);
+            let frame_sound = decoder.sound.as_mut().and_then(SoundReader::frame);
             if frame_sound.is_none() {
-                sound = None;
+                decoder.sound = None;
             }
             if !self.send(Message::Picture(Arc::new(picture), frame_sound)) {
                 break Played::Stop;
@@ -613,10 +647,48 @@ impl Worker {
                     break Played::Shown;
                 }
             }
+        }
+    }
+}
+
+/// A video file being decoded: ffmpeg writing card-sized frames to a pipe,
+/// and a second ffmpeg its sound, read a frame's worth at a time beside
+/// each picture so the two stay together whatever the host's pace. A file
+/// without sound plays silent.
+struct Decoder {
+    child: std::process::Child,
+    video: std::process::ChildStdout,
+    sound: Option<SoundReader>,
+}
+
+impl Decoder {
+    fn start(ffmpeg: &Path, file: &Path) -> std::io::Result<Self> {
+        let filter = format!(
+            "scale={SQUARE_W}:{PICTURE_H}:force_original_aspect_ratio=decrease,\
+             pad={SQUARE_W}:{PICTURE_H}:(ow-iw)/2:(oh-ih)/2:black,\
+             scale={PICTURE_W}:{PICTURE_H},fps=30000/1001"
+        );
+        let mut cmd = ffmpeg_command(ffmpeg, file);
+        cmd.args([
+            "-an", "-vf", &filter, "-pix_fmt", "rgba", "-f", "rawvideo", "-",
+        ]);
+        let mut child = cmd.spawn()?;
+        let Some(video) = child.stdout.take() else {
+            let _ = child.kill();
+            return Err(std::io::Error::other("no pipe from ffmpeg"));
         };
-        let _ = child.kill();
-        let _ = child.wait();
-        result
+        Ok(Self {
+            child,
+            video,
+            sound: SoundReader::start(ffmpeg, file),
+        })
+    }
+}
+
+impl Drop for Decoder {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -731,6 +803,40 @@ mod tests {
         );
         assert!(lengths.iter().sum::<usize>().abs_diff(14715) <= 1);
         assert!(peak > 0.1, "peak {peak}");
+    }
+
+    /// What an input shows on a given frame does not depend on how long
+    /// the host took to get there.
+    #[test]
+    fn an_input_shows_the_same_frames_whatever_the_hosts_pace() {
+        let red = u32::from_le_bytes([255, 0, 0, 255]);
+        let green = u32::from_le_bytes([0, 255, 0, 255]);
+        let run = |wait: Duration| {
+            let dir = tempfile::tempdir().unwrap();
+            for (name, rgb) in [("a.png", [255u8, 0, 0]), ("b.png", [0, 255, 0])] {
+                image::RgbImage::from_pixel(8, 6, image::Rgb(rgb))
+                    .save(dir.path().join(name))
+                    .unwrap();
+            }
+            let mut feed = InputFeed::spawn(0, dir.path().to_path_buf(), None);
+            // Not started: nothing, and no waiting for it.
+            feed.advance();
+            assert!(feed.picture().is_none());
+            feed.start();
+            std::thread::sleep(wait);
+            (0..STILL_HOLD_FRAMES + 2)
+                .map(|_| {
+                    feed.advance();
+                    feed.picture().map(|p| p[0])
+                })
+                .collect::<Vec<_>>()
+        };
+        let at_once = run(Duration::ZERO);
+        assert_eq!(at_once[0], Some(red), "the first frame after the start");
+        let hold = STILL_HOLD_FRAMES as usize;
+        assert_eq!(at_once[hold - 1], Some(red));
+        assert_eq!(at_once[hold], Some(green), "the next still, by frame count");
+        assert_eq!(at_once, run(Duration::from_millis(300)));
     }
 
     #[test]

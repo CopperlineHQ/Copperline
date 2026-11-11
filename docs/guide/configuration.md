@@ -934,8 +934,11 @@ subfolders on first use:
 
 - `Input 1` .. `Input 4`: what is plugged into each video input. Drop
   video files or still pictures in; several play one after another in name
-  order and loop, and an empty folder is an unplugged input. Changes are
-  picked up while the machine runs. Stills (PNG, JPEG, BMP) need nothing
+  order and loop (a still among several shows for five emulated seconds),
+  and an empty folder is an unplugged input. Changes are picked up while
+  the machine runs. A file plays in emulated time: the machine waits for
+  the decoder, so the same files give the same output on a fast or a slow
+  host, headless or windowed. Stills (PNG, JPEG, BMP) need nothing
   else; video files are decoded by ffmpeg, found as `ffmpeg.exe` (or
   `ffmpeg`) in the folder itself, beside Copperline, or on the `PATH`.
 - `Output`: recordings of the Program output (MP4 or AVI, see below).
