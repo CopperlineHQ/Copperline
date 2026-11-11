@@ -1146,6 +1146,93 @@ pub fn export(
     Ok(report)
 }
 
+/// Characters in a name on a Flyer drive (the drive lists nothing longer).
+pub const FLYER_NAME_MAX: usize = 31;
+
+/// The longest name a clip can have with nothing after it: its crouton
+/// icon is the clip's whole name and `.I`, and must fit too.
+pub const CLIP_NAME_MAX: usize = FLYER_NAME_MAX - 2;
+
+/// `stem` as the name of a clip file with `suffix` after it (`""`, or
+/// `".clip"`): characters a Flyer name cannot hold replaced, and cut so
+/// that the name, the suffix, `tail` (a collision number) and the icon's
+/// `.I` fit a Flyer name together.
+fn clip_file_name(stem: &str, tail: &str, suffix: &str) -> String {
+    let room = CLIP_NAME_MAX.saturating_sub(suffix.chars().count() + tail.chars().count());
+    let name: String = stem
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | ':' | '\\') || c < ' ' || (c as u32) >= 0x100 {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(room.max(1))
+        .collect();
+    let name = name.trim();
+    let name = if name.is_empty() { "Clip" } else { name };
+    format!("{name}{tail}{suffix}")
+}
+
+/// Where a clip called `stem` goes in `dir`: a name the Flyer's drive
+/// lists, icon included ([`clip_file_name`]), that no file there has and
+/// that is not in `taken` (the clips a batch has already been given,
+/// which do not exist yet). `name`, then `name 2`, `name 3`... The Flyer
+/// compares names without case, and so does this. With `replace`, a file
+/// already there is no obstacle; a name in `taken` still is.
+pub fn unused_clip_path(
+    dir: &Path,
+    stem: &str,
+    suffix: &str,
+    taken: &[PathBuf],
+    replace: bool,
+) -> PathBuf {
+    let existing: Vec<String> = if replace {
+        Vec::new()
+    } else {
+        std::fs::read_dir(dir)
+            .map(|read| {
+                read.flatten()
+                    .filter_map(|e| e.file_name().into_string().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let used = |name: &str| {
+        existing.iter().any(|e| e.eq_ignore_ascii_case(name))
+            || taken.iter().any(|t| {
+                t.parent() == Some(dir)
+                    && t.file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|n| n.eq_ignore_ascii_case(name))
+            })
+    };
+    (1u32..)
+        .map(|n| {
+            let tail = if n == 1 {
+                String::new()
+            } else {
+                format!(" {n}")
+            };
+            clip_file_name(stem, &tail, suffix)
+        })
+        .find(|name| !used(name))
+        .map(|name| dir.join(name))
+        .expect("an unused name")
+}
+
+/// The clips a batch of `names` becomes in `dir`, in order: each its own
+/// file, so two sources of one name do not write the same clip.
+pub fn batch_clip_paths(dir: &Path, names: &[&str], replace: bool) -> Vec<PathBuf> {
+    let mut taken: Vec<PathBuf> = Vec::with_capacity(names.len());
+    for name in names {
+        let path = unused_clip_path(dir, name, "", &taken, replace);
+        taken.push(path);
+    }
+    taken
+}
+
 /// `path`, or when that exists `name (2).ext`, `name (3).ext`...: a
 /// default output never replaces a file.
 pub fn unused_path(path: &Path) -> PathBuf {
@@ -1194,6 +1281,56 @@ pub fn describe(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clip_names_fit_the_flyer_with_their_suffix_icon_and_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let fits = |p: &Path| {
+            let name = p.file_name().unwrap().to_str().unwrap().to_string();
+            let icon = icon_path(p);
+            let icon = icon.file_name().unwrap().to_str().unwrap();
+            assert!(icon.chars().count() <= FLYER_NAME_MAX, "{icon:?}");
+            name
+        };
+        let long = "A sufficiently long video name for anyone";
+        let first = unused_clip_path(dir.path(), long, ".clip", &[], false);
+        assert_eq!(fits(&first), "A sufficiently long vide.clip");
+        std::fs::write(&first, b"x").unwrap();
+        // A collision number comes out of the stem, not past the limit;
+        // names are compared as the Flyer does, without case.
+        let second = unused_clip_path(dir.path(), &long.to_uppercase(), ".clip", &[], false);
+        assert_eq!(fits(&second), "A SUFFICIENTLY LONG VI 2.clip");
+        assert_eq!(
+            fits(&unused_clip_path(
+                dir.path(),
+                "a/b:c\u{3042}",
+                "",
+                &[],
+                false
+            )),
+            "a_b_c_"
+        );
+        assert_eq!(
+            fits(&unused_clip_path(dir.path(), "  ", "", &[], false)),
+            "Clip"
+        );
+    }
+
+    #[test]
+    fn a_batch_gives_each_clip_its_own_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("Old"), b"x").unwrap();
+        let names = |replace| {
+            batch_clip_paths(dir.path(), &["Clip", "clip", "Old", "Clip"], replace)
+                .iter()
+                .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(false), ["Clip", "clip 2", "Old 2", "Clip 3"]);
+        // Replacing takes over a clip already on the drive, never one of
+        // the same batch.
+        assert_eq!(names(true), ["Clip", "clip 2", "Old", "Clip 3"]);
+    }
 
     #[test]
     fn ffmpegs_report_gives_the_run_time_size_rate_and_sound() {

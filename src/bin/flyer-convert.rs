@@ -498,17 +498,6 @@ impl App {
         }
     }
 
-    /// The clip a queued item becomes.
-    fn target(&self, item: &Item) -> PathBuf {
-        let dir = self.drive_folder();
-        let path = dir.join(&item.name);
-        if self.replace {
-            path
-        } else {
-            fc::unused_path(&path)
-        }
-    }
-
     fn start(&mut self, ctx: &egui::Context) {
         let Some(ffmpeg) = self.ffmpeg.clone() else {
             self.message = "ffmpeg is needed to convert".into();
@@ -529,11 +518,16 @@ impl App {
         self.save_settings();
         let options = self.options();
         let cancel = Arc::new(AtomicBool::new(false));
+        // Every clip of the batch gets a file of its own before any is
+        // written: two sources of one name must not land on one clip.
+        let names: Vec<&str> = queue.iter().map(|&i| self.items[i].name.as_str()).collect();
+        let targets = fc::batch_clip_paths(&dir, &names, self.replace);
         let jobs: Vec<(usize, Input, Kind, PathBuf)> = queue
             .iter()
-            .map(|&i| {
+            .zip(targets)
+            .map(|(&i, target)| {
                 let it = &self.items[i];
-                (i, it.input.clone(), it.kind, self.target(it))
+                (i, it.input.clone(), it.kind, target)
             })
             .collect();
         let total_seconds = queue
@@ -797,7 +791,7 @@ fn is_clip(path: &Path) -> bool {
 
 /// Characters in a clip's name: a Flyer name holds 31, and its icon's
 /// name is the clip's and `.I`.
-const NAME_MAX: usize = 29;
+const NAME_MAX: usize = fc::CLIP_NAME_MAX;
 
 /// A clip name the Flyer accepts: at most [`NAME_MAX`] characters, no
 /// `/` or `:`.

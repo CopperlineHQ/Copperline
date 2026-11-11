@@ -30,7 +30,8 @@ Converts between video files and NewTek Video Toaster Flyer clips. An
 imported clip goes to the Flyer's drive FA0 (Flyer/FA0 in the Toaster files
 folder) unless CLIP names a file; an exported video (MP4 unless VIDEO says
 otherwise) goes beside the clip. Without an output name nothing is overwritten: a name in
-use gets \" (2)\" added. Needs ffmpeg.";
+use gets a number added, and a clip's name is cut to what the Flyer's
+drive lists (31 characters with its icon's \".I\"). Needs ffmpeg.";
 
 fn is_clip(path: &Path) -> bool {
     std::fs::File::open(path)
@@ -42,27 +43,6 @@ fn is_clip(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// A clip name the Flyer accepts: at most 29 characters (31 with its
-/// icon's `.I`), no `/` or `:`.
-fn clip_name(stem: &str) -> String {
-    let name: String = stem
-        .chars()
-        .map(|c| {
-            if matches!(c, '/' | ':' | '\\') {
-                '_'
-            } else {
-                c
-            }
-        })
-        .take(29)
-        .collect();
-    if name.is_empty() {
-        "Clip".into()
-    } else {
-        name
-    }
-}
-
 fn default_clip_path(input: &Path) -> PathBuf {
     let stem = input.file_stem().and_then(|s| s.to_str()).unwrap_or("Clip");
     // The Flyer's first drive, FA0, is the folder `Flyer/FA0`.
@@ -72,7 +52,7 @@ fn default_clip_path(input: &Path) -> PathBuf {
     } else {
         input.parent().map(Path::to_path_buf).unwrap_or_default()
     };
-    flyer_convert::unused_path(&dir.join(format!("{}.clip", clip_name(stem))))
+    flyer_convert::unused_clip_path(&dir, stem, ".clip", &[], false)
 }
 
 fn progress(label: &'static str) -> impl FnMut(usize) {

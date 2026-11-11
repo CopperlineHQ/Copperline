@@ -756,14 +756,12 @@ impl McpServer {
                 return ToolResult::error("missing source");
             };
             let clip = path_arg("clip").unwrap_or_else(|| {
-                let stem: String = source
+                let stem = source
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("Clip")
-                    .chars()
-                    .take(31)
-                    .collect();
-                crate::flyer_convert::unused_path(&fa0.join(format!("{stem}.clip")))
+                    .unwrap_or("Clip");
+                // A name the drive lists, its icon's `.I` included.
+                crate::flyer_convert::unused_clip_path(&fa0, stem, ".clip", &[], false)
             });
             let mut options = crate::flyer_convert::ImportOptions::default();
             match args.get("grade").and_then(Value::as_str) {
