@@ -584,6 +584,18 @@ video = "PAL"
 # genlock = false
 
 
+# A card in the video slot. "toaster" fits an emulated NewTek Video Toaster
+# 4000 (A4000; the Toaster software is not included). It supplies sync like
+# a genlock while fitted. `media` is its host folder: Input 1-4 (video files
+# or stills to play into each input), Output (Program recordings) and Flyer.
+# The card's Preview and Program outputs open as monitor windows.
+# [video_slot]
+# card = "none"
+# media = "Amiga Toaster Files"
+# monitors = true
+# preview_overlay = false
+
+
 # IDE hard-disk images, on the machines with a built-in IDE port: A600, A1200,
 # and A4000. Raw flat HDF images opened read/write; both full images with their
 # own RDB and bare partition hardfiles (boot block "DOS\x..", size a multiple
@@ -901,6 +913,13 @@ floppy_sounds_volume = 100
 # explicitly -- a comma-separated subset of "master", "source", "channel".
 # Has no effect without `--audio-stems DIR` on the command line.
 # stem_granularity = "master,source"
+
+# How much sound, in milliseconds, the live output keeps ahead of the
+# host's device (50-1000, default 150): how long the machine may run slower
+# than real time before the sound stops and restarts. A machine near the
+# host's limit (a Video Toaster running a transition) is
+# smoother with 400; the sound then trails the picture by that much.
+# live_lead_ms = 150
 
 
 # Host input preferences.

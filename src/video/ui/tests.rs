@@ -3825,6 +3825,8 @@ fn panels_render_into_their_rects() {
         rewind: false,
         recording: false,
         input_recording: false,
+        card_outputs: false,
+        card_recording: false,
         autofire_hz: 0,
         clipboard_share: false,
         clipboard_available: false,

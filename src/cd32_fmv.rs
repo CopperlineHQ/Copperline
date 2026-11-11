@@ -495,7 +495,9 @@ struct NewPacket {
 /// Complete CD32 FMV cartridge state.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Cd32Fmv {
+    #[serde(with = "crate::bytes_serde")]
     rom: Vec<u8>,
+    #[serde(with = "crate::bytes_serde")]
     ram: Vec<u8>,
     io_reg: u16,
 

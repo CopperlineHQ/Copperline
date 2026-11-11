@@ -118,6 +118,7 @@ pub struct A2065 {
     /// Synthesized station MAC (locally administered).
     mac: [u8; 6],
     /// 32 KiB on-board RAM (LANCE address space and CPU window share it).
+    #[serde(with = "crate::bytes_serde")]
     ram: Vec<u8>,
     /// Which host backend to bring up (recorded so a save state is
     /// self-contained); the live backend is a non-serialized host resource.

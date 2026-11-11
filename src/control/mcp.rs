@@ -24,6 +24,7 @@
 use super::bridge::{self, Bridge, LaunchSpec, Launched, Reply};
 use super::catalogue::{self, ToolDef};
 use super::proto::{self, INVALID_PARAMS, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR};
+use super::toaster_link;
 use serde_json::{json, Map, Value};
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
@@ -71,13 +72,29 @@ strings (\"0xDFF096\", \"$C00000\"). A resume with no stop condition blocks unti
 the machine, so give continue, run_until and step_frame a wait_ms: the bridge pauses the machine \
 for you when it expires. Subscribe to notifications with events_subscribe and read them with \
 events_next or events_drain. session_close disconnects and stops an emulator this server \
-launched.";
+launched. Video Toaster (a machine with [video_slot] card = \"toaster\"): toaster_status reads \
+the card (what is on Program and Preview, the fader, the inputs); toaster_capture returns the \
+Program/Preview pictures as images; toaster_record records Program to the Output folder; \
+toaster_input points an input at a host file; toaster_switcher runs a switcher command \
+(M001-M004/MDV1/MDV2/MBKG pick Program, P001.../PBKG pick Preview, TAKE, AUTO, TBAR n 0-511, \
+SLOW/MEDM/FAST, STAT MAIN...); toaster_project runs a project-editor function (CROUTONLOAD \
+path, CROUTONPICK n then toaster_switcher DOEN to make it the transition, PROJECTLOAD/ \
+PROJECTSAVE path, CROUTONSINPROJECT, CROUTONNAME...); toaster_program reaches CG, Paint, \
+LightWave and Modeler through their own ports; \
+toaster_rexx runs any ARexx script inside the Amiga and returns what it says. Those three go \
+through S:Copperline-Link.rexx in the Amiga and the ToasterFiles: volume ([video_slot] volume), \
+and need the bridge on the same computer as the emulator.";
 
 /// The server: at most one attached session, plus the counters the
 /// session tools report.
 pub struct McpServer {
     session: Option<Session>,
     screenshot_seq: u64,
+    /// The next Toaster link job id.
+    link_job: u64,
+    /// A `--control-info` file to attach to when a tool first needs a
+    /// session (`copperline-ctl --mcp --attach-on-use FILE`).
+    attach_on_use: Option<PathBuf>,
 }
 
 struct Session {
@@ -143,6 +160,8 @@ impl McpServer {
         Self {
             session: None,
             screenshot_seq: 0,
+            link_job: toaster_link::first_id(),
+            attach_on_use: None,
         }
     }
 
@@ -157,6 +176,44 @@ impl McpServer {
 
     pub fn attached(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// Attach to the session in `info_file` when a tool first needs one
+    /// and none is attached: the emulator may start after this server.
+    pub fn set_attach_on_use(&mut self, info_file: Option<PathBuf>) {
+        self.attach_on_use = info_file;
+    }
+
+    /// The `--attach-on-use` attach, when it applies.
+    fn auto_attach(&mut self) -> Option<String> {
+        let path = self.attach_on_use.clone()?;
+        // An emulator that was closed and started again: its old
+        // connection is gone, so attach to the new one.
+        let lost = self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.launched.is_none() && s.bridge.closed().is_some());
+        if lost {
+            self.session = None;
+        }
+        if self.session.is_some() {
+            return None;
+        }
+        match Bridge::connect_info_file(&path) {
+            Ok(bridge) => {
+                eprintln!("copperline-mcp: attached to {}", bridge.listen());
+                self.session = Some(Session {
+                    bridge,
+                    launched: None,
+                });
+                None
+            }
+            Err(e) => Some(format!(
+                "no session attached, and attaching to the emulator in {} failed ({e}); is it \
+                 running with --control-gui and --control-info?",
+                path.display()
+            )),
+        }
     }
 
     /// Serve newline-delimited JSON-RPC from `reader` to `writer` until
@@ -284,6 +341,11 @@ impl McpServer {
     /// the model can read it and adapt; protocol errors are for
     /// malformed requests only.
     pub fn call_tool(&mut self, name: &str, args: Value) -> ToolResult {
+        if !name.starts_with("session_") {
+            if let Some(error) = self.auto_attach() {
+                return ToolResult::error(error);
+            }
+        }
         match name {
             "session_launch" => self.session_launch(&args),
             "session_attach" => self.session_attach(&args),
@@ -291,6 +353,10 @@ impl McpServer {
             "session_close" => self.session_close(),
             "events_next" => self.events_next(&args),
             "events_drain" => self.events_drain(),
+            "toaster_rexx" => self.toaster_rexx(&args),
+            "toaster_switcher" => self.toaster_function(&args, "command", Some("Switcher")),
+            "toaster_project" => self.toaster_function(&args, "function", None),
+            "toaster_program" => self.toaster_program(&args),
             _ => match catalogue::find(name) {
                 Some(def) => self.call_ccp(def, args),
                 None => ToolResult::error(format!("unknown tool: {name}")),
@@ -517,6 +583,10 @@ impl McpServer {
             self.screenshot_seq += 1;
             return screenshot(session, &args, self.screenshot_seq);
         }
+        if def.method == "toaster.capture" {
+            self.screenshot_seq += 1;
+            return toaster_capture(session, &args, self.screenshot_seq);
+        }
         let wait = if def.wait_ms {
             match args.as_object_mut().and_then(|o| o.remove("wait_ms")) {
                 None | Some(Value::Null) => None,
@@ -549,6 +619,164 @@ impl McpServer {
                 PAUSE_GRACE.as_millis()
             )),
             Err(e) => ToolResult::error(e),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Toaster link tools
+
+    fn toaster_rexx(&mut self, args: &Value) -> ToolResult {
+        let Some(script) = args.get("script").and_then(Value::as_str) else {
+            return ToolResult::error("toaster_rexx needs a script");
+        };
+        let timeout = link_timeout(args);
+        self.run_link_job(script, timeout)
+    }
+
+    /// `toaster_switcher` / `toaster_project`: one function call.
+    fn toaster_function(&mut self, args: &Value, key: &str, function: Option<&str>) -> ToolResult {
+        let Some(name) = args.get(key).and_then(Value::as_str) else {
+            return ToolResult::error(format!("missing {key}"));
+        };
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return ToolResult::error(format!("{key} must be a plain name, got {name:?}"));
+        }
+        let mut call_args: Vec<Value> = Vec::new();
+        let function = match function {
+            // Switcher(command, args...)
+            Some(function) => {
+                call_args.push(Value::String(name.to_ascii_uppercase()));
+                function.to_string()
+            }
+            None => name.to_ascii_uppercase(),
+        };
+        match args.get("args") {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(extra)) => call_args.extend(extra.iter().cloned()),
+            Some(one) => call_args.push(one.clone()),
+        }
+        let body = toaster_link::call_body(&function, &call_args);
+        let mut result = self.run_link_job(&body, link_timeout(args));
+        if !result.is_error {
+            if let Some(Value::String(text)) = result.content.first().and_then(|b| b.get("text")) {
+                if let Ok(mut v) = serde_json::from_str::<Value>(text) {
+                    v["call"] = json!(format!(
+                        "{function}({})",
+                        call_args
+                            .iter()
+                            .map(toaster_link::arg)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                    result = ToolResult::ok(v);
+                }
+            }
+        }
+        result
+    }
+
+    /// `toaster_program`: a command for one of the Toaster suite's
+    /// programs, through its own ARexx port.
+    fn toaster_program(&mut self, args: &Value) -> ToolResult {
+        let Some(program) = args.get("program").and_then(Value::as_str) else {
+            return ToolResult::error("missing program");
+        };
+        let Some(app) = toaster_link::app(program) else {
+            return ToolResult::error(format!(
+                "unknown program {program:?}: {}",
+                toaster_link::APP_NAMES
+            ));
+        };
+        let Some(command) = args.get("command").and_then(Value::as_str) else {
+            return ToolResult::error("missing command");
+        };
+        let call_args: Vec<Value> = match args.get("args") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(a)) => a.clone(),
+            Some(one) => vec![one.clone()],
+        };
+        let body = match toaster_link::app_body(app, command, &call_args) {
+            Ok(body) => body,
+            Err(e) => return ToolResult::error(e),
+        };
+        self.run_link_job(&body, link_timeout(args))
+    }
+
+    /// Hand `body` to the Amiga through the link folder and wait for its
+    /// output, running a paused machine forward as needed.
+    fn run_link_job(&mut self, body: &str, timeout: Duration) -> ToolResult {
+        let Some(session) = self.session.as_mut() else {
+            return ToolResult::error(NO_SESSION);
+        };
+        let status = match session.bridge.call("toaster.status", json!({})) {
+            Ok(Reply::Ok(status)) => status,
+            Ok(Reply::Err { code, message }) => return ToolResult::ccp_error(code, message),
+            Ok(Reply::TimedOut) => return ToolResult::error("toaster.status timed out"),
+            Err(e) => return ToolResult::error(e),
+        };
+        let Some(dir) = toaster_link::folder_from_status(&status) else {
+            return ToolResult::error(
+                "the Toaster has no host folder ([video_slot] media), so there is no link",
+            );
+        };
+        self.link_job += 1;
+        let id = self.link_job;
+        if let Err(e) = toaster_link::submit(&dir, id, &toaster_link::wrap(body)) {
+            return ToolResult::error(format!(
+                "writing the job into {}: {e} (the bridge must run on the emulator's computer)",
+                dir.display()
+            ));
+        }
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(done) = toaster_link::collect(&dir, id) {
+                return ToolResult::ok(json!({
+                    "rc": done.rc,
+                    "output": done.output,
+                    "host_ms": started.elapsed().as_millis() as u64,
+                }));
+            }
+            if started.elapsed() >= timeout {
+                let note = if toaster_link::withdraw(&dir, id) {
+                    "the Amiga never picked the job up: is S:Copperline-Link.rexx running \
+                     (S:User-Startup starts it) and the card's folder mounted as ToasterFiles: \
+                     ([video_slot] volume = \"ToasterFiles\")?"
+                } else {
+                    "the Amiga took the job but it has not finished: a requester, a long \
+                     transition, or a program that is loaded but not open does not answer \
+                     its port (the link carries on with other jobs)"
+                };
+                return ToolResult::error(format!(
+                    "no answer within {} ms: {note}",
+                    timeout.as_millis()
+                ));
+            }
+            // A paused machine has to run for the guest to do the job.
+            let paused = match session.bridge.call("status", Value::Null) {
+                Ok(Reply::Ok(st)) => st.get("state").and_then(Value::as_str) == Some("paused"),
+                Ok(Reply::Err { code, message }) => return ToolResult::ccp_error(code, message),
+                Ok(Reply::TimedOut) => false,
+                Err(e) => return ToolResult::error(e),
+            };
+            if paused {
+                let now = match session.bridge.call("status", Value::Null) {
+                    Ok(Reply::Ok(st)) => st.get("seconds").and_then(Value::as_f64).unwrap_or(0.0),
+                    _ => 0.0,
+                };
+                match session
+                    .bridge
+                    .call("run_until", json!({"seconds": now + LINK_RUN_STEP}))
+                {
+                    Ok(Reply::Ok(_)) => {}
+                    Ok(Reply::Err { code, message }) => {
+                        return ToolResult::ccp_error(code, message)
+                    }
+                    Ok(Reply::TimedOut) => {}
+                    Err(e) => return ToolResult::error(e),
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
     }
 
@@ -624,6 +852,78 @@ fn resume_with_wait(
             })
         }
         reply => Ok(reply),
+    }
+}
+
+/// Default wait for a Toaster link job, in host time.
+const LINK_DEFAULT_WAIT: Duration = Duration::from_secs(60);
+
+/// How far a paused machine is run between looks at the link folder.
+const LINK_RUN_STEP: f64 = 0.5;
+
+fn link_timeout(args: &Value) -> Duration {
+    args.get("timeout_ms")
+        .and_then(Value::as_u64)
+        .map(Duration::from_millis)
+        .unwrap_or(LINK_DEFAULT_WAIT)
+        .min(MAX_EVENT_WAIT)
+}
+
+/// `toaster.capture` with the PNGs attached as image content blocks.
+fn toaster_capture(session: &mut Session, args: &Value, seq: u64) -> ToolResult {
+    let (param, temporary) = match args.get("path") {
+        None | Some(Value::Null) => {
+            let path = std::env::temp_dir().join(format!(
+                "copperline-mcp-toaster-{}-{seq}.png",
+                std::process::id()
+            ));
+            (json!(path.display().to_string()), true)
+        }
+        Some(Value::String(given)) => {
+            let path = std::path::absolute(given).unwrap_or_else(|_| PathBuf::from(given));
+            (json!(path.display().to_string()), false)
+        }
+        Some(other) => (other.clone(), false),
+    };
+    let mut params = args.as_object().cloned().unwrap_or_default();
+    params.insert("path".to_string(), param);
+    let mut result = match session
+        .bridge
+        .call("toaster.capture", Value::Object(params))
+    {
+        Ok(Reply::Ok(result)) => result,
+        Ok(Reply::Err { code, message }) => return ToolResult::ccp_error(code, message),
+        Ok(Reply::TimedOut) => unreachable!("waited without a timeout"),
+        Err(e) => return ToolResult::error(e),
+    };
+    let mut images = Vec::new();
+    if let Some(captures) = result.get_mut("captures").and_then(Value::as_array_mut) {
+        for capture in captures {
+            let Some(path) = capture
+                .get("path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+            else {
+                continue;
+            };
+            if let Ok(bytes) = std::fs::read(&path) {
+                images.push(json!({
+                    "type": "image",
+                    "data": proto::encode_base64(&bytes),
+                    "mimeType": "image/png",
+                }));
+            }
+            if temporary {
+                let _ = std::fs::remove_file(&path);
+                capture["path"] = Value::Null;
+            }
+        }
+    }
+    let mut content = vec![ToolResult::text_block(&result)];
+    content.extend(images);
+    ToolResult {
+        content,
+        is_error: false,
     }
 }
 
@@ -837,6 +1137,84 @@ pub fn bridge_tools() -> Vec<Value> {
                             session started.",
             "inputSchema": object(json!({}), vec![]),
         }),
+        json!({
+            "name": "toaster_switcher",
+            "description": "Run one Video Toaster switcher command inside the Amiga, through \
+                            the switcher's ARexx port, and return what it answers (OK, or the \
+                            value asked for). `command` is the four-letter code and `args` its \
+                            arguments: M001-M004, MDV1, MDV2, MBKG put a source on Program; \
+                            P001-P004, PDV1, PDV2, PBKG on Preview; TAKE cuts; AUTO runs the \
+                            selected transition; TBAR [0-511] moves the T-bar; SLOW, MEDM, FAST \
+                            set its speed; DOEN loads the effect picked in the project grid; BACK [index] picks the matte colour; FMLD [path] loads \
+                            a framestore into the bank on Preview; FMSV [path] saves one; STAT \
+                            [MAIN|PREV|TBAR|FXNM|...] reads state; LDCG/LDTP load CG and \
+                            ToasterPaint. Needs S:Copperline-Link.rexx running in the Amiga.",
+            "inputSchema": object(json!({
+                "command": {"type": "string", "description": "Switcher command code (TAKE, M001, TBAR...)"},
+                "args": {"type": "array", "description": "Arguments: numbers stay numbers, the rest are passed as strings"},
+                "timeout_ms": {"type": "integer", "minimum": 1, "description": "Host milliseconds to wait (default 60000)"}
+            }), vec!["command"]),
+        }),
+        json!({
+            "name": "toaster_project",
+            "description": "Call one of the Toaster project editor's ARexx functions \
+                            (PROJECT_REXX_PORT) inside the Amiga and return its result: \
+                            CROUTONLOAD [path] adds an effect or framestore to the project grid \
+                            (paths like \"Toaster:Effects/4000FX/Wipes/Square B-R\"); \
+                            CROUTONPICK [n] selects one (counting from 0; toaster_switcher DOEN \
+                            then loads it as the transition TAKE/AUTO/TBAR use); \
+                            CROUTONSINPROJECT, CROUTONNAME [row, col], CROUTONTYPE; \
+                            CROUTONDELETE; PROJECTLOAD and PROJECTSAVE [path]; PROJECTPLAY; \
+                            REQ_ERROR [text]. Needs S:Copperline-Link.rexx running in the Amiga.",
+            "inputSchema": object(json!({
+                "function": {"type": "string", "description": "Function name (CROUTONLOAD, PROJECTSAVE...)"},
+                "args": {"type": "array", "description": "Arguments: numbers stay numbers, the rest are passed as strings"},
+                "timeout_ms": {"type": "integer", "minimum": 1, "description": "Host milliseconds to wait (default 60000)"}
+            }), vec!["function"]),
+        }),
+        json!({
+            "name": "toaster_program",
+            "description": "Send a command to one of the Video Toaster suite's programs through \
+                            its own ARexx port, inside the Amiga, and return its answer. \
+                            `program`: switcher (ToasterARexx.port: TAKE, AUTO, M001...), \
+                            project (the project editor and the Flyer's functions: \
+                            CROUTONLOAD, PROJECTSAVE, FLYERDRIVE, RECORDCLIP...), cg (ToasterCG, \
+                            CG_AREXX: GET_PAGE, PICKPAGE, LOADFONT, ...), paint (ToasterPaint, \
+                            the DigiPaint command host: Load, Save, ...), lightwave (LightWave \
+                            3D, LightWaveARexx.port: LoadScene, Render...), modeler \
+                            (LWModelerARexx.port). `command` open loads the program (CG, \
+                            Paint and LightWave through the switcher; Paint is also entered); \
+                            otherwise it is the program's command or function name, with \
+                            `args`. The program must be on screen for its port to answer: CG \
+                            and LightWave are entered from the Toaster's Programs menu, and a \
+                            call to a program that is only loaded waits until the timeout. The \
+                            commands each program takes are in Toaster:Programs/Documentation/ \
+                            Arexx (CGARexx.Doc, TPaintARexx.Doc, LightWaveARexx.Doc, \
+                            ModelerARexx.Doc, SwitcherARexx.Doc, EditorARexx.Doc); \
+                            toaster_rexx can read them.",
+            "inputSchema": object(json!({
+                "program": {"type": "string", "enum": ["switcher", "project", "cg", "paint", "lightwave", "modeler"], "description": "Which program"},
+                "command": {"type": "string", "description": "Command or function name, or open"},
+                "args": {"type": "array", "description": "Arguments: numbers stay numbers, the rest are passed as strings"},
+                "timeout_ms": {"type": "integer", "minimum": 1, "description": "Host milliseconds to wait (default 60000)"}
+            }), vec!["program", "command"]),
+        }),
+        json!({
+            "name": "toaster_rexx",
+            "description": "Run an ARexx script inside the emulated Amiga and return its return \
+                            code and everything it printed with `say`. The Toaster's function \
+                            hosts (ToasterARexx.port: Switcher(...); PROJECT_REXX_PORT: \
+                            CROUTONLOAD(...) and friends) and rexxsupport.library are already \
+                            added, OPTIONS RESULTS is on, and a syntax error is reported rather \
+                            than hanging. `address command '...'` runs AmigaDOS commands. A \
+                            paused machine is run until the script finishes. Needs \
+                            S:Copperline-Link.rexx running in the Amiga and the bridge on the \
+                            emulator's computer.",
+            "inputSchema": object(json!({
+                "script": {"type": "string", "description": "ARexx statements, e.g. \"say Switcher('STAT', 'MAIN')\""},
+                "timeout_ms": {"type": "integer", "minimum": 1, "description": "Host milliseconds to wait (default 60000)"}
+            }), vec!["script"]),
+        }),
     ]
 }
 
@@ -857,7 +1235,14 @@ pub fn list_tools() -> Vec<Value> {
 /// Serve stdin/stdout until EOF, then close the session (stopping an
 /// emulator this server launched).
 pub fn run_stdio(attach: Option<Bridge>) -> io::Result<()> {
+    run_stdio_with(attach, None)
+}
+
+/// [`run_stdio`], attaching to the session in `attach_on_use` when a tool
+/// first needs one.
+pub fn run_stdio_with(attach: Option<Bridge>, attach_on_use: Option<PathBuf>) -> io::Result<()> {
     let mut server = McpServer::new();
+    server.set_attach_on_use(attach_on_use);
     if let Some(bridge) = attach {
         server.attach(bridge);
     }

@@ -212,28 +212,35 @@ pub fn normalize_a1000_boot_rom(rom: Vec<u8>) -> Result<Vec<u8>> {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Memory {
+    #[serde(with = "crate::bytes_serde")]
     pub chip_ram: Vec<u8>,
+    #[serde(with = "crate::bytes_serde")]
     pub slow_ram: Vec<u8>,
     /// Ramsey-controlled motherboard fast RAM (A3000/A4000): 32-bit local
     /// RAM off the chip bus, ending at [`MB_RAM_TOP`] and growing downward.
     /// Empty on machines without a Ramsey; fitted via [`Memory::fit_mb_ram`].
+    #[serde(with = "crate::bytes_serde")]
     pub mb_ram: Vec<u8>,
     /// CPU-slot (accelerator) fast RAM: 32-bit local RAM in the big-box
     /// coprocessor-slot space, starting at [`ACCEL_RAM_BASE`] and growing
     /// upward. Empty when no accelerator RAM is fitted; fitted via
     /// [`Memory::fit_accel_ram`].
+    #[serde(with = "crate::bytes_serde")]
     pub accel_ram: Vec<u8>,
+    #[serde(with = "crate::bytes_serde")]
     pub rom: Vec<u8>,
     pub overlay: bool,
     /// Zorro expansion boards (autoconfig chain plus their RAM windows).
     pub zorro: ZorroChain,
     /// Extended ROM image (CD32 at $E00000, CDTV at $F00000); empty when
     /// no extended ROM is fitted.
+    #[serde(with = "crate::bytes_serde")]
     pub extended_rom: Vec<u8>,
     pub extended_rom_base: u64,
     /// Amiga 1000 WCS / WOM at $FC0000 (256 KiB writable control store the
     /// boot ROM loads Kickstart into). Empty on every other machine, which is
     /// how the address decode tells an A1000 apart.
+    #[serde(with = "crate::bytes_serde")]
     pub wcs: Vec<u8>,
     /// A1000 WCS write-protect latch. A 68000 RESET clears it (WCS writable,
     /// boot ROM mapped at $F80000); a CPU write anywhere in $F80000-$FBFFFF

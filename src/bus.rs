@@ -782,12 +782,19 @@ pub struct Bus {
     /// like the parallel peripheral, so it survives save-state loads.
     #[serde(skip)]
     video_slot: Option<Box<dyn crate::videoslot::VideoSlotDevice>>,
+    /// Scratch for the video-slot card's sound on its way to Paula's mixer.
+    #[serde(skip)]
+    video_slot_audio: Vec<(f32, f32)>,
     #[serde(skip)]
     video_slot_live: crate::videoslot::LiveFieldCache,
     #[serde(skip)]
     video_slot_fb: Vec<u32>,
     #[serde(skip)]
     video_slot_scratch: Vec<u32>,
+    /// Render inputs for a card that paints its own fields, refilled from
+    /// the frame each time round.
+    #[serde(skip)]
+    video_slot_inputs: Vec<Box<crate::video::bitplane::RenderInput>>,
     /// `[chipset] genlock`: a stand-alone genlock is fitted.
     #[serde(default)]
     genlock_configured: bool,
@@ -990,7 +997,9 @@ pub struct Bus {
     last_frame_beam_top_palette_end: Palette,
     last_frame_beam_bottom_palette: Palette,
     last_frame_beam_bottom_palette_valid: bool,
+    #[serde(with = "crate::bytes_serde")]
     current_frame_chip_ram: Vec<u8>,
+    #[serde(with = "crate::bytes_serde::arc")]
     last_frame_chip_ram: std::sync::Arc<Vec<u8>>,
     current_frame_chip_ram_writes: Vec<BeamChipRamWrite>,
     last_frame_chip_ram_writes: Vec<BeamChipRamWrite>,
@@ -3716,9 +3725,11 @@ impl Bus {
             floppy,
             parallel_port: crate::parallel::null_parallel_port(),
             video_slot: None,
+            video_slot_audio: Vec::new(),
             video_slot_live: Default::default(),
             video_slot_fb: Vec::new(),
             video_slot_scratch: Vec::new(),
+            video_slot_inputs: Vec::new(),
             genlock_configured: false,
             rtc: Rtc::default(),
             rtc_present: true,
@@ -6659,6 +6670,24 @@ impl Bus {
         self.video_slot.as_deref_mut()
     }
 
+    /// Have the fitted card finish the fields it was handed, so its
+    /// outputs are those of this emulated instant
+    /// ([`crate::videoslot::VideoSlotDevice::settle_outputs`]).
+    pub fn settle_video_slot_outputs(&mut self) {
+        if let Some(card) = self.video_slot.as_mut() {
+            card.settle_outputs();
+        }
+    }
+
+    /// The fitted video-slot card's own video outputs (none without a
+    /// card, or for a card that has none).
+    pub fn video_slot_outputs(&self) -> Vec<std::sync::Arc<crate::videoslot::CardOutput>> {
+        self.video_slot
+            .as_ref()
+            .map(|card| card.video_outputs())
+            .unwrap_or_default()
+    }
+
     /// Live in-progress renders the video-slot tap has performed.
     pub fn video_slot_live_renders(&self) -> u64 {
         self.video_slot_live.renders
@@ -6695,10 +6724,30 @@ impl Bus {
         let Some(mut device) = self.video_slot.take() else {
             return;
         };
-        if device.wants_completed_fields() && self.last_frame_render_base.is_some() {
+        if device.takes_render_input() && self.last_frame_render_base.is_some() {
+            // The card paints the field itself (on its own thread): hand
+            // it the frame's render input, in a bundle it used before
+            // where there is one, so the vectors are not reallocated.
+            device.take_spent_render_inputs(&mut self.video_slot_inputs);
+            self.video_slot_inputs.truncate(4);
+            let mut input = match self.video_slot_inputs.pop() {
+                Some(mut input) => {
+                    input.refill_from_bus(self);
+                    input
+                }
+                None => Box::new(crate::video::bitplane::RenderInput::from_bus(self)),
+            };
+            // The debugger's layer toggles are for the host's display.
+            input.show_all_layers();
+            // The counter already moved on to the new field.
+            let mut at = self.video_slot_beam();
+            at.frame = at.frame.saturating_sub(1);
+            device.field_render_input(input, at);
+        } else if device.wants_completed_fields() && self.last_frame_render_base.is_some() {
             let mut fb = std::mem::take(&mut self.video_slot_fb);
             let mut scratch = std::mem::take(&mut self.video_slot_scratch);
             let mut input = crate::video::bitplane::RenderInput::from_bus(self);
+            input.show_all_layers();
             let wide = crate::video::bitplane::render_wide(
                 &mut input,
                 crate::videoslot::SLOT_FIRST_CCK,
@@ -6732,6 +6781,12 @@ impl Bus {
             self.video_slot_fb = fb;
             self.video_slot_scratch = scratch;
         }
+        // The card's sound for the frame it may just have finished.
+        let mut sound = std::mem::take(&mut self.video_slot_audio);
+        device.take_audio(&mut sound);
+        self.paula.video_slot_audio_mut().push_chunk(&sound);
+        sound.clear();
+        self.video_slot_audio = sound;
         self.video_slot = Some(device);
     }
 
@@ -6802,6 +6857,12 @@ impl Bus {
 
     pub fn set_output_volume_percent(&mut self, percent: u8) {
         self.paula.set_output_volume_percent(percent);
+    }
+
+    /// The level of a video-slot card's sound in the mix: its picture
+    /// monitor's volume (host preference, not machine state).
+    pub fn set_video_slot_volume(&mut self, gain: f32) {
+        self.paula.set_video_slot_volume(gain);
     }
 
     pub fn adjust_output_volume_percent(&mut self, delta: i16) {

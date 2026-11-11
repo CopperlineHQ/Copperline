@@ -25,6 +25,7 @@ pub mod blitviz;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod blockdev;
 pub mod bus;
+pub mod bytes_serde;
 pub mod cache;
 pub mod cartridge;
 #[cfg(feature = "cd32-fmv")]
@@ -152,6 +153,7 @@ pub mod typing;
 pub mod uaelib;
 // The About panel's Check for updates: asks GitHub for the latest release,
 // only when the button is pressed. Gated with the HTTP client it needs.
+pub mod toaster;
 #[cfg(feature = "update-check")]
 pub mod update;
 pub mod uss;

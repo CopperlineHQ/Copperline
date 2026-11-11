@@ -147,10 +147,15 @@ const REG_ARG: u32 = 0x30;
 /// so it cannot race.
 const DIAG_DOORBELL: u32 = 0x7E00;
 
-/// 'CLFS' -- our own id_DiskType, honest about not being an FFS at all.
-/// (The UAE filesys reports 'DOS\1' here instead; if some tool turns out to
-/// insist on a DOS\x dostype, reconsider.)
-const ID_CLFS_DISK: u32 = 0x434C_4653;
+/// The id_DiskType (and volume node dol_DiskType) a host directory reports:
+/// 'DOS\1', a plain FFS hard disk, as the UAE filesys does. Software asks
+/// for a DOS\x type before it will use a volume: the Video Toaster's file
+/// browser (the project editor's Grazer, which is also its load and save
+/// requester) drops every volume whose Info() type is not DOS\0-DOS\5,
+/// FLY\0 or MSD\0, and its framestore free-space count gives up on any
+/// other; C:Info calls anything else an unreadable disk. (An earlier
+/// 'CLFS' type hid every host volume from the Toaster.)
+const ID_HOSTFS_DISK: u32 = 0x444F_5301;
 
 /// One `[[filesys]]` entry: a host directory exported as an AmigaDOS
 /// device `HOSTFS<n>:` with the given volume name.
@@ -851,8 +856,8 @@ impl FilesysBoard {
             // before it starts the handler, and a degenerate volume (1
             // block, unknown DosType) is rejected up front -- the boot
             // then dies composing the "is not validated" requester. The
-            // handler never reads this geometry; the volume node keeps
-            // ID_CLFS_DISK as its honest runtime identity.
+            // handler never reads this geometry; the volume node and Info()
+            // report ID_HOSTFS_DISK.
             let envec = DosEnvec {
                 table_size: long(16),  // entries after this one, through dos_type
                 size_block: long(128), // longwords = 512-byte blocks
@@ -921,7 +926,7 @@ impl FilesysUnit {
             lock: long(0),
             volume_date: [long(days), long(mins), long(ticks)],
             lock_list: long(0),
-            disk_type: long(ID_CLFS_DISK),
+            disk_type: long(ID_HOSTFS_DISK),
             unused: long(0),
             name: long((vol + fixed) >> 2), // BSTR right after the struct
         };
@@ -1002,7 +1007,7 @@ impl FilesysUnit {
                     num_blocks: long(numblocks),
                     num_blocks_used: long(inuse),
                     bytes_per_block: long(blocksize),
-                    disk_type: long(ID_CLFS_DISK),
+                    disk_type: long(ID_HOSTFS_DISK),
                     volume_node: long(self.volume.unwrap_or(0) >> 2),
                     in_use: long(if locks_open { DOSTRUE } else { 0 }),
                 };
@@ -3466,6 +3471,36 @@ mod tests {
             Some(ERROR_DISK_WRITE_PROTECTED)
         );
         assert_eq!(hle.units[1].write_refusal(), None);
+    }
+
+    /// Info() and the volume node give a validated DOS\x disk: the Video
+    /// Toaster's file browser (its load and save requester) lists only
+    /// volumes whose Info() type is one it knows, and C:Info calls anything
+    /// else an unreadable disk.
+    #[test]
+    fn a_host_volume_is_a_validated_dos_disk() {
+        let mut fs = FsTester::mounted("dostype");
+        let Some(GuestOp::AddVolume(vol)) = fs.guest_op else {
+            panic!("the startup packet hands over a volume node");
+        };
+        let long = |bus: &RamBus, at: u32| {
+            u32::from_be_bytes(bus.0[at as usize..at as usize + 4].try_into().unwrap())
+        };
+        // dol_DiskType.
+        assert_eq!(long(&fs.bus, vol + 32) & 0xFFFF_FF00, 0x444F_5300);
+        const ID: u32 = 0x8000;
+        for (ty, args) in [
+            (ACTION_DISK_INFO, [ID >> 2, 0, 0]),
+            (ACTION_INFO, [0, ID >> 2, 0]),
+        ] {
+            fs.bus.0[ID as usize..ID as usize + 36].fill(0);
+            assert_eq!(fs.send(ty, args).0, DOSTRUE);
+            // id_DiskState, id_DiskType.
+            assert_eq!(long(&fs.bus, ID + 8), ID_VALIDATED);
+            assert_eq!(long(&fs.bus, ID + 24), ID_HOSTFS_DISK);
+            // The Toaster's VolType(): DOS\0-DOS\5 are disks it shows.
+            assert!((0x444F_5300..=0x444F_5305).contains(&long(&fs.bus, ID + 24)));
+        }
     }
 
     /// SetProtection with only `w` denied lands in the host read-only flag,

@@ -4317,6 +4317,16 @@ impl RenderInput {
         self.canvas_origin_cck = cck;
     }
 
+    /// Let go of the frame's shared buffers (the chip-RAM snapshot and
+    /// the captured bitplane rows) once the bundle has been rendered, so
+    /// the capture side can take the allocations back at the next frame
+    /// wrap instead of starting afresh. The bundle is not renderable until
+    /// refilled.
+    pub fn release_shared_buffers(&mut self) {
+        self.chip_ram = std::sync::Arc::new(Vec::new());
+        self.captured_bitplane_rows = std::sync::Arc::new(Vec::new());
+    }
+
     /// Re-snapshot the just-finished frame into this bundle, reusing the
     /// vector allocations left over from a previous frame (the chip-RAM
     /// copy alone is up to 2 MiB per frame). Field-for-field this must
@@ -4385,6 +4395,20 @@ impl RenderInput {
         // Taken at the wrap, the bus's in-progress events are the whole next
         // frame; a render of this field when it was current saw none of them.
         self.current_render_events.clear();
+    }
+
+    /// Show every bitplane and sprite, whatever the debugger's layer
+    /// toggles say: those hide layers on the host's display, and a
+    /// video-slot card sees Denise's output, not the display.
+    pub(crate) fn show_all_layers(&mut self) {
+        self.debug_plane_mask = 0xFF;
+        self.debug_sprite_mask = 0xFF;
+    }
+
+    /// The layer-isolation masks, `(planes, sprites)`.
+    #[cfg(test)]
+    pub(crate) fn debug_masks(&self) -> (u8, u8) {
+        (self.debug_plane_mask, self.debug_sprite_mask)
     }
 
     /// Override the layer-isolation masks on an existing snapshot (tests

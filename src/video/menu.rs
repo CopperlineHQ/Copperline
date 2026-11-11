@@ -110,6 +110,10 @@ pub enum MenuAction {
     // Recording.
     ToggleRecord,
     ToggleRecordInput,
+    /// Start or stop recording the video-slot card's Program output.
+    ToggleCardRecord,
+    /// Bring the video-slot card's monitor windows back into view.
+    ShowCardMonitors,
     SaveClip,
     SaveNativeScreenshot,
 
@@ -484,6 +488,10 @@ pub struct MenuState<'a> {
     pub rewind: bool,
     pub recording: bool,
     pub input_recording: bool,
+    /// The video-slot card has outputs of its own (the Toaster's monitors),
+    /// and whether its Program output is being recorded.
+    pub card_outputs: bool,
+    pub card_recording: bool,
     pub autofire_hz: u8,
     pub run_ahead_frames: u8,
     pub joystick_input_mode: JoystickInputMode,
@@ -1240,7 +1248,22 @@ fn warp_rows(s: &MenuState) -> Vec<MenuRow> {
 }
 
 fn recording_rows(s: &MenuState) -> Vec<MenuRow> {
-    vec![
+    let mut rows = Vec::new();
+    if s.card_outputs {
+        rows.push(MenuRow::action(
+            if s.card_recording {
+                "Stop Toaster Program Recording"
+            } else {
+                "Record Toaster Program"
+            },
+            MenuAction::ToggleCardRecord,
+        ));
+        rows.push(MenuRow::action(
+            "Show Toaster Monitors",
+            MenuAction::ShowCardMonitors,
+        ));
+    }
+    rows.extend(vec![
         MenuRow::action(
             if s.recording {
                 "Stop Video Recording"
@@ -1262,7 +1285,8 @@ fn recording_rows(s: &MenuState) -> Vec<MenuRow> {
             "Save Native Screenshot (1:1)",
             MenuAction::SaveNativeScreenshot,
         ),
-    ]
+    ]);
+    rows
 }
 
 /// The numbered slots, for either direction. A slot names what is in it,
@@ -1468,6 +1492,8 @@ mod tests {
             rewind: false,
             recording: false,
             input_recording: false,
+            card_outputs: false,
+            card_recording: false,
             autofire_hz: 0,
             clipboard_share: false,
             clipboard_available: false,

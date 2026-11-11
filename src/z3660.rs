@@ -119,6 +119,7 @@ pub struct Z3660 {
     /// Latched register words, indexed by (offset - REG_FIRST) / 4.
     regs: Vec<u32>,
     /// Board RAM behind the register file: P96 VRAM and the GFXData mailbox.
+    #[serde(with = "crate::bytes_serde")]
     vram: Vec<u8>,
     /// Position inside the fake 60 Hz output frame, in colour clocks;
     /// VBLANK_STATUS reads 1 while it is inside the vblank window.

@@ -1707,6 +1707,65 @@ fn build() -> Vec<ToolDef> {
             ),
             json!({"x": 0, "y": 0, "w": 64, "h": 32}),
         ),
+        entry(
+            "toaster.status",
+            "Report the Video Toaster card in the video slot: the sources on the Program \
+             bus (`program.a`, `program.b`), the fader between them (`program.fader`, 0 \
+             all A to 255 all B, moved by the T-bar and AUTO) and how it mixes \
+             (`program.mode`), the `preview` source, the framestore's input, the matte, \
+             each video input (its host folder, files, pinned file and what is playing), \
+             the card's host folder (`media_root`) and any recording. Sources read Input \
+             1-4, DV1/DV2 (the framestores), Matte, Amiga. Fails without a card.",
+            no_params(),
+            json!({}),
+        ),
+        entry(
+            "toaster.capture",
+            "Save the Toaster's Program and/or Preview output as PNG, in square pixels \
+             (640 x 480). `output` is program, preview or both (default both); with both, \
+             `-program` and `-preview` are added to the file name. Without `path` the \
+             files go to the screenshots folder. Fails before the switcher has started.",
+            object(
+                vec![
+                    ("output", enumeration("Which output", &["program", "preview", "both"])),
+                    ("path", string("Host path for the PNG")),
+                ],
+                &[],
+            ),
+            json!({"output": "program"}),
+        ),
+        entry(
+            "toaster.record",
+            "Start or stop recording a Toaster output to an AVI, or report whether one \
+             is recording (`action` start|stop|status, default status). `output` is \
+             program (default) or preview. Without `path` a start records to a new, \
+             time-stamped file in the card's Output folder. Recording keeps every frame \
+             the card produces, whatever the host's speed.",
+            object(
+                vec![
+                    ("action", enumeration("What to do", &["start", "stop", "status"])),
+                    ("output", enumeration("Which output", &["program", "preview"])),
+                    ("path", string("Host path of the .avi to record (start only)")),
+                ],
+                &[],
+            ),
+            json!({"action": "start"}),
+        ),
+        entry(
+            "toaster.input",
+            "Hold Toaster video input `input` (1-4) to one host file (`file`: a still or \
+             a video ffmpeg can play), instead of the files in its Input folder; `file` \
+             null or absent goes back to the folder. Takes effect within about 1.5 s. \
+             Returns every input's state.",
+            object(
+                vec![
+                    ("input", int("Video input, 1-4", Some(1), Some(4))),
+                    ("file", string("Host path of a picture or video; omit for the folder")),
+                ],
+                &["input"],
+            ),
+            json!({"input": 1, "file": "/tmp/bars.png"}),
+        ),
     ];
     entries
         .into_iter()

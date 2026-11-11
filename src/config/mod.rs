@@ -506,6 +506,14 @@ pub struct Config {
     /// electrically disconnected, so CIA-A strobes receive no FLAG acknowledge
     /// and port-B reads see the CIA's own pin state.
     pub parallel: ParallelConfig,
+    /// `[video_slot] card`: the card in the video slot.
+    pub video_slot: VideoSlotCard,
+    /// `[video_slot] media`: the card's host folder, when set.
+    pub video_slot_media: Option<PathBuf>,
+    /// `[video_slot] monitors`: open windows for the card's outputs.
+    pub video_slot_monitors: bool,
+    /// `[video_slot] preview_overlay`: the Toaster's interface over Preview.
+    pub video_slot_preview_overlay: bool,
 }
 
 /// How much of the overscan field the window presents. The
@@ -1240,6 +1248,15 @@ impl ParallelDevice {
 /// [`ParallelDevice::Printer`], and `sampler_input`/`sampler_gain_db` only for
 /// [`ParallelDevice::Sampler`]; the inactive fields are carried through so the
 /// configuration screen round-trips them unchanged.
+/// The card in the A2000/A3000/A4000 video slot (`[video_slot] card`).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum VideoSlotCard {
+    #[default]
+    None,
+    /// NewTek Video Toaster 4000 (`crate::toaster`).
+    Toaster,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParallelConfig {
     pub device: ParallelDevice,
@@ -1994,6 +2011,10 @@ pub struct AudioConfig {
     /// `None` when unset (a bare `--audio-stems` then requires an explicit
     /// `--audio-stems-mode`, per the CLI's own validation).
     pub stem_granularity: Option<Vec<crate::audio::mux::StemGranularity>>,
+    /// Milliseconds of sound the live output keeps ahead of the host's
+    /// device, 50-1000: how long the machine may fall behind real time
+    /// before the sound stops. The default is `audio::DEFAULT_LIVE_LEAD_MS`.
+    pub live_lead_ms: u32,
 }
 
 impl Default for AudioConfig {
@@ -2008,6 +2029,7 @@ impl Default for AudioConfig {
             stereo_separation: 100,
             filter: AudioFilterMode::Auto,
             stem_granularity: None,
+            live_lead_ms: crate::audio::DEFAULT_LIVE_LEAD_MS,
         }
     }
 }
@@ -2971,6 +2993,10 @@ impl Default for Config {
             parallel_joysticks: [false; 2],
             serial: SerialConfig::default(),
             parallel: ParallelConfig::default(),
+            video_slot: VideoSlotCard::None,
+            video_slot_media: None,
+            video_slot_monitors: true,
+            video_slot_preview_overlay: false,
             paths: crate::pathconf::Paths::default(),
         }
     }
