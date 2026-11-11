@@ -424,7 +424,29 @@ impl HostDrive {
         if self.child(dir, name).is_some_and(|c| c != index) {
             return Err(std::io::ErrorKind::AlreadyExists.into());
         }
-        std::fs::rename(self.host_path(index), self.host_path(dir).join(name))?;
+        let old_rel = self.objects[index].rel.clone();
+        if self.objects[dir].rel.starts_with(&old_rel) {
+            // A directory into itself.
+            return Err(std::io::ErrorKind::InvalidInput.into());
+        }
+        let new_rel = self.objects[dir].rel.join(name);
+        std::fs::rename(self.folder.join(&old_rel), self.folder.join(&new_rel))?;
+        // The object keeps its identity (its header and data blocks, which
+        // open grips in the SRAM name), and so does everything under a
+        // renamed directory: only their paths change, so the scan finds
+        // them again instead of taking them for new.
+        for obj in &mut self.objects[1..] {
+            if let Ok(rest) = obj.rel.strip_prefix(&old_rel) {
+                // (Joining an empty rest would leave a trailing separator.)
+                obj.rel = if rest.as_os_str().is_empty() {
+                    new_rel.clone()
+                } else {
+                    new_rel.join(rest)
+                };
+            }
+        }
+        self.objects[index].name = name.to_string();
+        self.objects[index].parent = dir;
         self.scan();
         Ok(())
     }
@@ -565,6 +587,45 @@ mod tests {
         std::fs::write(fa0.join(".hidden"), b"x").unwrap();
         std::fs::write(fa0.join("a name that is far too long for the Flyer"), b"x").unwrap();
         dir
+    }
+
+    /// A renamed file or directory is the same object: header blocks and
+    /// data blocks an open grip holds still lead to it and to what is
+    /// under it.
+    #[test]
+    fn a_rename_keeps_object_identities_and_blocks() {
+        let dir = folder();
+        let mut drive = HostDrive::open(dir.path(), 0).unwrap();
+        let clip = drive.lookup(0, "Clip One").unwrap();
+        let (header, start) = (drive.header_block(clip), drive.object(clip).unwrap().start);
+        drive.rename(clip, 0, "Clip Two").unwrap();
+        assert_eq!(drive.object_at_header(header), Some(clip));
+        assert_eq!(drive.lookup(0, "Clip Two"), Some(clip));
+        assert_eq!(drive.lookup(0, "Clip One"), None);
+        assert_eq!(drive.object(clip).unwrap().start, start);
+        let mut block = vec![0u8; 512];
+        drive.read_blocks(start, 1, &mut block).unwrap();
+        assert!(block.iter().all(|&b| b == 7), "the old block mapping reads");
+
+        // A directory: its descendants keep theirs too.
+        let projects = drive.lookup(0, "Projects").unwrap();
+        let notes = drive.lookup(0, "Projects/notes").unwrap();
+        let old = drive.lookup(0, "Projects/Old").unwrap();
+        let headers = [projects, notes, old].map(|i| drive.header_block(i));
+        drive.rename(projects, 0, "Work").unwrap();
+        assert_eq!(drive.lookup(0, "Work/notes"), Some(notes));
+        assert_eq!(drive.lookup(0, "Work/Old"), Some(old));
+        for (i, h) in [projects, notes, old].into_iter().zip(headers) {
+            assert_eq!(drive.object_at_header(h), Some(i));
+        }
+        let mut data = [0u8; 5];
+        assert_eq!(drive.read_file(notes, 0, &mut data).unwrap(), 5);
+        assert_eq!(&data, b"hello");
+        // Into another directory, and not into itself.
+        drive.rename(clip, old, "Clip").unwrap();
+        assert_eq!(drive.lookup(0, "Work/Old/Clip"), Some(clip));
+        assert_eq!(drive.object_at_header(header), Some(clip));
+        assert!(drive.rename(projects, old, "Loop").is_err());
     }
 
     #[test]
