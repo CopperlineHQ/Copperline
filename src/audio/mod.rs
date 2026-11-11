@@ -5,8 +5,9 @@
 //! plus several concrete implementations chosen at startup time based
 //! on CLI flags.
 
-#[cfg(any(feature = "mhi", feature = "cd-mp3"))]
+#[cfg(feature = "frontend")]
 pub mod fx;
+#[cfg(any(feature = "mhi", feature = "cd-mp3"))]
 pub(crate) mod mpeg;
 pub mod mux;
 pub(crate) mod resample;
@@ -64,13 +65,13 @@ static LIVE_LEAD_MS: std::sync::atomic::AtomicU32 =
 pub fn set_live_lead_ms(ms: u32) {
     LIVE_LEAD_MS.store(
         ms.clamp(MIN_LIVE_LEAD_MS, MAX_LIVE_LEAD_MS),
-        Ordering::Relaxed,
+        std::sync::atomic::Ordering::Relaxed,
     );
 }
 
 /// The lead sinks are built with, in milliseconds.
 pub fn live_lead_ms() -> u32 {
-    LIVE_LEAD_MS.load(Ordering::Relaxed)
+    LIVE_LEAD_MS.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// The queue targets, in mixer frames, for a lead: `(target, stale
@@ -624,6 +625,7 @@ impl CpalSink {
     }
 }
 
+#[cfg(feature = "frontend")]
 impl Drop for CpalSink {
     fn drop(&mut self) {
         fx::set_live(false);
