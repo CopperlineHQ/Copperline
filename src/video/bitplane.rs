@@ -4397,6 +4397,20 @@ impl RenderInput {
         self.current_render_events.clear();
     }
 
+    /// Show every bitplane and sprite, whatever the debugger's layer
+    /// toggles say: those hide layers on the host's display, and a
+    /// video-slot card sees Denise's output, not the display.
+    pub(crate) fn show_all_layers(&mut self) {
+        self.debug_plane_mask = 0xFF;
+        self.debug_sprite_mask = 0xFF;
+    }
+
+    /// The layer-isolation masks, `(planes, sprites)`.
+    #[cfg(test)]
+    pub(crate) fn debug_masks(&self) -> (u8, u8) {
+        (self.debug_plane_mask, self.debug_sprite_mask)
+    }
+
     /// Override the layer-isolation masks on an existing snapshot (tests
     /// exercise masking without touching the process-global knobs).
     #[cfg(test)]

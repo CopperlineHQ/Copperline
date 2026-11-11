@@ -6721,13 +6721,15 @@ impl Bus {
             // where there is one, so the vectors are not reallocated.
             device.take_spent_render_inputs(&mut self.video_slot_inputs);
             self.video_slot_inputs.truncate(4);
-            let input = match self.video_slot_inputs.pop() {
+            let mut input = match self.video_slot_inputs.pop() {
                 Some(mut input) => {
                     input.refill_from_bus(self);
                     input
                 }
                 None => Box::new(crate::video::bitplane::RenderInput::from_bus(self)),
             };
+            // The debugger's layer toggles are for the host's display.
+            input.show_all_layers();
             // The counter already moved on to the new field.
             let mut at = self.video_slot_beam();
             at.frame = at.frame.saturating_sub(1);
@@ -6736,6 +6738,7 @@ impl Bus {
             let mut fb = std::mem::take(&mut self.video_slot_fb);
             let mut scratch = std::mem::take(&mut self.video_slot_scratch);
             let mut input = crate::video::bitplane::RenderInput::from_bus(self);
+            input.show_all_layers();
             let wide = crate::video::bitplane::render_wide(
                 &mut input,
                 crate::videoslot::SLOT_FIRST_CCK,

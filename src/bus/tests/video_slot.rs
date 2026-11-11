@@ -376,7 +376,61 @@ fn red_columns(row: &[u32]) -> Vec<usize> {
 /// starts further left and shows it.
 #[test]
 fn slot_canvas_shows_a_sprite_left_of_the_display_capture() {
+    sprite_left_of_the_display_capture(false);
+}
+
+/// The debugger's layer toggles hide layers on the host's display only:
+/// the card still sees the sprite.
+#[test]
+fn debugger_layer_toggles_do_not_reach_the_card() {
+    sprite_left_of_the_display_capture(true);
+
+    // A card that takes the render input gets it with every layer on,
+    // a reused bundle included.
+    struct Takes(
+        Arc<Mutex<Vec<(u8, u8)>>>,
+        Vec<Box<crate::video::bitplane::RenderInput>>,
+    );
+    impl VideoSlotDevice for Takes {
+        fn name(&self) -> &'static str {
+            "takes"
+        }
+        fn takes_render_input(&self) -> bool {
+            true
+        }
+        fn field_render_input(
+            &mut self,
+            input: Box<crate::video::bitplane::RenderInput>,
+            _at: BeamPos,
+        ) {
+            self.0.lock().unwrap().push(input.debug_masks());
+            self.1.push(input);
+        }
+        fn take_spent_render_inputs(
+            &mut self,
+            into: &mut Vec<Box<crate::video::bitplane::RenderInput>>,
+        ) {
+            into.append(&mut self.1);
+        }
+    }
     let mut bus = empty_bus();
+    let masks = Arc::new(Mutex::new(Vec::new()));
+    bus.attach_video_slot(Box::new(Takes(Arc::clone(&masks), Vec::new())));
+    bus.ui_toggle_layer_sprite(0);
+    bus.ui_toggle_layer_plane(1);
+    for _ in 0..3 {
+        advance_to_next_frame(&mut bus);
+    }
+    let masks = masks.lock().unwrap();
+    assert!(masks.len() >= 2);
+    assert!(masks.iter().all(|&m| m == (0xFF, 0xFF)), "{masks:?}");
+}
+
+fn sprite_left_of_the_display_capture(sprite_hidden_in_debugger: bool) {
+    let mut bus = empty_bus();
+    if sprite_hidden_in_debugger {
+        bus.ui_toggle_layer_sprite(0);
+    }
     let rows = Arc::new(Mutex::new(Vec::new()));
     bus.attach_video_slot(Box::new(RowGrab {
         rows: Arc::clone(&rows),

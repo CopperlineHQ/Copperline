@@ -776,11 +776,23 @@ samples.
 
 Inputs come from the host folder (`media.rs`): a worker thread per input
 plays the folder's files (stills decoded with the `image` crate, video
-through ffmpeg) into an eight-frame channel, one frame taken per emulated
-frame. Until the switcher's first extended header (`Toaster::active`) the
+through ffmpeg) into an eight-frame channel. Once started, the worker
+sends exactly one message per emulated frame, whatever the input holds (a
+video frame with its sound, a still again, no signal), and
+`InputFeed::advance` waits for it: what an input shows on a given frame is
+a count of frames, never of host time, so decoder speed and scheduling do
+not reach the card's output or a digitised framestore. A still's hold is
+150 frames. Only what is in the folder is read on the host's clock (a
+host event, like changing a disk). The next file's ffmpeg is started
+while the current one plays, so a change of file does not wait on a
+process starting, and a worker that stops answering for five seconds is
+given up on (the picture holds, silent). Until the switcher's first extended header (`Toaster::active`) the
 workers wait and the card publishes black, silent frames
 (`produce_idle_outputs`): the power-on mux settings select inputs nobody
-chose, and nothing need be decoded while the machine boots. The outputs are published per frame into `videoslot::CardOutput`s,
+chose, and nothing need be decoded while the machine boots. The card's
+render inputs always show every layer (`RenderInput::show_all_layers`):
+the debugger's bitplane and sprite toggles hide layers on the host's
+display, not in what the card sees. The outputs are published per frame into `videoslot::CardOutput`s,
 which the window layer shows as monitor windows (`card_monitors.rs`) and
 which record themselves (ZMBV AVI, via `recorder.rs`) when asked.
 
