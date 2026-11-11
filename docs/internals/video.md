@@ -792,7 +792,10 @@ workers wait and the card publishes black, silent frames
 chose, and nothing need be decoded while the machine boots. The card's
 render inputs always show every layer (`RenderInput::show_all_layers`):
 the debugger's bitplane and sprite toggles hide layers on the host's
-display, not in what the card sees. The outputs are published per frame into `videoslot::CardOutput`s,
+display, not in what the card sees. `VideoSlotDevice::settle_outputs`
+waits for the compose thread; the control protocol's `toaster.capture`
+and `toaster.record` call it first, so a capture or a recording boundary
+on a paused machine is that of its emulated instant. The outputs are published per frame into `videoslot::CardOutput`s,
 which the window layer shows as monitor windows (`card_monitors.rs`) and
 which record themselves (ZMBV AVI, via `recorder.rs`) when asked.
 

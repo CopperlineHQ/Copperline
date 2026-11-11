@@ -1121,6 +1121,10 @@ impl VideoSlotDevice for Toaster {
         true
     }
 
+    fn settle_outputs(&mut self) {
+        self.drain();
+    }
+
     fn field_render_input(&mut self, input: Box<RenderInput>, at: BeamPos) {
         self.submit(FieldInput::Render(input), at);
     }
@@ -1742,6 +1746,21 @@ mod tests {
             .mix_sound(&shares, 1471)
             .iter()
             .all(|&(l, r)| l == 0.0 && r == 0.0));
+    }
+
+    /// A capture at an emulated instant waits for the compose thread:
+    /// after `settle_outputs` the outputs hold the fields handed over,
+    /// with no call that would advance or read the card.
+    #[test]
+    fn settling_the_outputs_finishes_the_fields_handed_over() {
+        let mut card = Toaster::new();
+        let blank = Line::new(30);
+        for _ in 0..2 {
+            card.field_complete(&blank.field(), BeamPos::default());
+        }
+        VideoSlotDevice::settle_outputs(&mut card);
+        let outputs = card.video_outputs();
+        assert!(outputs.iter().all(|o| o.snapshot().is_some()));
     }
 
     #[test]

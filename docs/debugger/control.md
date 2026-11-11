@@ -230,7 +230,9 @@ On a machine with the emulated Video Toaster (`[video_slot] card =
 `toaster.status` (the sources on Program and Preview, the fader, the
 inputs, the host folder), `toaster.capture` (the Program and/or Preview
 picture as PNG; over MCP the images come back attached), `toaster.record`
-(start or stop an AVI recording of an output) and `toaster.input` (hold an
+(start or stop a recording of an output; both first let the card finish
+the fields the machine has produced, so on a paused machine they are
+exact to the emulated frame) and `toaster.input` (hold an
 input to one host file instead of its folder).
 
 Three more tools belong to the MCP bridge and run inside the Amiga, through

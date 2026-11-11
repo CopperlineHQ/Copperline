@@ -316,6 +316,13 @@ pub trait VideoSlotDevice: Send {
         Vec::new()
     }
 
+    /// Finish any work still under way on the fields handed over so far,
+    /// so the outputs show the last of them. A card that composes on a
+    /// thread of its own waits for it here; a capture or a recording
+    /// boundary taken at an emulated instant calls this first, so what it
+    /// gets does not depend on that thread's progress.
+    fn settle_outputs(&mut self) {}
+
     /// What the card is doing, for the control protocol's
     /// `toaster.status`: the sources on its outputs, its inputs, its host
     /// folders. Null for a card with nothing to report.

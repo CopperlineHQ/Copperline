@@ -365,14 +365,18 @@ impl CoreOp {
 
 const NO_CARD: &str = "no video-slot card is fitted ([video_slot] card = \"toaster\")";
 
-/// A card output by its lower-case name.
+/// A card output by its lower-case name, showing the last field the
+/// machine finished: the card's compose thread is waited for, so a capture
+/// or a recording boundary on a paused machine is that of its emulated
+/// instant whatever the thread's progress.
 fn card_output(
-    emu: &Emulator,
+    emu: &mut Emulator,
     name: &str,
 ) -> Result<std::sync::Arc<crate::videoslot::CardOutput>, CtlError> {
     if emu.bus().video_slot().is_none() {
         return Err(CtlError::unsupported(NO_CARD));
     }
+    emu.bus_mut().settle_video_slot_outputs();
     emu.bus()
         .video_slot_outputs()
         .into_iter()
@@ -404,7 +408,7 @@ fn square_pixels(width: usize, height: usize, pixels: &[u32], aspect: f32) -> (V
 /// `toaster.capture`: the named outputs as PNGs. With one output `path`
 /// is the file; with both, `-program`/`-preview` go before its extension.
 fn toaster_capture(
-    emu: &Emulator,
+    emu: &mut Emulator,
     outputs: &[String],
     path: Option<&std::path::Path>,
 ) -> Result<Value, CtlError> {
@@ -443,7 +447,7 @@ fn toaster_capture(
 
 /// `toaster.record`.
 fn toaster_record(
-    emu: &Emulator,
+    emu: &mut Emulator,
     name: &str,
     action: &str,
     path: Option<&std::path::Path>,

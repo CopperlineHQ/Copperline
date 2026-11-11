@@ -6670,6 +6670,15 @@ impl Bus {
         self.video_slot.as_deref_mut()
     }
 
+    /// Have the fitted card finish the fields it was handed, so its
+    /// outputs are those of this emulated instant
+    /// ([`crate::videoslot::VideoSlotDevice::settle_outputs`]).
+    pub fn settle_video_slot_outputs(&mut self) {
+        if let Some(card) = self.video_slot.as_mut() {
+            card.settle_outputs();
+        }
+    }
+
     /// The fitted video-slot card's own video outputs (none without a
     /// card, or for a card that has none).
     pub fn video_slot_outputs(&self) -> Vec<std::sync::Arc<crate::videoslot::CardOutput>> {
