@@ -1,0 +1,755 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Pack a title and the browser build into one self-contained HTML file.
+
+The browser twin of tools/publish: it reads the same game manifest
+(crates/copperline-player/game.example.toml) and writes a single .html page
+holding the wasm emulator, its JavaScript, the boot ROM and the disk images.
+The page makes no request beyond itself, so it can be dropped on any static
+host, attached to a mail, or opened from disk. See docs/guide/publishing.md.
+
+Usage:
+  tools/publish-web --manifest /path/to/game.toml [--payload PATH]
+                    [--disk PATH ...] [--out FILE] [--pkg DIR] [--skip-build]
+                    [--profile NAME] [--drives N] [--video PAL|NTSC]
+                    [--joystick keys|cd32|off] [--rom PATH [--ext-rom PATH]]
+                    [--max-size SIZE]
+
+Only floppy (`adf`) payloads can be packed: the browser build has no CD
+drive and no host-directory volume. The payload defaults to the file the
+manifest names, looked for next to the manifest; --disk adds further disks
+of a multi-disk title. Without --skip-build the wasm bundle is built first
+(cargo, wasm-bindgen, and wasm-opt when it is installed).
+
+File format. Every asset is a <script type="text/plain" data-cl-asset=NAME
+data-cl-kind=KIND data-cl-size=RAW_BYTES> block whose text is base64 of a
+zlib stream. KIND is "binary", "module" (an ES module, linked at load time
+through Blob URLs), "worklet" or "text"; data-cl-lazy marks a block the page
+unpacks only on demand. One <script type="application/json" id="cl-config">
+block describes the title, and crates/copperline-web/www/kit-loader.js,
+inlined verbatim, unpacks the lot.
+"""
+
+import argparse
+import base64
+import hashlib
+import html
+from html.parser import HTMLParser
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tomllib
+import zlib
+
+REPO = Path(__file__).resolve().parent.parent
+WWW = REPO / "crates/copperline-web/www"
+DEFAULT_PKG = REPO / "crates/copperline-web/pkg"
+SOURCE_URL = "https://github.com/CopperlineHQ/Copperline"
+
+FORMAT = 1
+ENTRY_MODULE = "./kit-player.js"
+GLUE_MODULE = "./pkg/copperline_web.js"
+WASM_ASSET = "pkg/copperline_web_bg.wasm"
+WASM_FILE = "copperline_web_bg.wasm"
+GLUE_FILE = "copperline_web.js"
+B64_LINE = 8192  # a multiple of 4, so every line decodes on its own
+
+# The models the root crate's parse_machine_model accepts, normalized the
+# way crates/copperline-player/build.rs does.
+MODELS = [
+    "A1000", "A500", "A500OCS", "A500PLUS", "A600", "A1200", "A3000", "A4000",
+    "CDTV", "CD32",
+]
+# Machines with no floppy drive of their own: nothing here could boot them.
+CD_MODELS = {"CDTV", "CD32"}
+# What WebEmu.models() offers the hosted page: known to boot the bundled
+# AROS ROM from a floppy. Others pack, with a warning.
+VETTED_MODELS = {"A500", "A1200"}
+JOYSTICK_MODES = ("keys", "cd32", "off")
+SHADERS = ("none", "scanlines", "mask", "crt")
+BEZELS = ("off", "1084", "classic")
+
+MANIFEST_KEYS = {
+    "game": {"title", "id", "version"},
+    "payload": {"cd", "adf", "run", "sha256"},
+    "machine": {"model", "chip", "fast", "slow"},
+    "display": {"shader", "bezel", "fullscreen"},
+    "features": {"save_states"},
+    "branding": {"icon"},
+}
+
+# A relative specifier in a static import, a re-export, or a dynamic import
+# of a string literal. Must stay in step with SPECIFIER in kit-loader.js,
+# which rewrites exactly what this finds.
+SPECIFIER = re.compile(r"""(\bfrom\s*|\bimport\s*\(?\s*)(['"])(\.\.?/[^'"\n]+)\2""")
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+class KitError(Exception):
+    """A problem with the inputs; main() reports it and exits 1."""
+
+
+def warn(msg: str) -> None:
+    print(f"publish-web: warning: {msg}", file=sys.stderr)
+
+
+def copperline_version() -> str:
+    for line in (REPO / "Cargo.toml").read_text().splitlines():
+        if line.startswith("version"):
+            return line.split('"')[1]
+    return "unknown"
+
+
+def source_ref() -> str | None:
+    """The commit the page is built from, for the About box; None outside
+    a git checkout (a source tarball)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(REPO), "describe", "--tags", "--always", "--dirty"],
+            capture_output=True, text=True, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return out.stdout.strip() or None
+
+
+def parse_size(text: str) -> int:
+    """A byte count with an optional K/M/G suffix ("48M", "1500K", "65536")."""
+    match = re.fullmatch(r"\s*(\d+)\s*([KMG]?)(?:i?B)?\s*", text, re.IGNORECASE)
+    if not match:
+        raise KitError(f"cannot read {text!r} as a size (try 48M or 1500K)")
+    scale = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30}[match.group(2).upper()]
+    size = int(match.group(1)) * scale
+    if size <= 0:
+        raise KitError("a size limit must be greater than zero")
+    return size
+
+
+def normalize_model(name: str) -> str:
+    return (
+        name.strip().upper().replace("-", "").replace("_", "").replace(" ", "")
+        .replace("+", "PLUS")
+    )
+
+
+def bare_file_name(what: str, value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in (".", "..")
+        or "/" in value
+        or "\\" in value
+    ):
+        raise KitError(f"[payload] {what} must be a bare file name, not a path: {value!r}")
+    return value
+
+
+def load_manifest(path: Path) -> dict:
+    """Read and validate a game manifest to the rules the native player's
+    build script applies, so one file serves both kits."""
+    try:
+        manifest = tomllib.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as e:
+        raise KitError(f"cannot read manifest {path}: {e}") from e
+    for section in manifest:
+        if section not in MANIFEST_KEYS:
+            raise KitError(f"manifest has an unknown [{section}] section")
+    for section, keys in MANIFEST_KEYS.items():
+        table = manifest.get(section, {})
+        if not isinstance(table, dict):
+            raise KitError(f"[{section}] must be a table")
+        for key in table:
+            if key not in keys:
+                raise KitError(f"[{section}] has an unknown key {key!r}")
+    for section in ("game", "payload", "machine"):
+        if section not in manifest:
+            raise KitError(f"manifest is missing its [{section}] section")
+
+    game = manifest["game"]
+    title = game.get("title")
+    if not isinstance(title, str) or not title.strip():
+        raise KitError("[game] title must not be empty")
+    game_id = game.get("id")
+    if (
+        not isinstance(game_id, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", game_id)
+    ):
+        raise KitError("[game] id must be a plain directory name: letters, digits, '.', '-', '_'")
+    if "version" in game and not isinstance(game["version"], str):
+        raise KitError("[game] version must be a string")
+
+    model = manifest["machine"].get("model")
+    if not isinstance(model, str) or normalize_model(model) not in MODELS:
+        raise KitError(
+            f"[machine] model {model!r} is not a Copperline machine (one of {', '.join(MODELS)})"
+        )
+
+    payload = manifest["payload"]
+    kinds = [kind for kind in ("cd", "adf", "run") if kind in payload]
+    if len(kinds) != 1:
+        raise KitError("[payload] must name exactly one of cd, adf, or run")
+    pin = payload.get("sha256")
+    if pin is not None:
+        if kinds[0] == "run":
+            raise KitError("[payload] sha256 applies to file payloads (cd/adf), not run directories")
+        if not isinstance(pin, str) or not re.fullmatch(r"[0-9A-Fa-f]{64}", pin):
+            raise KitError("[payload] sha256 must be 64 hex characters")
+    if kinds[0] in ("cd", "adf"):
+        bare_file_name(kinds[0], payload[kinds[0]])
+
+    display = manifest.get("display", {})
+    if "shader" in display and display["shader"] not in SHADERS:
+        raise KitError(f"[display] shader must be one of {', '.join(SHADERS)}")
+    if "bezel" in display and display["bezel"] not in BEZELS:
+        raise KitError(f"[display] bezel must be one of {', '.join(BEZELS)}")
+    if "fullscreen" in display and not isinstance(display["fullscreen"], bool):
+        raise KitError("[display] fullscreen must be true or false")
+    save_states = manifest.get("features", {}).get("save_states", False)
+    if not isinstance(save_states, bool):
+        raise KitError("[features] save_states must be true or false")
+    return manifest
+
+
+def check_web_support(manifest: dict) -> list[str]:
+    """Refuse what the browser build cannot do, and return warnings for
+    what it accepts but does not honour."""
+    payload = manifest["payload"]
+    if "adf" not in payload:
+        kind = "cd" if "cd" in payload else "run"
+        raise KitError(
+            f"the web player packs floppy (adf) payloads only; this manifest's payload is "
+            f"`{kind}`, which needs the native player (tools/publish)"
+        )
+    machine = manifest["machine"]
+    model = normalize_model(machine["model"])
+    if model in CD_MODELS:
+        raise KitError(f"the web player has no CD drive, so it cannot build a {machine['model']}")
+    for key in ("chip", "fast", "slow"):
+        if key in machine:
+            raise KitError(
+                f"[machine] {key} is not supported by the web player: the browser build "
+                "takes each model's own memory configuration"
+            )
+    warnings = []
+    if model not in VETTED_MODELS:
+        warnings.append(
+            f"model {machine['model']} is outside the browser build's vetted list "
+            f"({', '.join(sorted(VETTED_MODELS))}); check that the page boots"
+        )
+    display = manifest.get("display", {})
+    if display.get("shader", "none") != "none" or display.get("bezel", "off") != "off":
+        warnings.append(
+            "[display] shader and bezel are not drawn by the web player yet; "
+            "the page shows the plain picture"
+        )
+    return warnings
+
+
+def scan_imports(source: str) -> list[str]:
+    """The relative import specifiers of a module, in source order."""
+    return [match.group(3) for match in SPECIFIER.finditer(source)]
+
+
+def order_modules(sources: dict[str, str], entry: str) -> list[str]:
+    """Dependencies-first order of every module reachable from `entry`.
+    The loader links in this order, so each import is already a Blob URL
+    when the module naming it is linked."""
+    order: list[str] = []
+    state: dict[str, int] = {}  # 1 = on the stack, 2 = placed
+
+    def visit(name: str, chain: tuple[str, ...]) -> None:
+        if state.get(name) == 2:
+            return
+        if state.get(name) == 1:
+            raise KitError("modules import each other in a cycle: " + " -> ".join(chain + (name,)))
+        if name not in sources:
+            where = f" (imported by {chain[-1]})" if chain else ""
+            raise KitError(f"module {name} is missing{where}")
+        state[name] = 1
+        for spec in scan_imports(sources[name]):
+            visit(spec, chain + (name,))
+        state[name] = 2
+        order.append(name)
+
+    visit(entry, ())
+    return order
+
+
+def collect_modules(entry: str, www: Path, pkg: Path) -> dict[str, str]:
+    """Read the entry module and everything it imports. Specifiers are
+    relative to the page directory; ./pkg/ is the wasm-bindgen output."""
+    sources: dict[str, str] = {}
+    pending = [entry]
+    while pending:
+        name = pending.pop()
+        if name in sources:
+            continue
+        if not name.startswith("./") or ".." in name.split("/"):
+            raise KitError(f"module specifier {name!r} leaves the page directory")
+        rel = name[2:]
+        path = pkg / rel[len("pkg/"):] if rel.startswith("pkg/") else www / rel
+        try:
+            sources[name] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise KitError(f"cannot read module {name} ({path}): {e}") from e
+        pending.extend(scan_imports(sources[name]))
+    return sources
+
+
+def encode_asset(name: str, kind: str, data: bytes, lazy: bool = False) -> str:
+    """One asset block: base64 of a zlib stream, with the raw size the
+    loader checks the unpacked bytes against."""
+    if not re.fullmatch(r"[A-Za-z0-9._/-]+", name):
+        raise KitError(f"asset name {name!r} is not plain ASCII path characters")
+    text = base64.b64encode(zlib.compress(data, 9)).decode("ascii")
+    lines = "\n".join(text[i:i + B64_LINE] for i in range(0, len(text), B64_LINE))
+    attrs = f'data-cl-asset="{name}" data-cl-kind="{kind}" data-cl-size="{len(data)}"'
+    if lazy:
+        attrs += " data-cl-lazy"
+    return f'<script type="text/plain" {attrs}>\n{lines}\n</script>'
+
+
+class _PageScan(HTMLParser):
+    """Pull the asset blocks and the config out of a packed page, and note
+    every attribute that could make the browser fetch something."""
+
+    URL_ATTRS = {"src", "href", "action", "poster", "srcset", "data", "formaction", "manifest"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.assets: dict[str, dict] = {}
+        self.config_text: str | None = None
+        self.references: list[tuple[str, str, str]] = []
+        self._open: dict | None = None
+
+    def handle_starttag(self, tag, attrs):
+        attr = dict(attrs)
+        for key, value in attr.items():
+            if key in self.URL_ATTRS and value is not None:
+                self.references.append((tag, key, value))
+        if tag != "script":
+            return
+        if "data-cl-asset" in attr:
+            self._open = {
+                "name": attr["data-cl-asset"],
+                "kind": attr.get("data-cl-kind"),
+                "size": int(attr.get("data-cl-size", "-1")),
+                "lazy": "data-cl-lazy" in attr,
+                "text": [],
+            }
+        elif attr.get("id") == "cl-config":
+            self._open = {"config": True, "text": []}
+
+    def handle_data(self, data):
+        if self._open is not None:
+            self._open["text"].append(data)
+
+    def handle_endtag(self, tag):
+        if tag != "script" or self._open is None:
+            return
+        block, self._open = self._open, None
+        text = "".join(block.pop("text"))
+        if block.get("config"):
+            self.config_text = text
+            return
+        if block["name"] in self.assets:
+            raise KitError(f"asset {block['name']} appears twice in the page")
+        block["data"] = zlib.decompress(base64.b64decode(text, validate=False))
+        self.assets[block.pop("name")] = block
+
+
+def read_page(page: str) -> tuple[dict, dict[str, dict], list[tuple[str, str, str]]]:
+    """Unpack a page this tool wrote: (config, assets, url references).
+    Each asset is {"kind", "size", "lazy", "data"}."""
+    scan = _PageScan()
+    scan.feed(page)
+    scan.close()
+    if scan.config_text is None:
+        raise KitError("the page has no cl-config block")
+    return json.loads(scan.config_text), scan.assets, scan.references
+
+
+def check_self_contained(page: str, expected: dict[str, bytes]) -> None:
+    """Prove the written page against what went in: every asset unpacks to
+    the bytes it was packed from, and no attribute or style rule names
+    anything outside the file."""
+    config, assets, references = read_page(page)
+    if config.get("format") != FORMAT:
+        raise KitError("the page's config block did not survive packing")
+    for name, data in expected.items():
+        block = assets.get(name)
+        if block is None:
+            raise KitError(f"asset {name} is missing from the packed page")
+        if block["data"] != data or block["size"] != len(data):
+            raise KitError(f"asset {name} did not survive packing intact")
+    for tag, attr, value in references:
+        if not value.startswith("data:"):
+            raise KitError(f"the page references {value!r} from <{tag} {attr}>")
+    for style in re.findall(r"<style[^>]*>(.*?)</style>", page, re.DOTALL | re.IGNORECASE):
+        if re.search(r"url\s*\(|@import", style, re.IGNORECASE):
+            raise KitError("the page's stylesheet references an external resource")
+
+
+def favicon_url(icon: bytes | None) -> str:
+    """The icon as a data: URL. With no icon the URL is an empty data: one,
+    which also stops the browser asking the host for /favicon.ico."""
+    if icon is None:
+        return "data:,"
+    if not icon.startswith(PNG_MAGIC):
+        raise KitError("[branding] icon must be a PNG file")
+    return "data:image/png;base64," + base64.b64encode(icon).decode("ascii")
+
+
+def json_for_script(value: object) -> str:
+    """JSON that is safe inside a <script> element whatever the strings
+    hold: no markup character survives unescaped."""
+    return (
+        json.dumps(value, indent=1, sort_keys=True)
+        .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+    )
+
+
+def build_page(
+    *,
+    manifest: dict,
+    shell: str,
+    loader: str,
+    modules: dict[str, str],
+    wasm: bytes,
+    worklet: bytes,
+    rom: bytes,
+    ext_rom: bytes | None,
+    rom_label: str,
+    disks: list[tuple[str, bytes]],
+    notices: list[tuple[str, str, bytes]],
+    icon: bytes | None = None,
+    drives: int = 1,
+    video: str | None = None,
+    joystick: str = "keys",
+    version: str = "unknown",
+    ref: str | None = None,
+) -> tuple[str, dict[str, bytes]]:
+    """Assemble the page. Returns it with the {asset name: bytes} map that
+    check_self_contained verifies it against."""
+    if not disks:
+        raise KitError("a page needs at least one disk")
+    if not 1 <= drives <= 4:
+        raise KitError("--drives must be between 1 and 4")
+    if joystick not in JOYSTICK_MODES:
+        raise KitError(f"--joystick must be one of {', '.join(JOYSTICK_MODES)}")
+    if video is not None and video not in ("PAL", "NTSC"):
+        raise KitError("--video must be PAL or NTSC")
+    for name, data in disks:
+        if not data:
+            raise KitError(f"disk {name} is empty")
+    for name, data in (("the ROM", rom), ("the extended ROM", ext_rom)):
+        if data is not None and len(data) not in (0x40000, 0x80000, 0x100000):
+            raise KitError(f"{name} is {len(data)} bytes; expected a 256K, 512K or 1M image")
+    if "</script" in loader.lower():
+        raise KitError("the loader script contains a closing script tag")
+    for slot in ("%%TITLE%%", "%%FAVICON%%", "%%CONFIG%%", "%%ASSETS%%", "%%LOADER%%"):
+        if slot not in shell:
+            raise KitError(f"the page shell has no {slot} slot")
+
+    order = order_modules(modules, ENTRY_MODULE)
+    packed: dict[str, bytes] = {}
+    blocks: list[str] = []
+
+    def add(name: str, kind: str, data: bytes, lazy: bool = False) -> None:
+        if name in packed:
+            raise KitError(f"asset {name} is packed twice")
+        packed[name] = data
+        blocks.append(encode_asset(name, kind, data, lazy))
+
+    for name in order:
+        add(name, "module", modules[name].encode("utf-8"))
+    add("audio-worklet.js", "worklet", worklet)
+    add(WASM_ASSET, "binary", wasm)
+    add("rom/main", "binary", rom)
+    if ext_rom is not None:
+        add("rom/ext", "binary", ext_rom)
+    disk_config = []
+    digest = hashlib.sha256()
+    for part in (wasm, rom, ext_rom or b""):
+        digest.update(hashlib.sha256(part).digest())
+    for index, (name, data) in enumerate(disks):
+        sha = hashlib.sha256(data).hexdigest()
+        digest.update(bytes.fromhex(sha))
+        add(f"disk/{index}", "binary", data)
+        disk_config.append({"asset": f"disk/{index}", "name": name, "sha256": sha})
+    notice_config = []
+    for slug, title, data in notices:
+        add(f"notice/{slug}", "text", data, lazy=True)
+        notice_config.append({"asset": f"notice/{slug}", "title": title})
+
+    game = manifest["game"]
+    display = manifest.get("display", {})
+    config = {
+        "format": FORMAT,
+        "game": {
+            "title": game["title"],
+            "id": game["id"],
+            "version": game.get("version", "1.0"),
+        },
+        "machine": {
+            "model": manifest["machine"]["model"].strip(),
+            "video": video,
+            "drives": drives,
+        },
+        "display": {
+            "fullscreen": bool(display.get("fullscreen", False)),
+            "shader": display.get("shader"),
+            "bezel": display.get("bezel"),
+        },
+        "features": {
+            "save_states": bool(manifest.get("features", {}).get("save_states", False)),
+        },
+        "input": {"joystick": joystick},
+        "rom": {
+            "main": "rom/main",
+            "ext": "rom/ext" if ext_rom is not None else None,
+            "label": rom_label,
+        },
+        "disks": disk_config,
+        "modules": {"order": order, "entry": ENTRY_MODULE},
+        "wasm": WASM_ASSET,
+        "copperline": {"version": version, "source": SOURCE_URL, "ref": ref},
+        "notices": notice_config,
+        # Identifies this exact pairing of emulator, ROM and disks; a quick
+        # save state is only offered back to the build that wrote it.
+        "build": digest.hexdigest(),
+    }
+    config_block = (
+        '<script type="application/json" id="cl-config">\n'
+        + json_for_script(config)
+        + "\n</script>"
+    )
+    slots = {
+        "TITLE": html.escape(game["title"]),
+        "FAVICON": favicon_url(icon),
+        "CONFIG": config_block,
+        "ASSETS": "\n".join(blocks),
+        "LOADER": loader,
+    }
+    # One pass over the shell, so a slot name inside a filled-in value (a
+    # title, say) is never expanded in turn.
+    page = re.sub(
+        r"%%(TITLE|FAVICON|CONFIG|ASSETS|LOADER)%%", lambda match: slots[match.group(1)], shell
+    )
+    return page, packed
+
+
+def read_bytes(path: Path, what: str) -> bytes:
+    try:
+        return path.read_bytes()
+    except OSError as e:
+        raise KitError(f"cannot read {what} {path}: {e}") from e
+
+
+def pinned_bindgen_version() -> str:
+    text = (REPO / "crates/copperline-web/Cargo.toml").read_text()
+    match = re.search(r'^wasm-bindgen = "=(.*)"$', text, re.MULTILINE)
+    if not match:
+        raise KitError("cannot find the wasm-bindgen pin in crates/copperline-web/Cargo.toml")
+    return match.group(1)
+
+
+def build_pkg(pkg: Path, profile: str) -> None:
+    """Build the wasm bundle the way .github/workflows/wasm-demo.yml does:
+    cargo, the pinned wasm-bindgen, then wasm-opt when it is installed."""
+    want = pinned_bindgen_version()
+    bindgen = shutil.which("wasm-bindgen")
+    if not bindgen:
+        raise KitError(
+            f"wasm-bindgen is not installed (cargo install wasm-bindgen-cli --version {want} --locked)"
+        )
+    have = subprocess.run([bindgen, "--version"], capture_output=True, text=True).stdout.split()
+    if not have or have[-1] != want:
+        raise KitError(
+            f"wasm-bindgen {have[-1] if have else '?'} is installed but the web crate pins {want} "
+            f"(cargo install wasm-bindgen-cli --version {want} --locked)"
+        )
+    env = dict(os.environ)
+    flags = env.get("RUSTFLAGS", "")
+    if "simd128" not in flags:
+        env["RUSTFLAGS"] = (flags + " -C target-feature=+simd128").strip()
+    profile_args = ["--release"] if profile == "release" else ["--profile", profile]
+    try:
+        subprocess.run(
+            ["cargo", "build", "-p", "copperline-web", *profile_args,
+             "--target", "wasm32-unknown-unknown", "--locked"],
+            cwd=REPO, env=env, check=True,
+        )
+        built = REPO / "target/wasm32-unknown-unknown" / profile / "copperline_web.wasm"
+        subprocess.run(
+            [bindgen, "--target", "web", "--out-dir", str(pkg), str(built)], check=True
+        )
+        wasm_opt = shutil.which("wasm-opt")
+        if wasm_opt:
+            wasm = pkg / WASM_FILE
+            subprocess.run([wasm_opt, "-O3", str(wasm), "-o", str(wasm)], check=True)
+        else:
+            warn("wasm-opt (binaryen) is not installed; the page will be larger and slower")
+    except (OSError, subprocess.CalledProcessError) as e:
+        raise KitError(f"building the wasm bundle failed: {e}") from e
+
+
+def notices() -> list[tuple[str, str, bytes]]:
+    version = copperline_version()
+    about = (
+        f"This page runs on Copperline {version}, a cycle-driven Amiga emulator "
+        "licensed under the GNU General Public License v3.0 or later.\n"
+        "\n"
+        "Complete corresponding source code:\n"
+        f"  {SOURCE_URL} (tag v{version})\n"
+        "\n"
+        "The bundled AROS boot ROM is a separate work under the AROS Public "
+        "License 1.1; its license and acknowledgements are included here.\n"
+        "\n"
+        "The title itself is a separate work by its publisher, carried in "
+        "this file as data, and is not covered by the licenses above.\n"
+    )
+    return [
+        ("about", "About this player", about.encode("utf-8")),
+        ("copperline-license", "Copperline license (GPL-3.0-or-later)",
+         read_bytes(REPO / "LICENSE", "license")),
+        ("aros-license", "AROS license (APL 1.1)",
+         read_bytes(REPO / "assets/aros/LICENSE", "license")),
+        ("aros-acknowledgements", "AROS acknowledgements",
+         read_bytes(REPO / "assets/aros/ACKNOWLEDGEMENTS", "acknowledgements")),
+    ]
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        prog="publish-web",
+        description="Pack a title and the browser build into one self-contained HTML file.",
+    )
+    ap.add_argument("--manifest", required=True, type=Path, help="the game manifest (game.toml)")
+    ap.add_argument("--payload", type=Path,
+                    help="the manifest's adf payload (default: beside the manifest)")
+    ap.add_argument("--disk", type=Path, action="append", default=[],
+                    help="a further disk of a multi-disk title (repeatable)")
+    ap.add_argument("--out", type=Path, help="output file (default: target/publish/<id>.html)")
+    ap.add_argument("--pkg", type=Path, default=DEFAULT_PKG,
+                    help="the wasm-bindgen output directory (default: crates/copperline-web/pkg)")
+    ap.add_argument("--skip-build", action="store_true",
+                    help="reuse the wasm bundle already in --pkg")
+    ap.add_argument("--profile", default="release",
+                    help="cargo profile for the wasm build (default: release)")
+    ap.add_argument("--drives", type=int, default=1,
+                    help="floppy drives to fit, 1-4 (default: 1)")
+    ap.add_argument("--video", choices=("PAL", "NTSC"),
+                    help="video standard (default: the model's own)")
+    ap.add_argument("--joystick", choices=JOYSTICK_MODES, default="keys",
+                    help="keyboard joystick mode the page starts in (default: keys)")
+    ap.add_argument("--rom", type=Path,
+                    help="a Kickstart image to embed instead of the bundled AROS ROM")
+    ap.add_argument("--ext-rom", type=Path, help="an extended ROM image to go with --rom")
+    ap.add_argument("--max-size", default="64M",
+                    help="refuse to write a page larger than this (default: 64M)")
+    args = ap.parse_args(argv)
+    if args.ext_rom and not args.rom:
+        ap.error("--ext-rom needs --rom")
+    return args
+
+
+def run(args: argparse.Namespace) -> Path:
+    max_size = parse_size(args.max_size)
+    manifest_path = args.manifest.resolve()
+    manifest = load_manifest(manifest_path)
+    for message in check_web_support(manifest):
+        warn(message)
+
+    payload_name = manifest["payload"]["adf"]
+    payload_path = args.payload or manifest_path.parent / payload_name
+    if payload_path.name != payload_name:
+        raise KitError(
+            f"--payload file name {payload_path.name!r} does not match the manifest's {payload_name!r}"
+        )
+    payload = read_bytes(payload_path, "payload")
+    pin = manifest["payload"].get("sha256")
+    if pin and hashlib.sha256(payload).hexdigest() != pin.lower():
+        raise KitError(f"payload {payload_path} does not match the manifest's sha256 pin")
+    disks = [(payload_name, payload)]
+    for path in args.disk:
+        disks.append((path.name, read_bytes(path, "disk")))
+    names = [name for name, _ in disks]
+    if len(set(names)) != len(names):
+        raise KitError("two disks share a file name; the page tells disks apart by name")
+
+    if args.rom:
+        rom = read_bytes(args.rom, "ROM")
+        ext_rom = read_bytes(args.ext_rom, "extended ROM") if args.ext_rom else None
+        rom_label = args.rom.name
+        warn("embedding a ROM image you supplied: make sure you may redistribute it")
+    else:
+        rom = read_bytes(REPO / "assets/aros/aros-amiga-m68k-rom.bin", "AROS ROM")
+        ext_rom = read_bytes(REPO / "assets/aros/aros-amiga-m68k-ext.bin", "AROS extended ROM")
+        rom_label = "AROS (open source, AROS Public License 1.1)"
+
+    icon = None
+    icon_rel = manifest.get("branding", {}).get("icon")
+    if icon_rel:
+        icon = read_bytes(manifest_path.parent / icon_rel, "[branding] icon")
+
+    pkg = args.pkg.resolve()
+    if not args.skip_build:
+        build_pkg(pkg, args.profile)
+    if not (pkg / WASM_FILE).is_file() or not (pkg / GLUE_FILE).is_file():
+        raise KitError(
+            f"no wasm bundle in {pkg} (expected {GLUE_FILE} and {WASM_FILE}); "
+            "run without --skip-build, or see docs/guide/browser.md"
+        )
+
+    page, packed = build_page(
+        manifest=manifest,
+        shell=(WWW / "kit-shell.html").read_text(encoding="utf-8"),
+        loader=(WWW / "kit-loader.js").read_text(encoding="utf-8"),
+        modules=collect_modules(ENTRY_MODULE, WWW, pkg),
+        wasm=read_bytes(pkg / WASM_FILE, "wasm binary"),
+        worklet=read_bytes(WWW / "audio-worklet.js", "audio worklet"),
+        rom=rom,
+        ext_rom=ext_rom,
+        rom_label=rom_label,
+        disks=disks,
+        notices=notices(),
+        icon=icon,
+        drives=args.drives,
+        video=args.video,
+        joystick=args.joystick,
+        version=copperline_version(),
+        ref=source_ref(),
+    )
+    data = page.encode("utf-8")
+    if len(data) > max_size:
+        raise KitError(
+            f"the page would be {len(data):,} bytes, over the --max-size limit of {max_size:,}"
+        )
+    check_self_contained(page, packed)
+
+    out = args.out or REPO / "target/publish" / f"{manifest['game']['id']}.html"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    raw = sum(len(blob) for blob in packed.values())
+    print(f"publish-web: wrote {out} ({len(data):,} bytes; {raw:,} bytes of assets unpacked)")
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(sys.argv[1:] if argv is None else argv)
+    try:
+        run(args)
+    except KitError as e:
+        print(f"publish-web: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

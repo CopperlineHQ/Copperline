@@ -669,6 +669,19 @@ jobs:
           wasm-bindgen --target web --out-dir pkg ../../target/wasm32-unknown-unknown/release/copperline_web.wasm
           node ../../tools/check-web-netplay.mjs pkg
           node ../../tools/check-web-netplay-swaps.mjs pkg
+      - name: Single-file web player kit
+        # Pack a page around the bundle built above and boot the machine
+        # from the page's own embedded assets, through the page's own
+        # loader. A blank disk is enough: the check is that the packed
+        # emulator, ROM and disk come back out intact and run.
+        run: |
+          mkdir -p target/kit-smoke
+          python3 -c "open('target/kit-smoke/blank.adf', 'wb').write(bytes(901120))"
+          printf '[game]\ntitle = "Kit smoke test"\nid = "kit-smoke"\n\n[payload]\nadf = "blank.adf"\n\n[machine]\nmodel = "A500"\n' \
+            > target/kit-smoke/game.toml
+          python3 tools/publish-web --manifest target/kit-smoke/game.toml \
+            --skip-build --out target/kit-smoke/page.html
+          node tools/check-web-kit.mjs target/kit-smoke/page.html
       - name: Browser page controller tests
         working-directory: crates/copperline-web/www
         run: npm test

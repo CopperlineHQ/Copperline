@@ -2,6 +2,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --check try.js && node --test *.test.js"
+    "test": "node --check try.js && node --check kit-player.js && node --check kit-loader.js && node --test *.test.js"
   }
 }

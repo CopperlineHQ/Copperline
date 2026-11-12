@@ -10,6 +10,9 @@
 # expects it as a sidecar file next to the binary at runtime (tools/publish
 # assembles the bundle). With the variable unset, this example manifest is
 # built, which is only useful for checking that the crate compiles.
+#
+# The same file packs a floppy title as a single-file browser page:
+# tools/publish-web --manifest /path/to/game.toml (docs/guide/publishing.md).
 
 [game]
 # Window title, and the name the player identifies itself by.
