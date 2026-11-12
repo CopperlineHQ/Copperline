@@ -189,6 +189,8 @@ if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
   `debug_save(address, size, name)` access the host. Paths are confined below
   the `--run` program directory: absolute paths, `..`, symlink escapes, invalid
   UTF-8, unmapped guest-memory ranges, and transfers over 16 MiB are rejected.
+  `debug_save` also refuses to write a file named `copperline.toml`, for the
+  reason the mounted directory does (see above).
   `debug_load` returns the byte count, or 0 when disabled or rejected. This is
   an explicit trust decision for the launched guest and has no effect without
   a `--run` program directory.
