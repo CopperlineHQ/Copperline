@@ -5133,6 +5133,16 @@ impl Bus {
         })
     }
 
+    /// Write out battery-backed memory that reaches its file on a delay
+    /// (the CDTV's bookmark RAM). For a frontend about to build a new
+    /// machine while this one is still alive: the new machine reads the
+    /// same files when it is built, before this one is dropped.
+    pub fn flush_battery_ram(&mut self) {
+        if let Some(cdtv) = self.cdtv.as_mut() {
+            cdtv.flush_bookmark_ram();
+        }
+    }
+
     pub fn attach_cdtv(&mut self, cdtv: crate::cdtv::CdtvController) {
         self.cdtv = Some(cdtv);
     }

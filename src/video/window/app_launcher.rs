@@ -1594,6 +1594,10 @@ impl App {
         // predecessor still owns, and is told it is in use.
         #[cfg(feature = "fluxbridge")]
         self.emu.bus_mut().floppy.release_bridges();
+        // Likewise battery-backed memory the outgoing machine has not
+        // written out yet: the new machine reads the same file as it is
+        // built, and must find the last save in it.
+        self.emu.bus_mut().flush_battery_ram();
         // This path boots a fresh machine, never a save state, so a real
         // ROM is required here.
         let guest = options
