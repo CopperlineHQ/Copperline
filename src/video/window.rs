@@ -3251,7 +3251,7 @@ impl App {
     fn rewind_one_step(&mut self) {
         use crate::timetravel::ReverseOutcome;
         if !self.emu.time_travel_enabled() {
-            self.show_osd("Rewind is off (Emulator menu > Rewind)");
+            self.show_osd("Rewind is off (Emulation Settings > Rewind)");
             return;
         }
         match self.emu.tt_rewind_step() {

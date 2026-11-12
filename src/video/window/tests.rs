@@ -7777,6 +7777,17 @@ fn number_row_keys_map_onto_the_ten_slots_in_printed_order() {
 }
 
 #[test]
+fn the_rewind_off_notice_names_the_real_menu_row() {
+    let mut app = test_app();
+    assert!(!app.emu.time_travel_enabled());
+    app.rewind_one_step();
+    let (text, _) = app
+        .active_osd_text()
+        .expect("the hotkey reports that rewind is off");
+    assert!(text.contains("Emulation Settings > Rewind"), "{text}");
+}
+
+#[test]
 fn rewind_toggle_arms_the_ring_and_steps_back_a_capture_point() {
     let mut app = test_app();
     // Off by default: the hotkey reports rather than silently doing nothing.
