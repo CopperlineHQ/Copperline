@@ -424,6 +424,10 @@ impl CdtvController {
     /// Persist the bookmark RAM to (and preload it from) `path`, a raw
     /// image of the 16 KiB. A shorter file fills the start of the RAM and
     /// leaves the rest clear; a longer one gives its first 16 KiB.
+    ///
+    /// A file that is there but cannot be read is left alone: the RAM
+    /// stays session-only rather than being bound to a file whose saves
+    /// it has not loaded and would overwrite at the first change.
     pub fn set_bookmark_path(&mut self, path: std::path::PathBuf) {
         match std::fs::read(&path) {
             Ok(data) => {
@@ -432,7 +436,13 @@ impl CdtvController {
                 self.battram[..n].copy_from_slice(&data[..n]);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => log::warn!("cdtv bookmark RAM: reading {}: {e}", path.display()),
+            Err(e) => {
+                log::warn!(
+                    "cdtv bookmark RAM: reading {}: {e}; not using it this session",
+                    path.display()
+                );
+                return;
+            }
         }
         self.battram_path = Some(path);
         self.battram_dirty = false;
@@ -465,8 +475,11 @@ impl CdtvController {
         self.battram_dirty_cck = 0;
     }
 
-    /// Write the bookmark RAM to its backing file if it has changed.
-    fn flush_bookmark_ram(&mut self) {
+    /// Write the bookmark RAM to its backing file if it has changed. Runs
+    /// on its own a quarter of an emulated second after a change; a
+    /// frontend calls it before it builds another machine on the same
+    /// file, so the new one loads what this one saved.
+    pub fn flush_bookmark_ram(&mut self) {
         if !self.battram_dirty {
             return;
         }
@@ -2260,13 +2273,50 @@ mod tests {
     }
 
     #[test]
+    fn a_bookmark_file_that_cannot_be_read_is_not_written_over() {
+        // A directory where the file should be: reading it fails, and not
+        // because it is missing. The RAM stays session-only, so the saves
+        // the unreadable file may hold are never replaced by a blank image.
+        let path = bookmark_file("unreadable");
+        std::fs::create_dir_all(&path).unwrap();
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        assert!(!cdtv.persistent_bookmark_ram());
+        cdtv.battram_write(0, 1, 0x7E);
+        run_cck(&mut cdtv, 2 * BOOKMARK_FLUSH_CCK);
+        drop(cdtv);
+        assert!(path.is_dir());
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_frontend_can_write_a_pending_change_out_at_once() {
+        // Before it builds another machine on the same file.
+        let path = bookmark_file("explicit-flush");
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        cdtv.battram_write(0x123, 1, 0x45);
+        assert!(!path.exists());
+        cdtv.flush_bookmark_ram();
+        let mut next = CdtvController::new();
+        next.set_bookmark_path(path.clone());
+        assert_eq!(next.battram_read(0x123, 1), 0x45);
+        drop(cdtv);
+        drop(next);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn a_failed_bookmark_write_is_retried_at_the_next_interval() {
-        // A path whose parent is a regular file cannot be created.
+        // The file's folder does not exist yet when the path is bound (a
+        // missing file is a blank RAM); by the time of the write a regular
+        // file sits where the folder should go, so it cannot be made.
         let blocker = bookmark_file("retry-blocker");
-        std::fs::write(&blocker, b"not a directory").unwrap();
         let path = blocker.join("cdtv-bookmark.bin");
         let mut cdtv = CdtvController::new();
         cdtv.set_bookmark_path(path.clone());
+        assert!(cdtv.persistent_bookmark_ram());
+        std::fs::write(&blocker, b"not a directory").unwrap();
         cdtv.battram_write(0, 1, 0x61);
         run_cck(&mut cdtv, BOOKMARK_FLUSH_CCK + CCK_PER_LINE);
         assert!(cdtv.battram_dirty, "a failed write must stay pending");
