@@ -1,0 +1,18 @@
+# The machine the osbench numbers in docs/internals/jit-performance.md use.
+# Give rom a Kickstart 3.x A3000 image and unit0 a fresh 64 MiB hardfile
+# whose first four bytes are "DOS\1" (see README.md).
+rom = "kicka3000.rom"
+
+[machine]
+profile = "A3000"
+rtc_time = "2005-03-18 01:58:29"
+
+[cpu]
+fpu = false
+
+[memory]
+motherboard = "16M"
+z3 = "8M"
+
+[copperhf]
+unit0 = "bench.hdf"
