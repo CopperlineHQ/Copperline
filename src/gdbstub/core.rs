@@ -1122,13 +1122,33 @@ pub(crate) fn xml_chunk_reply(xml: &str, range: &str) -> Result<String> {
     if offset >= bytes.len() {
         return Ok("l".to_string());
     }
-    let end = offset.saturating_add(len).min(bytes.len());
+    // qXfer data is binary: the bytes that frame a packet ('$', '#'),
+    // start a run-length repeat ('*') or escape ('}') go out as '}' and
+    // the byte XOR 0x20. The offset counts unescaped bytes; the length
+    // bounds what is sent, so an escaped chunk never outgrows the packet
+    // the client sized its request for.
+    let mut chunk = Vec::with_capacity(len.min(bytes.len() - offset));
+    let mut end = offset;
+    while let Some(&byte) = bytes.get(end) {
+        let escaped = matches!(byte, b'$' | b'#' | b'*' | b'}');
+        let cost = if escaped { 2 } else { 1 };
+        // Always make progress, even for a length too small to be useful.
+        if chunk.len() + cost > len && end > offset {
+            break;
+        }
+        if escaped {
+            chunk.extend([b'}', byte ^ 0x20]);
+        } else {
+            chunk.push(byte);
+        }
+        end += 1;
+    }
     let prefix = if end == bytes.len() { 'l' } else { 'm' };
     // The XML is pure ASCII today, so any offset/len is a valid char
     // boundary, but both come straight from the peer: don't let a future
     // non-ASCII addition (or a boundary that happens to split a
     // multi-byte char) turn into a panic instead of a clean error.
-    let chunk = std::str::from_utf8(&bytes[offset..end])
+    let chunk = String::from_utf8(chunk)
         .map_err(|_| anyhow!("qXfer XML slice landed on a non-UTF-8 boundary"))?;
     Ok(format!("{prefix}{chunk}"))
 }
@@ -1385,7 +1405,56 @@ mod tests {
         Ok(())
     }
 
-    /// A watchpoint's value is re-read after every step, so its length is
+    /// qXfer data is binary-escaped: a program name from guest memory can
+    /// hold the bytes that frame a packet or start a run-length repeat.
+    #[test]
+    fn qxfer_chunks_escape_the_bytes_that_frame_a_packet() -> Result<()> {
+        let xml = build_library_list_xml(&[crate::amigaos::TrackedModule {
+            seglist: 0,
+            task: 0,
+            name: "a$b#c}d*e".into(),
+            segments: Vec::new(),
+        }]);
+        fn unescape(data: &str) -> String {
+            let mut out = Vec::new();
+            let mut bytes = data.bytes();
+            while let Some(b) = bytes.next() {
+                out.push(if b == b'}' {
+                    bytes.next().unwrap() ^ 0x20
+                } else {
+                    b
+                });
+            }
+            String::from_utf8(out).unwrap()
+        }
+        // Read it back in small pieces, as a client with a small packet
+        // size would: offsets count unescaped bytes.
+        let mut read = String::new();
+        loop {
+            let reply = xml_chunk_reply(&xml, &format!("{:x},7", read.len()))?;
+            let (kind, data) = reply.split_at(1);
+            assert!(data.len() <= 7, "{data:?} is longer than was asked for");
+            for (i, b) in data.bytes().enumerate() {
+                let escaped = i > 0 && data.as_bytes()[i - 1] == b'}';
+                assert!(
+                    escaped || !matches!(b, b'$' | b'#' | b'*'),
+                    "raw {:?} in {data:?}",
+                    b as char
+                );
+            }
+            read.push_str(&unescape(data));
+            if kind == "l" {
+                break;
+            }
+            assert!(
+                !data.is_empty(),
+                "a chunk that is not the last makes progress"
+            );
+        }
+        assert_eq!(read, xml);
+        Ok(())
+    }
+
     /// bounded like an `m` read's rather than taken from the packet as is.
     #[test]
     fn a_watchpoint_longer_than_a_memory_read_is_refused() -> Result<()> {
