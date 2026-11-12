@@ -1170,6 +1170,24 @@ half clocks. This is visible in timing-test rows 19/20/22/27 and in
 line-wrap polling loops that read VHPOSR immediately after INTREQR bits
 become visible.
 
+VPOSR's V8 is the top bit of the same vertical counter, so it steps in the
+same colour clock as VHPOSR's high byte: two reported positions into the
+line (vAmiga applies the one rule to both registers as well). A program
+that brackets a VHPOSR read with two VPOSR reads and retries when they
+differ can therefore trust the line number it assembles; a model that
+steps V8 at a different colour clock makes that idiom read line 0 at the
+255 -> 256 step and line 256 at the frame wrap whenever all three reads
+fall inside the gap, which a fast CPU manages. LOF and LOL are not part of
+the counter and keep the internal frame- and line-wrap timing. Tests:
+`vposr_v8_steps_two_reported_positions_into_the_line`,
+`vposr_v8_and_vhposr_line_byte_never_disagree`; golden probe
+`posprobe-v8`.
+
+A long read of VPOSR:VHPOSR samples both words in the same colour clock
+here. A 68000 reads them in two bus cycles two colour clocks apart, so on
+hardware the pair can still tear when the counter steps between them; that
+per-word sampling is not modelled.
+
 ## Real-time pacing
 
 Pacing never changes emulated behaviour -- it only decides how much

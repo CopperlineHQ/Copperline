@@ -747,6 +747,13 @@ the final encoding to true 35 ns output; cross-checked against vAmigaTS
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
 class; the whole-blit fence collapsed the fill/line bars),
+`posprobe-v8` (131072 long reads of VPOSR:VHPOSR at a walking phase; the
+count of samples whose line number runs backwards, as a bar and a binary
+word -- V8 and V7-V0 are one counter, so the count is the number of frames
+spanned; a model that steps V8 three colour clocks after the low byte adds
+about ten false steps; not a vAmiga or hardware reference as it stands,
+because a long register read is sampled in one colour clock here and real
+68000 reads tear the pair on their own),
 `ddfprobe-sprmulti` (DMA sprite vertical reuse and an attached 15-colour
 pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render
