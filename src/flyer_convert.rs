@@ -362,6 +362,34 @@ fn command(ffmpeg: &Path) -> Command {
     cmd
 }
 
+/// The most of ffmpeg's error output kept for a message.
+const STDERR_KEPT: usize = 64 * 1024;
+
+/// Read a child's error output on a thread of its own, from the start. A
+/// pipe nobody reads fills up, and a child with a lot to say (a decoder
+/// on a damaged file) then stops in its write for good while this side
+/// waits on its other pipe. The thread ends when the child closes its end
+/// and gives back the first [`STDERR_KEPT`] bytes.
+fn drain_stderr(child: &mut std::process::Child) -> std::thread::JoinHandle<String> {
+    let stderr = child.stderr.take();
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut buf = [0u8; 8192];
+        if let Some(mut stderr) = stderr {
+            loop {
+                match stderr.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let room = STDERR_KEPT - kept.len();
+                        kept.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&kept).into_owned()
+    })
+}
+
 /// The source's sound as interleaved stereo at the Flyer's rate; empty
 /// when it has none.
 fn read_audio(ffmpeg: &Path, input: &Input, options: &ImportOptions) -> Result<Vec<i16>> {
@@ -498,6 +526,7 @@ pub fn import_input(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("starting ffmpeg")?;
+    let errors = drain_stderr(&mut child);
     let mut stdout = child.stdout.take().context("ffmpeg's output")?;
 
     let mut writer = ClipWriter::new(options.grade, channels);
@@ -583,11 +612,8 @@ pub fn import_input(
         bail!("stopped");
     }
     let status = child.wait()?;
+    let err = errors.join().unwrap_or_default();
     if report.frames == 0 {
-        let mut err = String::new();
-        if let Some(mut e) = child.stderr.take() {
-            let _ = e.read_to_string(&mut err);
-        }
         bail!(
             "ffmpeg read no video from {} ({status}): {}",
             input.path().display(),
@@ -1329,6 +1355,50 @@ mod tests {
             fits(&unused_clip_path(dir.path(), "  ", "", &[], false)),
             "Clip"
         );
+    }
+
+    /// A stand-in for ffmpeg: a shell script in `dir`.
+    #[cfg(unix)]
+    fn fake_ffmpeg(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("ffmpeg");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// ffmpeg reports a damaged source on its error output, line after
+    /// line. Nobody reads that pipe while the pictures are coming, so it
+    /// must not be able to fill up and stop the decoder for good.
+    #[cfg(unix)]
+    #[test]
+    fn an_import_does_not_stall_on_a_decoder_with_a_lot_to_say() {
+        let dir = tempfile::tempdir().unwrap();
+        // A megabyte of complaints, then two colour frames of black.
+        let ffmpeg = fake_ffmpeg(
+            dir.path(),
+            &format!(
+                "head -c 1048576 /dev/zero | tr '\\0' 'e' >&2\nhead -c {} /dev/zero",
+                W * H * 4 * 8
+            ),
+        );
+        let out = dir.path().join("Clip");
+        let (source, target) = (dir.path().join("source.mp4"), out.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let options = ImportOptions {
+                audio: false,
+                icon: false,
+                ..ImportOptions::default()
+            };
+            let done = import_input(&ffmpeg, &Input::Video(source), &target, &options, |_| {});
+            let _ = tx.send(done.map(|report| report.frames).map_err(|e| e.to_string()));
+        });
+        let frames = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the import finished");
+        assert_eq!(frames, Ok(2));
+        assert!(out.is_file());
     }
 
     /// Copying a clip that is already where it is going must not open it
