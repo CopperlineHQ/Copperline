@@ -3344,10 +3344,12 @@ bytes are rejected explicitly.
 
 Subcode: every image delivers its Q-channel position to the machine. The
 R-W channels, which carry CD+G graphics, exist only in images that stored
-them, and Copperline reads two forms: a CloneCD-style `.sub` file with the
+them, and Copperline reads three forms: a CloneCD-style `.sub` file with the
 same name as the image file (`game.bin` + `game.sub`, or `game.img` +
-`game.sub` next to the cue sheet that names it; 96 bytes per sector), and a
-CHD created with raw subcode (`SUBTYPE:RW_RAW` in its track metadata). The
+`game.sub` next to the cue sheet that names it; 96 bytes per sector), a cue
+sheet track of type `CDG` (2448-byte sectors: the audio followed by its
+subcode), and a CHD created with raw subcode (`SUBTYPE:RW_RAW` in its track
+metadata). The
 `.sub` file must match a single-file image sector for sector; one that does
 not is reported in the log and ignored. Both the CD32 and the CDTV receive
 the data while the disc plays.

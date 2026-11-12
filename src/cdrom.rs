@@ -3,7 +3,7 @@
 //! CD image backend: cue/bin, NRG, and CHD parsing and sector access.
 //!
 //! Supports single-file and multi-file cue layouts with MODE1/2048,
-//! MODE1/2352, MODE2/2336, MODE2/2352, and AUDIO tracks, including INDEX 00 pregaps stored in
+//! MODE1/2352, MODE2/2336, MODE2/2352, AUDIO, and CDG tracks, including INDEX 00 pregaps stored in
 //! the files and PREGAP/POSTGAP gaps that are not (they read as zero
 //! fill, like a CHD's unstored gaps). A `FILE` is `BINARY` (raw sector
 //! bytes) or, for audio tracks, `WAVE` or `MP3` -- the packaged form a
@@ -97,7 +97,14 @@ enum Storage {
     Source { source: usize, byte_offset: u64 },
     /// A PREGAP/POSTGAP no file holds: zero fill.
     Gap,
+    /// A cue sheet `CDG` track: each sector is its 2352 audio bytes
+    /// followed by its 96 subcode bytes, one symbol per byte as the
+    /// drive reads them.
+    SourceWithSubcode { source: usize, byte_offset: u64 },
 }
+
+/// Bytes one sector of a `CDG` track takes in its file.
+const CDG_SECTOR_BYTES: u64 = (RAW_SECTOR_BYTES + SUBCODE_FRAME_BYTES) as u64;
 
 #[derive(Debug)]
 pub struct CdImage {
@@ -408,6 +415,8 @@ impl<'de> serde::Deserialize<'de> for CdImage {
 struct RawTrack {
     number: u8,
     kind: TrackKind,
+    /// A `CDG` track: audio sectors stored with their subcode.
+    cdg: bool,
     /// File-relative sector of INDEX 00, when present (pregap start).
     index0: Option<u32>,
     /// File-relative sector of INDEX 01.
@@ -524,20 +533,24 @@ impl CdImage {
                         .next()
                         .and_then(|s| s.parse().ok())
                         .with_context(|| format!("{}: bad TRACK line", cue_path.display()))?;
-                    let kind = match words.next() {
+                    let type_name = words.next();
+                    let kind = match type_name {
                         Some("MODE1/2048") => TrackKind::Mode1_2048,
                         Some("MODE1/2352") => TrackKind::Mode1_2352,
                         Some("MODE2/2336") => TrackKind::Mode2_2336,
                         Some("MODE2/2352") => TrackKind::Mode2_2352,
-                        Some("AUDIO") => TrackKind::Audio,
+                        // CDG is an audio track whose sectors are stored
+                        // with their 96 bytes of subcode (2448 in all).
+                        Some("AUDIO" | "CDG") => TrackKind::Audio,
                         other => bail!(
                             "{}: track {} type {:?} is not supported (MODE1/2048, \
-                             MODE1/2352, MODE2/2336, MODE2/2352, AUDIO)",
+                             MODE1/2352, MODE2/2336, MODE2/2352, AUDIO, CDG)",
                             cue_path.display(),
                             number,
                             other
                         ),
                     };
+                    let cdg = type_name == Some("CDG");
                     let Some((file_name, format)) = files.last() else {
                         bail!("{}: TRACK before FILE", cue_path.display());
                     };
@@ -551,9 +564,20 @@ impl CdImage {
                             format.cue_type()
                         );
                     }
+                    if cdg && *format != FileFormat::Binary {
+                        bail!(
+                            "{}: track {} is a CDG track, but {} is a {} file; \
+                             CDG tracks need a BINARY file",
+                            cue_path.display(),
+                            number,
+                            file_name,
+                            format.cue_type()
+                        );
+                    }
                     raw_tracks.push(RawTrack {
                         number,
                         kind,
+                        cdg,
                         index0: None,
                         index1: None,
                         pregap: 0,
@@ -645,6 +669,11 @@ impl CdImage {
             let file_len = sources[file_index].byte_len;
             let mut byte_offset = 0u64;
             for (j, track) in file_tracks.iter().enumerate() {
+                // Bytes a sector of this track takes in the file.
+                let stride = match track.cdg {
+                    true => CDG_SECTOR_BYTES,
+                    false => track.kind.sector_bytes() as u64,
+                };
                 if track.pregap > 0 {
                     extents.push(Extent {
                         disc_start: disc,
@@ -679,14 +708,14 @@ impl CdImage {
                                 files[file_index].0,
                             );
                         };
-                        if !remaining.is_multiple_of(track.kind.sector_bytes() as u64) {
+                        if !remaining.is_multiple_of(stride) {
                             bail!(
                                 "{}: track {} does not end on a sector boundary",
                                 cue_path.display(),
                                 track.number
                             );
                         }
-                        let sectors = u32::try_from(remaining / track.kind.sector_bytes() as u64)
+                        let sectors = u32::try_from(remaining / stride)
                             .ok()
                             .and_then(|s| region_start.checked_add(s))
                             .with_context(|| {
@@ -710,9 +739,15 @@ impl CdImage {
                     disc_start: disc,
                     sector_count: region_sectors,
                     kind: track.kind,
-                    storage: Storage::Source {
-                        source: file_index,
-                        byte_offset,
+                    storage: match track.cdg {
+                        true => Storage::SourceWithSubcode {
+                            source: file_index,
+                            byte_offset,
+                        },
+                        false => Storage::Source {
+                            source: file_index,
+                            byte_offset,
+                        },
                     },
                 });
                 let index1_offset = index1 - region_start;
@@ -735,7 +770,7 @@ impl CdImage {
                     start_sector: region_start_disc + index1_offset,
                     sector_count,
                 });
-                byte_offset += u64::from(region_sectors) * track.kind.sector_bytes() as u64;
+                byte_offset += u64::from(region_sectors) * stride;
                 if track.postgap > 0 {
                     extents.push(Extent {
                         disc_start: disc,
@@ -942,7 +977,13 @@ impl CdImage {
     /// Whether the image stores subcode of its own (R-W content).
     pub fn has_stored_subcode(&self) -> bool {
         match &self.backend {
-            Backend::Bin(bin) => bin.subcode.is_some(),
+            Backend::Bin(bin) => {
+                bin.subcode.is_some()
+                    || bin
+                        .extents
+                        .iter()
+                        .any(|e| matches!(e.storage, Storage::SourceWithSubcode { .. }))
+            }
             Backend::Chd(chd) => chd.has_raw_subcode(),
         }
     }
@@ -975,6 +1016,15 @@ impl BinBackend {
             return None;
         };
         if !matches!(source.data, SourceData::Binary(_)) {
+            return None;
+        }
+        // A CDG track carries its own subcode and does not have the
+        // image's plain sector size: no `.sub` file can be laid against it.
+        if self
+            .extents
+            .iter()
+            .any(|e| matches!(e.storage, Storage::SourceWithSubcode { .. }))
+        {
             return None;
         }
         let mut sizes = self
@@ -1016,12 +1066,29 @@ impl BinBackend {
     /// The stored subcode frame of `sector`, if the image has one for it.
     fn read_subcode(&mut self, sector: u32) -> Option<[u8; SUBCODE_FRAME_BYTES]> {
         let extent = self.extent_for_sector(sector)?;
-        let Storage::Source { byte_offset, .. } = extent.storage else {
-            return None;
-        };
         let in_extent = u64::from(sector - extent.disc_start);
-        let sub = self.subcode.as_mut()?;
-        sub.read(byte_offset / sub.sector_bytes + in_extent).ok()
+        match extent.storage {
+            Storage::Gap => None,
+            Storage::Source { byte_offset, .. } => {
+                let sub = self.subcode.as_mut()?;
+                sub.read(byte_offset / sub.sector_bytes + in_extent).ok()
+            }
+            // The subcode follows the sector's audio in the file, already
+            // one symbol per byte.
+            Storage::SourceWithSubcode {
+                source,
+                byte_offset,
+            } => {
+                let mut frame = [0u8; SUBCODE_FRAME_BYTES];
+                self.sources[source]
+                    .read_at(
+                        byte_offset + in_extent * CDG_SECTOR_BYTES + RAW_SECTOR_BYTES as u64,
+                        &mut frame,
+                    )
+                    .ok()?;
+                Some(frame)
+            }
+        }
     }
 
     fn extent_for_sector(&self, sector: u32) -> Option<&Extent> {
@@ -1045,6 +1112,11 @@ impl BinBackend {
                 source,
                 byte_offset,
             } => self.sources[source].read_at(byte_offset + in_extent * sector_bytes, buf),
+            // The audio is the first 2352 bytes of each 2448-byte slot.
+            Storage::SourceWithSubcode {
+                source,
+                byte_offset,
+            } => self.sources[source].read_at(byte_offset + in_extent * CDG_SECTOR_BYTES, buf),
         }
     }
 }
@@ -1473,6 +1545,64 @@ mod tests {
         let _ = std::fs::remove_file(&cue);
         let _ = std::fs::remove_file(&bin);
         let _ = std::fs::remove_file(&sub);
+    }
+
+    #[test]
+    fn a_cdg_track_serves_its_audio_and_the_subcode_stored_with_it() {
+        // Track 1 plain audio (2352-byte sectors), track 2 CDG: three
+        // sectors of 2352 audio bytes then 96 subcode bytes each.
+        let cue = temp_path("cdg.cue");
+        let bin = cue.with_extension("bin");
+        let mut bytes = vec![0x11u8; 2 * RAW_SECTOR_BYTES];
+        for s in 0..3u8 {
+            bytes.extend(std::iter::repeat_n(0xA0 + s, RAW_SECTOR_BYTES));
+            // R-W symbols 0x21 + s; P and Q blank.
+            bytes.extend(std::iter::repeat_n(0x21 + s, SUBCODE_FRAME_BYTES));
+        }
+        write_file(&bin, &bytes);
+        write_file(
+            &cue,
+            format!(
+                "FILE \"{}\" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n  \
+                 TRACK 02 CDG\n    INDEX 01 00:00:02\n",
+                bin.file_name().unwrap().to_string_lossy()
+            )
+            .as_bytes(),
+        );
+        let mut image = CdImage::load(&cue).unwrap();
+        assert_eq!(image.total_sectors(), 5);
+        assert_eq!(image.tracks()[1].kind, TrackKind::Audio);
+        assert_eq!(image.tracks()[1].sector_count, 3);
+        assert!(image.has_stored_subcode());
+        let mut audio = [0u8; RAW_SECTOR_BYTES];
+        for s in 0..3u8 {
+            let sector = 2 + u32::from(s);
+            // The audio is the audio: no subcode bytes leak into it.
+            image.read_audio_sector(sector, &mut audio).unwrap();
+            assert!(audio.iter().all(|&b| b == 0xA0 + s), "sector {sector}");
+            let frame = image.subcode_frame(sector);
+            assert!(frame.iter().all(|&symbol| symbol & 0x3F == 0x21 + s));
+            // The stored Q was blank: the position is regenerated.
+            assert_eq!(
+                channel_of(&frame, 1),
+                subcode::q_channel_position(image.tracks(), sector)
+            );
+        }
+        // The plain audio track before it has no stored subcode.
+        assert!(image.subcode_frame(1).iter().all(|&s| s & !0x40 == 0));
+        image.read_audio_sector(1, &mut audio).unwrap();
+        assert!(audio.iter().all(|&b| b == 0x11));
+
+        // The layout survives a save state.
+        let encoded = bincode::serialize(&image).unwrap();
+        let mut restored: CdImage = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(restored.subcode_frame(4), image.subcode_frame(4));
+
+        // A file that is not whole 2448-byte sectors is refused.
+        write_file(&bin, &bytes[..bytes.len() - 96]);
+        assert!(CdImage::load(&cue).is_err());
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
     }
 
     #[test]

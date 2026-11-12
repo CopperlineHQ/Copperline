@@ -1126,12 +1126,14 @@ blank. An image that stored its subcode supplies R-W, which is where CD+G
 graphics and CD-TEXT live: a CloneCD-style `.sub` file beside a
 single-file cue or ISO image (96 bytes per sector, channel after channel,
 checked against the image's sector count and reopened with the image on a
-state load), or a CHD track marked `SUBTYPE:RW_RAW`. Stored P and Q are
+state load), a CHD track marked `SUBTYPE:RW_RAW`, or a cue sheet `CDG`
+track (2448-byte sectors: the 2352 audio bytes, then the 96 subcode bytes
+one symbol per byte). Stored P and Q are
 passed through only when the stored Q packet's CRC verifies; rippers
 commonly leave them blank, and then the regenerated position takes their
 place. Not read: a CHD's "cooked" `SUBTYPE:RW` (packs already
-de-interleaved and corrected, which is not what a drive delivers) and cue
-`CDG` tracks (2448-byte sectors). That stream is what the
+de-interleaved and corrected, which is not what a drive delivers). That
+stream is what the
 Kickstart `cd.device` turns into `CD_ADDFRAMEINT` server calls and
 `CD_QCODEMSF`/`CD_QCODELSN` positions, and the drive's SubQ command reports
 the same position while a play is running or paused (regression example:
@@ -1290,7 +1292,7 @@ The next parsed packet rebases the counter to its visible index, even if the
 producer queued several packets under one comparator value.
 
 `cdrom.rs` parses cue sheets (single- or multi-file; MODE1/2048,
-MODE1/2352, MODE2/2336, MODE2/2352, and AUDIO tracks;
+MODE1/2352, MODE2/2336, MODE2/2352, AUDIO, and CDG tracks;
 `PREGAP`/`POSTGAP` as unstored zero-fill
 extents, like a CHD's gaps) for both machines and the SCSI/ATAPI drives,
 and lays every `FILE` out as a run of extents over a byte-addressed

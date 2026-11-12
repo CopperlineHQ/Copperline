@@ -143,7 +143,7 @@ for individual programs. The linked subsystem chapters give the details.
 | A2024 / UHRES dual-scan output | Not emulated. [Chipset gaps](../internals/chipset.md#known-aga-ecs-gaps-and-non-goals). |
 | External genlock | Physical genlock input/output is not emulated. This does not remove the CD32 FMV module's internal digital video compositing. [Chipset gaps](../internals/chipset.md#known-aga-ecs-gaps-and-non-goals). |
 | AGA display fetch | Sub-unit DDF stop effects beyond whole fetch-unit completion are not modelled. [Chipset gaps](../internals/chipset.md#known-aga-ecs-gaps-and-non-goals). |
-| CD+G graphics | Subcode R-W data reaches the CDTV and CD32 only from an image that stored it: a `.sub` file beside the image, or a CHD with raw subcode. Cue `CDG` tracks and CHD "cooked" subcode are not read. [CD images](configuration.md#cd-config). |
+| CD+G graphics | Subcode R-W data reaches the CDTV and CD32 only from an image that stored it: a `.sub` file beside the image, a cue sheet `CDG` track, or a CHD with raw subcode. CHD "cooked" subcode is not read. [CD images](configuration.md#cd-config). |
 | Toccata recording | The capture FIFO is a stub: reads return zero and no record half-full interrupt fires. Playback is implemented. [Toccata scope](../internals/toccata.md#out-of-scope). |
 
 Browser and libretro builds also have host integration limits; see the

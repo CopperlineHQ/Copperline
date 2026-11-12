@@ -9,8 +9,9 @@
 //! symbol-per-byte layout is what a drive delivers and what every consumer
 //! here takes: Akiko's subcode DMA, and the CDTV drive's subcode port.
 //!
-//! Q is the position channel and is regenerated from the track layout
-//! (an ADR 1 packet) for any image, which is all an ordinary disc needs.
+//! P and Q are regenerated from the track layout for any image, which is
+//! all an ordinary disc needs: Q is the position (an ADR 1 packet) and P
+//! the pause flag, set through the gap before a track's INDEX 01.
 //! R-W carry CD+G graphics and CD-TEXT, and exist only on discs that have
 //! them, so they are served only from images that stored them:
 //!
@@ -18,7 +19,9 @@
 //!   bytes per sector with the channels stored one after the other
 //!   (twelve bytes of P, twelve of Q, ... twelve of W);
 //! - a CHD whose track metadata says `SUBTYPE:RW_RAW`: 96 bytes per frame
-//!   in the drive's own symbol-per-byte layout.
+//!   in the drive's own symbol-per-byte layout;
+//! - a cue sheet `CDG` track: 2448-byte sectors, the 2352 audio bytes
+//!   followed by the 96 subcode bytes in that same layout.
 //!
 //! Stored P and Q are passed through when the stored Q packet's CRC
 //! checks out; otherwise (rippers commonly leave them blank) the
@@ -62,6 +65,12 @@ fn write_bcd_msf(out: &mut [u8], frames: u32) {
 /// the gap before a track's INDEX 01 belongs to that track as index 0
 /// with the relative time counting down, as the pickup sees it.
 pub(crate) fn q_channel_position(tracks: &[CdTrack], sector: u32) -> [u8; 12] {
+    position(tracks, sector).0
+}
+
+/// The Q packet of `sector`, and whether the sector lies in a pause (the
+/// gap before a track's INDEX 01), which is what the P channel flags.
+fn position(tracks: &[CdTrack], sector: u32) -> ([u8; 12], bool) {
     let mut q = [0u8; 12];
     let (control, number, index, relative) =
         match tracks.iter().rposition(|t| sector >= t.start_sector) {
@@ -78,7 +87,7 @@ pub(crate) fn q_channel_position(tracks: &[CdTrack], sector: u32) -> [u8; 12] {
             // Lead-in side of the first track: its pregap, counting down.
             None => match tracks.first() {
                 Some(first) => (first.kind, first.number, 0, first.start_sector - sector),
-                None => return q,
+                None => return (q, false),
             },
         };
     q[0] = if control.is_data() { 0x41 } else { 0x01 };
@@ -89,7 +98,14 @@ pub(crate) fn q_channel_position(tracks: &[CdTrack], sector: u32) -> [u8; 12] {
     let crc = q_channel_crc(&q[..10]);
     q[10] = (crc >> 8) as u8;
     q[11] = crc as u8;
-    q
+    (q, index == 0)
+}
+
+/// Put the regenerated P and Q channels into `frame`.
+fn put_position(frame: &mut [u8; SUBCODE_FRAME_BYTES], tracks: &[CdTrack], sector: u32) {
+    let (q, pause) = position(tracks, sector);
+    put_channel(frame, P_BIT, &[if pause { 0xFF } else { 0x00 }; 12]);
+    put_channel(frame, Q_BIT, &q);
 }
 
 /// Set channel `bit` of a frame from that channel's twelve bytes.
@@ -115,10 +131,10 @@ pub(crate) fn q_channel_of(frame: &[u8; SUBCODE_FRAME_BYTES]) -> [u8; 12] {
 }
 
 /// The frame of a sector whose image stored no subcode: the regenerated
-/// position in Q, P and R-W blank.
+/// position in Q and pause flag in P, R-W blank.
 pub(crate) fn regenerated_frame(tracks: &[CdTrack], sector: u32) -> [u8; SUBCODE_FRAME_BYTES] {
     let mut frame = [0u8; SUBCODE_FRAME_BYTES];
-    put_channel(&mut frame, Q_BIT, &q_channel_position(tracks, sector));
+    put_position(&mut frame, tracks, sector);
     frame
 }
 
@@ -137,8 +153,8 @@ pub(crate) fn from_channel_order(stored: &[u8; SUBCODE_FRAME_BYTES]) -> [u8; SUB
 }
 
 /// Finish a frame an image stored: keep its P and Q when the Q packet's
-/// CRC verifies, and otherwise put the regenerated position there. R-W
-/// are the image's either way.
+/// CRC verifies, and otherwise put the regenerated ones there. R-W are
+/// the image's either way.
 pub(crate) fn with_position(
     mut frame: [u8; SUBCODE_FRAME_BYTES],
     tracks: &[CdTrack],
@@ -148,8 +164,7 @@ pub(crate) fn with_position(
     let stored_crc = u16::from_be_bytes([q[10], q[11]]);
     // An all-zero packet has a non-zero CRC, so a blank Q never passes.
     if q_channel_crc(&q[..10]) != stored_crc {
-        put_channel(&mut frame, P_BIT, &[0u8; 12]);
-        put_channel(&mut frame, Q_BIT, &q_channel_position(tracks, sector));
+        put_position(&mut frame, tracks, sector);
     }
     frame
 }
@@ -216,11 +231,18 @@ mod tests {
     }
 
     #[test]
-    fn a_regenerated_frame_carries_only_the_position_in_q() {
+    fn a_regenerated_frame_carries_the_position_in_q_and_the_pause_in_p() {
         let tracks = tracks();
+        // Inside a track: Q only.
         let frame = regenerated_frame(&tracks, 5);
         assert!(frame.iter().all(|&symbol| symbol & !Q_BIT == 0));
         assert_eq!(q_channel_of(&frame), q_channel_position(&tracks, 5));
+        // In the gap before track 2's INDEX 01: P is set throughout, and
+        // nothing but P and Q.
+        let frame = regenerated_frame(&tracks, 2);
+        assert!(frame.iter().all(|&symbol| symbol & P_BIT != 0));
+        assert!(frame.iter().all(|&symbol| symbol & !(P_BIT | Q_BIT) == 0));
+        assert_eq!(q_channel_of(&frame), q_channel_position(&tracks, 2));
     }
 
     #[test]
