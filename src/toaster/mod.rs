@@ -798,7 +798,13 @@ impl Toaster {
         };
         let s = card.stats;
         SavedToaster {
-            frame_store: card.frame_store.data.clone(),
+            // A card nobody has written to (fitted but not driven) saves
+            // no banks: empty reads back as all zero.
+            frame_store: if card.frame_store.data.iter().all(|&b| b == 0) {
+                Vec::new()
+            } else {
+                card.frame_store.data.clone()
+            },
             pending_grab_0: grab(0),
             pending_grab_1: grab(1),
             elh: card.elh.iter().map(|h| [h.r, h.g, h.b, h.i]).collect(),

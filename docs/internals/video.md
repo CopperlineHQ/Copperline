@@ -715,6 +715,14 @@ frame and the frames' sound not yet handed to Paula (`SavedToaster` in
 `toaster/mod.rs`); the host files on its inputs play on from where they
 are, and its outputs show the next frame composed.
 
+That state is about 3 MB for a card the switcher drives (the two banks,
+1.5 MB, and the last Program frame, 1.4 MB) and up to 6 MB while both banks
+hold a digitised picture not yet encoded; a card nothing has written to
+saves no banks. Every state write carries it, in-memory snapshots included,
+so with a card fitted the rewind and reverse-debugging rings hold that much
+less history per snapshot, and each snapshot first waits for the compose
+thread to finish the fields it has in hand (two at most).
+
 ### The Video Toaster (`toaster.rs`)
 
 `[video_slot] card = "toaster"` fits the one card so far. The NewTek
