@@ -2835,6 +2835,28 @@ fn named_key_parser_accepts_modifiers_and_raw_codes() {
 }
 
 #[test]
+fn digit_key_names_press_the_digit_keys() {
+    // 1-9 share their raw codes, but the zero key is $0A: raw code 0 is the
+    // backtick key, so a bare 0 must not be read as a number.
+    for (name, raw) in [
+        ("1", 0x01),
+        ("2", 0x02),
+        ("5", 0x05),
+        ("9", 0x09),
+        ("0", 0x0A),
+        (" 0 ", 0x0A),
+    ] {
+        assert_eq!(parse_amiga_key(name), Some(raw), "{name:?}");
+    }
+    // The raw code stays reachable in its hex forms, and other decimal
+    // codes are untouched.
+    assert_eq!(parse_amiga_key("0x00"), Some(0x00));
+    assert_eq!(parse_amiga_key("$00"), Some(0x00));
+    assert_eq!(parse_amiga_key("10"), Some(10));
+    assert_eq!(parse_amiga_key("00"), Some(0x00));
+}
+
+#[test]
 fn renderer_runs_once_per_emulated_frame() {
     assert!(should_render_emulated_frame(None, 0));
     assert!(!should_render_emulated_frame(Some(12), 12));

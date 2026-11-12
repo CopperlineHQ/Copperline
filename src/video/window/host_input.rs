@@ -229,6 +229,12 @@ pub(super) fn host_to_amiga_rawkey(code: KeyCode) -> Option<u8> {
 /// key name for scripted input.
 pub fn parse_amiga_key(s: &str) -> Option<u8> {
     let trimmed = s.trim();
+    // The digit keys are names. `1`-`9` share their raw codes, but the zero
+    // key is $0A while raw code 0 is the backtick key, so a bare `0` has to
+    // be taken as the name before the number (`0x00` still gives the code).
+    if trimmed == "0" {
+        return Some(0x0A);
+    }
     if let Some(raw) = parse_u8(trimmed) {
         return Some(raw);
     }

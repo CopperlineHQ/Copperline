@@ -257,7 +257,8 @@ timestamps. Every flag repeats:
 KEY is a raw key code in decimal, `0x45` or `$45` form, or a name:
 letters, digits, `space`, `return`, `tab`, `esc`, `del`, `backspace`,
 `up`/`down`/`left`/`right`, `f1`-`f10`, `shift`/`lshift`/`rshift`, `caps`,
-`ctrl`, `lalt`/`ralt` and `lami`/`rami`. Names ignore case. The
+`ctrl`, `lalt`/`ralt` and `lami`/`rami`. Names ignore case. A digit names
+that digit's key, so `0` is the zero key; write raw key code 0 as `0x00`. The
 `--joy-after` controls are `up`, `down`, `left`, `right`, `red` (or `fire`),
 `blue`, and the CD32 pad's `green`, `yellow`, `play`, `rwd` and `ffw`.
 
