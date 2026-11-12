@@ -343,6 +343,75 @@ pub trait VideoSlotDevice: Send {
     ) -> Result<serde_json::Value, String> {
         Err(format!("the {} card has no {command} control", self.name()))
     }
+
+    /// The card's emulated state for a save state: what the guest can read
+    /// back from it (framestores, registers) and what decides when it
+    /// does what. `None` for a card that keeps nothing of its own. Called
+    /// on the emulation thread; a card that works on a thread of its own
+    /// finishes that work first, and saving must leave the card exactly
+    /// as it was.
+    fn save_state(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Become the card of a state that was just loaded. `state` is what
+    /// [`Self::save_state`] gave when that state was saved, or `None` when
+    /// it holds none (saved without this card, or before cards were
+    /// saved): the card then goes back to how it powers on, so that
+    /// nothing of the timeline that was left stays in it.
+    fn load_state(&mut self, _state: Option<&[u8]>) {}
+
+    /// For [`SavedCard`]: the bytes a loaded state carried.
+    fn take_saved_state(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+}
+
+/// What a loaded state's bus holds in its video slot: the saved card's
+/// bytes, until `Bus::adopt_host_resources` hands them to the session's
+/// own card (a card is host-attached and is never built from a state).
+pub(crate) struct SavedCard(Option<Vec<u8>>);
+
+impl VideoSlotDevice for SavedCard {
+    fn name(&self) -> &'static str {
+        "saved card state"
+    }
+
+    fn wants_completed_fields(&self) -> bool {
+        false
+    }
+
+    fn take_saved_state(&mut self) -> Option<Vec<u8>> {
+        self.0.take()
+    }
+}
+
+/// `#[serde(with)]` for `Bus::video_slot`: the fitted card's
+/// [`VideoSlotDevice::save_state`] as one optional byte string, read back
+/// as a [`SavedCard`].
+pub(crate) mod state_serde {
+    use super::{SavedCard, VideoSlotDevice};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    struct Saved(#[serde(with = "crate::bytes_serde")] Vec<u8>);
+
+    pub fn serialize<S: Serializer>(
+        slot: &Option<Box<dyn VideoSlotDevice>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        slot.as_ref()
+            .and_then(|card| card.save_state())
+            .map(Saved)
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Box<dyn VideoSlotDevice>>, D::Error> {
+        let saved = Option::<Saved>::deserialize(deserializer)?;
+        Ok(saved.map(|Saved(bytes)| Box::new(SavedCard(Some(bytes))) as Box<dyn VideoSlotDevice>))
+    }
 }
 
 /// `src` stretched or squeezed to `n` samples by linear interpolation

@@ -679,6 +679,67 @@ fn a_loaded_state_takes_its_sync_from_the_live_card() {
     assert_eq!(vhposr(&mut restored), a, "ERSY set, no sync: frozen");
 }
 
+/// A card with one byte of emulated state, which it drives onto the
+/// parallel pins.
+struct StatefulCard(u8);
+
+impl VideoSlotDevice for StatefulCard {
+    fn name(&self) -> &'static str {
+        "stateful"
+    }
+    fn wants_completed_fields(&self) -> bool {
+        false
+    }
+    fn parallel_read(&mut self, _live: &mut LiveField<'_>, _ddrb: u8) -> Option<u8> {
+        Some(self.0)
+    }
+    fn save_state(&self) -> Option<Vec<u8>> {
+        Some(vec![self.0])
+    }
+    fn load_state(&mut self, state: Option<&[u8]>) {
+        self.0 = state.map_or(0, |s| s[0]);
+    }
+}
+
+/// A save state carries the fitted card's emulated state, in both of the
+/// encodings a machine is written in, and a load hands it to the
+/// session's own card: what the guest reads from the card after a load
+/// is what it read when the state was saved.
+#[test]
+fn a_cards_state_is_saved_and_handed_to_the_live_card_on_load() {
+    let mut saved = empty_bus();
+    saved.attach_video_slot(Box::new(StatefulCard(0x5A)));
+    saved.cia_a.write(REG_DDRB, 0x00);
+    assert_eq!(saved.cia_a_read(0xBFE101, 1) as u8, 0x5A);
+    let file = rmp_serde::to_vec_named(&saved).unwrap();
+    let snapshot = bincode::serialize(&saved).unwrap();
+    let loads: [Box<dyn Fn() -> Bus>; 2] = [
+        Box::new(|| rmp_serde::from_slice(&file).unwrap()),
+        Box::new(|| bincode::deserialize(&snapshot).unwrap()),
+    ];
+    for load in loads {
+        // The session's card has moved on since.
+        let mut live = empty_bus();
+        live.attach_video_slot(Box::new(StatefulCard(0xC3)));
+        let mut restored = load();
+        restored.adopt_host_resources(&mut live).unwrap();
+        assert_eq!(restored.cia_a_read(0xBFE101, 1) as u8, 0x5A);
+        // And a session without a card stays without one.
+        let mut restored = load();
+        restored.adopt_host_resources(&mut empty_bus()).unwrap();
+        assert!(restored.video_slot().is_none());
+    }
+
+    // A state saved without a card puts a fitted one back as at power-on.
+    let bare = rmp_serde::to_vec_named(&empty_bus()).unwrap();
+    let mut live = empty_bus();
+    live.attach_video_slot(Box::new(StatefulCard(0xC3)));
+    let mut restored: Bus = rmp_serde::from_slice(&bare).unwrap();
+    restored.adopt_host_resources(&mut live).unwrap();
+    restored.cia_a.write(REG_DDRB, 0x00);
+    assert_eq!(restored.cia_a_read(0xBFE101, 1) as u8, 0x00);
+}
+
 /// Reads one sample per parallel read: the beam line at `hpos`, or with
 /// `line` set, that line the beam has passed.
 struct LineProbe {

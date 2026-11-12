@@ -696,10 +696,24 @@ outputs (DDRB set) stay CIA-driven. A card that supplies genlock sync
 (`supplies_sync`, the Toaster) puts Agnus in genlock mode while fitted:
 `BPLCON0.ERSY` then leaves the beam counters live instead of freezing them
 (`Agnus::set_genlock_sync`; `[chipset] genlock` does the same without a
-card). A fitted card blocks run-ahead, since
-it holds state run-ahead cannot rewind. Like the parallel peripheral it is
-host-attached (`Bus::attach_video_slot`) and survives save-state loads; it
-is not itself serialised.
+card). A fitted card blocks run-ahead: a burst would carry the card's
+framestores through every snapshot, and the host files on its inputs cannot
+be rewound.
+
+Like the parallel peripheral the card is host-attached
+(`Bus::attach_video_slot`) and a save-state load keeps the session's own
+card object, but what the card holds is machine state and is saved:
+`VideoSlotDevice::save_state` gives the bytes the bus writes in the card's
+place (`videoslot::state_serde`, one optional byte string in the `BUS `
+chunk), and `Bus::adopt_host_resources` hands a loaded state's bytes to the
+session's card through `load_state`. A state that carries none (it was
+saved without that card, or before cards were saved) puts the card back as
+it powers on, so nothing of the session that was left stays in it. Saving
+leaves the card as it was. The Toaster saves its framestore banks, header
+latches, pictures digitised but not yet encoded, field phase, last Program
+frame and the frames' sound not yet handed to Paula (`SavedToaster` in
+`toaster/mod.rs`); the host files on its inputs play on from where they
+are, and its outputs show the next frame composed.
 
 ### The Video Toaster (`toaster.rs`)
 

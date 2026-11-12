@@ -779,8 +779,11 @@ pub struct Bus {
     parallel_port: Box<dyn crate::parallel::ParallelPort>,
     /// Card in the video slot (`crate::videoslot`), watching Denise's
     /// output and optionally driving the parallel data pins. Host-attached
-    /// like the parallel peripheral, so it survives save-state loads.
-    #[serde(skip)]
+    /// like the parallel peripheral, so the card itself survives save-state
+    /// loads; a state carries only what the card says is its emulated
+    /// state (`VideoSlotDevice::save_state`), which a load hands to the
+    /// session's card in `adopt_host_resources`.
+    #[serde(default, with = "crate::videoslot::state_serde")]
     video_slot: Option<Box<dyn crate::videoslot::VideoSlotDevice>>,
     /// Scratch for the video-slot card's sound on its way to Paula's mixer.
     #[serde(skip)]
@@ -6312,6 +6315,16 @@ impl Bus {
         std::mem::swap(&mut self.paula.audio, &mut live.paula.audio);
         std::mem::swap(&mut self.parallel_port, &mut live.parallel_port);
         std::mem::swap(&mut self.video_slot, &mut live.video_slot);
+        // The card is the live session's; what it holds is the state's. A
+        // state without any (saved with no card, or before cards were
+        // saved) puts the card back as it powers on.
+        let saved = live
+            .video_slot
+            .as_mut()
+            .and_then(|loaded| loaded.take_saved_state());
+        if let Some(card) = self.video_slot.as_mut() {
+            card.load_state(saved.as_deref());
+        }
         // The card is the live session's, the genlock setting the state's:
         // Agnus's restored sync must follow both.
         self.apply_genlock_sync();
