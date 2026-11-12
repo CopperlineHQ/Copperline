@@ -224,8 +224,9 @@ pub struct Parser {
     pending: Vec<u8>,
     paste: Option<PasteBuffer>,
     /// The terminal does not disambiguate escape codes (no Kitty keyboard
-    /// protocol): Alt+`[` and Alt+`O` arrive as the two bytes that also
-    /// start a control sequence. See [`Parser::ambiguous_prefix_pending`].
+    /// protocol): Alt+`[`, Alt+`O` and Alt+`_` arrive as the two bytes that
+    /// also start a control sequence or a graphics reply. See
+    /// [`Parser::ambiguous_prefix_pending`].
     legacy_keyboard: bool,
 }
 
@@ -281,8 +282,9 @@ impl Parser {
     /// Whether all that is waiting is a prefix only time can tell apart
     /// from a key. A lone ESC is the Escape key on a terminal not reporting
     /// it as a sequence, or the first byte of a sequence still on its way.
-    /// On a legacy keyboard, `ESC [` and `ESC O` are Alt+`[` and Alt+`O`,
-    /// or the start of a control sequence; left waiting for a final byte
+    /// On a legacy keyboard, `ESC [`, `ESC O` and `ESC _` are Alt+`[`,
+    /// Alt+`O` and Alt+`_`, or the start of a control sequence or of a
+    /// graphics reply; left waiting for a final byte (or a terminator)
     /// that is never coming, they would swallow the keys typed next.
     pub fn ambiguous_prefix_pending(&self) -> bool {
         if self.paste.is_some() {
@@ -290,7 +292,7 @@ impl Parser {
         }
         match self.pending.as_slice() {
             [ESC] => true,
-            [ESC, b'[' | b'O'] => self.legacy_keyboard,
+            [ESC, b'[' | b'O' | b'_'] => self.legacy_keyboard,
             _ => false,
         }
     }
@@ -969,6 +971,9 @@ mod tests {
         for (bytes, ch, mods) in [
             (&b"\x1b["[..], '[', Mods::ALT),
             (&b"\x1bO"[..], 'o', Mods::ALT | Mods::SHIFT),
+            // Alt+_ is the two bytes that start an APC string (a graphics
+            // reply), which ends only at `ESC \`.
+            (&b"\x1b_"[..], '-', Mods::ALT | Mods::SHIFT),
         ] {
             let mut parser = Parser::new();
             parser.set_legacy_keyboard(true);
