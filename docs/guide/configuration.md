@@ -3351,7 +3351,9 @@ sheet track of type `CDG` (2448-byte sectors: the audio followed by its
 subcode), and a CHD created with raw subcode (`SUBTYPE:RW_RAW` in its track
 metadata). The
 `.sub` file must match a single-file image sector for sector; one that does
-not is reported in the log and ignored. Both the CD32 and the CDTV receive
+not is reported in the log and ignored, and a save state made with a `.sub`
+file still loads after the file has gone, with the regenerated subcode. None
+of the three forms has been checked against a real CD+G disc yet. Both the CD32 and the CDTV receive
 the data while the disc plays.
 
 CDXL video discs need no special setting: mount the image on a `CD32`

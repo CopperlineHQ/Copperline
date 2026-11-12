@@ -1092,7 +1092,22 @@ interrupt latch); reading port A takes SBCP away, and a byte nobody read is
 replaced by the next, as in the shift register. Port A presents the symbol
 bit-reversed (P in bit 0 ... W in bit 7), per WinUAE's `cdtv.cpp`. Starting,
 pausing or stopping a play abandons the frame in transit. Data reads do not
-produce subcode bytes. A CD+G disc therefore plays its graphics data out to
+produce subcode bytes. The drive reports its next symbol and its next
+sector to the idle fast-forward (`CdtvController::next_event_cck`), so a
+CPU asleep in STOP between subcode bytes is woken for each one rather than
+sleeping past them. Symbols are clocked in emulated time whatever the host
+tick size, so a device tick that spans several symbol periods delivers only
+the last of them, exactly as a guest that did not read for that long would
+find.
+
+Three things here are not verified against hardware or a real CD+G disc,
+none of which was available: the port A bit order (taken from the
+reference); the layout of stored subcode (below); and pause, where the
+model follows the reference -- a paused drive raises no SCOR at all,
+neither frames nor the idle pulses, although a real drive holding its
+position may well keep decoding subcode there. A known gap: a frame is
+produced only for a sector that actually plays, and a play is held back
+while the host mixer's ring is full, so subcode stalls with it. A CD+G disc therefore plays its graphics data out to
 the guest when the image stored it, and any disc delivers its Q position.
 
 The 256 KiB extended ROM sits at `$F00000`, and the battery-backed bookmark
@@ -1123,7 +1138,8 @@ bit 7 through W in bit 0. Most images carry no subchannel data, so the Q
 channel is regenerated from the TOC as an ADR 1 position packet (control,
 track, index, track-relative and absolute MSF in BCD, CRC) with P and R-W
 blank. An image that stored its subcode supplies R-W, which is where CD+G
-graphics and CD-TEXT live: a CloneCD-style `.sub` file beside a
+graphics and CD-TEXT live (the three layouts are as their formats are
+documented, unverified against a real CD+G image): a CloneCD-style `.sub` file beside a
 single-file cue or ISO image (96 bytes per sector, channel after channel,
 checked against the image's sector count and reopened with the image on a
 state load), a CHD track marked `SUBTYPE:RW_RAW`, or a cue sheet `CDG`

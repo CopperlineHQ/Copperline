@@ -373,17 +373,22 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                     subcode: None,
                 };
                 if let Some(path) = subcode {
-                    state_path(&path, true)
-                        .and_then(|local| {
-                            crate::hostbind::restored(crate::hostbind::Kind::Cd, &local);
-                            bin.open_subcode(&local)
-                        })
-                        .map_err(|e| {
-                            serde::de::Error::custom(format!(
-                                "reopening CD subcode {}: {e:#}",
-                                path.display()
-                            ))
-                        })?;
+                    // Subcode is an extra: an image loads without its
+                    // `.sub` file, with regenerated subcode, and so does a
+                    // state whose `.sub` file has gone or no longer fits.
+                    // Failing here would cost every save state of the disc
+                    // for the sake of data most titles never read.
+                    let reopened = state_path(&path, true).and_then(|local| {
+                        crate::hostbind::restored(crate::hostbind::Kind::Cd, &local);
+                        bin.open_subcode(&local)
+                    });
+                    if let Err(e) = reopened {
+                        log::warn!(
+                            "cd: the state's subcode file {} cannot be reopened ({e:#}); \
+                             continuing with regenerated subcode",
+                            path.display()
+                        );
+                    }
                 }
                 Ok(Self {
                     tracks,
@@ -1510,14 +1515,23 @@ mod tests {
         let mut restored: CdImage = bincode::deserialize(&encoded).unwrap();
         assert!(restored.has_stored_subcode());
         assert_eq!(restored.subcode_frame(3), image.subcode_frame(3));
-        // And refuses to resume without it, as it does for the image.
+        // Without the file the state still loads, as the image itself
+        // would: the disc is there, its subcode is the regenerated one.
         drop(restored);
         std::fs::remove_file(&sub).unwrap();
-        let err = bincode::deserialize::<CdImage>(&encoded)
-            .map(|_| ())
-            .expect_err("the subcode file is gone")
-            .to_string();
-        assert!(err.contains("subcode"), "{err}");
+        let mut restored: CdImage = bincode::deserialize(&encoded).unwrap();
+        assert!(!restored.has_stored_subcode());
+        let frame = restored.subcode_frame(3);
+        assert_eq!(
+            channel_of(&frame, 1),
+            subcode::q_channel_position(restored.tracks(), 3)
+        );
+        assert!(frame.iter().all(|&symbol| symbol & !0x40 == 0));
+        // The same for a file that no longer fits the image.
+        write_file(&sub, &sub_file_bytes(3));
+        let restored: CdImage = bincode::deserialize(&encoded).unwrap();
+        assert!(!restored.has_stored_subcode());
+        let _ = std::fs::remove_file(&sub);
         let _ = std::fs::remove_file(&cue);
         let _ = std::fs::remove_file(&bin);
     }

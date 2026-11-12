@@ -40,8 +40,14 @@
 //! the next, as the shift register would. Port A presents the symbol
 //! bit-reversed (P in bit 0 ... W in bit 7), per the reference. With
 //! nothing playing SCOR still pulses at 75 Hz and SBCP stays quiet.
+//!
+//! Not verified against hardware or a real CD+G disc: the port A bit
+//! order, the symbol-per-byte layout of stored subcode, and what a paused
+//! drive does with SCOR (see `reset_subcode`). A frame is produced only
+//! for a sector that actually plays, so while the host mixer's ring is
+//! full and the play is held back, subcode is held back with it.
 
-use crate::cdrom::{to_bcd, CdImage, LEADIN_SECTORS, RAW_SECTOR_BYTES};
+use crate::cdrom::{to_bcd, CdImage, LEADIN_SECTORS, RAW_SECTOR_BYTES, SUBCODE_FRAME_BYTES};
 use crate::chipset::paula::CdAudioRing;
 use crate::memory::Memory;
 
@@ -1300,19 +1306,56 @@ impl CdtvController {
         if self.scor < 0 {
             self.scor = 0;
         }
-        self.sub_latch = self.sub_frame[usize::from(self.sub_index)];
-        self.sub_index += 1;
-        if usize::from(self.sub_index) >= self.sub_frame.len() {
+        // The frame and the index come out of a save state as well as from
+        // `start_subcode_frame`, so neither is trusted: an index past the
+        // frame ends it, and a frame is never longer than a sector's 96
+        // symbols.
+        let index = usize::from(self.sub_index);
+        let end = self.sub_frame.len().min(SUBCODE_FRAME_BYTES);
+        if index >= end {
             self.sub_frame.clear();
             self.sub_index = 0;
+            return;
+        }
+        self.sub_latch = self.sub_frame[index];
+        if index + 1 >= end {
+            self.sub_frame.clear();
+            self.sub_index = 0;
+        } else {
+            self.sub_index = (index + 1) as u8;
         }
         self.sbcp = 1;
         self.tp_check_interrupts();
     }
 
+    /// Colour clocks until the drive next does something on its own that
+    /// the guest can be waiting for: the next subcode symbol of a frame in
+    /// transit, or the next sector of a play (its SCOR). A CPU halted in
+    /// STOP must not sleep past either -- it would wake to find the bytes
+    /// it was waiting for already replaced.
+    pub fn next_event_cck(&self) -> Option<u32> {
+        // Nothing runs until the board is configured.
+        self.configured_base?;
+        let symbol = (!self.sub_frame.is_empty()).then_some(self.sub_symbol_cck);
+        let sector = (self.cd_playing && !self.cd_paused).then_some(self.audio_counter_cck);
+        symbol
+            .into_iter()
+            .chain(sector)
+            .min()
+            .map(|cck| cck.max(1) as u32)
+    }
+
     /// The pickup stopped following a track (play started over, paused or
     /// stopped): whatever frame was in transit is abandoned and both
     /// subcode lines go quiet.
+    ///
+    /// UNVERIFIED for pause: a paused drive here raises no SCOR at all --
+    /// no frames, because no sector plays, and none of the idle 75 Hz
+    /// pulses either, because those are held off while a play is in
+    /// progress and a paused play still is. That is what the reference
+    /// (WinUAE's cdtv.cpp) does. A real drive holding its position in
+    /// pause may well keep decoding subcode there and keep pulsing SCOR;
+    /// nothing at hand says which, so the reference's behaviour stands.
     fn reset_subcode(&mut self) {
         self.sub_frame.clear();
         self.sub_index = 0;
@@ -1800,6 +1843,53 @@ mod tests {
         assert_ne!(cdtv.sbcp, 0, "SBCP stays up while nobody reads port A");
         assert_eq!(cdtv.read(0xB0, 1) as u8, 0x02);
         assert_eq!(cdtv.sbcp, 0);
+    }
+
+    #[test]
+    fn a_malformed_restored_subcode_frame_ends_instead_of_panicking() {
+        let mut cdtv = configured_controller();
+        let mut ring = CdAudioRing::default();
+        // An index past the frame: the frame just ends.
+        cdtv.sub_frame = vec![0x40; 10];
+        cdtv.sub_index = 200;
+        cdtv.sub_symbol_cck = 1;
+        cdtv.tick(2, &mut ring);
+        assert!(cdtv.sub_frame.is_empty());
+        assert_eq!((cdtv.sub_index, cdtv.sbcp), (0, 0));
+
+        // A frame longer than a sector's 96 symbols is clocked out for 96
+        // and no further, however far behind the clock is.
+        cdtv.sub_frame = vec![0x40; 1000];
+        cdtv.sub_index = 0;
+        cdtv.sub_symbol_cck = i32::MIN / 2;
+        cdtv.tick(1, &mut ring);
+        assert!(cdtv.sub_frame.is_empty());
+        assert_eq!(cdtv.sub_index, 0);
+        assert_eq!(cdtv.read(0xB0, 1) as u8, 0x02);
+    }
+
+    #[test]
+    fn the_drive_reports_its_next_subcode_symbol_and_sector_as_events() {
+        let mut mem = test_mem(4096);
+        let mut cdtv = configured_controller();
+        let mut ring = CdAudioRing::default();
+        // Idle: nothing a sleeping CPU needs waking for.
+        assert_eq!(cdtv.next_event_cck(), None);
+        let _ = command(&mut cdtv, &mut mem, &[0x09, 0, 0, 4, 0, 0, 2]);
+        while cdtv.sub_frame.is_empty() {
+            cdtv.tick(1, &mut ring);
+        }
+        // A frame in transit: the next symbol is one period away, sooner
+        // than the next sector, and each tick brings it closer.
+        assert_eq!(cdtv.next_event_cck(), Some(CCK_PER_SUBCODE_SYMBOL));
+        cdtv.tick(100, &mut ring);
+        assert_eq!(cdtv.next_event_cck(), Some(CCK_PER_SUBCODE_SYMBOL - 100));
+        // Sleeping exactly that long lands on the symbol.
+        cdtv.tick(CCK_PER_SUBCODE_SYMBOL - 100, &mut ring);
+        assert_ne!(cdtv.sbcp, 0);
+        // Paused: no frames and no sectors are coming.
+        let _ = command(&mut cdtv, &mut mem, &[0x8B, 0x00, 0, 0, 0, 0, 0]);
+        assert_eq!(cdtv.next_event_cck(), None);
     }
 
     #[test]
