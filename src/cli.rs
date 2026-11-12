@@ -1423,12 +1423,24 @@ where
                 )?;
                 let path = args.next().ok_or_else(|| anyhow!(USAGE))?;
                 // The tolerance is optional and numeric; anything else is
-                // the next flag or a positional path and stays put.
-                let tolerance = match args.peek().and_then(|t| Tolerance::parse(t)) {
-                    Some(tolerance) => {
-                        args.next();
-                        tolerance
-                    }
+                // the next flag or a positional path and stays put. A number
+                // that is no tolerance is a mistake, though, not a ROM path.
+                let tolerance = match args.peek() {
+                    Some(token) => match Tolerance::parse(token) {
+                        Some(tolerance) => {
+                            args.next();
+                            tolerance
+                        }
+                        None if token.starts_with(|c: char| c.is_ascii_digit() || c == '.')
+                            && token.parse::<f64>().is_ok() =>
+                        {
+                            bail!(
+                                "--expect-screenshot TOLERANCE must be a fraction from 0 to 1 \
+                                 or a whole number of pixels, got {token}"
+                            );
+                        }
+                        None => Tolerance::Exact,
+                    },
                     None => Tolerance::Exact,
                 };
                 expect_screenshot.push(ExpectShotSpec {

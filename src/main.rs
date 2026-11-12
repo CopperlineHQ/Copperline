@@ -2885,6 +2885,15 @@ mod tests {
         assert_eq!(args.expect_screenshot[0].tolerance, Tolerance::Exact);
         assert!(!args.audio_live);
         assert!(parse(&["--expect-screenshot", "1"]).is_err());
+        // A number that is no tolerance is reported, not taken as the ROM.
+        for bad in ["1.5", "2.0", "1e3"] {
+            let err = parse(&["--expect-screenshot", "1", "x.png", bad])
+                .expect_err("an out-of-range tolerance is refused");
+            assert!(err.to_string().contains("TOLERANCE"), "{bad}: {err:#}");
+        }
+        // A ROM whose name merely starts with a digit is still a ROM.
+        let args = parse(&["--expect-screenshot", "1", "x.png", "31.rom"])?;
+        assert_eq!(args.rom_path.as_deref(), Some(Path::new("31.rom")));
 
         // The script directive spells the same flag.
         let path = temp_script("expect", "expect-screenshot 2 \"/tmp/a b.png\" 3\n");
