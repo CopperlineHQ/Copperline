@@ -11,7 +11,9 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 import zlib
 
 
@@ -484,6 +486,89 @@ class Page(unittest.TestCase):
         )
         publish_web.check_self_contained(page, packed)
         self.assertNotIn("%%", page.split("<body>", 1)[1].split("<script", 1)[0])
+
+
+class BundleBuild(unittest.TestCase):
+    def test_pin_is_read_from_the_web_crate(self):
+        self.assertRegex(publish_web.pinned_bindgen_version(), r"^\d+\.\d+\.\d+$")
+
+    def test_missing_or_mismatched_bindgen_stops_before_cargo(self):
+        want = publish_web.pinned_bindgen_version()
+        with patch.object(publish_web.shutil, "which", return_value=None), \
+                patch.object(publish_web.subprocess, "run") as run:
+            with self.assertRaises(KitError) as caught:
+                publish_web.build_pkg(Path("/nonexistent/pkg"), "release")
+            run.assert_not_called()
+        self.assertIn(f"cargo install wasm-bindgen-cli --version {want}", str(caught.exception))
+
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return SimpleNamespace(stdout="wasm-bindgen 0.0.1\n")
+
+        with patch.object(publish_web.shutil, "which", return_value="/bin/wasm-bindgen"), \
+                patch.object(publish_web.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(KitError) as caught:
+                publish_web.build_pkg(Path("/nonexistent/pkg"), "release")
+        self.assertIn(f"wasm-bindgen 0.0.1 is installed but the web crate pins {want}",
+                      str(caught.exception))
+        self.assertEqual(calls, [["/bin/wasm-bindgen", "--version"]])
+
+    def test_build_runs_cargo_bindgen_and_wasm_opt(self):
+        want = publish_web.pinned_bindgen_version()
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(stdout=f"wasm-bindgen {want}\n")
+
+        tools = {"wasm-bindgen": "/bin/wasm-bindgen", "wasm-opt": "/bin/wasm-opt"}
+        with patch.object(publish_web.shutil, "which", side_effect=tools.get), \
+                patch.object(publish_web.subprocess, "run", side_effect=fake_run), \
+                patch.dict(publish_web.os.environ, {"RUSTFLAGS": "-C debuginfo=0"}):
+            publish_web.build_pkg(Path("/out/pkg"), "ci")
+        cargo, cargo_kwargs = calls[1]
+        self.assertEqual(cargo[:4], ["cargo", "build", "-p", "copperline-web"])
+        self.assertIn("--locked", cargo)
+        self.assertEqual(cargo[cargo.index("--profile") + 1], "ci")
+        self.assertEqual(cargo[cargo.index("--target") + 1], "wasm32-unknown-unknown")
+        self.assertEqual(cargo_kwargs["env"]["RUSTFLAGS"],
+                         "-C debuginfo=0 -C target-feature=+simd128")
+        bindgen = calls[2][0]
+        self.assertEqual(bindgen[:5],
+                         ["/bin/wasm-bindgen", "--target", "web", "--out-dir", "/out/pkg"])
+        self.assertTrue(bindgen[5].endswith("target/wasm32-unknown-unknown/ci/copperline_web.wasm"))
+        self.assertEqual(calls[3][0], ["/bin/wasm-opt", "-O3", "/out/pkg/copperline_web_bg.wasm",
+                                       "-o", "/out/pkg/copperline_web_bg.wasm"])
+
+        # The release profile is spelled the way cargo wants it, and a
+        # missing wasm-opt is a warning, not a failure.
+        calls.clear()
+        stderr = io.StringIO()
+        with patch.object(publish_web.shutil, "which",
+                          side_effect={"wasm-bindgen": "/bin/wasm-bindgen"}.get), \
+                patch.object(publish_web.subprocess, "run", side_effect=fake_run), \
+                contextlib.redirect_stderr(stderr):
+            publish_web.build_pkg(Path("/out/pkg"), "release")
+        self.assertIn("--release", calls[1][0])
+        self.assertNotIn("--profile", calls[1][0])
+        self.assertEqual(len(calls), 3)
+        self.assertIn("wasm-opt (binaryen) is not installed", stderr.getvalue())
+
+    def test_a_failed_build_is_reported(self):
+        want = publish_web.pinned_bindgen_version()
+
+        def fake_run(argv, **kwargs):
+            if argv[0] == "cargo":
+                raise publish_web.subprocess.CalledProcessError(101, argv)
+            return SimpleNamespace(stdout=f"wasm-bindgen {want}\n")
+
+        with patch.object(publish_web.shutil, "which", return_value="/bin/wasm-bindgen"), \
+                patch.object(publish_web.subprocess, "run", side_effect=fake_run):
+            with self.assertRaises(KitError) as caught:
+                publish_web.build_pkg(Path("/out/pkg"), "release")
+        self.assertIn("building the wasm bundle failed", str(caught.exception))
 
 
 class CommandLine(unittest.TestCase):

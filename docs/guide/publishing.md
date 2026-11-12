@@ -222,8 +222,8 @@ that did not get a drive of their own.
 
 The page shows the title and a **Start** button; the click is what lets a
 browser start sound. Below the picture are Pause, Reset, the keyboard joystick
-mode, the disk list (multi-disk titles), Export disk, Screenshot, Volume,
-Fullscreen and About.
+mode, the disk list (multi-disk titles), Export disk, Import disk, Screenshot,
+Volume, Fullscreen and About.
 
 - **Keyboard:** goes to the Amiga. In joystick mode `keys` the cursor keys
   steer and Right Ctrl, Right Alt or Left Ctrl fire (Left Alt is the second
@@ -236,8 +236,9 @@ Fullscreen and About.
 - **Saves:** each disk runs from the visitor's own writable copy, as the native
   player's does. Changes are stored in the browser (IndexedDB, in a database
   named after the manifest's `id`) and return on the next visit. **Export
-  disk** downloads the current image of `DF0:`; **Erase saves** in the About
-  box returns to the pristine disks. A page repacked with a changed disk starts
+  disk** downloads the current image of `DF0:` and **Import disk** takes one
+  back (to move saves between browsers); **Erase saves** in the About box
+  returns to the pristine disks. A page repacked with a changed disk starts
   afresh. A quick save state is offered back only to the exact build that
   wrote it.
 - **About:** names Copperline and where its source is, and shows the

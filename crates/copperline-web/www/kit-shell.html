@@ -23,8 +23,8 @@ html, body { margin: 0; height: 100%; background: #0b0c10; color: #d7dae0;
 #cl-app { height: 100vh; height: 100dvh; display: flex; flex-direction: column;
   background: #0b0c10; }
 #cl-app.cl-pinned { position: fixed; inset: 0; z-index: 10; }
-#cl-stage { flex: 1 1 0; min-height: 0; container-type: size; display: flex;
-  align-items: center; justify-content: center; }
+#cl-stage { position: relative; flex: 1 1 0; min-height: 0; container-type: size;
+  display: flex; align-items: center; justify-content: center; }
 #cl-view { position: relative; aspect-ratio: 4 / 3; background: #000;
   width: min(100cqw, calc(100cqh * 4 / 3)); }
 #cl-screen { display: block; width: 100%; height: 100%; outline: none;
@@ -52,10 +52,12 @@ button[hidden], label[hidden] { display: none; }
 #cl-led.cl-on { background: #4be36a; box-shadow: 0 0 6px #4be36a; }
 #cl-note { color: #9aa0ab; font-size: 0.85rem; }
 #cl-note:empty { display: none; }
+/* The touch pad lies over the stage, not the picture: beside a landscape
+   picture and below a portrait one wherever the stage has room to spare. */
 #cl-touch { position: absolute; inset: 0; pointer-events: none; }
 #cl-stick, #cl-fires button { pointer-events: auto; touch-action: none;
   -webkit-user-select: none; user-select: none; }
-#cl-stick { position: absolute; left: 3%; bottom: 5%; width: 26%; aspect-ratio: 1;
+#cl-stick { position: absolute; left: 3%; bottom: 5%; width: min(26%, 9rem); aspect-ratio: 1;
   border-radius: 50%; background: rgba(255, 255, 255, 0.14); border: 2px solid rgba(255, 255, 255, 0.3); }
 #cl-fires { position: absolute; right: 3%; bottom: 7%; display: flex; gap: 0.8rem; }
 #cl-fires button { width: 3.6rem; height: 3.6rem; border-radius: 50%; font-weight: 700;
@@ -82,6 +84,7 @@ dialog h2 { margin-top: 0; }
       <p id="cl-status">loading...</p>
       <noscript><p>This page needs JavaScript to run.</p></noscript>
     </div>
+  </div>
     <div id="cl-touch" hidden>
       <div id="cl-stick"></div>
       <div id="cl-fires">
@@ -89,7 +92,7 @@ dialog h2 { margin-top: 0; }
         <button id="cl-fire1" type="button">1</button>
       </div>
     </div>
-  </div></div>
+  </div>
   <div id="cl-bar">
     <span id="cl-led" title="Disk activity"></span>
     <button id="cl-pause" type="button">Pause</button>
@@ -99,9 +102,11 @@ dialog h2 { margin-top: 0; }
     <button id="cl-state-save" type="button" hidden>Save state</button>
     <button id="cl-state-load" type="button" hidden>Load state</button>
     <button id="cl-export" type="button">Export disk</button>
+    <button id="cl-import" type="button">Import disk</button>
+    <input id="cl-import-file" type="file" hidden>
     <button id="cl-shot" type="button">Screenshot</button>
     <label>Volume <input id="cl-volume" type="range" min="0" max="100" value="100"></label>
-    <button id="cl-touchpad" type="button" hidden>Hide pad</button>
+    <button id="cl-touchpad" type="button" hidden>Show pad</button>
     <button id="cl-fs" type="button">Fullscreen</button>
     <button id="cl-about-open" type="button">About</button>
     <span id="cl-note" role="status"></span>

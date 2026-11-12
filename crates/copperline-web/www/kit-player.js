@@ -434,7 +434,11 @@ export async function start(kit) {
   }
   stickEl.addEventListener('pointerdown', (e) => {
     e.preventDefault();
-    stickEl.setPointerCapture?.(e.pointerId);
+    try {
+      stickEl.setPointerCapture?.(e.pointerId);
+    } catch {
+      // Capture only keeps a drag that leaves the zone; steer without it.
+    }
     stickFrom(e);
   });
   stickEl.addEventListener('pointermove', (e) => {
@@ -698,6 +702,42 @@ export async function start(kit) {
       new Blob([disk.bytes], { type: 'application/octet-stream' }),
       exportFileName(`${config.game.title}-${disk.name}`, ''),
     );
+  });
+
+  // The way back in: an image exported earlier (on another device, say)
+  // replaces the disk in DF0 and becomes the stored copy. The core decides
+  // whether the file is a disk image at all, so this needs a running
+  // machine.
+  const importBtn = $('cl-import');
+  const importFile = $('cl-import-file');
+  importBtn.hidden = exportBtn.hidden;
+  importBtn.addEventListener('click', () => {
+    if (!emu || !running) {
+      note('Start the title before importing a disk');
+      return;
+    }
+    importFile.click();
+  });
+  importFile.addEventListener('change', async () => {
+    const file = importFile.files?.[0];
+    importFile.value = '';
+    const disk = disks[driveDisk[0]];
+    if (!file || !disk || !emu) return;
+    try {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      // Store the current disk first: the import replaces it for good.
+      await flushDrive(0);
+      if (!emu) return;
+      emu.insert_floppy_writable(0, bytes, disk.name);
+      disk.writable = true;
+      await flushDrive(0);
+      note(`Imported ${file.name} as ${disk.name}; reset to boot from it`, true);
+    } catch (e) {
+      // The core refuses a file that is not a disk image before touching
+      // the drive, so the disk that was in it is still there.
+      note(`Import failed: ${e.message ?? e}`, true);
+    }
+    canvas.focus({ preventScroll: true });
   });
 
   // Quick save state, when the manifest enables it. A state is only
