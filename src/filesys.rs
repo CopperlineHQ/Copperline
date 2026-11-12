@@ -2611,7 +2611,11 @@ fn parse_uaem(data: &[u8]) -> Option<UaemInfo> {
 /// Converted directly from the civil date (no timezone round trip): the
 /// sidecar records the guest's original DateStamp rendered as text.
 fn parse_uaem_date(s: &[u8]) -> Option<(DateStamp, &[u8])> {
-    let t = std::str::from_utf8(s.get(..22)?).ok()?;
+    // The fields are sliced by byte position, so every byte has to be a
+    // whole character.
+    let t = std::str::from_utf8(s.get(..22)?)
+        .ok()
+        .filter(|t| t.is_ascii())?;
     let b = t.as_bytes();
     if !(b[4] == b'-' && b[7] == b'-' && b[10] == b' ' && b[13] == b':') {
         return None;
@@ -4193,6 +4197,16 @@ mod tests {
         // Flags but no parsable date: attributes still apply.
         let info = parse_uaem(b"---arwed").unwrap();
         assert_eq!(info.protection, 0x10); // FIBF_ARCHIVE
+        assert_eq!(info.date, None);
+    }
+
+    /// The date is picked apart by byte position. A sidecar is host data
+    /// (and a guest can write one), so a multi-byte character straddling a
+    /// field boundary must read as "no date", not split a character.
+    #[test]
+    fn uaem_sidecar_with_a_multibyte_character_in_the_date_has_no_date() {
+        let info = parse_uaem(b"----rwed 2020-01-01 00:0\xC3\xA9:00.00").unwrap();
+        assert_eq!(info.protection, 0);
         assert_eq!(info.date, None);
     }
 
