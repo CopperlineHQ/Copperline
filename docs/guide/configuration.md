@@ -941,7 +941,8 @@ subfolders on first use:
   the machine runs. A file plays in emulated time: the machine waits for
   the decoder, so the same files give the same output on a fast or a slow
   host, headless or windowed. Stills (PNG, JPEG, BMP) need nothing
-  else; video files are decoded by ffmpeg, found as `ffmpeg.exe` (or
+  else; video files are decoded by ffmpeg: the program the
+  `COPPERLINE_FFMPEG` environment variable names, else `ffmpeg.exe` (or
   `ffmpeg`) in the folder itself, beside Copperline, or on the `PATH`.
 - `Output`: recordings of the Program output (MP4 or AVI, see below).
 
