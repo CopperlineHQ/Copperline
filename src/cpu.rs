@@ -533,8 +533,10 @@ struct CpuBus {
     cacr_040_layout: bool,
     /// Transient accounting inside one run_batch call, never snapshotted.
     jit_batch: Option<JitBatchTiming>,
-    /// Cache exclusions may be reused only within one CPU slice, until a
-    /// peripheral write, RESET or primary-bank change. Never caches a pointer.
+    /// Cache exclusions, and the list of additional regions they mirror
+    /// (`jit_recapture_extra_regions`), may be reused only within one CPU
+    /// slice, until a peripheral write other than to the custom chips,
+    /// RESET or a primary-bank change. Never caches a pointer.
     jit_cache_exclusions_current: bool,
     jit_bus_boundary: bool,
     /// The local memory the running batch was offered, for the accesses the
@@ -572,6 +574,9 @@ struct JitLocalMap {
     /// Whether slot 0 holds the primary window; the additional regions
     /// follow it, or start there when the batch has no primary window.
     primary: bool,
+    /// The additional regions as last captured in full, which later batches
+    /// reuse while `CpuBus::jit_cache_exclusions_current` holds.
+    captured_extra: [Option<JitLocalRegion>; MAX_FAST_MEM_REGIONS],
 }
 
 impl Default for JitLocalMap {
@@ -585,6 +590,7 @@ impl Default for JitLocalMap {
                 backing: JitLocalBacking::Rom,
             }; MAX_FAST_MEM_REGIONS + 1],
             primary: false,
+            captured_extra: [None; MAX_FAST_MEM_REGIONS],
         }
     }
 }
@@ -4814,6 +4820,10 @@ impl CpuBus {
         // Ordinary memory stores above change bytes, not mappings. Autoconfig
         // and peripheral writes below can change decode, so recapture cache
         // exclusions before the next batch. RESET and slice entry also do so.
+        // The custom chips are the exception: no register of theirs moves a
+        // CPU mapping, and OS code writes INTENA far too often to pay a
+        // recapture for each Disable and Enable.
+        let exclusions_were_current = self.jit_cache_exclusions_current;
         self.jit_cache_exclusions_current = false;
 
         if self.bus.uaelib.is_some() && crate::uaelib::debug_port::decodes(addr) {
@@ -5024,6 +5034,7 @@ impl CpuBus {
             return;
         }
         if let Some(off) = self.custom_reg_page_offset(addr) {
+            self.jit_cache_exclusions_current = exclusions_were_current;
             // Custom registers live on the chip bus; custom_write itself
             // grants the contended chip-bus slot.
             if self
@@ -5191,6 +5202,11 @@ impl CpuBus {
             self.jit_cache_exclusions_current = false;
             return regions;
         }
+        if self.jit_cache_exclusions_current {
+            if let Some(regions) = self.jit_recapture_extra_regions() {
+                return regions;
+            }
+        }
         let mut local = [None; MAX_FAST_MEM_REGIONS];
         let mut count = 0;
         let mut push = |ptr, base, len, writable, backing| {
@@ -5304,8 +5320,61 @@ impl CpuBus {
         }
         self.window_offered |= count != 0;
         self.jit_cache_exclusions_current = true;
+        self.jit_local.captured_extra = local;
         self.jit_local.set_extra(&local);
         regions
+    }
+
+    /// The additional regions of the previous capture, for a batch whose
+    /// mappings cannot have changed since (`jit_cache_exclusions_current`).
+    /// A batch ends at every shared-bus access, so OS code starts one every
+    /// few dozen instructions, and walking the ROMs, RAM banks and boards
+    /// again for each was a measurable share of that code's host time. Only
+    /// the descriptors are reused: each host pointer is taken afresh from
+    /// its backing store, and a store that no longer covers its descriptor
+    /// sends the caller back to the full capture.
+    fn jit_recapture_extra_regions(
+        &mut self,
+    ) -> Option<[Option<FastMemRegion>; MAX_FAST_MEM_REGIONS]> {
+        let captured = self.jit_local.captured_extra;
+        let mut regions = [None; MAX_FAST_MEM_REGIONS];
+        for (slot, region) in regions.iter_mut().zip(captured.iter().flatten()) {
+            let mem = &mut self.bus.mem;
+            let bytes: &mut [u8] = match region.backing {
+                JitLocalBacking::Rom => &mut mem.rom,
+                JitLocalBacking::ExtendedRom => &mut mem.extended_rom,
+                JitLocalBacking::MbRam => &mut mem.mb_ram,
+                JitLocalBacking::AccelRam => &mut mem.accel_ram,
+                JitLocalBacking::ZorroRam(idx) => mem.zorro.board_ram_mut(idx),
+                JitLocalBacking::BoardRom(device) => {
+                    let rom =
+                        crate::zorro_device::ZorroDevice::plain_rom(self.bus.devices.get(device)?)?
+                            .1;
+                    if rom.len() != region.len as usize {
+                        return None;
+                    }
+                    *slot = Some(FastMemRegion {
+                        ptr: rom.as_ptr().cast_mut(),
+                        base: region.base,
+                        len: region.len,
+                        writable: false,
+                    });
+                    continue;
+                }
+            };
+            if bytes.len() != region.len as usize {
+                return None;
+            }
+            *slot = Some(FastMemRegion {
+                ptr: bytes.as_mut_ptr(),
+                base: region.base,
+                len: region.len,
+                writable: region.writable,
+            });
+        }
+        self.window_offered |= regions[0].is_some();
+        self.jit_local.set_extra(&captured);
+        Some(regions)
     }
 
     /// Serve a read or fetch the core sent through the bus from the local
@@ -9563,6 +9632,50 @@ mod tests {
         // An access running off the end of the ROM is not plain.
         assert!(jit.bus.board_plain_rom(CODE + rom_len - 2, 4).is_none());
         assert!(jit.bus.board_plain_rom(CODE + rom_len - 2, 2).is_some());
+        Ok(())
+    }
+
+    /// The list of additional regions is worked out once and reused, with
+    /// fresh pointers, until a mapping could have changed: a custom-chip
+    /// write keeps it, a CIA write (OVL lives there) drops it, and a
+    /// backing store that changed size is never trusted.
+    #[test]
+    fn jit_region_capture_is_reused_until_a_mapping_can_change() -> Result<()> {
+        let mut machine = machine_with_program_model(0x0100, &[0x4E71], CpuModel::M68030)?;
+        machine.bus.bus.mem.fit_mb_ram(2 * 1024 * 1024);
+        machine.set_jit_enabled(true);
+        let key = |regions: &[Option<FastMemRegion>; MAX_FAST_MEM_REGIONS]| {
+            regions.map(|r| r.map(|r| (r.ptr as usize, r.base, r.len, r.writable)))
+        };
+        let bus = &mut machine.bus;
+        bus.bus.cpu_pc = FAST_RAM_BASE as u32;
+        bus.fast_mem().unwrap();
+        assert!(bus
+            .jit_recapture_extra_regions()
+            .is_some_and(|r| r[0].is_none()));
+        let full = bus.fast_mem_regions();
+        assert!(full[1].is_some(), "ROM and motherboard RAM");
+        assert!(bus.jit_cache_exclusions_current);
+        let reused = bus
+            .jit_recapture_extra_regions()
+            .expect("unchanged mappings");
+        assert_eq!(key(&reused), key(&full));
+
+        bus.write_word(0x00DF_F09A, 0x4000); // INTENA
+        assert!(bus.jit_cache_exclusions_current);
+        bus.write_byte(0x00BF_E201, 0x03); // CIA-A DDRA
+        assert!(!bus.jit_cache_exclusions_current);
+
+        assert_eq!(key(&bus.fast_mem_regions()), key(&full));
+        assert!(bus.jit_cache_exclusions_current);
+        bus.bus.mem.fit_mb_ram(4 * 1024 * 1024);
+        assert!(bus.jit_recapture_extra_regions().is_none());
+        let mb = bus.bus.mem.mb_ram_base() as u32;
+        assert!(bus
+            .fast_mem_regions()
+            .iter()
+            .flatten()
+            .any(|r| r.base == mb && r.len == 4 * 1024 * 1024));
         Ok(())
     }
 

@@ -134,8 +134,15 @@ the expansion-bus timing for all of it. Chip and slow
 RAM, the boot-time ROM overlay, WCS and every other device or cartridge
 mapping stay on the bus. A store or a whole read-modify-write instruction aimed at ROM,
 and an access that crosses a region boundary, falls back to the bus before
-the instruction changes any register. The mappings are captured afresh for
-each native batch and never serialized, but the primary bank choice is
+the instruction changes any register. The host pointers are taken afresh
+for each native batch and never serialized. Which regions exist is worked
+out once and reused by the batches that follow (a batch ends at every
+shared-bus access, so OS code starts one every few dozen instructions)
+until something that can move a mapping happens: a write to anything but
+memory or the custom chips, RESET, a new primary bank, or the end of the
+CPU slice. Custom-chip writes are exempt because no register there moves a
+CPU mapping and the OS writes INTENA for every `Disable` and `Enable`. The
+primary bank choice is
 saved with the machine (`MachineRuntimeState::jit_window_bank`): with more
 banks fitted than the table holds it still decides which accesses allocate
 cache lines, so it is emulated state, not only host speed.
@@ -193,9 +200,8 @@ The timing contract is deliberately approximate
   one-instruction batch gets no direct pointers (it cannot enter a native
   trace), but its local accesses keep the same cache exclusions as the
   batches around it.
-  With cache models present a slice reuses those exclusions until a
-  peripheral write, RESET or a new primary bank invalidates them; slice
-  entry and state adoption always rebuild them;
+  A slice reuses those exclusions on the same terms as the region list
+  above; slice entry and state adoption always rebuild them;
 - interrupts are recognized at batch boundaries from the live
   INTENA/INTREQ state, and a fast-RAM or ROM batch also ends as soon as a
   pending level rises above the mask (an SR write unmasking it, say). A
