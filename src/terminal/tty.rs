@@ -153,10 +153,16 @@ fn restore_terminal(restore: &Restore) {
 /// text once the session ends. Reads until the terminal has been quiet for
 /// [`DRAIN_QUIET`], for at most [`DRAIN_BUDGET`].
 fn discard_input(fd: RawFd) {
+    discard_input_within(fd, DRAIN_QUIET, DRAIN_BUDGET);
+}
+
+/// [`discard_input`] with its quiet period and budget given, so a test can
+/// widen them past what a loaded machine's scheduler can stall for.
+fn discard_input_within(fd: RawFd, quiet_for: Duration, budget: Duration) {
     let started = Instant::now();
     let mut quiet_since = started;
     let mut buf = [0u8; 1024];
-    while started.elapsed() < DRAIN_BUDGET {
+    while started.elapsed() < budget {
         // SAFETY: buf is a live, writable slice; fd is an open descriptor.
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n > 0 {
@@ -174,7 +180,7 @@ fn discard_input(fd: RawFd) {
             break;
         }
         let quiet = quiet_since.elapsed();
-        if quiet >= DRAIN_QUIET || wait_fd(fd, false, DRAIN_QUIET - quiet).is_err() {
+        if quiet >= quiet_for || wait_fd(fd, false, quiet_for - quiet).is_err() {
             break;
         }
     }
@@ -1402,18 +1408,57 @@ mod tests {
     fn restoring_discards_input_the_session_never_read() {
         let (restore, _out_read, _out_write, mut in_read, mut in_write) = piped_restore(true);
         in_write.write_all(b"\x1b[<35;120;80M\x1b[97;1:3u").unwrap();
-        // More arrives while the restore is already under way.
-        let late = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(15));
-            in_write.write_all(b"\x1b[<35;121;80M").unwrap();
-            in_write
-        });
         let started = Instant::now();
         restore_terminal(&restore);
-        let _in_write = late.join().unwrap();
         assert_eq!(read_available(&mut in_read), b"");
         assert!(started.elapsed() >= DRAIN_QUIET);
         assert!(started.elapsed() < DRAIN_BUDGET + Duration::from_secs(1));
+    }
+
+    /// Bytes queued on a pipe and not yet read.
+    fn queued_bytes(fd: RawFd) -> libc::c_int {
+        let mut queued: libc::c_int = 0;
+        // SAFETY: FIONREAD writes one c_int through a live pointer; fd is
+        // an open pipe end the caller holds.
+        let rc = unsafe { libc::ioctl(fd, libc::FIONREAD, &mut queued) };
+        assert_eq!(rc, 0, "FIONREAD: {}", std::io::Error::last_os_error());
+        queued
+    }
+
+    /// A report that lands while the drain is still waiting for quiet is
+    /// discarded too, and the wait for quiet starts over from it. The
+    /// late report is sent only once the drain has emptied the pipe, so it
+    /// arrives mid-drain however the threads are scheduled; the quiet
+    /// period is far wider than the production one so a stalled writer
+    /// thread cannot outlast it.
+    #[test]
+    fn input_arriving_during_the_drain_restarts_the_quiet_period() {
+        let quiet_for = Duration::from_millis(500);
+        let (mut in_read, mut in_write) = pipe();
+        nonblocking(&in_read);
+        let read_fd = in_read.as_raw_fd();
+        in_write.write_all(b"\x1b[<35;120;80M\x1b[97;1:3u").unwrap();
+        let late = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while queued_bytes(read_fd) > 0 {
+                assert!(Instant::now() < deadline, "the drain never read");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let sent_at = Instant::now();
+            in_write.write_all(b"\x1b[<35;121;80M").unwrap();
+            (sent_at, in_write)
+        });
+        discard_input_within(read_fd, quiet_for, Duration::from_secs(10));
+        let returned = Instant::now();
+        let (sent_at, _in_write) = late.join().unwrap();
+        assert_eq!(read_available(&mut in_read), b"");
+        // Quiet is measured from the read that took the late report, which
+        // cannot come before the write began.
+        assert!(
+            returned.duration_since(sent_at) >= quiet_for,
+            "returned {:?} after the late write",
+            returned.duration_since(sent_at)
+        );
     }
 
     /// A terminal that never stops sending cannot hold the restore up.
