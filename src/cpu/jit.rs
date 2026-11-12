@@ -42,6 +42,12 @@ pub(super) struct JitTiming {
     irq_level: u8,
     host_stop: bool,
     stop_state_stale: bool,
+    /// Nothing cached above can end the batch: the state is fresh, no
+    /// interrupt is pending at any level, the host has no stop and no
+    /// shared-bus fetch is waiting to finish. The boundary hook then has
+    /// only `jit_bus_boundary` to look at. Cleared with every
+    /// `stop_state_stale`.
+    quiet: bool,
 }
 
 /// What a bus access under the batch path is doing.
@@ -137,6 +143,7 @@ impl CpuBus {
             if let Some(JitBatchTiming::Multiple(timing)) = self.jit_batch.as_mut() {
                 // The access itself can raise interrupts or move the beam.
                 timing.stop_state_stale = true;
+                timing.quiet = false;
                 if fetch {
                     timing.fetch_retired.get_or_insert(timing.observed_retired);
                     return;
@@ -162,6 +169,10 @@ impl CpuBus {
             return false;
         };
         timing.observed_retired = retired;
+        // The common case, a run of local instructions with nothing pending.
+        if timing.quiet && !self.jit_bus_boundary {
+            return false;
+        }
         // Always allow progress on entry, including a bring-up interrupt whose
         // vector has not been installed yet. The host applies that guard.
         if retired == 0 {
@@ -174,6 +185,7 @@ impl CpuBus {
             (timing.irq_level, timing.host_stop) = jit_stop_state(&self.bus, timing.deadline);
             timing.stop_state_stale = false;
         }
+        timing.quiet = !timing.host_stop && timing.irq_level == 0 && timing.fetch_retired.is_none();
         timing.host_stop || timing.irq_level > ((sr >> 8) & 7) as u8
     }
 
@@ -213,6 +225,7 @@ impl CpuBus {
             timing.retired = retired;
             self.flush_timed_devices_dcache_coherent();
             timing.stop_state_stale = true;
+            timing.quiet = false;
         }
         self.diag_current_pc = pc;
         self.bus.cpu_pc = pc;
@@ -241,6 +254,7 @@ impl CpuBus {
             irq_level: 0,
             host_stop: false,
             stop_state_stale: true,
+            quiet: false,
         }));
     }
 }
@@ -373,6 +387,7 @@ impl M68kMachine {
                     irq_level: 0,
                     host_stop: false,
                     stop_state_stale: true,
+                    quiet: false,
                 })
             });
             let cpu_was_stopped = self.cpu.is_stopped();
