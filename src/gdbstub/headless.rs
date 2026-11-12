@@ -10,7 +10,7 @@
 use super::core::*;
 use crate::debugger::normalize_listen_addr;
 use crate::emulator::Emulator;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -77,7 +77,17 @@ fn serve_dialect(
         // absorbs an already-running program so nothing fires spuriously.
         let mut session = Session::new(emu, stream, stop_on_load.clone());
         session.core.bartman = bartman;
-        let end = session.run()?;
+        let end = match session.run() {
+            Ok(end) => end,
+            // The connection failed under the session (reset, a reply the
+            // client was no longer there to take). That is the client's
+            // end of things: the machine stays paused for the next one.
+            Err(error) if is_connection_error(&error) => {
+                log::warn!("gdb: connection lost: {error:#}");
+                SessionEnd::Detached
+            }
+            Err(error) => return Err(error),
+        };
         session.clear_debug_hardware();
         emu = session.emu;
         match end {
@@ -93,6 +103,13 @@ fn serve_dialect(
             }
         }
     }
+}
+
+/// Whether a session error came from its socket rather than the machine.
+fn is_connection_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
 }
 
 /// How a [`Session`] ended: a detach/EOF keeps serving, `k` shuts down.
@@ -275,29 +292,39 @@ impl Session {
                 }
             }
 
+            // A client that goes away part way through a packet has
+            // detached, the same as one that goes away between packets.
+            let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::UnexpectedEof;
             let mut payload = Vec::new();
             loop {
-                self.stream
-                    .read_exact(&mut byte)
-                    .context("reading GDB packet payload")?;
+                match self.stream.read_exact(&mut byte) {
+                    Ok(()) => {}
+                    Err(e) if gone(&e) => return Ok(None),
+                    Err(e) => return Err(e).context("reading GDB packet payload"),
+                }
                 if byte[0] == b'#' {
                     break;
                 }
                 payload.push(byte[0]);
                 if payload.len() > MAX_PACKET_PAYLOAD_BYTES {
-                    bail!(
-                        "GDB packet exceeds {}-byte limit without a '#' terminator",
-                        MAX_PACKET_PAYLOAD_BYTES
+                    // Not a debugger: drop the client, keep the machine.
+                    log::warn!(
+                        "gdb: packet exceeds {MAX_PACKET_PAYLOAD_BYTES}-byte limit without a \
+                         '#' terminator; dropping the client"
                     );
+                    return Ok(None);
                 }
             }
             let mut sum_bytes = [0u8; 2];
-            self.stream
-                .read_exact(&mut sum_bytes)
-                .context("reading GDB packet checksum")?;
-            let expected = parse_hex_byte(sum_bytes[0], sum_bytes[1])?;
-            let actual = checksum(&payload);
-            if expected != actual {
+            match self.stream.read_exact(&mut sum_bytes) {
+                Ok(()) => {}
+                Err(e) if gone(&e) => return Ok(None),
+                Err(e) => return Err(e).context("reading GDB packet checksum"),
+            }
+            // Checksum digits that are not hex are a checksum that does
+            // not match.
+            let expected = parse_hex_byte(sum_bytes[0], sum_bytes[1]).ok();
+            if expected != Some(checksum(&payload)) {
                 if !self.no_ack {
                     self.stream.write_all(b"-").ok();
                 }
@@ -306,9 +333,10 @@ impl Session {
             if !self.no_ack {
                 self.stream.write_all(b"+").ok();
             }
-            return String::from_utf8(payload)
-                .map(Some)
-                .context("GDB packet is not UTF-8");
+            // An acknowledged packet is owed a reply. No packet this stub
+            // knows carries bytes that are not UTF-8, so one that does is
+            // passed on in a form the core answers as unknown.
+            return Ok(Some(String::from_utf8_lossy(&payload).into_owned()));
         }
     }
 
@@ -501,6 +529,34 @@ mod tests {
             // program the first session ran into.
             let mut second = GdbClient::connect(addr);
             assert_eq!(second.request("qOffsets"), "TextSeg=14004;DataSeg=15004");
+            second.send("k");
+        });
+        serve(listener, emulator_with_loadseg_program(), None).unwrap();
+        thread.join().unwrap();
+    }
+
+    /// What a client sends is its own business: bytes that are not a
+    /// packet, or a connection dropped part way through one, end at most
+    /// that client's session. The machine stays, and the next client is
+    /// served.
+    #[test]
+    fn a_malformed_packet_or_a_dropped_client_does_not_end_the_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let thread = std::thread::spawn(move || {
+            let mut first = GdbClient::connect(addr);
+            first.raw(b"$\xff#ff"); // a valid checksum over a byte that is not UTF-8
+            assert_eq!(
+                first.read_reply(),
+                "",
+                "an unknown packet is answered empty"
+            );
+            first.raw(b"$qC#zz"); // checksum digits that are not hex
+            assert_eq!(first.request("qC"), "QC1");
+            first.raw(b"$qC"); // gone before the packet ends
+            drop(first);
+            let mut second = GdbClient::connect(addr);
+            assert_eq!(second.request("qC"), "QC1");
             second.send("k");
         });
         serve(listener, emulator_with_loadseg_program(), None).unwrap();
