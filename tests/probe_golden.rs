@@ -547,6 +547,10 @@ probe_tests! {
     // write gets the blitter's three-miss yield (the write loop must not
     // stall for the whole blit).
     golden_bltprobe_post => probe_aga("bltprobe-post", "bltprobe-post.bin", 16.0);
+    // VPOSR's V8 steps with VHPOSR's line byte: a read of both never pairs
+    // the low byte of one line with the V8 of another (the false line 0 at
+    // 255 -> 256 and line 256 at the frame wrap).
+    golden_posprobe_v8 => probe("posprobe-v8", "posprobe-v8.bin", 16.0);
     // DMA sprite vertical reuse + attached pair placement (the sprite
     // register-FSM regression class).
     golden_ddfprobe_sprmulti => probe("ddfprobe-sprmulti", "ddfprobe-sprmulti.bin", 16.0);

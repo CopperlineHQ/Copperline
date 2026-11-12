@@ -1169,14 +1169,17 @@ impl Agnus {
     }
 
     /// Read VPOSR as exposed by the replacement Agnus: top byte is
-    /// {LOF, chipset_id}, low byte is {LOL, 6'b0, V8}. With the light pen
-    /// enabled and a position latched, V8 comes from the latch (LPENV high
-    /// bit); LOF/LOL and the chipset id stay live.
+    /// {LOF, chipset_id}, low byte is {LOL, 6'b0, V8}. V8 is the top bit of
+    /// the same vertical counter VHPOSR exposes in its high byte, so the
+    /// live readback steps it in the same colour clock (see
+    /// [`Agnus::read_vhposr`]). With the light pen enabled and a position
+    /// latched, V8 comes from the latch (LPENV high bit); LOF/LOL and the
+    /// chipset id stay live.
     pub fn read_vposr(&self) -> u16 {
         let (vpos, lof, lol) = match (self.lpen_latch_active(), self.ersy_freeze) {
             (Some((v, _)), _) => (v, self.lof, self.lol),
             (None, Some(freeze)) => (freeze.vpos, freeze.lof, freeze.lol),
-            (None, None) => (self.read_visible_vpos(), self.lof, self.lol),
+            (None, None) => (self.read_live_beam_position().0, self.lof, self.lol),
         };
         let v8 = ((vpos >> 8) & 0x01) as u16;
         (u16::from(lof) << 15)
@@ -1198,25 +1201,34 @@ impl Agnus {
         let (v, h) = match (self.lpen_latch_active(), self.ersy_freeze) {
             (Some((v, h)), _) => (v, h),
             (None, Some(freeze)) => (freeze.vpos, freeze.hpos),
-            (None, None) => {
-                let line_cck = self.current_line_cck();
-                let mut h = self.hpos + VHPOSR_LOOKAHEAD_CCK;
-                let mut v = self.vpos;
-                if h >= line_cck {
-                    h -= line_cck;
-                    // The first two positions of a line still report the
-                    // previous line number.
-                    if h > 1 {
-                        v += 1;
-                        if v >= self.current_frame_lines() {
-                            v = 0;
-                        }
-                    }
-                }
-                (v, h)
-            }
+            (None, None) => self.read_live_beam_position(),
         };
         (((v & 0xFF) as u16) << 8) | ((h & 0xFF) as u16)
+    }
+
+    /// The live beam position as the position registers report it: the
+    /// vertical counter (all of V8-V0) and the horizontal position in
+    /// colour clocks. The readback runs `VHPOSR_LOOKAHEAD_CCK` ahead of
+    /// the internal counter, and the vertical counter steps two reported
+    /// positions into the line. VPOSR's V8 and VHPOSR's V7-V0 are the same
+    /// counter and both come from here, so a read of one never disagrees
+    /// with a read of the other taken in the same colour clock.
+    fn read_live_beam_position(&self) -> (u32, u32) {
+        let line_cck = self.current_line_cck();
+        let mut h = self.hpos + VHPOSR_LOOKAHEAD_CCK;
+        let mut v = self.vpos;
+        if h >= line_cck {
+            h -= line_cck;
+            // The first two positions of a line still report the
+            // previous line number.
+            if h > 1 {
+                v += 1;
+                if v >= self.current_frame_lines() {
+                    v = 0;
+                }
+            }
+        }
+        (v, h)
     }
 
     /// Mirror BPLCON0.ERSY (bit 1). Setting it with no genlock attached
@@ -1638,21 +1650,71 @@ mod tests {
     }
 
     #[test]
-    fn vposr_v8_bit_observes_line_start_increment_delay() {
+    fn vposr_v8_steps_two_reported_positions_into_the_line() {
         let mut agnus =
             Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
         agnus.vpos = 0xFF;
-        agnus.hpos = COLORCLOCKS_PER_LINE - 1;
+        agnus.hpos = COLORCLOCKS_PER_LINE - VHPOSR_LOOKAHEAD_CCK;
+
+        // V8 is the top bit of the counter VHPOSR shows in its high byte:
+        // it keeps the old line for reported positions 0 and 1 and steps
+        // at position 2, in the same colour clock as V7-V0.
+        assert_eq!(agnus.read_vhposr(), 0xFF00);
+        assert_eq!(agnus.read_vposr(), 0xA000);
+
+        agnus.advance_by_cck(1);
+        assert_eq!(agnus.read_vhposr(), 0xFF01);
+        assert_eq!(agnus.read_vposr(), 0xA000);
+
+        agnus.advance_by_cck(1);
+        assert_eq!(agnus.read_vhposr(), 0x0002);
+        assert_eq!(agnus.read_vposr(), 0xA001);
 
         agnus.advance_by_cck(1);
         assert_eq!(agnus.vpos, 0x100);
-        assert_eq!(agnus.read_vposr(), 0xA000);
-
-        agnus.advance_by_cck(1);
-        assert_eq!(agnus.read_vposr(), 0xA000);
-
-        agnus.advance_by_cck(1);
+        assert_eq!(agnus.read_vhposr(), 0x0003);
         assert_eq!(agnus.read_vposr(), 0xA001);
+    }
+
+    /// The nine-bit line number a program assembles from VPOSR's V8 and
+    /// VHPOSR's V7-V0, both read in the same colour clock.
+    fn reported_line(agnus: &Agnus) -> u32 {
+        (u32::from(agnus.read_vposr() & 1) << 8) | u32::from(agnus.read_vhposr() >> 8)
+    }
+
+    #[test]
+    fn vposr_v8_and_vhposr_line_byte_never_disagree() {
+        // V8 and V7-V0 are one counter. Walking the beam through a whole
+        // frame and into the next, the assembled line number only ever
+        // steps by one line or wraps from the last line to 0: it never
+        // pairs the low byte of one line with the V8 of another (which
+        // reads as line 0 at 255 -> 256 and as line 256 at the frame wrap).
+        for (standard, lines) in [
+            (VideoStandard::Pal, PAL_LINES),
+            (VideoStandard::Ntsc, NTSC_LINES),
+        ] {
+            let mut agnus =
+                Agnus::with_video_standard_and_revision(standard, AgnusRevision::Ecs8372Rev4);
+            let mut previous = reported_line(&agnus);
+            let mut wraps = 0;
+            for _ in 0..(lines + 40) * NTSC_LONG_COLORCLOCKS_PER_LINE {
+                agnus.advance_by_cck(1);
+                let line = reported_line(&agnus);
+                if line != previous {
+                    if line == 0 {
+                        assert!(
+                            previous >= lines - 1,
+                            "{standard:?}: wrapped to line 0 from {previous}"
+                        );
+                        wraps += 1;
+                    } else {
+                        assert_eq!(line, previous + 1, "{standard:?}: line step");
+                    }
+                    previous = line;
+                }
+            }
+            assert_eq!(wraps, 1, "{standard:?}: one frame wrap");
+        }
     }
 
     #[test]

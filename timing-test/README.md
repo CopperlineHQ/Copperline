@@ -754,6 +754,13 @@ bus request and gets the blitter's three-miss yield, so the BLTPRI-clear
 bar is long; a drain that never takes a yielded cycle stalls the writes
 for the whole blit and collapses it to the BLTPRI-set bar; not
 cross-checked against vAmiga, which has no 68020 bus model),
+`posprobe-v8` (131072 long reads of VPOSR:VHPOSR at a walking phase; the
+count of samples whose line number runs backwards, as a bar and a binary
+word -- V8 and V7-V0 are one counter, so the count is the number of frames
+spanned; a model that steps V8 three colour clocks after the low byte adds
+about ten false steps; not a vAmiga or hardware reference as it stands,
+because a long register read is sampled in one colour clock here and real
+68000 reads tear the pair on their own),
 `ddfprobe-sprmulti` (DMA sprite vertical reuse and an attached 15-colour
 pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render
