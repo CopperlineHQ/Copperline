@@ -2581,6 +2581,9 @@ const IMPLICIT_CONFIG_NAME: &str = "copperline.toml";
 pub(crate) fn names_implicit_config(rel: &Path) -> bool {
     rel.file_name()
         .and_then(|name| name.to_str())
+        // Windows drops trailing dots and spaces from a name, so those
+        // spellings reach the same file.
+        .map(|name| name.trim_end_matches(['.', ' ']))
         .is_some_and(|name| name.eq_ignore_ascii_case(IMPLICIT_CONFIG_NAME))
 }
 
@@ -4474,6 +4477,22 @@ mod tests {
         // ... and no longer.
         set_mtime(settled + Duration::from_secs(60));
         assert!(unit.resolve(0, b"late").is_some());
+    }
+
+    /// Windows drops trailing dots and spaces from a name, so those
+    /// spellings reach the same file.
+    #[test]
+    fn the_implicit_config_name_is_recognised_with_trailing_dots_and_spaces() {
+        for name in ["copperline.toml", "Copperline.TOML.", "copperline.toml . ."] {
+            assert!(names_implicit_config(Path::new(name)), "{name:?}");
+            assert!(
+                names_implicit_config(&Path::new("Sub").join(name)),
+                "{name:?}"
+            );
+        }
+        for name in ["copperline.toml.bak", "other.toml", "copperline"] {
+            assert!(!names_implicit_config(Path::new(name)), "{name:?}");
+        }
     }
 
     #[test]
