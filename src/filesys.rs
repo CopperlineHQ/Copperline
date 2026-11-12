@@ -1693,6 +1693,9 @@ impl FilesysUnit {
                 let Some(rec) = self.resolve_for_create(arg(bus, 1), &name) else {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 };
+                if let Some(err) = Self::host_config_refusal(&rec) {
+                    return (DOSFALSE, err);
+                }
                 let path = self.lock_path(&rec);
                 if path.exists() {
                     return (DOSFALSE, ERROR_OBJECT_EXISTS);
@@ -2513,7 +2516,7 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 /// any directory of any mount.
 const IMPLICIT_CONFIG_NAME: &str = "copperline.toml";
 
-fn names_implicit_config(rel: &Path) -> bool {
+pub(crate) fn names_implicit_config(rel: &Path) -> bool {
     rel.file_name()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.eq_ignore_ascii_case(IMPLICIT_CONFIG_NAME))
@@ -3547,6 +3550,24 @@ mod tests {
         // Nothing was created under any spelling, and the source is intact.
         assert_eq!(listing(&fs.root), ["source.txt"]);
         assert_eq!(std::fs::read(fs.root.join("source.txt")).unwrap(), b"data");
+    }
+
+    /// A directory of the implicitly loaded name is no configuration, but
+    /// the next run started there finds the name and fails to load it.
+    #[test]
+    fn the_implicitly_loaded_config_name_cannot_be_made_as_a_directory() {
+        let mut fs = FsTester::mounted("implicit-config-dir");
+        fs.set_name(b"Copperline.TOML");
+        assert_eq!(
+            fs.send(ACTION_CREATE_DIR, [0, FsTester::NAME >> 2, 0]),
+            (DOSFALSE, ERROR_WRITE_PROTECTED)
+        );
+        assert_eq!(std::fs::read_dir(&fs.root).unwrap().count(), 0);
+        fs.set_name(b"other.toml");
+        assert_ne!(
+            fs.send(ACTION_CREATE_DIR, [0, FsTester::NAME >> 2, 0]).0,
+            DOSFALSE
+        );
     }
 
     /// A later run loads `copperline.toml` from its working directory without
