@@ -1126,7 +1126,9 @@ impl Filesystem {
             let at = self.open_file(sram, slot.arg32(sram, 6))?;
             let d = self.drive(n)?;
             let index = self.writable(sram, d, at)?;
-            let len = read64(sram, at + g::FILELEN_EXT, at + g::FILELEN) + more;
+            // The grip's length is the guest's to write: past the top of
+            // the range it is simply more than the file's room.
+            let len = read64(sram, at + g::FILELEN_EXT, at + g::FILELEN).saturating_add(more);
             self.drives[d]
                 .set_len(index, len)
                 .map_err(|e| io_error(n, &e))?;
@@ -1758,6 +1760,37 @@ mod tests {
         // A clip cannot be replaced by a new file.
         r.action(0, "Clip", 0, MODE_OUTPUT);
         assert_eq!(r.send(op::FILEOPEN, &[(4, ACTION as u32)]).0, ERR_PROTECTED);
+    }
+
+    /// A grip lies in SRAM the guest can write, so the position and the
+    /// length in it are guest values. A write or an extend from one at the
+    /// top of the 64-bit range is a full disk, not an arithmetic overflow,
+    /// and leaves the host file as it was.
+    #[test]
+    fn a_position_or_length_poked_into_a_grip_cannot_overflow() {
+        let mut r = rig();
+        let fa0 = r._dir.path().join("Flyer/FA0");
+        r.action(0, "Poked", 0, MODE_OUTPUT);
+        assert_eq!(r.send(op::FILEOPEN, &[(4, ACTION as u32)]).0, err::OKAY);
+        let id = rd32(&r.sram, ACTION + ca::FILE_ID);
+        r.sram[BUFFER..BUFFER + 32].fill(0x55);
+        let write = [(4, 0), (6, id), (10, 32), (14, BUFFER as u32)];
+        assert_eq!(r.send(op::FILEWRITE, &write).0, err::OKAY);
+        let at = (id - SRAM_CPU_BASE) as usize;
+
+        write64(
+            &mut r.sram,
+            at + g::CURPOS_EXT,
+            at + g::CURPOS,
+            u64::MAX - 15,
+        );
+        assert_ne!(r.send(op::FILEWRITE, &write).0, err::OKAY);
+        write64(&mut r.sram, at + g::FILELEN_EXT, at + g::FILELEN, u64::MAX);
+        assert_ne!(
+            r.send(op::FILEEXTEND, &[(4, 0), (6, id), (10, 1)]).0,
+            err::OKAY
+        );
+        assert_eq!(std::fs::read(fa0.join("Poked")).unwrap(), [0x55; 32]);
     }
 
     #[test]

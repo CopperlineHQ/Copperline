@@ -680,11 +680,12 @@ impl Player {
         {
             return Err(err::BADPARAM);
         }
+        // (Only the start of a part being played was checked above.)
         if r.vid_count == 0 {
-            r.vid_count = clip.fields - r.vid_start;
+            r.vid_count = clip.fields.saturating_sub(r.vid_start);
         }
         if r.aud_count == 0 {
-            r.aud_count = clip.fields - r.aud_start;
+            r.aud_count = clip.fields.saturating_sub(r.aud_start);
         }
         // The channel's current user: stolen, or an error if asked.
         if r.video() {
@@ -1579,7 +1580,7 @@ fn add_dsp_event(list: &mut Vec<DspEvent>, mut e: DspEvent) {
             }
         }
         if same && this.rate == 0 && e.rate > 0 {
-            e.time += 1;
+            e.time = e.time.wrapping_add(1);
             e.rate -= 1;
         }
         i += 1;
@@ -1689,6 +1690,49 @@ mod tests {
         r.field(128);
         assert_eq!(r.player.shown[1], Shown::Black);
         assert_eq!(r.player.dsp_queue.len(), 0);
+    }
+
+    /// Only the start a request uses is range-checked, so the count a
+    /// zero defaults to must not be worked out from the other one by a
+    /// bare subtraction: the guest can leave anything there.
+    #[test]
+    fn an_unused_start_past_the_clip_does_not_underflow_its_default_count() {
+        let mut r = rig();
+        let mut req = request(caf::AUDIOL, 0);
+        req.vid_start = u32::MAX;
+        req.vid_count = 0;
+        let clip = info(&r.path);
+        r.player
+            .play_clip(Slot(1), req, clip, 0, &mut r.sram, Some(&r.link))
+            .unwrap();
+        let mut r = rig();
+        let mut req = request(caf::VIDEO, 0);
+        req.aud_start = u32::MAX;
+        req.aud_count = 0;
+        let clip = info(&r.path);
+        r.player
+            .play_clip(Slot(1), req, clip, 0, &mut r.sram, Some(&r.link))
+            .unwrap();
+    }
+
+    /// A ramp queued behind an immediate change on the same channel
+    /// starts a field later; at the last field number that wraps, as the
+    /// field clock itself does.
+    #[test]
+    fn a_ramp_behind_an_immediate_change_wraps_with_the_field_clock() {
+        let event = |rate| DspEvent {
+            time: u32::MAX,
+            chan: 1,
+            volume: 0x4000,
+            pan: 0,
+            rate,
+            owner: Owner::Play(1),
+        };
+        let mut list = Vec::new();
+        add_dsp_event(&mut list, event(0));
+        add_dsp_event(&mut list, event(4));
+        assert_eq!(list.len(), 2);
+        assert_eq!((list[1].time, list[1].rate), (0, 3));
     }
 
     #[test]

@@ -477,7 +477,8 @@ impl HostDrive {
 
     /// Write bytes into a file at `offset`, growing it as needed.
     pub fn write_file(&mut self, index: usize, offset: u64, data: &[u8]) -> std::io::Result<()> {
-        let end = offset + data.len() as u64;
+        // The offset is the guest's (a grip's position lies in its SRAM).
+        let end = offset.saturating_add(data.len() as u64);
         if end > self.objects[index].bytes {
             self.set_len(index, end)?;
         }
