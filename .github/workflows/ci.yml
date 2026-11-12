@@ -670,14 +670,15 @@ jobs:
           node ../../tools/check-web-netplay.mjs pkg
           node ../../tools/check-web-netplay-swaps.mjs pkg
       - name: Single-file web player kit
-        # Pack a page around the bundle built above and boot the machine
-        # from the page's own embedded assets, through the page's own
-        # loader. A blank disk is enough: the check is that the packed
-        # emulator, ROM and disk come back out intact and run.
+        # Pack a page around the bundle built above and run the page's own
+        # scripts (guard, loader, shell) against a stand-in page: boot the
+        # machine from the embedded assets and drive the save, state and
+        # restart paths. A blank disk is enough: the check is that the
+        # packed emulator, ROM and disk come back out intact and run.
         run: |
           mkdir -p target/kit-smoke
           python3 -c "open('target/kit-smoke/blank.adf', 'wb').write(bytes(901120))"
-          printf '[game]\ntitle = "Kit smoke test"\nid = "kit-smoke"\n\n[payload]\nadf = "blank.adf"\n\n[machine]\nmodel = "A500"\n' \
+          printf '[game]\ntitle = "Kit smoke test"\nid = "kit-smoke"\n\n[payload]\nadf = "blank.adf"\n\n[machine]\nmodel = "A500"\n\n[features]\nsave_states = true\n' \
             > target/kit-smoke/game.toml
           python3 tools/publish-web --manifest target/kit-smoke/game.toml \
             --skip-build --out target/kit-smoke/page.html

@@ -272,8 +272,15 @@ Volume, Fullscreen and About.
   disk** downloads the current image of `DF0:` and **Import disk** takes one
   back (to move saves between browsers); **Erase saves** in the About box
   returns to the pristine disks and restarts the title. A page repacked with a changed disk starts
-  afresh. A quick save state is offered back only to the exact build that
-  wrote it.
+  afresh.
+- **Save states** (with `[features] save_states`): one quick slot, offered
+  back only to the exact build that wrote it. A state is the whole machine,
+  disks included, as everywhere else in Copperline: loading one puts every
+  disk that was in a drive when it was saved back to how it was at that
+  moment, and the stored copy follows at once. Anything the title wrote to
+  such a disk after the state was saved is gone, and the page says which disk
+  went back; a visitor who wants to keep it uses **Export disk** first. A
+  disk that was not in a drive when the state was saved is left alone.
 - **About:** names Copperline, the source repository and the commit the page
   was built from, and shows the notices described under
   [Source and license notices](#web-kit-notices), all carried
@@ -282,8 +289,11 @@ Volume, Fullscreen and About.
 ### Hosting and browser support
 
 The page needs `DecompressionStream`, `AudioWorklet` and CSS container units:
-Chrome or Edge 105, Firefox 113, Safari 16.4, or newer. An older browser gets
-a plain message instead of a blank page. Browser storage can be unavailable
+Chrome or Edge 105, Firefox 113, Safari 16.4, or newer. An older browser is
+told so instead of being left on "loading...": one that parses the loader but
+lacks a feature gets the loader's own message, and one too old to parse it at
+all is caught by a small guard script written in the oldest syntax, which
+takes any script error before the loader has run to mean that. Browser storage can be unavailable
 (private windows, some `file://` origins); the title still plays, and the page
 says saves cannot be kept.
 
@@ -300,10 +310,16 @@ node tools/check-web-kit.mjs target/publish/skyhawks.html
 node tools/check-web-kit-browser.mjs target/publish/skyhawks.html --seconds 30
 ```
 
-The first needs only Node: it runs the page's own loader over the page's own
-embedded assets, builds the machine and emulates 20 seconds
-(`--seconds N`), then requires a picture with at least `--min-colours`
-colours. The second opens the file in a headless Chrome (`--chrome PATH` or
+The first needs only Node. It runs the page's own scripts against a stand-in
+for the page: the guard, the loader over the page's own embedded assets, and
+the shell the loader starts. It then drives the shell's controls on a
+synthetic clock: every About text opens, Start boots the machine, which after
+20 emulated seconds (`--seconds N`) must show a picture with at least
+`--min-colours` colours, and the save paths are exercised (an imported disk
+is stored, a loaded state takes its disk back, Erase saves stays erased, a
+Restart after a failure runs one frame loop). It has no layout, canvas or
+audio device, and imports the modules from `data:` instead of `blob:` URLs.
+The second covers those: it opens the file in a headless Chrome (`--chrome PATH` or
 `$CHROME` when it is not in a usual place), clicks Start, and additionally
 fails if the page requested anything but itself; give it an `http://` URL to
 check a hosted copy, and `--screenshot OUT.png` to keep the picture.

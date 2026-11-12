@@ -134,6 +134,24 @@ dialog h2 { margin-top: 0; }
     </div>
   </dialog>
 </div>
+<script id="cl-compat">
+// Kept to what every scripting browser parses (no arrow functions, no
+// let or const, nothing newer): the loader below uses syntax an old
+// browser rejects outright, and a script that fails to parse runs no
+// check of its own. Until the loader has run, any script error on the
+// page is taken to be that, and the visitor is told instead of being
+// left on "loading...".
+(function () {
+  window.addEventListener('error', function () {
+    if (window.CopperlineKit) return;
+    var el = document.getElementById('cl-status');
+    if (el) {
+      el.textContent =
+        'This browser is too old to run this page. Try a current Chrome, Edge, Firefox or Safari.';
+    }
+  });
+})();
+</script>
 %%CONFIG%%
 %%ASSETS%%
 <script>

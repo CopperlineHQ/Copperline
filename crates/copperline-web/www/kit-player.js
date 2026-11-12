@@ -302,6 +302,11 @@ export async function start(kit) {
 
   function fail(e) {
     running = false;
+    // A failure outside the frame loop (a control, a starved-frame step)
+    // leaves a frame requested; dropped here, so a Restart before it
+    // fires cannot end up with two loops running.
+    cancelAnimationFrame(rafId);
+    rafId = 0;
     console.error(e);
     emu = null; // the instance may have panicked; never reuse it
     releaseSession();
@@ -839,13 +844,15 @@ export async function start(kit) {
         note('No saved state for this version');
         return;
       }
-      // The load replaces every drive's disk with the state's: keep what
-      // the guest wrote to the ones in the drives now.
-      const outgoing = [];
-      for (let d = 0; d < drives; d++) {
-        const disk = captureDrive(d);
-        if (disk) outgoing.push(disk);
-      }
+      // A state is the whole machine, disks included: a disk that was in
+      // a drive when it was saved comes back as it was at that moment,
+      // and the stored copy follows it (the libretro core's rule too). A
+      // disk that kept later writes under a machine restored to before
+      // them would be at the mercy of whatever the guest still holds in
+      // memory. Only a disk the load takes out of the drives keeps what
+      // was written since, so that is captured first.
+      for (let d = 0; d < drives; d++) captureDrive(d);
+      const before = new Map(disks.map((disk) => [disk, disk.bytes]));
       try {
         emu.load_state(record.bytes);
       } catch (e) {
@@ -867,8 +874,19 @@ export async function start(kit) {
       resetRenderStrideState(stride);
       emu.resync_clock();
       present(true);
-      note('State loaded');
-      for (const disk of outgoing) await persistDisk(disk);
+      // Take the restored disks as the visitor's copies now, not at the
+      // next poll, and say so when that undid something written since.
+      const restored = [];
+      for (let d = 0; d < drives; d++) {
+        const disk = captureDrive(d);
+        if (disk && !bytesEqual(before.get(disk), disk.bytes)) restored.push(disk.name);
+      }
+      if (restored.length > 0) {
+        note(`State loaded; ${restored.join(', ')} went back to how the state saved it`, true);
+      } else {
+        note('State loaded');
+      }
+      for (const disk of disks) if (disk.writable) await persistDisk(disk);
     });
   }
 
@@ -917,7 +935,9 @@ export async function start(kit) {
   $('cl-about-engine').textContent =
     `Copperline ${config.copperline.version}` +
     (config.copperline.ref ? ` (${config.copperline.ref})` : '');
-  $('cl-about-source').textContent = config.copperline.source;
+  $('cl-about-source').textContent =
+    config.copperline.source +
+    (config.copperline.commit ? ` (commit ${config.copperline.commit.slice(0, 12)})` : '');
   $('cl-about-rom').textContent = config.rom.label;
   const noticeList = $('cl-notices');
   for (const item of config.notices) {
