@@ -270,8 +270,8 @@ Cheats are not part of save states; the frontend re-applies its own list.
 They are local pokes, so netplay peers must enable identical cheats or
 their machines diverge.
 
-A netplay session publishes no memory map, and its save RAM reads as
-absent. RetroArch offers neither the cheat search nor the memory viewer
+A netplay session publishes no memory map, and its system RAM and save RAM
+read as absent. RetroArch offers neither the cheat search nor the memory viewer
 while a session runs, and holding the RAM banks at fixed host addresses
 would cost a copy of every bank on each of the rollbacks a session makes
 several of per frame. Leave netplay to run a game and use the memory tools

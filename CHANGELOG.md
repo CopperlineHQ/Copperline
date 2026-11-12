@@ -25,12 +25,54 @@ for the earlier release notes.
   of the repository's Cargo workspace. They share the root `Cargo.lock` and
   build into the root `target/` directory, so a source-built libretro core
   is at `target/release/` rather than `crates/copperline-libretro/target/release/`.
+- `[[filesys]]`, `--run` and WHDLoad host-directory volumes carry a fixed
+  date, 1 January 1978, instead of the host time their handler started, so
+  identical runs no longer vary with the host clock. A machine with no
+  battery clock that boots from a host directory starts its clock at that
+  date; fit an RTC, or seed one with `rtc_time` / `--rtc-time`, for another.
 
 ### Fixed
 
 - External floppy drives answer the /RDY ID probe while their motor is off,
   including before the first motor cycle, so boot-time probes can find DF1.
 - Covered or minimised windows no longer leak GPU staging memory.
+- A guest can no longer create a file, directory or rename target outside a
+  `[[filesys]]` host directory on Windows by putting a drive letter in the
+  name, nor open a DOS device such as `NUL` or `COM1` through one. Names
+  containing `:` are refused on every host.
+- A guest can no longer create, overwrite or rename a file onto
+  `copperline.toml` in a `[[filesys]]`, `--run` or WHDLoad host directory,
+  where a later run started from that directory would load it as its
+  configuration.
+- A `[[filesys]]` mount holds at most 96 open files and 32 unfinished
+  directory scans, refuses negative `Read()`/`Write()` lengths and deletion
+  of its own root, and logs an out-of-memory guest buffer once per request
+  instead of once per byte.
+- A `copperhf.device` read or write whose buffer is not guest RAM fails
+  before any host I/O instead of first allocating and reading the full
+  request length.
+- A TCP serial or modem peer that stops reading no longer freezes the
+  emulator: a write that cannot progress for one second drops the link.
+  Input the guest has not read yet is limited to 64 KiB per link.
+- The browser build stops downloading a linked disk image as soon as it
+  passes the 64 MiB limit, including when the server sends no length.
+- Save states carry the CPU's interrupt-sample latches and the chip data
+  bus value, so a resumed run takes an interrupt that was recognisable at
+  the save point on the same instruction as an uninterrupted run.
+- The libretro core no longer publishes a chip-RAM pointer during netplay,
+  where rollbacks replace the RAM buffers and a cached pointer would dangle.
+- The AppImage includes Copperline's licence and the AROS README and
+  acknowledgements, as the other packages do.
+- Netplay: a host accepts only small control messages from guests and
+  spectators instead of buffering up to 512 MiB per link, sends one packet
+  at a time to a peer that has not answered yet, and drops a spectator that
+  acknowledges nothing for ten seconds during setup. An oversized or failed
+  UDP datagram no longer ends a session (it did on Windows), and a host
+  cannot make a guest load drive sound samples from a path of its choosing.
+- Loading a save state logs a warning for each host file, directory, plugin
+  module or network backend the state names that the running session had not
+  opened. `SECURITY.md` now states which inputs are trusted: a save state has
+  the same access to the host as a configuration file.
 - Command-line help is written to stdout. Options accept `--flag=value`,
   misspelled options suggest close matches, and fatal desktop-launch errors
   appear in a native dialog.

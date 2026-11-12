@@ -125,7 +125,9 @@ when the current config selects something else. It is **not a disk backup**:
 hard-drive and CD images reopen by path, and later writes to a host disk or
 mounted folder are not undone. Keep the original backing images available.
 Physical drives, host networking and other live services also prevent a full
-timeline rewind. See [save states](ui.md#save-states) and the
+timeline rewind. The host paths and mounts a state names are opened on load
+whatever the current config says, so only load states from a source you
+would accept a config file from. See [save states](ui.md#save-states) and the
 [determinism boundaries](../internals/savestate.md#determinism-boundaries).
 
 ## Known emulation limits

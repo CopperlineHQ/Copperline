@@ -242,9 +242,17 @@ the loaded hunks.
 
 ```sh
 cargo test                        # unit suite, no external assets needed
-cargo test --release -- --ignored # integration tests (need local ROMs/disks)
-cargo clippy && cargo fmt --check # both expected clean
+cargo fmt --check                 # expected clean, as in CI
+cargo clippy --all-targets --all-features --locked -- -D warnings
 ```
+
+The asset-gated integration tests in `tests/` are `#[ignore]`d. Select the
+ones whose local ROMs and disks are installed, for example
+`cargo test --release --test image_regression kickstart_boot_screen -- --ignored`:
+an `image_regression` test fails when its assets are absent, while some older
+suites pass without running (`tests/README.md`). The standalone crates under
+`crates/` are not workspace members; CI checks their formatting from their
+own directories.
 
 `main` is the development line and `v1` the 1.x maintenance branch. Base bug
 fixes, documentation corrections and packaging fixes on `v1`, which is merged

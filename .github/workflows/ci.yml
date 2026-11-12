@@ -7,7 +7,7 @@ on:
 
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -174,7 +174,7 @@ jobs:
           workspaces: fuzz
           key: fuzz-linux
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --locked
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
       - name: Build all fuzz targets
         working-directory: fuzz
         run: cargo fuzz build --codegen-units=16
@@ -317,6 +317,26 @@ jobs:
             "$suite"
           done
           ./ci-bins/test-audio_stems_determinism --ignored
+      - name: Bundled-ROM end-to-end tests
+        # #[ignore]d because they boot an optimized emulator, not because
+        # they need local assets: each runs on the bundled AROS ROM and the
+        # committed guest fixtures. They are selected by name, since the same
+        # binaries hold tests that need Kickstart images, and the pass count
+        # is checked so a renamed or newly gated test cannot drop out with a
+        # green result.
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            ./ci-bins/test-run_boot --ignored aros_
+            ./ci-bins/test-coverage_run --ignored
+            ./ci-bins/test-diverge_e2e --ignored
+            ./ci-bins/test-mcp_stdio --ignored
+            ./ci-bins/test-dap_stdio --ignored --skip kick13
+          } | tee e2e-tests.txt
+          passed=$(awk '/^test result: ok\./ { total += $4 } END { print total + 0 }' e2e-tests.txt)
+          echo "end-to-end tests passed: $passed"
+          test "$passed" -eq 12
 
   probe-golden:
     timeout-minutes: 30
@@ -682,7 +702,7 @@ jobs:
         with:
           node-version: 24
       - name: Install MyST CLI
-        run: npm install -g mystmd
+        run: npm install -g mystmd@1.12.0
       - name: Install Typst (PDF renderer)
         # MyST shells out to Typst for PDF export. Latest release, like the
         # brew install documented in docs/README.md.

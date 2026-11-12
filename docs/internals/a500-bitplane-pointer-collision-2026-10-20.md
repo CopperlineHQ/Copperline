@@ -21,19 +21,19 @@ its existing behavior. No serialized state is added.
 
 CPU register application happens after its two-CCK bus-cycle tail. The guard
 therefore uses `cpu_custom_access_slot`, as render recording already does;
-Copper uses the current slot. A rejected current-beam candidate repaired20
-cases but regressed7 CPU/BPL1 cases. Its byte-identical trace identified that
-phase error. The grant-anchored candidate repairs all24 qualified persistent
+Copper uses the current slot. A rejected current-beam candidate repaired 20
+cases but regressed 7 CPU/BPL1 cases. Its byte-identical trace identified that
+phase error. The grant-anchored candidate repairs all 24 qualified persistent
 losses (71 fields), with zero field/qualification regressions. Thirteen early
 collision-read differences remain a separate family.
 
-The480-case matrix has281 qualifying rows and199 unchanged exclusions under
-exact setup, CPU-write and both early/settled read brackets. Of these,111
+The 480-case matrix has 281 qualifying rows and 199 unchanged exclusions under
+exact setup, CPU-write and both early/settled read brackets. Of these, 111
 candidate rows have independent repeated exact cohorts; zero conflicts does
-not make all281 independently repeated. Four of the24 repaired rows have
+not make all 281 independently repeated. Four of the 24 repaired rows have
 independently repeated exact cohorts; the raw Copper hole pattern recurs across
 both physical runs with differing later read brackets. Never count exclusions as matches.
-The earlier800-case sweep retains its separate362-exclusion budget.
+The earlier 800-case sweep retains its separate 362-exclusion budget.
 
 Versioned reference: `amiga-hardware-probes/references/pointer-collision-v2/run{1,2}`.
 ROM SHA-256: `89e928cb35641a5e0d5519d6103ebcfc97a2d7ec206fab8feb9ac8a64c013aaf`.

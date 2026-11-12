@@ -236,6 +236,9 @@ Run Copperline from the terminal:
 ./target/release/copperline
 ```
 
+An installed build is run as `copperline`; the `./target/release/` prefix
+used in this guide applies to a build from source.
+
 When started with no arguments and no `copperline.toml` in the current directory
 or beside the Copperline executable, Copperline displays the interactive
 launcher screen where you can configure machine models, memory, storage, and
@@ -253,6 +256,10 @@ configuration loads it. If that saved default has **Run on startup** set
 executable, and also leaves Coppersynth's and the modem's stored settings
 untouched; an explicit `--config` or a local `copperline.toml` still takes
 precedence.
+
+A machine booted on the bundled AROS ROM with no disk inserted shows the
+AROS logo on a black screen with the message "Waiting for bootable media"
+above a row of boot-media icons.
 
 A `copperline.toml` beside the Copperline executable (on macOS, beside
 `Copperline.app`) boots straight into its machine, running, from any working

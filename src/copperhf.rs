@@ -1047,6 +1047,15 @@ impl CopperhfBoard {
                     return;
                 }
             };
+        // The length was checked against the unit, not against the guest's
+        // buffer. Refuse a buffer that is not RAM here, before a read sizes
+        // a host allocation and a host read by it (a unit of a few GiB
+        // accepts a request nearly that long) only for the copy back into
+        // the guest to fail.
+        if !dma_span_is_ram(host, header.data, sectors * SECTOR_SIZE as u64) {
+            self.push_precomputed(ptr, header.flags, IOERR_BADADDRESS, 0);
+            return;
+        }
         let write_payload = if read {
             None
         } else {
@@ -1734,6 +1743,40 @@ fn write_u16(host: &mut DeviceHost, addr: u32, value: u16) -> bool {
 /// A buffer that one RAM bank holds whole (the span its word accesses
 /// cover, so an odd length's last word too) is copied in one go, with the
 /// same result as the word loop below, which handles everything else.
+/// Whether `[addr, addr + len)` is plausibly guest RAM, decided without
+/// reading or allocating in proportion to `len`. A range inside one RAM
+/// bank is answered exactly. A range that would have to straddle banks is
+/// probed at its first and last byte and at every 64 KiB boundary between
+/// them, which finds any hole between banks (they start and end on such
+/// boundaries); the copy itself still checks every word, so a range this
+/// accepts wrongly fails there with the same error.
+fn dma_span_is_ram(host: &DeviceHost, addr: u32, len: u64) -> bool {
+    const STEP: u64 = 0x1_0000;
+    if len == 0 {
+        return true;
+    }
+    let first = u64::from(addr);
+    let last = first + (len - 1);
+    if last > u64::from(u32::MAX) {
+        return false;
+    }
+    if usize::try_from(len).is_ok_and(|len| host.dma_ram(addr, len.next_multiple_of(2)).is_some()) {
+        return true;
+    }
+    let mapped = |at: u64| host.dma_read_byte(at as u32).is_some();
+    if !mapped(first) || !mapped(last) {
+        return false;
+    }
+    let mut at = (first / STEP + 1) * STEP;
+    while at < last {
+        if !mapped(at) {
+            return false;
+        }
+        at += STEP;
+    }
+    true
+}
+
 fn dma_read_bytes(host: &DeviceHost, addr: u32, len: usize) -> Option<Vec<u8>> {
     if let Some(ram) = host.dma_ram(addr, len.next_multiple_of(2)) {
         return Some(ram[..len].to_vec());
@@ -1911,7 +1954,7 @@ impl ZorroDevice for CopperhfBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::Memory;
+    use crate::memory::{Memory, SLOW_RAM_BASE};
     use crate::zorro::ZorroChain;
     use std::io::Write;
 
@@ -2366,6 +2409,48 @@ mod tests {
         let mut host = DeviceHost::new(&mut mem);
         ring_doorbell_long(&mut board, &mut host, ptr);
         assert_eq!(io_error(&mem, ptr), IOERR_BADADDRESS);
+    }
+
+    /// A request is checked against guest RAM before any host work is sized
+    /// by its length: a range that leaves RAM, wraps the address space or
+    /// crosses a hole between banks is refused without walking it.
+    #[test]
+    fn a_transfer_range_outside_guest_ram_is_refused_before_any_io() {
+        let mut mem = memory();
+        mem.slow_ram = vec![0u8; 0x8_0000];
+        let top = mem.chip_ram.len() as u64;
+        let host = DeviceHost::new(&mut mem);
+        assert!(dma_span_is_ram(&host, 0x2000, 512));
+        assert!(dma_span_is_ram(&host, 0, top));
+        assert!(dma_span_is_ram(&host, 0x2000, 0));
+        assert!(!dma_span_is_ram(&host, 0, top + 2));
+        assert!(!dma_span_is_ram(&host, 0xFFFF_0000, 512));
+        assert!(!dma_span_is_ram(&host, 0x2000, 0xFFFF_FE00));
+        assert!(!dma_span_is_ram(&host, 0xFFFF_FFFE, 4));
+        // Chip RAM and slow RAM are both RAM, but not what lies between.
+        let slow = SLOW_RAM_BASE;
+        assert!(dma_span_is_ram(&host, SLOW_RAM_BASE as u32, 0x8_0000));
+        assert!(!dma_span_is_ram(&host, 0x2000, slow + 0x100 - 0x2000));
+    }
+
+    /// The largest read a 4 GiB unit accepts, aimed at a buffer that is not
+    /// RAM, completes with IOERR_BADADDRESS at the doorbell: nothing is
+    /// queued for the worker.
+    #[test]
+    fn an_oversized_read_into_unmapped_memory_never_reaches_the_worker() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("oversized", 16));
+        // Pretend the unit is as large as the command can address, so the
+        // range check alone lets the request through.
+        board.unit_sectors[0] = (1 << 32) / SECTOR_SIZE as u64;
+        let mut mem = memory();
+        let ptr = 0x1000u32;
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 0xFFFF_FE00, 0x2000, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), IOERR_BADADDRESS);
+        // The activity flag is raised only when a job goes to the worker.
+        assert!(!board.take_activity());
     }
 
     #[test]

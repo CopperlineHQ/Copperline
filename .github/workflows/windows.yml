@@ -32,6 +32,8 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "build.rs"
+      - "crates/**"
+      - "guest/**"
       - ".cargo/**"
       - "packaging/windows/**"
       - ".github/workflows/windows.yml"
@@ -45,6 +47,8 @@ on:
       - "Cargo.lock"
       - "Cargo.toml"
       - "build.rs"
+      - "crates/**"
+      - "guest/**"
       - ".cargo/**"
       - "packaging/windows/**"
       - ".github/workflows/windows.yml"
@@ -64,7 +68,7 @@ on:
 
 concurrency:
   group: windows-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Seed each native build cache on main; PR copies cannot serve other PRs
 # and crowd out the shared entries when several matrices run together.

@@ -1086,6 +1086,9 @@ fn cd32_exposes_its_eeprom_as_save_ram_outside_netplay() {
         Core::load_with_system(&cfg, None, root.path().into(), false, root.path(), netplay).unwrap()
     };
     assert!(make(true).memory_region(MEMORY_SAVE_RAM).is_none());
+    // Netplay lets a state load replace the RAM buffers, so no region with
+    // a host address a frontend might cache is published there.
+    assert!(make(true).memory_region(MEMORY_SYSTEM_RAM).is_none());
     let mut core = make(false);
     let nvram = core.memory_region(MEMORY_SAVE_RAM).unwrap();
     assert_eq!(nvram.len(), 1024);

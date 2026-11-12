@@ -284,7 +284,11 @@ function activate(context) {
   context.subscriptions.push(
     vscode.window.registerTreeDataProvider("copperline.customRegisters", registers), registers.changed,
     vscode.debug.onDidChangeActiveDebugSession(() => void registers.refresh()),
-    vscode.debug.onDidChangeActiveStackItem(() => void registers.refresh()),
+    // Newer than the oldest VS Code this extension accepts: without it the
+    // view still refreshes on session changes, just not on frame selection.
+    ...(vscode.debug.onDidChangeActiveStackItem
+      ? [vscode.debug.onDidChangeActiveStackItem(() => void registers.refresh())]
+      : []),
     vscode.debug.onDidStartDebugSession(() => void registers.refresh()),
     vscode.debug.onDidTerminateDebugSession(() => void registers.refresh())
   );

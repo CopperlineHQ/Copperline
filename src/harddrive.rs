@@ -230,6 +230,7 @@ impl<'de> serde::Deserialize<'de> for HardDriveImage {
             }
             (None, Some(image)) => Backing::Memory(image),
             (None, None) => {
+                crate::hostbind::restored(crate::hostbind::Kind::HardDrive, &state.path);
                 let reopen_error = |e: &dyn std::fmt::Display| {
                     serde::de::Error::custom(format!(
                         "reopening hard-drive image {}: {e}",
@@ -554,6 +555,7 @@ impl HardDriveImage {
             );
         }
         let opened = crate::blockdev::open_device(&device, writable, identity_confirmed)?;
+        crate::hostbind::opened_named(crate::hostbind::Kind::HardDrive, id);
         let total_sectors = opened.total_sectors();
         if total_sectors == 0 {
             anyhow::bail!("{id} reports no capacity");
@@ -589,6 +591,7 @@ impl HardDriveImage {
             return Ok(());
         };
         let saved = saved.clone();
+        crate::hostbind::restored_named(crate::hostbind::Kind::HardDrive, &saved.id);
         let opened = Self::open_device(
             &saved.id,
             Some(&saved.fingerprint),
@@ -742,6 +745,11 @@ impl HardDriveImage {
                 ),
             }
         };
+        // Only a persistent file backing is reopened by path when a save
+        // state is restored; an in-memory or session copy travels inside it.
+        if !session && !matches!(backing, Backing::Memory(_)) {
+            crate::hostbind::opened(crate::hostbind::Kind::HardDrive, path);
+        }
         let len = match &backing {
             Backing::File(file) => file
                 .metadata()

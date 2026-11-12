@@ -247,6 +247,13 @@ impl Hardware {
                 && self.audio.stem_granularity.is_none(),
             "remote audio output settings are forbidden"
         );
+        // A drive sample set is a set name or a host path, and each peer
+        // plays its own (`capture` never sends one), so a remote value
+        // could only make this peer open files of the host's choosing.
+        ensure!(
+            self.audio.floppy_sounds_set.is_none(),
+            "remote drive sample set is forbidden"
+        );
         ensure!(
             self.boards.len() <= 16
                 && self
@@ -839,6 +846,12 @@ mod tests {
         hw.audio.output_device = Some("remote choice".into());
         assert!(hw.config().is_err());
         hw.audio.output_device = None;
+        for set in ["/etc/passwd", "A500Real", ""] {
+            hw.audio.floppy_sounds_set = Some(set.into());
+            assert!(hw.config().is_err(), "remote sample set {set:?}");
+        }
+        hw.audio.floppy_sounds_set = None;
+        assert!(hw.config().is_ok());
         hw.cpu.jit = Some(true);
         assert!(hw.config().is_err());
         hw.cpu.jit = Some(false);

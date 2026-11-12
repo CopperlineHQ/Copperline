@@ -84,6 +84,8 @@ pub(crate) struct ChunkSpec {
 //   META v1: added (in the clear, after DESC) with the thumbnail, emulated
 //     and wall-clock times, machine summary, and media names. Older
 //     states simply lack it.
+//   CIAA, CIAB v2: corrected pulse-output semantics. v1 payloads are
+//     upgraded by `migrate_cia_pulse_v1`.
 
 const fn value(tag: &[u8; 4], version: u32, name: &'static str) -> ChunkSpec {
     ChunkSpec {

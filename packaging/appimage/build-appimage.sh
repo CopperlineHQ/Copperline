@@ -61,8 +61,13 @@ install -Dm644 assets/aros/aros-amiga-m68k-rom.bin \
   "$appdir/usr/share/copperline/aros/aros-amiga-m68k-rom.bin"
 install -Dm644 assets/aros/aros-amiga-m68k-ext.bin \
   "$appdir/usr/share/copperline/aros/aros-amiga-m68k-ext.bin"
-install -Dm644 assets/aros/LICENSE \
-  "$appdir/usr/share/copperline/aros/LICENSE"
+# The AROS licence, provenance notes and acknowledgements travel with the
+# ROM, as in the macOS and Windows packages.
+for f in LICENSE README.md ACKNOWLEDGEMENTS; do
+  install -Dm644 "assets/aros/$f" "$appdir/usr/share/copperline/aros/$f"
+done
+# Copperline's own licence.
+install -Dm644 LICENSE "$appdir/usr/share/licenses/copperline/LICENSE"
 install -Dm644 assets/egui/THIRD_PARTY_FONTS.txt \
   "$appdir/usr/share/copperline/THIRD_PARTY_FONTS.txt"
 
@@ -137,9 +142,21 @@ install -Dm644 assets/brand/copperline-icon.png \
 echo "==> Fetching linuxdeploy"
 mkdir -p "$tools_dir"
 if [ ! -x "$linuxdeploy" ]; then
-  curl -fsSL -o "$linuxdeploy" \
-    "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-$arch.AppImage"
-  chmod +x "$linuxdeploy"
+  # A tagged release checked against its published digest, not the mutable
+  # "continuous" build: what this tool emits is the artifact that ships.
+  # To update, change the tag and take the digests from the release's
+  # asset list (gh api repos/linuxdeploy/linuxdeploy/releases/tags/TAG).
+  linuxdeploy_tag=1-alpha-20251107-1
+  case "$arch" in
+    x86_64) linuxdeploy_sha256=c20cd71e3a4e3b80c3483cef793cda3f4e990aca14014d23c544ca3ce1270b4d ;;
+    aarch64) linuxdeploy_sha256=620095110d693282b8ebeb244a95b5e911cf8f65f76c88b4b47d16ae6346fcff ;;
+    *) echo "no pinned linuxdeploy digest for $arch" >&2; exit 1 ;;
+  esac
+  curl -fsSL -o "$linuxdeploy.download" \
+    "https://github.com/linuxdeploy/linuxdeploy/releases/download/$linuxdeploy_tag/linuxdeploy-$arch.AppImage"
+  echo "$linuxdeploy_sha256  $linuxdeploy.download" | sha256sum --check --strict -
+  chmod +x "$linuxdeploy.download"
+  mv "$linuxdeploy.download" "$linuxdeploy"
 fi
 
 echo "==> Building AppImage"

@@ -694,6 +694,17 @@ impl FloppyController {
             .is_some_and(|drive| drive.external_id != 0)
     }
 
+    /// A save state was restored into this controller: a file-backed image
+    /// writes the guest's changes back to the path the state recorded, so
+    /// check each against what the running session had opened.
+    pub(crate) fn note_restored_images(&self) {
+        for image in self.drives.iter().filter_map(|drive| drive.image.as_ref()) {
+            if image.backing == FloppyImageBacking::File {
+                crate::hostbind::restored(crate::hostbind::Kind::Floppy, &image.path);
+            }
+        }
+    }
+
     pub fn disk_inserted(&self, drive_idx: usize) -> bool {
         self.drives
             .get(drive_idx)

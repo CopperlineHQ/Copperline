@@ -497,6 +497,37 @@ function keepUploadedDisksForRebuild() {
 // Sanity cap on fetched disk images; SCP flux dumps run tens of MB.
 const DISK_URL_MAX_BYTES = 64 << 20;
 
+// Read a response body, giving up as soon as it passes `max` bytes. A
+// server that sends no Content-Length (or a wrong one) must not be able to
+// make the page buffer an arbitrarily large download before the size check.
+async function readBodyCapped(resp, max) {
+  const reader = resp.body?.getReader();
+  if (!reader) {
+    const whole = new Uint8Array(await resp.arrayBuffer());
+    if (whole.length > max) throw new Error('file too large');
+    return whole;
+  }
+  const chunks = [];
+  let size = 0;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      throw new Error('file too large');
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 // Display name from a fetched URL's path. decodeURIComponent throws on a
 // malformed percent-escape (a literal "%" survives URL parsing), and a
 // throw here would escape the fetch functions' error handling as an
@@ -533,8 +564,7 @@ async function insertDiskFromUrl(url, drive = 0) {
     if (Number(resp.headers.get('content-length') ?? 0) > DISK_URL_MAX_BYTES) {
       throw new Error('file too large');
     }
-    const bytes = new Uint8Array(await resp.arrayBuffer());
-    if (bytes.length > DISK_URL_MAX_BYTES) throw new Error('file too large');
+    const bytes = await readBodyCapped(resp, DISK_URL_MAX_BYTES);
     insertDisk(bytes, name, drive);
   } catch (e) {
     // A TypeError is the opaque network/CORS failure; HTTP and size errors

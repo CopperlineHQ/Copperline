@@ -19,7 +19,7 @@ on:
 
 concurrency:
   group: docs-site-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   release-branch:
@@ -32,13 +32,14 @@ jobs:
     if: needs.release-branch.outputs.publish == 'true'
     # No Typst/PDF here, so plain ubuntu is enough (unlike docs-release.yml).
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: Install MyST CLI
-        run: npm install -g mystmd
+        run: npm install -g mystmd@1.12.0
       - name: Build HTML
         working-directory: docs
         env:

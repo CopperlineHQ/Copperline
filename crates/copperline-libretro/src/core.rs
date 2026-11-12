@@ -283,13 +283,16 @@ impl Core {
 
     /// The buffer behind a `retro_get_memory_data` region: chip RAM for
     /// `RETRO_MEMORY_SYSTEM_RAM`, and the CD32 EEPROM for
-    /// `RETRO_MEMORY_SAVE_RAM` outside netplay, where saves stay temporary.
-    /// Both keep their host address for the whole session, including across
-    /// state loads and resets.
+    /// `RETRO_MEMORY_SAVE_RAM`. Both keep their host address for the whole
+    /// session, including across state loads and resets, which is what a
+    /// frontend that caches the pointer relies on. A netplay session gives
+    /// that up (a state load replaces the RAM buffers instead of copying
+    /// into them, see `Core::load_with_system`), so it exposes neither: a
+    /// cached chip-RAM pointer would dangle after the first rollback.
     pub fn memory_region(&mut self, id: u32) -> Option<&mut [u8]> {
         let bus = self.emu.bus_mut();
         match id {
-            crate::abi::MEMORY_SYSTEM_RAM => Some(&mut bus.mem.chip_ram),
+            crate::abi::MEMORY_SYSTEM_RAM if !self.netplay => Some(&mut bus.mem.chip_ram),
             crate::abi::MEMORY_SAVE_RAM if self.cd_mode && !self.netplay => {
                 bus.akiko.as_mut().map(|akiko| akiko.nvram_bytes_mut())
             }

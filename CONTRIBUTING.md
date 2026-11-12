@@ -43,11 +43,18 @@ Documentation changes should also build cleanly:
 
 ```sh
 cd docs
+python3 ../tools/prepare-docs.py
 myst build --html --ci --strict --check-links
-myst build --pdf --ci --strict
+python3 ../tools/build-docs-pdf.py --ci --strict
 test -s _build/exports/copperline.pdf
 ```
 
+These are the checks CI runs; `docs/README.md` explains the version-identity
+step and the PDF helper.
+
 The ignored integration tests under `tests/` require local ROM and disk
-assets. They should skip cleanly when those assets are absent; see
+assets. Select the ones whose assets you have installed rather than running
+every ignored test: an `image_regression` test fails when its assets are
+absent, while some older asset-backed suites still pass without running, so
+a pass is not evidence that the scenario was exercised. See
 `tests/README.md` for the expected filenames and lookup order.

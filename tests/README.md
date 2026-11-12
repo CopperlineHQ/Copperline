@@ -301,8 +301,8 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
     KICK31 config. **1.3 has no ROM-resident `Echo`** (disk-based `C:`
     commands only, and this fixture carries none), so it is verified
     instead by an exact-byte golden screenshot
-    (`tests/golden/copperhf/*.png`, `COPPERLINE_BLESS_GOLDEN=1` to
-    (re)generate) of the CLI prompt an *empty* Startup-Sequence leaves
+    (`tests/golden/copperhf/*.png`; set `COPPERLINE_BLESS_GOLDEN` to one
+    golden's file stem to (re)generate that one) of the CLI prompt an *empty* Startup-Sequence leaves
     open on the mounted volume -- weaker than a structural marker check,
     but the only option that stages no extra binary onto the volume;
     machine shape matches `tests/image_regression.rs`'s own KICK13

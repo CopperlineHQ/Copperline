@@ -167,6 +167,7 @@ impl Source {
                 (SourceData::Audio(Box::new(audio)), len)
             }
         };
+        crate::hostbind::opened(crate::hostbind::Kind::Cd, path);
         Ok(Self {
             path: path.to_path_buf(),
             format,
@@ -216,7 +217,9 @@ struct SourceSpec {
 
 impl SourceSpec {
     fn reopen(&self) -> Result<Source> {
-        let source = Source::open(&state_path(&self.path, true)?, self.format)?;
+        let path = state_path(&self.path, true)?;
+        crate::hostbind::restored(crate::hostbind::Kind::Cd, &path);
+        let source = Source::open(&path, self.format)?;
         if source.byte_len != self.byte_len {
             bail!(
                 "{} changed since the state was saved ({} bytes of sector data, was {})",
@@ -306,7 +309,10 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                 })
             }
             CdImageState::Chd { path, fault } => state_path(&path, true)
-                .and_then(|p| Self::load_chd(&p))
+                .and_then(|p| {
+                    crate::hostbind::restored(crate::hostbind::Kind::Cd, &p);
+                    Self::load_chd(&p)
+                })
                 .map(|mut img| {
                     img.fault = fault;
                     img
@@ -355,6 +361,7 @@ impl CdImage {
     /// Load a CHD (MAME "Compressed Hunks of Data") CD image.
     fn load_chd(path: &Path) -> Result<Self> {
         let (backend, tracks, total_sectors) = chd::ChdImage::load(path)?;
+        crate::hostbind::opened(crate::hostbind::Kind::Cd, path);
         Ok(Self {
             tracks,
             total_sectors,
