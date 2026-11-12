@@ -40,6 +40,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tomllib
@@ -399,12 +400,29 @@ def check_self_contained(page: str, expected: dict[str, bytes]) -> None:
             raise KitError("the page's stylesheet references an external resource")
 
 
+def solid_png(size: int, rgb: tuple[int, int, int]) -> bytes:
+    """A square single-colour PNG, written by hand so the packer needs no
+    imaging library."""
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    rows = (b"\x00" + bytes(rgb) * size) * size
+    return (
+        PNG_MAGIC
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(rows, 9))
+        + chunk(b"IEND", b"")
+    )
+
+
 def favicon_url(icon: bytes | None) -> str:
-    """The icon as a data: URL. With no icon the URL is an empty data: one,
-    which also stops the browser asking the host for /favicon.ico."""
+    """The icon as a data: URL. A page always declares one, and one that
+    decodes: a browser given no icon asks the host for /favicon.ico, which
+    would be the page's only outside request. Without [branding] icon it
+    is a plain square in the Start button's colour."""
     if icon is None:
-        return "data:,"
-    if not icon.startswith(PNG_MAGIC):
+        icon = solid_png(32, (0x2B, 0x5F, 0xD9))
+    elif not icon.startswith(PNG_MAGIC):
         raise KitError("[branding] icon must be a PNG file")
     return "data:image/png;base64," + base64.b64encode(icon).decode("ascii")
 

@@ -205,7 +205,7 @@ size (base64 costs a third on top of that).
 | `[machine] model` | The machine profile, as `--model` |
 | `[display] fullscreen` | Enter fullscreen with the Start click |
 | `[features] save_states` | Adds Save state / Load state buttons |
-| `[branding] icon` | The page's favicon |
+| `[branding] icon` | The page's favicon (a plain placeholder without one, so the browser never asks the host for `/favicon.ico`) |
 
 The browser build has no CD drive, no host-directory volume and no memory
 overrides, so the packer refuses `cd` and `run` payloads, the CDTV and CD32

@@ -9,6 +9,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import struct
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -323,8 +324,31 @@ class Assets(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(KitError):
                 publish_web.encode_asset(name, "binary", b"x")
 
+    def test_default_favicon_is_a_real_image(self):
+        # A page with no icon of its own makes the browser ask the host
+        # for /favicon.ico; the placeholder must be a PNG that decodes.
+        url = publish_web.favicon_url(None)
+        self.assertTrue(url.startswith("data:image/png;base64,"))
+        png = base64.b64decode(url.split(",", 1)[1])
+        self.assertTrue(png.startswith(publish_web.PNG_MAGIC))
+        at = len(publish_web.PNG_MAGIC)
+        chunks = {}
+        while at < len(png):
+            (length,) = struct.unpack(">I", png[at:at + 4])
+            tag = png[at + 4:at + 8]
+            data = png[at + 8:at + 8 + length]
+            (crc,) = struct.unpack(">I", png[at + 8 + length:at + 12 + length])
+            self.assertEqual(crc, zlib.crc32(tag + data))
+            chunks[tag] = data
+            at += 12 + length
+        self.assertEqual(list(chunks), [b"IHDR", b"IDAT", b"IEND"])
+        width, height, depth, colour = struct.unpack(">IIBB", chunks[b"IHDR"][:10])
+        self.assertEqual((width, height, depth, colour), (32, 32, 8, 2))
+        rows = zlib.decompress(chunks[b"IDAT"])
+        self.assertEqual(len(rows), 32 * (1 + 32 * 3))
+        self.assertEqual(rows[:4], b"\x00\x2b\x5f\xd9")
+
     def test_favicon(self):
-        self.assertEqual(publish_web.favicon_url(None), "data:,")
         png = publish_web.PNG_MAGIC + b"rest"
         url = publish_web.favicon_url(png)
         self.assertTrue(url.startswith("data:image/png;base64,"))
@@ -359,7 +383,7 @@ class Page(unittest.TestCase):
         for name, data in packed.items():
             self.assertEqual(assets[name]["size"], len(data))
         publish_web.check_self_contained(page, packed)
-        self.assertEqual(references, [("link", "href", "data:,")])
+        self.assertEqual(references, [("link", "href", publish_web.favicon_url(None))])
         self.assertEqual(config["format"], publish_web.FORMAT)
         self.assertEqual(config["modules"]["entry"], "./kit-player.js")
         self.assertEqual(config["modules"]["order"][-1], "./kit-player.js")
@@ -611,7 +635,7 @@ class CommandLine(unittest.TestCase):
             assets["notice/copperline-license"]["data"], (publish_web.REPO / "LICENSE").read_bytes()
         )
         self.assertEqual(assets["notice/aros-license"]["data"], (aros / "LICENSE").read_bytes())
-        self.assertEqual(references, [("link", "href", "data:,")])
+        self.assertEqual(references, [("link", "href", publish_web.favicon_url(None))])
         self.assertEqual(config["copperline"]["version"], publish_web.copperline_version())
 
     def test_options_reach_the_page(self):
