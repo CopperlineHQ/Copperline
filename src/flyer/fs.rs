@@ -608,7 +608,7 @@ impl Filesystem {
     /// room's `_tmp_` sub-clips), replacing one of that name.
     pub fn write_root_file(&mut self, n: u8, name: &str, bytes: &[u8]) -> Result<(), u8> {
         let d = self.drive(n)?;
-        if !drive::valid_name(name) {
+        if !drive::creatable_name(name) {
             return Err(err::BADPARAM);
         }
         if drive::blocks_for(bytes.len() as u64) > self.drives[d].usage().1 {

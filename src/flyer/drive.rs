@@ -374,7 +374,7 @@ impl HostDrive {
     /// Create file `name` in directory `dir`, or empty it if it is there;
     /// its index.
     pub fn create_file(&mut self, dir: usize, name: &str) -> std::io::Result<usize> {
-        if !valid_name(name) {
+        if !creatable_name(name) {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
         let path = match self.child(dir, name) {
@@ -392,7 +392,7 @@ impl HostDrive {
 
     /// Create directory `name` in `dir`; its index.
     pub fn create_dir(&mut self, dir: usize, name: &str) -> std::io::Result<usize> {
-        if !valid_name(name) {
+        if !creatable_name(name) {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
         if self.child(dir, name).is_some() {
@@ -418,7 +418,7 @@ impl HostDrive {
 
     /// Move an object to `name` in directory `dir`.
     pub fn rename(&mut self, index: usize, dir: usize, name: &str) -> std::io::Result<()> {
-        if !valid_name(name) || index == 0 {
+        if !creatable_name(name) || index == 0 {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
         if self.child(dir, name).is_some_and(|c| c != index) {
@@ -534,6 +534,21 @@ pub fn valid_name(name: &str) -> bool {
             .all(|c| (c as u32) < 0x100 && c >= ' ' && c != '/' && c != ':')
 }
 
+/// A name the guest may give a new or renamed object. It is joined onto
+/// the drive's host folder, so beyond the Flyer's own rules it must be one
+/// ordinary host path component: no backslash (a separator on a Windows
+/// host), no "." or "..", nothing the host's own parser reads as a root, a
+/// prefix or a device. A leading dot is refused too: the scan keeps such
+/// names to itself (hidden files, and `.flyervol`, the volume's name), so
+/// the guest could make one but never see it again.
+pub fn creatable_name(name: &str) -> bool {
+    valid_name(name)
+        && !name.starts_with('.')
+        && !name.contains('\\')
+        && crate::filesys::is_single_host_component(name)
+        && !(cfg!(windows) && crate::filesys::is_windows_alias_name(name))
+}
+
 /// The firmware's `CompareStrings`: equal ignoring ASCII case.
 pub fn names_match(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
@@ -626,6 +641,42 @@ mod tests {
         assert_eq!(drive.lookup(0, "Work/Old/Clip"), Some(clip));
         assert_eq!(drive.object_at_header(header), Some(clip));
         assert!(drive.rename(projects, old, "Loop").is_err());
+    }
+
+    /// A name the guest gives a new or renamed object is joined onto the
+    /// drive's host folder, so it must be one ordinary host path component:
+    /// a backslash is a separator on a Windows host, "." and ".." are path
+    /// steps everywhere, and a leading dot names what the scan keeps to
+    /// itself (hidden files, and the `.flyervol` volume name).
+    #[test]
+    fn a_created_or_renamed_name_is_one_ordinary_host_component() {
+        let dir = folder();
+        let mut drive = HostDrive::open(dir.path(), 0).unwrap();
+        let clip = drive.lookup(0, "Clip One").unwrap();
+        let listing = |root: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing(&dir.path().join("FA0"));
+        let outside = listing(dir.path());
+        for name in ["..\\x", "a\\b", ".", "..", ".x", ".flyervol"] {
+            assert!(drive.create_file(0, name).is_err(), "create_file {name:?}");
+            assert!(drive.create_dir(0, name).is_err(), "create_dir {name:?}");
+            assert!(drive.rename(clip, 0, name).is_err(), "rename {name:?}");
+        }
+        assert_eq!(listing(&dir.path().join("FA0")), before);
+        assert_eq!(listing(dir.path()), outside);
+        assert_eq!(drive.volume, default_volume_name(0));
+        assert_eq!(drive.lookup(0, "Clip One"), Some(clip));
+        // Ordinary names, dots inside them included, still work.
+        assert!(drive.create_file(0, "Take 1.b").is_ok());
+        assert!(creatable_name("Clip 1"));
+        assert_eq!(creatable_name("NUL"), !cfg!(windows));
+        assert_eq!(creatable_name("com1.clip"), !cfg!(windows));
     }
 
     #[test]
