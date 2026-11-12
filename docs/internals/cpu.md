@@ -120,9 +120,19 @@ allocation priority (30) than a Zorro III board (20), so with 16 MB on the
 motherboard and a 256 MB board, ExecBase, libraries and programs land in
 the smaller bank first. Up to eight further regions
 (`AddressBus::fast_mem_regions`) cover read-only main and extended ROM and
-the other motherboard, accelerator and Zorro fast-RAM banks. Chip and slow
-RAM, the boot-time ROM overlay, WCS and device or cartridge mappings stay
-on the bus. A store or a whole read-modify-write instruction aimed at ROM,
+the other motherboard, accelerator and Zorro fast-RAM banks, and then the
+boot ROM of any expansion board that declares it plain
+(`ZorroDevice::plain_rom`). Copperline's own boards do: `copperhf.device`
+and the HOSTFS handlers execute in place from their board windows, and
+through the device path every opcode word they fetch is a two-colour-clock
+expansion-bus access that also flushes the timed devices. Mapped as local
+memory that code runs like Kickstart's, in deadline-bounded batches and
+compiled traces, which more than halves the emulated time small-file
+traffic on a `copperhf` volume takes. Only the ROM bytes are mapped: a board's registers, tables and pools, and every
+write to its window, stay on the device path, and the precise core keeps
+the expansion-bus timing for all of it. Chip and slow
+RAM, the boot-time ROM overlay, WCS and every other device or cartridge
+mapping stay on the bus. A store or a whole read-modify-write instruction aimed at ROM,
 and an access that crosses a region boundary, falls back to the bus before
 the instruction changes any register. The mappings are captured afresh for
 each native batch and never serialized, but the primary bank choice is

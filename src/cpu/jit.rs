@@ -44,6 +44,14 @@ pub(super) struct JitTiming {
     stop_state_stale: bool,
 }
 
+/// What a bus access under the batch path is doing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum JitAccess {
+    Read,
+    Fetch,
+    Write,
+}
+
 /// The pending interrupt level and host stop condition for a batch boundary.
 fn jit_stop_state(bus: &Bus, deadline: u64) -> (u8, bool) {
     let irq_level = if bus.paula.intena & INT_MASTER != 0 {
@@ -67,10 +75,19 @@ impl CpuBus {
         matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_)))
     }
 
+    /// Whether a read or fetch stays off the shared bus and every device.
     fn jit_plain_access(&self, address: u32, size: usize) -> bool {
-        matches!(
-            self.classify_plain_memory(self.mask(address), size),
-            Some(
+        let addr = self.mask(address);
+        self.jit_plain_memory(addr, size)
+            .unwrap_or_else(|| self.board_plain_rom(addr, size).is_some())
+    }
+
+    /// Local RAM and ROM, `None` when `addr` is not memory at all. A write
+    /// stops here: one aimed at a board's boot ROM is a device access.
+    fn jit_plain_memory(&self, addr: u32, size: usize) -> Option<bool> {
+        self.classify_plain_memory(addr, size).map(|region| {
+            matches!(
+                region,
                 PlainMemRegion::Rom(_)
                     | PlainMemRegion::OverlayRom(_)
                     | PlainMemRegion::ExtendedRom(_)
@@ -78,7 +95,26 @@ impl CpuBus {
                     | PlainMemRegion::AccelRam(_)
                     | PlainMemRegion::ZorroRam(..)
             )
-        )
+        })
+    }
+
+    /// The bytes at `addr` inside a configured board's plain boot ROM
+    /// (`ZorroDevice::plain_rom`), when the whole access fits in it. The
+    /// batch path reads and executes such a ROM as zero-wait local memory,
+    /// like Kickstart; the precise loop keeps the board's bus timing and
+    /// never asks.
+    pub(super) fn board_plain_rom(&self, addr: u32, size: usize) -> Option<&[u8]> {
+        if !self.jit_enabled {
+            return None;
+        }
+        let (crate::zorro::BoardBacking::Device(slot), off) =
+            self.bus.mem.zorro.device_region_at(addr, size)?
+        else {
+            return None;
+        };
+        let (rom_off, rom) = crate::zorro_device::ZorroDevice::plain_rom(&self.bus.devices[slot])?;
+        let start = off.checked_sub(rom_off)? as usize;
+        rom.get(start..start.checked_add(size)?)
     }
 
     /// `fetch` marks an instruction-stream access. The completed prefix is
@@ -86,12 +122,16 @@ impl CpuBus {
     /// instruction may still finish in this batch: the core repeats a fetch
     /// when the host yields between fetch and dispatch, which would bill the
     /// same shared-bus fetch twice. Interrupts and deadlines still yield there.
-    pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize, fetch: bool) {
+    pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize, access: JitAccess) {
+        let fetch = access == JitAccess::Fetch;
         // A one-instruction batch has no completed prefix before this access,
         // and returns to the host before the next instruction anyway. A lump
         // defers nothing and bills at its end.
         if matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_)))
-            && !self.jit_plain_access(address, size)
+            && !match access {
+                JitAccess::Write => self.jit_plain_memory(self.mask(address), size) == Some(true),
+                JitAccess::Read | JitAccess::Fetch => self.jit_plain_access(address, size),
+            }
         {
             self.flush_jit_batch_prefix();
             if let Some(JitBatchTiming::Multiple(timing)) = self.jit_batch.as_mut() {

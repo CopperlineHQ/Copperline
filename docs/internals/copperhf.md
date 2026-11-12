@@ -136,6 +136,12 @@ requests `SCSIF_AUTOSENSE`/`SCSIF_OLDAUTOSENSE`, honouring
 
 ## The device stub (`guest/copperhf/`)
 
+The device runs in place from the board window. The precise core fetches
+it over the expansion bus like any Zorro II ROM; under `[cpu] jit` the ROM
+is mapped as local memory (`ZorroDevice::plain_rom`, see
+[the batch execution mode](cpu.md#the-batch-jit-execution-mode)), so only
+the register accesses below reach the board.
+
 The boot ROM contains an Exec device built from:
 
 - `entry.s` -- entry table, DiagArea, and Romtag (`rt_Type = NT_DEVICE`).

@@ -4109,7 +4109,15 @@ impl CpuBus {
     }
 
     fn read_sized_unobserved(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
-        self.note_jit_bus_access(address, size, kind == CpuBusAccessKind::Fetch);
+        self.note_jit_bus_access(
+            address,
+            size,
+            if kind == CpuBusAccessKind::Fetch {
+                jit::JitAccess::Fetch
+            } else {
+                jit::JitAccess::Read
+            },
+        );
         let addr = self.mask(address);
         if kind == CpuBusAccessKind::Read {
             self.bus
@@ -4442,6 +4450,11 @@ impl CpuBus {
         if let Some((crate::zorro::BoardBacking::Device(slot), off)) =
             self.bus.mem.zorro.device_region_at(addr, size)
         {
+            // The batch path runs a board's plain boot ROM as zero-wait
+            // local memory, like Kickstart ROM (`board_plain_rom`).
+            if let Some(rom) = self.board_plain_rom(addr, size) {
+                return read_be(rom, 0, size);
+            }
             self.bus.cpu_slow_external_access(Self::access_words(size));
             let (value, activity) = {
                 let mem = &mut self.bus.mem;
@@ -4584,7 +4597,7 @@ impl CpuBus {
     }
 
     fn write_sized(&mut self, address: u32, size: usize, value: u32) {
-        self.note_jit_bus_access(address, size, false);
+        self.note_jit_bus_access(address, size, jit::JitAccess::Write);
         self.write_sized_unobserved(address, size, value);
         // MMIO watches see the write once it has landed, stamped like a
         // read: at the end of the access, when the device has it.
@@ -5093,6 +5106,7 @@ impl CpuBus {
             }
         };
         let mem = &mut self.bus.mem;
+        let devices = &self.bus.devices;
         if !mem
             .zorro
             .ram_overlaps(ROM_BASE as u32, mem.rom.len() as u32)
@@ -5140,6 +5154,19 @@ impl CpuBus {
         for (base, len, idx) in banks.into_iter().flatten() {
             if self.jit_window_bank != Some(base) {
                 push(mem.zorro.board_ram_mut(idx).as_mut_ptr(), base, len, true);
+            }
+        }
+        // Boot ROMs a board declares plain (`ZorroDevice::plain_rom`): the
+        // driver code Copperline's own boards execute in place. Last, so a
+        // full table drops these before any RAM bank; their accesses then
+        // take the bus path, which bills them the same nothing.
+        for (base, len, slot) in mem.zorro.primary_device_windows() {
+            let Some((off, rom)) = crate::zorro_device::ZorroDevice::plain_rom(&devices[slot])
+            else {
+                continue;
+            };
+            if u64::from(off) + rom.len() as u64 <= u64::from(len) {
+                push(rom.as_ptr().cast_mut(), base + off, rom.len() as u32, false);
             }
         }
         let ranges = regions.map(|r| r.map(|r| (r.base, r.len)));
@@ -8992,7 +9019,7 @@ mod tests {
         bus.bus.paula.intreq = INT_SOFT;
         // An opcode fetched from chip RAM with no new prefix to bill: only the
         // access itself can mark the cached state stale.
-        bus.note_jit_bus_access(0x0000_0100, 2, true);
+        bus.note_jit_bus_access(0x0000_0100, 2, jit::JitAccess::Fetch);
         assert!(
             bus.note_jit_batch_boundary(1, pc, 0x2000),
             "a shared-bus access refreshes it"
@@ -9193,6 +9220,107 @@ mod tests {
             .is_none());
         machine.bus.dbg_memw_addr = Some(mb);
         assert!(machine.bus.fast_mem_regions().iter().all(Option::is_none));
+        Ok(())
+    }
+
+    /// A board that declares its boot ROM plain (`ZorroDevice::plain_rom`)
+    /// has it run as local memory by the batch path: a loop executing in
+    /// place from the board window computes what the precise core computes
+    /// without paying a device access per opcode word. Everything else in
+    /// the window, and every write, stays on the device path.
+    #[test]
+    fn jit_runs_a_boards_plain_boot_rom_as_local_memory() -> Result<()> {
+        const BOARD: u32 = 0x00E9_0000;
+        const CODE: u32 = BOARD + crate::filesys::ROM_OFFSET as u32;
+        const RESULT: u32 = FAST_RAM_BASE as u32 + 0x100;
+        const PROGRAM: [u16; 10] = [
+            0x7000, // moveq #0,d0
+            0x323C, 999,    // move.w #999,d1
+            0x5280, // addq.l #1,d0
+            0x51C9, 0xFFFC, // dbra d1,*-2
+            0x2080, // move.l d0,(a0)
+            0x60FE, // bra.s *
+            0x4E71, 0x4E71,
+        ];
+        fn machine(jit: bool) -> Result<M68kMachine> {
+            let mut bus = test_bus_with_pc(CODE);
+            bus.mem
+                .zorro
+                .add_board_configured_at(BoardSpec::copperline_services(0), BOARD)?;
+            bus.devices.push(crate::zorro_device::BoardDevice::Filesys(
+                crate::filesys::FilesysBoard::new(Vec::new()),
+            ));
+            // The window latches guest writes, so the program goes in the
+            // way a guest would put it there.
+            for (idx, word) in PROGRAM.iter().enumerate() {
+                let mut host = crate::zorro_device::DeviceHost::for_slot(&mut bus.mem, 0);
+                crate::zorro_device::ZorroDevice::write(
+                    &mut bus.devices[0],
+                    crate::filesys::ROM_OFFSET as u32 + idx as u32 * 2,
+                    2,
+                    u32::from(*word),
+                    &mut host,
+                );
+            }
+            let mut machine = M68kMachine::new(bus, CpuModel::M68030, false)?;
+            machine.bus_mut().agnus.hpos = 0x21;
+            machine.set_jit_enabled(jit);
+            machine.cpu.dar[8] = RESULT;
+            Ok(machine)
+        }
+        fn run(machine: &mut M68kMachine) -> Result<u64> {
+            let start = machine.bus.bus.emulated_cck();
+            let mut instructions = 0;
+            while instructions < 2100 {
+                instructions += machine.step_slice(64)?.instructions;
+            }
+            Ok(machine.bus.bus.emulated_cck() - start)
+        }
+
+        let mut precise = machine(false)?;
+        let precise_cck = run(&mut precise)?;
+        let mut jit = machine(true)?;
+        let jit_cck = run(&mut jit)?;
+        for machine in [&precise, &jit] {
+            assert_eq!(machine.d(0), 1000);
+            assert_eq!(machine.bus.peek_long(RESULT), 1000);
+        }
+        // The precise core fetches every word over the expansion bus.
+        assert!(precise_cck >= 2 * 2000, "precise: {precise_cck} cck");
+        assert!(
+            jit_cck < precise_cck / 2,
+            "jit: {jit_cck} cck against precise {precise_cck}"
+        );
+
+        let rom_len = crate::filesys::FILESYS_HANDLER.len() as u32;
+        let regions = jit.bus.fast_mem_regions();
+        assert!(regions
+            .iter()
+            .flatten()
+            .any(|r| r.base == CODE && r.len == rom_len && !r.writable));
+        assert!(precise
+            .bus
+            .fast_mem_regions()
+            .iter()
+            .flatten()
+            .all(|r| r.base != CODE));
+
+        // A read inside the ROM bills nothing; the mount table above it and
+        // a write into the ROM are device accesses, and the write lands.
+        jit.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        let before = jit.bus.bus.emulated_cck();
+        assert_eq!(jit.bus.read_word(CODE), 0x7000);
+        assert_eq!(jit.bus.bus.emulated_cck(), before);
+        jit.bus
+            .read_word(BOARD + crate::filesys::MOUNTS_OFFSET as u32);
+        let after_table = jit.bus.bus.emulated_cck();
+        assert!(after_table > before);
+        jit.bus.write_word(CODE + 0x40, 0x1234);
+        assert!(jit.bus.bus.emulated_cck() > after_table);
+        assert_eq!(jit.bus.read_word(CODE + 0x40), 0x1234);
+        // An access running off the end of the ROM is not plain.
+        assert!(jit.bus.board_plain_rom(CODE + rom_len - 2, 4).is_none());
+        assert!(jit.bus.board_plain_rom(CODE + rom_len - 2, 2).is_some());
         Ok(())
     }
 

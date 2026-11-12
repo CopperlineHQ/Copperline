@@ -2145,6 +2145,17 @@ impl ZorroDevice for FilesysBoard {
             .fold(0, |acc, &b| (acc << 8) | u32::from(b))
     }
 
+    /// The handler ROM: every HOSTFS handler process runs in place from
+    /// it (`dn_SegList` points into the window). Only the code is offered;
+    /// the mount table, register banks and lock pool above it stay on the
+    /// device path.
+    fn plain_rom(&self) -> Option<(u32, &[u8])> {
+        let rom = self
+            .image
+            .get(ROM_OFFSET..ROM_OFFSET + FILESYS_HANDLER.len())?;
+        Some((ROM_OFFSET as u32, rom))
+    }
+
     fn write(&mut self, off: u32, size: usize, value: u32, host: &mut DeviceHost) {
         // Latch first: the window behaves as RAM apart from the doorbells.
         let at = off as usize;
