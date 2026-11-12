@@ -700,6 +700,23 @@ impl Toaster {
         }
     }
 
+    /// The card for the host's side (a status query, a capture, a control
+    /// command), once the compose thread has caught up. Unlike
+    /// [`Toaster::card`] this is not an event of the emulated timeline, so
+    /// it waits without recording that it did: `joined` decides at which
+    /// field a frame's sound is taken, and that must be the same field
+    /// whether or not anyone looked.
+    fn host_card(&mut self) -> MutexGuard<'_, Card> {
+        self.settle();
+        self.card.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn settle(&mut self) {
+        if self.joined < self.submitted && self.worker_alive() {
+            self.pipe.drain(self.submitted);
+        }
+    }
+
     pub fn stats(&mut self) -> Stats {
         self.card().stats
     }
@@ -1195,7 +1212,7 @@ impl VideoSlotDevice for Toaster {
     }
 
     fn settle_outputs(&mut self) {
-        self.drain();
+        self.settle();
     }
 
     fn field_render_input(&mut self, input: Box<RenderInput>, at: BeamPos) {
@@ -1219,7 +1236,7 @@ impl VideoSlotDevice for Toaster {
     }
 
     fn control_status(&mut self) -> serde_json::Value {
-        self.card().status_value()
+        self.host_card().status_value()
     }
 
     /// Program's sound of the frames whose fields are known finished: a
@@ -1263,7 +1280,7 @@ impl VideoSlotDevice for Toaster {
                     }
                     Some(_) => return Err("file must be a path string or null".into()),
                 };
-                let card = self.card();
+                let card = self.host_card();
                 card.video.pin_input(n - 1, file)?;
                 Ok(serde_json::json!({ "inputs": card.video.input_status() }))
             }
@@ -2026,6 +2043,31 @@ mod tests {
             fields.push(Line::new(vpos));
         }
         fields
+    }
+
+    /// A host looking at the card (a capture, a status query) waits for
+    /// the compose thread, but it is no part of the emulated timeline: the
+    /// frames' sound still reaches Paula at the fields it does on a run
+    /// nobody looked at.
+    #[test]
+    fn a_host_query_does_not_move_when_the_sound_is_taken() {
+        let fields = session_fields();
+        let mut quiet = Toaster::new();
+        let mut watched = Toaster::new();
+        for (k, line) in fields.iter().enumerate() {
+            let at = BeamPos {
+                frame: k as u64,
+                ..BeamPos::default()
+            };
+            let (mut unseen, mut seen) = (Vec::new(), Vec::new());
+            quiet.submit(FieldInput::Owned(OwnedField::copy_of(&line.field())), at);
+            quiet.take_audio(&mut unseen);
+            watched.submit(FieldInput::Owned(OwnedField::copy_of(&line.field())), at);
+            watched.take_audio(&mut seen);
+            assert_eq!(seen.len(), unseen.len(), "field {k}");
+            watched.settle_outputs();
+            let _ = watched.control_status();
+        }
     }
 
     #[test]
