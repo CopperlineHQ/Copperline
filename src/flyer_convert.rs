@@ -1069,23 +1069,25 @@ pub fn export(
         Clip::read(&bytes).map_err(|e| anyhow!("{}: not a Flyer clip: {e:?}", input.display()))?;
     let fields = clip.field_count();
     if fields == 0 {
-        bail!("{} has no video", input.display());
+        bail!("{} has no fields", input.display());
     }
     let (channels, audio) = clip.audio();
 
     // The sound goes through a temporary file: ffmpeg reads two inputs.
+    // A new file of its own name, removed when this function returns,
+    // however it does.
     let audio_file = if channels > 0 && !audio.is_empty() {
-        let path = std::env::temp_dir().join(format!(
-            "flyerclip-{}-{}.pcm",
-            std::process::id(),
-            crate::timestamp::compact_now()
-        ));
         let mut raw = Vec::with_capacity(audio.len() * 2);
         for s in &audio {
             raw.extend_from_slice(&s.to_le_bytes());
         }
-        std::fs::write(&path, raw)?;
-        Some(path)
+        let mut file = tempfile::Builder::new()
+            .prefix("flyerclip-")
+            .suffix(".pcm")
+            .tempfile()
+            .context("a temporary file for the sound")?;
+        file.write_all(&raw)?;
+        Some(file.into_temp_path())
     } else {
         None
     };
@@ -1104,7 +1106,7 @@ pub fn export(
     if let Some(path) = &audio_file {
         cmd.args(["-f", "s16le", "-ar", &AUDIO_RATE.to_string()])
             .args(["-ac", &channels.to_string(), "-i"])
-            .arg(path);
+            .arg(path.as_os_str());
     }
     cmd.args(["-vf", "scale=640:480,setsar=1"]);
     let is_mp4 = output
@@ -1122,6 +1124,7 @@ pub fn export(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("starting ffmpeg")?;
+    let errors = drain_stderr(&mut child);
     let mut stdin = child.stdin.take().context("ffmpeg's input")?;
 
     let mut report = Report {
@@ -1132,12 +1135,19 @@ pub fn export(
     let mut picture = vec![u32::from_le_bytes([0, 0, 0, 0xFF]); W * H];
     let mut bytes_out = vec![0u8; W * H * 4];
     let mut write_err = None;
+    let mut decode_err = None;
     for n in 0..fields {
-        let lines = clip
-            .decode_field(n)
-            .map_err(|e| anyhow!("field {n}: {e:?}"))?;
         let f = (n % 4) as usize;
-        decode_field_rows(&lines, f, &mut picture);
+        match clip.decode_field(n) {
+            Ok(lines) => decode_field_rows(&lines, f, &mut picture),
+            // A field of sound alone (an audio clip, a dropped field):
+            // the picture stays as it was, black to begin with.
+            Err(flyerclip::Error::NoVideo(_)) => {}
+            Err(e) => {
+                decode_err = Some(anyhow!("field {n}: {e:?}"));
+                break;
+            }
+        }
         // Fields II and IV complete a picture.
         if f & 1 == 1 || n + 1 == fields {
             for (o, p) in bytes_out.chunks_exact_mut(4).zip(&picture) {
@@ -1151,14 +1161,14 @@ pub fn export(
             progress(report.frames);
         }
     }
+    // Whatever stopped the loop, ffmpeg is told its input is over and is
+    // waited for, so no child is left behind.
     drop(stdin);
-    let mut err = String::new();
-    if let Some(mut e) = child.stderr.take() {
-        let _ = e.read_to_string(&mut err);
-    }
     let status = child.wait()?;
-    if let Some(path) = audio_file {
-        let _ = std::fs::remove_file(path);
+    let err = errors.join().unwrap_or_default();
+    drop(audio_file);
+    if let Some(e) = decode_err {
+        return Err(e);
     }
     if !status.success() || write_err.is_some() {
         bail!(
@@ -1399,6 +1409,67 @@ mod tests {
             .expect("the import finished");
         assert_eq!(frames, Ok(2));
         assert!(out.is_file());
+    }
+
+    /// A clip of sound alone (a cutting-room sub-clip, an audio import)
+    /// exports: its fields have no picture, so the video stays black.
+    #[cfg(unix)]
+    #[test]
+    fn a_clip_with_no_picture_exports_its_sound_over_black() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = flyerclip::ClipWriter::audio_only(2);
+        let sound: Vec<i16> = (0..4 * PER_FIELD * 2).map(|k| k as i16).collect();
+        writer.push_frame(None, Some(&sound));
+        writer.push_frame(None, Some(&sound));
+        let clip = dir.path().join("Sound");
+        std::fs::write(&clip, writer.finish()).unwrap();
+        // Takes the pictures in and counts their bytes.
+        let count = dir.path().join("bytes");
+        let ffmpeg = fake_ffmpeg(dir.path(), &format!("wc -c > '{}'", count.display()));
+        let report = export(&ffmpeg, &clip, &dir.path().join("out.mp4"), |_| {}).unwrap();
+        assert_eq!(
+            (report.fields, report.frames, report.audio_channels),
+            (8, 4, 2)
+        );
+        let piped: usize = std::fs::read_to_string(&count)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(piped, 4 * W * H * 4);
+    }
+
+    /// The exported sound goes through a temporary file. It is gone again
+    /// when the export gives up part-way, here on a clip cut off inside its
+    /// first frame's picture.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_export_leaves_no_temporary_sound_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = flyerclip::ClipWriter::new(Grade::Std, 2);
+        let field = vec![vec![40u8; W]; 242];
+        let video = [field.clone(), field.clone(), field.clone(), field];
+        let sound: Vec<i16> = vec![7; 4 * PER_FIELD * 2];
+        writer.push_frame(Some(&video), Some(&sound));
+        let mut bytes = writer.finish();
+        let frame = Clip::read(&bytes).unwrap().frames[0].block as usize;
+        // The frame's header and its sound (two channels of four fields).
+        bytes.truncate((frame + 1 + 2 * 4 * flyerclip::audio::BLOCKS_PER_FIELD) * 512);
+        let clip = dir.path().join("Cut off");
+        std::fs::write(&clip, bytes).unwrap();
+        // Says where its second input (the sound) is, and takes the rest.
+        let seen = dir.path().join("seen");
+        let ffmpeg = fake_ffmpeg(
+            dir.path(),
+            &format!(
+                "for a in \"$@\"; do case \"$a\" in *.pcm) echo \"$a\" > '{}';; esac; done\n\
+                 cat > /dev/null",
+                seen.display()
+            ),
+        );
+        assert!(export(&ffmpeg, &clip, &dir.path().join("out.mp4"), |_| {}).is_err());
+        let pcm = std::fs::read_to_string(&seen).unwrap();
+        assert!(!Path::new(pcm.trim()).exists(), "{pcm}");
     }
 
     /// Copying a clip that is already where it is going must not open it
