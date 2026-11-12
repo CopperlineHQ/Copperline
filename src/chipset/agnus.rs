@@ -1747,6 +1747,34 @@ mod tests {
         assert_eq!(agnus.cck_until_next_frame(), 8);
     }
 
+    /// The JIT event horizon leans on this: it bounds a batch by the end of
+    /// the scanline and leaves the frame deadline out.
+    #[test]
+    fn frame_deadline_is_never_before_the_end_of_the_scanline() {
+        for standard in [VideoStandard::Pal, VideoStandard::Ntsc] {
+            let mut agnus = Agnus::with_video_standard(standard);
+            let lines = agnus.current_frame_lines();
+            for step in [1, 7, 113, 226, 227, 228, 5000, 70_000] {
+                for _ in 0..40 {
+                    agnus.advance_by_cck(step);
+                    let line = agnus.cck_until_line_ticks(1).unwrap();
+                    let frame = agnus.cck_until_next_frame();
+                    assert!(
+                        frame >= line,
+                        "{standard:?} v={} h={}",
+                        agnus.vpos,
+                        agnus.hpos
+                    );
+                    if agnus.vpos + 1 >= lines {
+                        assert_eq!(frame, line, "last line of the frame");
+                    }
+                    agnus.nudge_hpos();
+                    assert!(agnus.cck_until_next_frame() >= agnus.cck_until_line_ticks(1).unwrap());
+                }
+            }
+        }
+    }
+
     #[test]
     fn ntsc_frame_deadline_accounts_for_long_lines() {
         let mut agnus = Agnus::with_video_standard(VideoStandard::Ntsc);
