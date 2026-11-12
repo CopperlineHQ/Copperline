@@ -1806,6 +1806,27 @@ mod tests {
         let _ = std::fs::remove_file(&bin);
     }
 
+    /// Each sector read gathers the source frames it resamples from, so a
+    /// header claiming an absurd sample rate turns every read into a large
+    /// allocation. No audio file has such a rate.
+    #[test]
+    fn a_wave_file_with_an_absurd_sample_rate_is_refused() {
+        let wav = temp_path("fast.wav");
+        // Long enough to hold audio at that rate, so that only the rate
+        // stands between this file and a load.
+        write_wav16(&wav, 100_000_000, &[(0, 0); 8192]);
+        let cue = single_audio_track_cue(&wav, "WAVE");
+        let Err(err) = CdImage::load(&cue) else {
+            panic!("the rate must be refused");
+        };
+        assert!(format!("{err:#}").contains("Hz"), "{err:#}");
+        // The highest rate in real use still loads.
+        write_wav16(&wav, 768_000, &[(0, 0); 588]);
+        CdImage::load(&cue).unwrap();
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&wav);
+    }
+
     #[test]
     fn file_line_without_a_type_is_binary() {
         let cue = temp_path("notype.cue");
