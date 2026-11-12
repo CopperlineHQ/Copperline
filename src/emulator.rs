@@ -5019,6 +5019,36 @@ mod tests {
     use crate::config::PacingBudget;
     use std::time::{Duration, Instant};
 
+    /// The A2000 profile as built hardware: the B2000 Rev 6.x board is the
+    /// 8372A Agnus with the OCS Denise, 1 MiB of chip RAM and nothing at
+    /// $C00000, the OKI clock in the $DC0000 socket, and the A500's Gary --
+    /// so no Gayle, Fat Gary or Ramsey claims the chip-register space.
+    #[test]
+    fn a2000_rev6_board_builds_with_1mb_chip_an_oki_clock_and_a500_gary() {
+        use crate::chipset::agnus::AgnusRevision;
+        use crate::config::{machine_profile_defaults, MachineModel};
+
+        let cfg = machine_profile_defaults(MachineModel::A2000);
+        let mut emu = super::build_machine(&cfg, Box::new(crate::audio::NullSink), false, true)
+            .expect("the A2000 builds on the bundled boot ROM");
+        assert_eq!(emu.machine_descriptor().machine, Some(MachineModel::A2000));
+        // The 8362 Denise has no DENISEID register to answer with $FC.
+        assert_ne!(emu.bus_mut().custom_read(0x07C, 2) & 0xFF, 0xFC);
+        let bus = emu.bus();
+        assert_eq!(bus.mem.chip_ram.len(), 1024 * 1024);
+        assert!(bus.mem.slow_ram.is_empty());
+        assert!(bus.mem.mb_ram.is_empty());
+        assert_eq!(bus.agnus.revision(), AgnusRevision::Ecs8372Rev4);
+        assert!(bus.rtc_present());
+        assert_eq!(bus.rtc.chip(), crate::rtc::RtcChip::Msm6242);
+        assert!(bus.gayle.is_none());
+        assert!(bus.gary.is_none());
+        assert!(bus.ramsey.is_none());
+        // The internal drive, and only it, is on the floppy bus.
+        assert!(bus.floppy.drive_connected(0));
+        assert!(!bus.floppy.drive_connected(1));
+    }
+
     #[test]
     fn pacing_cost_scales_with_cpu_clock() {
         // Stock 68000 (2 clocks/cck) is the identity. A 7-clocks/cck CPU (an

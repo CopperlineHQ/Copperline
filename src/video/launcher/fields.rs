@@ -1554,10 +1554,11 @@ pub(super) fn parallel_rows(parallel_device: ParallelDevice) -> &'static [Row] {
 }
 
 /// Machine models offered in the selector strip, roughly chronological.
-pub const MODELS: [MachineModel; 10] = [
+pub const MODELS: [MachineModel; 11] = [
     MachineModel::A1000,
     MachineModel::A500Ocs,
     MachineModel::A500,
+    MachineModel::A2000,
     MachineModel::A500Plus,
     MachineModel::A600,
     MachineModel::A1200,

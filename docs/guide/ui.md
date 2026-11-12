@@ -810,7 +810,7 @@ an A1200 is selected on the Memory tab; Zorro III RAM is greyed with the reason
 The layout is:
 
 - **Machine selector** (top). Pick a machine -- A1000, A500 OCS, A500,
-  A500+, A600, A1200, A3000, A4000, CDTV, or CD32. With no profile chosen
+  A2000, A500+, A600, A1200, A3000, A4000, CDTV, or CD32. With no profile chosen
   the A500 is highlighted, since that is the machine the defaults describe.
   Selecting a machine applies that profile's defaults (chipset, CPU, RAM,
   gate array, RTC) to every tab; settings that no longer apply (an IDE

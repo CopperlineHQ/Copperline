@@ -419,6 +419,17 @@ the mirror answers -- on a floating bus KS 1.2 sizes RAM into unmapped
 space and dies on a yellow screen. Machines with a Gayle or Fat
 Gary/Ramsey decode the space properly and have no mirror.
 
+The `A2000` profile (B2000 Rev 6.x) is this decode unchanged: the board
+carries the A500's Gary, so the profile is only the fitted parts (8372A
+Agnus, OCS Denise, 1 MiB of chip RAM, nothing at `$C00000`, an MSM6242 in
+the `$DC0000` socket). What the real board does differently and Copperline
+does not model yet: CIA-A's TOD input can be jumpered to the power supply's
+50/60 Hz mains tick instead of VSYNC (every profile clocks it from VSYNC),
+Buster's Zorro II bus arbitration is implicit in the board DMA paths rather
+than modelled as a chip, the slot count is not enforced (the autoconfig
+chain takes as many boards as fit the address space), and the CPU slot and
+the inactive ISA slots carry nothing.
+
 A CPU read of an address no region claims floats to the last value the
 chip data bus carried (`Bus.data_bus`), as on real Agnus-arbitrated
 hardware -- not a fixed all-ones pattern. DMA fetches drive that bus, and

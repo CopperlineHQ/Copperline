@@ -1297,18 +1297,23 @@ impl TryFrom<RawConfig> for Config {
         // the generic preset instead -- e.g. revision = "OCS" forces a plain
         // 8371/8362 machine even under profile = "A500". cfg.machine, the gate
         // array, and the descriptor machine id are unaffected.
-        let a500_default =
-            raw.chipset.revision.is_none() && matches!(machine, None | Some(MachineModel::A500));
+        // The A2000 Rev 6.x board carries the same pair, so its profile is
+        // pinned the same way.
+        let rev6_chip_pair = raw.chipset.revision.is_none()
+            && matches!(
+                machine,
+                None | Some(MachineModel::A500 | MachineModel::A2000)
+            );
         let agnus_revision = match raw.chipset.agnus.as_deref() {
             None => match machine {
                 // The A500+ (Rev 8A) and A600 boards have the 2 MB "Super Fat"
                 // 8375 soldered on, regardless of preset or fitted chip RAM.
                 Some(MachineModel::A500Plus | MachineModel::A600) => AgnusRevision::Ecs8375,
-                // The A500 Rev 6A / default machine has the 1 MB 8372A. Pinning
-                // it keeps the authentic 1 MiB chip-RAM ceiling, so fitting
-                // more is rejected by validate_chip_ram rather than silently
-                // promoted to an 8375.
-                _ if a500_default => AgnusRevision::Ecs8372Rev4,
+                // The A500 Rev 6A / default machine and the A2000 Rev 6.x have
+                // the 1 MB 8372A. Pinning it keeps the authentic 1 MiB chip-RAM
+                // ceiling, so fitting more is rejected by validate_chip_ram
+                // rather than silently promoted to an 8375.
+                _ if rev6_chip_pair => AgnusRevision::Ecs8372Rev4,
                 // Everything else -- the A1200's AGA preset (Alice) or an
                 // explicit revision preset -- picks by preset + fitted chip RAM.
                 _ => default_agnus_revision(chipset, chip_ram_bytes),
@@ -1316,11 +1321,11 @@ impl TryFrom<RawConfig> for Config {
             Some(s) => parse_agnus_revision(s)?,
         };
         let denise_revision = match raw.chipset.denise.as_deref() {
-            // The A500 Rev 6A / default machine pairs its ECS Agnus with the
-            // original 8362 OCS Denise (no superhires/BRDRBLNK). Every other
-            // machine, and any explicit revision preset, takes the Denise that
-            // matches its preset.
-            None if a500_default => DeniseRevision::Ocs,
+            // The A500 Rev 6A / default machine and the A2000 Rev 6.x pair
+            // their ECS Agnus with the original 8362 OCS Denise (no
+            // superhires/BRDRBLNK). Every other machine, and any explicit
+            // revision preset, takes the Denise that matches its preset.
+            None if rev6_chip_pair => DeniseRevision::Ocs,
             None => default_denise_revision(chipset),
             Some(s) => parse_denise_revision(s)?,
         };
@@ -2014,6 +2019,7 @@ pub fn parse_machine_model(s: &str) -> Result<MachineModel> {
         "A500" => Ok(MachineModel::A500),
         "A500OCS" => Ok(MachineModel::A500Ocs),
         "A500PLUS" | "A500+" => Ok(MachineModel::A500Plus),
+        "A2000" => Ok(MachineModel::A2000),
         "A600" => Ok(MachineModel::A600),
         "A1200" => Ok(MachineModel::A1200),
         "A3000" => Ok(MachineModel::A3000),
@@ -2021,7 +2027,7 @@ pub fn parse_machine_model(s: &str) -> Result<MachineModel> {
         "CDTV" => Ok(MachineModel::Cdtv),
         "CD32" => Ok(MachineModel::Cd32),
         _ => Err(anyhow!(
-            "unknown machine model {:?}: expected A1000 / A500 / A500OCS / A500Plus / A600 / A1200 / A3000 / A4000 / CDTV / CD32",
+            "unknown machine model {:?}: expected A1000 / A500 / A500OCS / A500Plus / A2000 / A600 / A1200 / A3000 / A4000 / CDTV / CD32",
             s
         )),
     }
@@ -2058,10 +2064,13 @@ pub fn machine_profile_defaults(model: MachineModel) -> Config {
             d.slow_ram_bytes = 0;
             // No RTC (inherits the default-off).
         }
-        // The early A500 (Rev 3/5) / A2000: the 512 KiB OCS "Fat Agnus"
+        // The early A500 (Rev 3/5): the 512 KiB OCS "Fat Agnus"
         // (8370/8371) and OCS 8362 Denise, with the same 512 KiB chip +
         // 512 KiB trapdoor slow RAM. This is the pre-Rev-6A machine the
-        // default used to be; `revision = "OCS"` gives the same chips.
+        // default used to be; `revision = "OCS"` gives the same chips. An
+        // early (Rev 4.x) A2000 has these chips and this memory split too,
+        // with a clock: the A2000 profile with `revision = "OCS"`, 512 KiB
+        // chip and 512 KiB slow RAM is that board.
         MachineModel::A500Ocs => {
             d.chipset = Chipset::Ocs;
         }
@@ -2088,6 +2097,20 @@ pub fn machine_profile_defaults(model: MachineModel) -> Config {
             d.cpu = CpuModel::M68EC020;
             d.cpu_clock_mhz = 14.18;
             d.gate_array = GateArray::GayleA1200;
+        }
+        // The A2000, as the B2000 Rev 6.x board most of them are: the A500
+        // Rev 6A chips (8372A Agnus + OCS 8362 Denise, pinned in the
+        // agnus/denise derivation below) with the board's 1 MiB of soldered
+        // RAM all chip RAM, so nothing at $C00000, and the OKI MSM6242
+        // clock on the motherboard. Its Gary is the A500's part and decodes
+        // the same map (GateArray::None is that decode), and its Zorro II
+        // slots are the autoconfig chain every profile already has, so the
+        // profile is the board's fitted parts and nothing else.
+        MachineModel::A2000 => {
+            d.chipset = Chipset::Ecs;
+            d.chip_ram_bytes = 1024 * 1024;
+            d.slow_ram_bytes = 0;
+            d.rtc_present = true;
         }
         // The A3000: ECS on a big-box board, a 25 MHz 68030 with a real MMU,
         // and Ramsey-04 in front of the motherboard DRAM. Gary, not Gayle, so
@@ -2168,12 +2191,13 @@ pub fn machine_profile_defaults(model: MachineModel) -> Config {
         // regardless of fitted chip RAM.
         MachineModel::A500Plus | MachineModel::A600 => AgnusRevision::Ecs8375,
         // The A500 Rev 6A keeps its pinned 8372A/OCS-Denise pairing (also
-        // the no-profile default machine's chips).
-        MachineModel::A500 => AgnusRevision::Ecs8372Rev4,
+        // the no-profile default machine's chips), and the A2000 Rev 6.x
+        // board carries the same two parts.
+        MachineModel::A500 | MachineModel::A2000 => AgnusRevision::Ecs8372Rev4,
         _ => default_agnus_revision(d.chipset, d.chip_ram_bytes),
     };
     d.denise_revision = match model {
-        MachineModel::A500 => DeniseRevision::Ocs,
+        MachineModel::A500 | MachineModel::A2000 => DeniseRevision::Ocs,
         _ => default_denise_revision(d.chipset),
     };
     // The FPU and on-chip caches are silicon: present whenever the CPU has

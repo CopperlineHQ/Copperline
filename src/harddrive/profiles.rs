@@ -562,6 +562,7 @@ mod tests {
             for machine in [
                 None,
                 Some(MachineModel::A500),
+                Some(MachineModel::A2000),
                 Some(MachineModel::A600),
                 Some(MachineModel::A1200),
                 Some(MachineModel::A3000),
@@ -581,6 +582,11 @@ mod tests {
         );
         assert_eq!(
             period_profile_id(A2091, Some(MachineModel::A4000)),
+            "quantum-lps-52s"
+        );
+        // The A2091 in the machine it was made for is the A2000HD.
+        assert_eq!(
+            period_profile_id(A2091, Some(MachineModel::A2000)),
             "quantum-lps-52s"
         );
     }

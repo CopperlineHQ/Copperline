@@ -766,8 +766,8 @@ mod tests {
     #[test]
     fn hardware_profiles_round_trip_without_host_paths() -> Result<()> {
         for profile in [
-            "A500", "A500OCS", "A500Plus", "A600", "A1200", "A3000", "A4000", "CDTV", "CD32",
-            "A1000",
+            "A500", "A500OCS", "A500Plus", "A2000", "A600", "A1200", "A3000", "A4000", "CDTV",
+            "CD32", "A1000",
         ] {
             let mut raw = RawConfig::default();
             raw.machine.profile = Some(profile.into());
