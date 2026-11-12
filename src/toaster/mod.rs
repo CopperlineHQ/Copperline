@@ -766,11 +766,21 @@ impl Toaster {
         }
     }
 
-    /// [`Self::settle`] from a shared borrow, for saving a state.
+    /// [`Self::settle`] from a shared borrow, for saving a state. A
+    /// compose thread that has died is not waited for: the fields it left
+    /// queued are run here, as [`Self::worker_alive`] runs them at the
+    /// card's next use, so what is saved is the card the session goes on
+    /// with.
     fn settle_shared(&self) {
-        let working = self.worker.as_ref().is_some_and(|w| !w.is_finished());
-        if self.joined < self.submitted && working {
-            self.pipe.drain(self.submitted);
+        if self.worker.as_ref().is_some_and(|w| !w.is_finished()) {
+            if self.joined < self.submitted {
+                self.pipe.drain(self.submitted);
+            }
+            return;
+        }
+        let left: Vec<Job> = self.pipe.lock().queue.drain(..).collect();
+        for job in left {
+            self.run_inline(job);
         }
     }
 
@@ -982,7 +992,7 @@ impl Toaster {
     }
 
     /// Do a job on this thread.
-    fn run_inline(&mut self, job: Job) {
+    fn run_inline(&self, job: Job) {
         let mut fb = Vec::new();
         let mut scratch = Vec::new();
         let (result, spent) = run_job(&self.card, job, &mut fb, &mut scratch);
@@ -2340,6 +2350,44 @@ mod tests {
                 loaded.card().frame_store.data
             );
         }
+    }
+
+    /// A save takes in every field handed over. If the compose thread
+    /// has died, the fields left in its queue are run by the save itself,
+    /// as the card's own next use runs them: the saved card and the live
+    /// one must not part ways.
+    #[test]
+    fn a_save_runs_the_fields_a_dead_compose_thread_left_queued() {
+        let fields = session_fields();
+        let field = || FieldInput::Owned(OwnedField::copy_of(&fields[0].field()));
+        let mut reference = Toaster::new();
+        reference.submit(field(), BeamPos::default());
+
+        let mut card = Toaster::new();
+        card.pipe.lock().stop = true;
+        card.pipe.changed.notify_all();
+        let worker = card.worker.as_ref().expect("a compose thread");
+        for _ in 0..2000 {
+            if worker.is_finished() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(worker.is_finished());
+        card.submitted = 1;
+        card.pipe.lock().queue.push_back(Job {
+            id: 1,
+            input: field(),
+            at: BeamPos::default(),
+            first_unscanned: 0,
+            flyer: None,
+        });
+        assert!(
+            VideoSlotDevice::save_state(&card) == VideoSlotDevice::save_state(&reference),
+            "the queued field is missing from the saved card"
+        );
+        // And the live card is where the saved one says it is.
+        assert_eq!(card.stats(), reference.stats());
     }
 
     /// A state that holds no card (it was saved without one, or before
