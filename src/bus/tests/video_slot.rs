@@ -752,6 +752,21 @@ fn a_passed_line_is_not_repainted_by_later_writes() {
     assert_eq!(seen.lock().unwrap()[0], Some(RED), "line $60 finished red");
 }
 
+/// Below the last captured line there is no picture to render. A card
+/// read there gets none, whatever the guest wrote on that line.
+#[test]
+fn a_read_below_the_capture_has_no_picture() {
+    let mut bus = empty_bus();
+    let seen = line_probe(&mut bus, None, 0x80);
+    advance_to_next_frame(&mut bus);
+    let last = bus.agnus.current_frame_lines() - 1;
+    advance_to(&mut bus, last, 0x40);
+    assert!(!bus.custom_write(0x100, 2, 0x1200));
+    advance_to(&mut bus, last, 0x90);
+    let _ = bus.cia_a_read(0xBFE101, 1);
+    assert_eq!(*seen.lock().unwrap(), vec![None]);
+}
+
 /// After a reset the frame count starts again, so a read can land on the
 /// beam position of a read before it: it must see the new picture.
 #[test]

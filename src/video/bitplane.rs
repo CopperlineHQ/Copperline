@@ -4806,6 +4806,18 @@ pub(crate) fn render_wide(
     let fb_w = FB_WIDTH * scale;
     out.clear();
     out.resize(stride * rows, 0);
+    if rows == 0 {
+        // A line below the capture's last row (a card read during the
+        // bottom of the field): there is no picture, and the painter
+        // expects at least one row for the line's register writes.
+        return WideRender {
+            rows,
+            stride,
+            visible_start_vpos: input.visible_start_vpos,
+            canvas_scale: scale,
+            interlaced: input.geometry.lace,
+        };
+    }
     if scratch.len() < fb_w * rows {
         scratch.resize(fb_w * rows, 0);
     }
