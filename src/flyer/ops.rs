@@ -384,6 +384,19 @@ impl Firmware {
         self.eeprom = eeprom;
         self.field_clock = field_clock;
         self.publish_routing();
+        self.restart_player();
+    }
+
+    /// Start with a new player, and take what the old one was showing off
+    /// the Toaster's inputs: a card that was reset or is back in its boot
+    /// ROM plays nothing. The link then holds what a state saved from here
+    /// puts on it when loaded (`Player::republish`), not the last picture
+    /// of the session before.
+    fn restart_player(&mut self) {
+        self.player = Player::default();
+        if let Some(link) = &self.link {
+            self.player.republish(link);
+        }
     }
 
     /// Tell the Toaster which of its inputs the Flyer has.
@@ -557,7 +570,7 @@ impl Firmware {
         };
         // InitFileSys and DriveSurvey.
         self.fs.boot(sram);
-        self.player = Player::default();
+        self.restart_player();
         self.waiting.clear();
         self.publish_routing();
     }
@@ -569,7 +582,7 @@ impl Firmware {
         self.mode = VideoMode::None;
         self.cache_test = None;
         self.leds = 0x04;
-        self.player = Player::default();
+        self.restart_player();
         self.waiting.clear();
     }
 
@@ -1887,6 +1900,37 @@ mod tests {
         fw.reset();
         assert_eq!(fw.cpu, Cpu::Rom);
         assert_eq!(fw.ee(40), 0x1234);
+    }
+
+    /// A card that was reset, or went back into its boot ROM, plays
+    /// nothing: the Toaster's inputs go black and silent, which is also
+    /// what a state saved after that point shows when it is loaded.
+    #[test]
+    fn a_reset_or_quit_card_stops_showing_its_last_picture() {
+        use crate::flyer::link::{FieldSource, BLACK};
+        let white = u32::from_le_bytes([255, 255, 255, 255]);
+        for quit in [false, true] {
+            let link = FlyerLink::new();
+            let (mut fw, mut sram) = running();
+            fw.adopt_link(Some(Arc::clone(&link)));
+            link.show(0, FieldSource::Matte(white));
+            // The Toaster took that field; the channel holds the picture.
+            let _ = link.take_shown(0);
+            link.push_sound(&[(0.5, 0.5); 16]);
+            if quit {
+                assert_eq!(send(&mut fw, &mut sram, Slot(0), op::QUIT, &[]), err::OKAY);
+                free(&mut fw, &mut sram, Slot(0));
+                assert_eq!(fw.cpu, Cpu::Rom);
+            } else {
+                fw.reset();
+            }
+            let shown = link.take_shown(0);
+            assert!(
+                matches!(shown.last(), Some(FieldSource::Matte(c)) if *c == BLACK),
+                "quit {quit}: {shown:?}"
+            );
+            assert!(link.take_sound().is_empty(), "quit {quit}");
+        }
     }
 
     #[test]
