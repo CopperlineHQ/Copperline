@@ -43,7 +43,9 @@ pub fn sub_clip(master: &Clip, start: u32, fields: u32, parts: Parts) -> Result<
         let mut header = frame.header.clone();
         let from = (frame.block as usize + 1) * BLOCK;
         // The length is the file's word for it: a frame ends there, and no
-        // later than the next frame's header or the end of the clip.
+        // later than the next frame's header or the end of the clip. (The
+        // next frame in the list is the next one in the file: `Clip::read`
+        // finds frames by walking `NextFrame` forwards.)
         let next = master
             .frames
             .get(first + i + 1)
