@@ -569,6 +569,12 @@ impl TryFrom<RawConfig> for Config {
             .map(PathBuf::from);
         let video_slot_monitors = raw.video_slot.monitors.unwrap_or(true);
         let video_slot_preview_overlay = raw.video_slot.preview_overlay.unwrap_or(false);
+        // `[video_slot] flyer`: the Flyer works only beside a Toaster (its
+        // video goes to the Toaster's inputs, its software is the Toaster's).
+        let video_slot_flyer = raw.video_slot.flyer.unwrap_or(false);
+        if video_slot_flyer && video_slot != VideoSlotCard::Toaster {
+            return Err(anyhow!("[video_slot] flyer needs card = \"toaster\""));
+        }
         // `[video_slot] volume`: the card's host folder as an Amiga volume
         // too, mounted after the `[[filesys]]` entries.
         let video_slot_mount = match raw.video_slot.volume.as_deref().map(str::trim) {
@@ -1629,6 +1635,7 @@ impl TryFrom<RawConfig> for Config {
             video_slot_media,
             video_slot_monitors,
             video_slot_preview_overlay,
+            video_slot_flyer,
             paths: raw.paths,
         })
     }

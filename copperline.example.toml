@@ -589,11 +589,16 @@ video = "PAL"
 # a genlock while fitted. `media` is its host folder: Input 1-4 (video files
 # or stills to play into each input), Output (Program recordings) and Flyer.
 # The card's Preview and Program outputs open as monitor windows.
+# `flyer = true` also fits a NewTek Video Flyer beside the Toaster; a
+# windowed machine with a Flyer also opens the clip converter window
+# (`flyer-convert`) unless `converter = false`.
 # [video_slot]
 # card = "none"
 # media = "Amiga Toaster Files"
 # monitors = true
 # preview_overlay = false
+# flyer = false
+# converter = true
 
 
 # IDE hard-disk images, on the machines with a built-in IDE port: A600, A1200,
@@ -917,7 +922,7 @@ floppy_sounds_volume = 100
 # How much sound, in milliseconds, the live output keeps ahead of the
 # host's device (50-1000, default 150): how long the machine may run slower
 # than real time before the sound stops and restarts. A machine near the
-# host's limit (a Video Toaster running a transition) is
+# host's limit (a Video Toaster with the Flyer playing a project) is
 # smoother with 400; the sound then trails the picture by that much.
 # live_lead_ms = 150
 

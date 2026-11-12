@@ -4226,6 +4226,17 @@ fn toccata_is_absent_by_default_and_fits_when_enabled() -> Result<()> {
 }
 
 #[test]
+fn the_video_flyer_fits_only_beside_a_toaster() -> Result<()> {
+    assert!(!parse_config("")?.video_slot_flyer);
+    let cfg = parse_config("[video_slot]\ncard = \"toaster\"\nflyer = true\n")?;
+    assert!(cfg.video_slot_flyer);
+    assert!(!parse_config("[video_slot]\ncard = \"toaster\"\n")?.video_slot_flyer);
+    let err = parse_config("[video_slot]\nflyer = true\n").unwrap_err();
+    assert!(err.to_string().contains("flyer needs card"), "{err}");
+    Ok(())
+}
+
+#[test]
 fn recording_clip_settings_default_and_validate() -> Result<()> {
     let cfg = parse_config("")?;
     assert_eq!(

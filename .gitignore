@@ -44,6 +44,9 @@
 # Standalone zz9k crypto plugin build output (the committed artifact is
 # assets/zz9k/zz9k_plugin.wasm).
 /crates/zz9k-plugin/target
+# Flyer clip crate's standalone test builds.
+/crates/flyerclip/target
+/crates/flyerclip/Cargo.lock
 # Standalone bezel preview harness build output (tools/bezel-preview).
 /tools/bezel-preview/target
 # CD images (cue/bin) are local assets, never committed.

@@ -811,7 +811,8 @@ is the switcher's own chip-bus traffic while an effect runs, which the
 machine pays as the real one did. `Toaster` is now a handle: the card proper
 is a `Card` behind a mutex, shared with a `toaster-compose` thread, and a
 finished field reaches it as a job (`Job`: the frame's `RenderInput`, the
-beam at the wrap and how many lines the live scan already took). The thread paints the field, takes its lines
+beam at the wrap, how many lines the live scan already took, and what the
+Flyer did during the field). The thread paints the field, takes its lines
 in (`Card::take_field`: the headers, framestore writes and `CERB` lines
 from `first_unscanned` on), and on the second field of a frame composes
 and publishes the outputs. The emulation thread's part of a field is the
@@ -839,6 +840,14 @@ deterministic whatever the host's speed:
   `--audio-wav` capture is the same byte for byte. The ring in Paula
   (`VideoSlotAudioRing`) absorbs the fixed offset as it absorbs the frame
   rate mismatch.
+- *The Flyer.* The thread never reads the Flyer's link at its own pace.
+  What each channel showed since the last field (`FlyerLink::take_shown`,
+  compressed to what the next weave needs by `push_shown`), the routing and
+  the sound since the last field are taken on the emulation thread at the
+  hand-over and travel with the job; the thread weaves them in order
+  (`weave_shown`). The peak of Program's sound (the Flyer's record meters,
+  which the guest reads) goes back to the link when the job that produced
+  it is joined, not when it finished.
 
 Without a thread (`wasm`, a spawn that failed) jobs run on the calling
 thread through the same code, and `field_complete` (the painted-field
@@ -889,6 +898,114 @@ on `IS`.
 Not modelled yet: the LUT (`LUT` on: colour and posterise effects),
 PED/GAIN/phase trims, and the blanking interval of digitised lines (the
 AutoHue camera test reads the colour burst there).
+
+#### The Video Flyer (`flyer/`)
+
+`[video_slot] flyer = true` adds NewTek's Flyer, a Zorro II board, beside
+the Toaster. It is emulated at its command mailbox, not at its 68000: the
+board's 256 KB window is its shared SRAM; flyer.library leaves commands in
+eight 32-byte slots at `$500` (opcode word written last) and polls them,
+and `ops.rs` answers each as the firmware's handler would, inside the
+Amiga's write of the opcode word (`mailbox.rs` has the layout and the
+opcode and error numbers). A command that runs on (a clip playing) stays
+"in progress" until it finishes. The drives are host folders (`drive.rs`:
+`Flyer/FA0` is bus A unit 0) given a consistent block address space,
+because block numbers leak to the Amiga (`fs.rs`: grips, LOCATE/DIRLIST,
+FILEOPEN/READ/SEEK, the field-read path LOCATEFLD/GETCOMPINFO/READ10/CPUDMA
+the library's software VTASC uses for thumbnails). Clips are read-only;
+other files (the switcher's `.i` crouton icons) can be made, written
+(FILEOPEN MODE_OUTPUT, FILEEXTEND + FILEHSWRITE, FILEWRITE), renamed and
+deleted.
+
+The field clock (GETCLOCK) steps once per field when the beam passes line
+105 (the switcher's `SyncClocks` notes the real one changes about 40 % down
+the field), forced to a multiple of four on field I of the colour frame.
+Each step plays a field (`play.rs`). Requests become *events*: a video
+event shows clip fields on channel A or B from a start time, an audio
+event feeds a clip's channels into a pair of the DSP's eight mono
+channels, and DSP events set a channel's volume and pan with a linear ramp
+over some fields (the firmware's `MakeDSPevents`/`AddDSPevent`, attack at
+the start, decay at the end, or AUDEKEY envelope keys). FLYPLAY makes them
+for one clip, starting at `GoClock` (or 20 fields from now) rounded down
+to a colour frame, sets `cont` to 2 and completes when they end (`cont` 0
+aborts to black, `$FF` pauses); NEWSEQ/ADDSEQCLIP/AUDEKEY store a sequence
+relative to its start, PLAYSEQ starts it at its base time with both
+channels black, and `SharedCtrl.Done` goes to 1 when everything has
+played. RESETFLYER stops all. After a clip a channel holds its last field,
+or shows black with `CAF_USEMATTE`; an ADDSEQCLIP with no clip name is a
+colour frame of black.
+
+The Flyer and the Toaster share a `FlyerLink` (`link.rs`), made in
+`build_machine_inner` when both are fitted and handed to each (the board
+keeps it out of its save state; a loaded board takes the live one's in
+`Bus::adopt_host_resources`, and puts its own held pictures on it in
+place of the live session's: the player keeps what makes up each
+channel's picture, a matte and the last field of each parity, and
+`Player::republish` shows them again from black and drops the queued
+sound). TOASTMUX sets which of Toaster inputs 3 and 4
+the Flyer has (channel A on 3, B on 4); every field the player says what
+each channel shows (a clip field by reference, or a matte) and adds a
+field of sound. The Toaster's `source_picture` takes a routed input from
+the link instead of its folder (`Toaster::input_into`, also for a live
+framestore), weaving the fields shown since its last frame by line parity
+into the 752 x 480 picture. Decoding a field (`flyerclip`'s VTASC decoder,
+then `composite::decode_single` to colour) costs a few milliseconds, so it
+is kept off the emulation thread: every field the player also tells the
+link which fields each channel will show over the next eight fields
+(`Player::read_ahead`, from the events and any jog frame), and two to four
+`flyer-decode` worker threads decode those into a cache of 48 decoded
+fields (least recently wanted dropped first). A field the Toaster asks for
+is then normally ready; one a worker has in hand is waited for, and one
+nobody has started is decoded on the spot, so the picture is the same
+whatever the host's speed (headless runs stay reproducible) and a channel
+no bus shows costs only its read-ahead. `clip.rs` reads a clip a field at
+a time (its CFRM headers once, then each field's video blocks); a colour
+frame's sound, all its fields and channels, is one run of blocks, read in
+one go (by the workers ahead of time, from the audio events) and kept for
+the last 24 frames.
+
+Jog and shuttle are SRCHARGS/DOSEARCH (`acts.c` `SearchArgs`, `DoSearch`;
+the library's Begin/Do/EndFindField and FindFieldAudio). SRCHARGS 1 opens a
+session on the named clip (counted, if one is open), taking the video
+channel as the firmware's channel semaphore does: it waits for a FLYPLAY on
+that channel to end, and a FLYPLAY for it waits until the session closes
+(fails with CHANINUSE under `CAPF_ERRIFBUSY`; `cont` 0 ends a waiting one).
+It gets a DSP pair when it asks for sound. Each DOSEARCH names a field (the
+video start, else the audio start) and puts up the colour frame holding
+it: it waits until the previous frame has taken, queues its own for the
+next colour-frame boundary (the field it is on, if that is one and nothing
+of the session's is showing yet), and completes once the previous frame's
+level changes have happened, with `LastFieldDone` = the field. Its flags
+are trimmed to what the clip has and written back. The channel then shows
+the frame's four fields in a loop, and its sound plays through the pair
+at the ClipAction's sustain levels and pans (ramped over the attack),
+looping with the picture, or once with `APF_AUTOMUTE` (volume 0 four
+fields on). That wait is what paces the switcher's shuttle loop
+(DoFindField, render, WaitAction) to one frame per colour frame instead of
+racing to the end of the clip. SRCHARGS 2 re-allocates the sound for new
+flags; SRCHARGS 0 closes once the last frame has taken: the sound goes
+quiet and, with `CAF_USEMATTE`, the channel black. Commands the firmware
+would wait in (`Outcome::Waiting`) stay in progress and are tried again
+after every field (`Firmware::retry_waiting`).
+
+The DSP model mixes its channels at 735 samples a field (44,055.94 Hz,
+locked to video): left `s·v·(1−p)`, right `s·v·p`, with `v` the volume
+(`$FFFF` = 1) and `p` the pan (the API word with its top bit flipped, 0 =
+left), each ramped across the field. The Toaster takes the fields of
+sound since its last frame and stretches them to the frame's length in
+mixer samples, the same 0.9 % stretch as the inputs' sound, then adds them
+to Program's sound: the Flyer's output is the system's audio, whatever
+the switcher shows, so it reaches the host's speakers and the Program
+recording. The input folders' sound keeps following Program as before (it
+stands in for what would reach the Flyer's line inputs); an input the
+Flyer has is silent there. CODECCTRL stores the codec's input settings
+and its meters read the peak of the Toaster's sound. The cutting room
+(NEWCUTLIST, ADDSUBCLIP, MAKESUBCLIPS; `clip.c` `MakeSubClips`) makes
+each sub-clip by copying the master's coded colour frames, whole or with
+the sound or picture stripped (`flyerclip::cut::sub_clip`), under the
+firmware's `_tmp_<ref>` name for flyer.library to rename; a destructive cut
+moves the master into `Flyer/Trash`. Not modelled: recording (FLYRECORD,
+still capture), SMPTE, the TBC module and the camcorder input on Preview.
 
 The monitor windows (`video/window/card_monitors.rs`) each have a painter
 thread of their own, which waits on the output (`CardOutput::

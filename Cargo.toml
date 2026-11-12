@@ -53,6 +53,7 @@ default = [
     "wasm-boards",
     "control",
     "ctl-bin",
+    "converter-bin",
     "import-uae-bin",
     "net-nat",
     "net-bridge",
@@ -185,6 +186,9 @@ net-bridge = ["dep:pcap", "dep:libloading"]
 # its `--mcp` mode (src/control/mcp.rs), an MCP server over stdio that
 # exposes the protocol as tools for coding agents.
 ctl-bin = ["control", "dap"]
+# `flyer-convert`: the window that converts video, stills and picture
+# sequences into Video Flyer clips on the Flyer's drives.
+converter-bin = ["frontend", "dep:eframe"]
 # The `copperline-import-uae` converter for WinUAE/Amiberry/FS-UAE
 # configuration files.
 import-uae-bin = ["dep:toml_edit"]
@@ -214,6 +218,8 @@ fluxbridge = ["dep:fluxbridge"]
 host-serial = ["dep:serialport"]
 
 [dependencies]
+# NewTek Video Flyer clips (container, VTASC codec): the flyerclip program.
+flyerclip = { path = "crates/flyerclip" }
 # 0.15.0 is the floor: earlier releases have no AddressBus::batch_boundary
 # callback and no physical RAM/ROM regions beyond the primary fastmem window.
 # Keep the conformance runner on this same version (tools/check-m68k-locks.py).
@@ -230,6 +236,8 @@ winit = { version = "0.30", optional = true }
 egui = { version = "0.35", optional = true }
 egui-winit = { version = "0.35", optional = true, default-features = false, features = ["clipboard", "wayland", "x11"] }
 egui-wgpu = { version = "0.35", optional = true, default-features = false }
+# The Flyer clip converter window (`flyer-convert`).
+eframe = { version = "0.35", optional = true, default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 anyhow = "1"
 log = "0.4"
 env_logger = { version = "0.11", optional = true }
@@ -475,6 +483,16 @@ required-features = ["bench-bin"]
 name = "copperline-ctl"
 path = "src/bin/copperline-ctl.rs"
 required-features = ["ctl-bin"]
+
+[[bin]]
+name = "flyerclip"
+path = "src/bin/flyerclip.rs"
+required-features = ["ctl-bin"]
+
+[[bin]]
+name = "flyer-convert"
+path = "src/bin/flyer-convert.rs"
+required-features = ["converter-bin"]
 
 [[bin]]
 name = "copperline-import-uae"

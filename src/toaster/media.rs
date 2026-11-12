@@ -11,7 +11,7 @@
 //!   folders are rescanned while the machine runs, so dropping a file in
 //!   is plugging a source in.
 //! - `Output`: recordings of the Program output.
-//! - `Flyer`: the Flyer's clips, for when the Flyer is emulated.
+//! - `Flyer`: the Video Flyer's drives (`Flyer/FA0` and so on).
 //!
 //! Stills (PNG, JPEG, BMP) are decoded here. Video files go through
 //! ffmpeg, found as `ffmpeg`/`ffmpeg.exe` in the folder itself, beside the
@@ -128,7 +128,7 @@ Output
     Recordings of the Toaster's Program output.
 
 Flyer
-    Clips for the Video Flyer (not emulated yet).
+    The Video Flyer's drives: FA0, FB0... hold its clips.
 ";
 
 /// Is `path` something an input can play, and how.

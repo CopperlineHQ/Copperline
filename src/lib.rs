@@ -57,6 +57,12 @@ pub mod envcfg;
 pub mod expect;
 pub mod filesys;
 pub mod floppy;
+/// NewTek Video Toaster Flyer: the Zorro II card, emulated at its command
+/// mailbox.
+pub mod flyer;
+/// Video files to NewTek Video Flyer clips and back (the `flyerclip` program).
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+pub mod flyer_convert;
 // Physical floppy drives over a Greaseweazle, through the pure-Rust
 // FluxBridge library. Gated because it talks to a serial port, which a
 // wasm32 browser build cannot do.

@@ -514,6 +514,9 @@ pub struct Config {
     pub video_slot_monitors: bool,
     /// `[video_slot] preview_overlay`: the Toaster's interface over Preview.
     pub video_slot_preview_overlay: bool,
+    /// `[video_slot] flyer`: a Video Flyer on the Zorro chain beside the
+    /// Toaster.
+    pub video_slot_flyer: bool,
 }
 
 /// How much of the overscan field the window presents. The
@@ -2997,6 +3000,7 @@ impl Default for Config {
             video_slot_media: None,
             video_slot_monitors: true,
             video_slot_preview_overlay: false,
+            video_slot_flyer: false,
             paths: crate::pathconf::Paths::default(),
         }
     }
