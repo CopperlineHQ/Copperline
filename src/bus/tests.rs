@@ -40,6 +40,7 @@ use crate::chipset::cia::{
 use crate::chipset::copper::{CopperWait, DMACON_COPEN};
 use crate::chipset::denise::BPLCON2_RDRAM;
 use crate::chipset::denise::{rgb12_to_rgba8, DeniseRevision, DiwHigh, COLOR_TRANSPARENCY_BIT};
+use crate::chipset::paula::INT_DSKBLK;
 use crate::chipset::paula::{
     pending_ipl, Paula, DMACON_DMAEN, INT_AUD0, INT_BLIT, INT_COPER, INT_EXTER, INT_MASTER,
     INT_PORTS, INT_VERTB, PAULA_CLOCK_HZ,
@@ -11372,6 +11373,71 @@ fn software_intreq_blit_write_keeps_the_full_irq_recognition_delay() {
     assert_eq!(bus.cpu_visible_intreq() & INT_BLIT, 0);
     bus.advance_chipset(1);
     assert_ne!(bus.cpu_visible_intreq() & INT_BLIT, 0);
+}
+
+// Paula's IPL outputs trail INTENA on both edges: a source software unmasks
+// and masks again three colour clocks later still shows at the IPL inputs,
+// from the unmask's recognition deadline until the same delay after the
+// mask write. Only the machines outside the measured 68000 A500 poll model
+// take this path.
+#[test]
+fn cpu_masked_source_still_reaches_the_ipl_inputs_as_a_pulse() {
+    let mut bus = empty_bus();
+    bus.irq_latency_setting = 6;
+    bus.set_cpu_clocks_per_cck(4);
+    bus.paula.intena = INT_MASTER;
+    bus.paula.intreq = INT_DSKBLK;
+    bus.note_irq_latches_changed();
+    bus.advance_chipset(20);
+
+    bus.write_custom_word_from(0x09A, 0x8000 | INT_DSKBLK, BeamWriteSource::Cpu);
+    bus.advance_chipset(3);
+    assert_eq!(bus.cpu_visible_intreq() & INT_DSKBLK, 0);
+    bus.write_custom_word_from(0x09A, INT_DSKBLK, BeamWriteSource::Cpu);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0, "unmask deadline not reached");
+    bus.advance_chipset(2);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0, "five cck after the unmask");
+    bus.advance_chipset(1);
+    assert_eq!(bus.cpu_masked_irq_pulse(), INT_DSKBLK, "the unmask arrives");
+    bus.advance_chipset(2);
+    assert_eq!(bus.cpu_masked_irq_pulse(), INT_DSKBLK);
+    bus.advance_chipset(1);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0, "the mask write arrives");
+}
+
+// A source that was already visible when it was masked stays eligible for
+// the same delay, and acknowledging it in INTREQ ends the pulse at once.
+#[test]
+fn cpu_masked_visible_source_lingers_until_acknowledged() {
+    let mut bus = empty_bus();
+    bus.irq_latency_setting = 6;
+    bus.set_cpu_clocks_per_cck(4);
+    bus.paula.intena = INT_MASTER | INT_DSKBLK;
+    bus.paula.intreq = INT_DSKBLK;
+    bus.note_irq_latches_changed();
+    bus.advance_chipset(20);
+    assert_ne!(bus.cpu_visible_intreq() & INT_DSKBLK, 0);
+
+    bus.write_custom_word_from(0x09A, INT_DSKBLK, BeamWriteSource::Cpu);
+    assert_eq!(bus.cpu_masked_irq_pulse(), INT_DSKBLK);
+    bus.advance_chipset(5);
+    assert_eq!(bus.cpu_masked_irq_pulse(), INT_DSKBLK);
+    bus.write_custom_word_from(0x09C, INT_DSKBLK, BeamWriteSource::Cpu);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0);
+}
+
+// The stock 68000 machine keeps its measured poll model: no pulse.
+#[test]
+fn stock_68000_poll_model_has_no_masked_source_pulse() {
+    let mut bus = empty_bus();
+    bus.irq_latency_setting = 6;
+    bus.paula.intena = INT_MASTER | INT_DSKBLK;
+    bus.paula.intreq = INT_DSKBLK;
+    bus.note_irq_latches_changed();
+    bus.advance_chipset(20);
+
+    bus.write_custom_word_from(0x09A, INT_DSKBLK, BeamWriteSource::Cpu);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0);
 }
 
 #[test]

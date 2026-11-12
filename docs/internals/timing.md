@@ -809,6 +809,37 @@ readback:
    INTREQR word in its own slot. Other custom registers retain their separately
    calibrated phases, and the shorter 020+ data-return path is unchanged.
 
+On the 68020 path (any CPU other than the stock-speed 68000) two further
+rules apply, because a faster CPU can open and close an INTENA window
+inside the recognition deadline:
+
+- Paula drives the IPL pins from a registered copy of INTREQ and INTENA,
+  so a mask write is as late reaching the CPU as an unmask write. A source
+  that a CPU write masks while it is still requested stays eligible until
+  the deadline after the mask write, starting from the deadline its unmask
+  armed if that has not passed. An unmask, a branch and a mask write (about
+  three CCK on a 68EC020) therefore still reach the CPU as a three-CCK
+  pulse, six CCK later. Acknowledging the source in INTREQ ends the pulse
+  at once, and PORTS keeps its immediate level path.
+- A 68020 or later holds a request it has sampled above its interrupt mask
+  until the next instruction boundary (IPEND), so the pulse does not have
+  to line up with a boundary. The mask compared is the one in force when
+  the instruction started: an RTE or a move to SR lowers it only as the
+  instruction ends. The 68000 and 68010 keep the poll rules above.
+
+The regression example is the wait loop of the CD32 Classic Lotus Trilogy:
+the Copper sets DSKBLK in INTREQ once a frame, and the game unmasks it for
+two instructions on each pass until its level 1 handler has counted two
+frames. Without the pulse the race screen froze.
+
+This is one edge of a delay line, not the whole of it. An INTREQ
+acknowledge passes through the same Paula register and should trail in the
+same way, which is why a fast CPU must not RTE straight after clearing
+INTREQ. That edge is not modelled: the 68020-path delay has not been
+measured on hardware, and an acknowledge that lingers too long makes
+handlers re-enter. The stock 68000 path has neither rule; its captures do
+not cover a mask write inside the deadline.
+
 The [focused One ROM measurements](a500-irq-focus-2026-10-15.md) match all
 2,212 A500 observations after these corrections; the earlier 2,560-divider
 and 896-STOP result packets also match hardware byte-for-byte. WinUAE Best

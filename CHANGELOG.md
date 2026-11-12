@@ -10,6 +10,10 @@ for the earlier release notes.
 
 ### Fixed
 
+- On 68020 and faster machines, an interrupt that a program leaves pending
+  in INTREQ and unmasks in INTENA for only a few colour clocks is now
+  taken. The CD32 Classic Lotus Trilogy froze at the Lotus 1 race screen,
+  with only the HUD drawn, waiting for a handler that never ran.
 - With the guest clock pinned (`rtc_time` / `--rtc-time`), `[[filesys]]` and
   `--run` volumes are dated at the seed rather than at the host time, so a
   run with a pinned clock no longer varies from one run to the next.

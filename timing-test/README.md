@@ -591,6 +591,13 @@ renders remain byte-identical. These references record the deterministic
 probe output; the timing model's hardware evidence is described in
 [`docs/internals/timing.md`](../docs/internals/timing.md#cia-register-transfers-and-timer-startup).
 
+The 68020-path masked-request pulse refreshes `jit-bus-boundary`: on the
+68040 JIT machine the AROS boot now takes requests that a mask write would
+previously have hidden inside their recognition deadline, which moves the
+handoff instant and with it the phase of the probe's markers by a few
+pixels. The band structure is unchanged. The other 55 existing renders,
+including every 68EC020 one, are byte-identical.
+
 The A500 timing branch also refreshes previously stale references verified
 byte-identical with binaries before and after its v1 rebase: timing-table
 rows 26, 27, 28 and 31 change from 6230/6428/3A23/131F to
@@ -743,7 +750,13 @@ class; the whole-blit fence collapsed the fill/line bars),
 `ddfprobe-sprmulti` (DMA sprite vertical reuse and an attached 15-colour
 pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render
-the same magenta), `clxprobe` (the CLXDAT collision matrix rendered as
+the same magenta), `irqprobe-window` (a request left pending in INTREQ
+and unmasked in INTENA for two instructions at a time still reaches its
+level 1 handler: six passes, green where the handler ran from inside the
+window, red where 999 windows passed without it; run on the 68000 OCS
+machine and, as `irqprobe-window-aga`, on the 68EC020, where the window is
+shorter than the recognition delay and only arrives because the IPL pins
+trail the mask write as they trail the unmask), `clxprobe` (the CLXDAT collision matrix rendered as
 bit cells for two CLXCON programs, including a plane enabled beyond the
 BPU count; its unsatisfied match clears both PF-PF bit 0 and odd
 sprite-playfield bit 1), `audprobe-en` (the AUD0 interrupt cadence as a
