@@ -174,6 +174,7 @@ class Manifest(unittest.TestCase):
         self.reject(MANIFEST + '\n[display]\nbezel = "wood"\n', "bezel must be one of")
         self.reject(MANIFEST + '\n[display]\nfullscreen = "yes"\n', "fullscreen must be")
         self.reject(MANIFEST + '\n[features]\nsave_states = 1\n', "save_states must be")
+        self.reject(MANIFEST + '\n[branding]\nicon = 7\n', "icon must be a file path")
 
 
 class WebSupport(unittest.TestCase):

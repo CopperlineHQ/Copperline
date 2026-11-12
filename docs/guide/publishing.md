@@ -225,10 +225,12 @@ browser start sound. Below the picture are Pause, Reset, the keyboard joystick
 mode, the disk list (multi-disk titles), Export disk, Import disk, Screenshot,
 Volume, Fullscreen and About.
 
-- **Keyboard:** goes to the Amiga. In joystick mode `keys` the cursor keys
-  steer and Right Ctrl, Right Alt or Left Ctrl fire (Left Alt is the second
-  button); `cd32` adds the pad's extra buttons on C/X/D/S/Enter/Z/A; `off`
-  leaves every key to the Amiga keyboard.
+- **Keyboard:** goes to the Amiga while the picture has focus. In joystick
+  mode `keys` the cursor keys steer and Right Ctrl, Right Alt or Left Ctrl
+  fire (Left Alt is the second button); `cd32` adds the pad's extra buttons on
+  C/X/D/S/Enter/Z/A; `off` leaves every key to the Amiga keyboard. Shift+Esc
+  moves focus from the picture to the controls, which then take Tab and the
+  arrow keys themselves; clicking the picture gives the keyboard back.
 - **Mouse:** click the picture to capture the pointer, Esc to release it.
 - **Gamepads:** the first drives port 2, a second port 1.
 - **Touch screens:** an on-screen stick and two fire buttons, and the picture
@@ -238,7 +240,7 @@ Volume, Fullscreen and About.
   named after the manifest's `id`) and return on the next visit. **Export
   disk** downloads the current image of `DF0:` and **Import disk** takes one
   back (to move saves between browsers); **Erase saves** in the About box
-  returns to the pristine disks. A page repacked with a changed disk starts
+  returns to the pristine disks and restarts the title. A page repacked with a changed disk starts
   afresh. A quick save state is offered back only to the exact build that
   wrote it.
 - **About:** names Copperline and where its source is, and shows the

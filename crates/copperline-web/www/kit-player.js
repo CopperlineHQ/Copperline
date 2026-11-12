@@ -117,19 +117,26 @@ export async function start(kit) {
     machine.insert_floppy(drive, disk.bytes, disk.name);
   }
 
-  // Store one drive's disk if the guest has written to it.
-  async function flushDrive(drive) {
+  // Read one drive's disk back out of the machine, so `disk.bytes` is what
+  // the guest has written so far. Synchronous on purpose: a caller about
+  // to change the drive's disk captures it with no gap for a write to
+  // fall into. Returns the disk, or null when there is nothing to keep.
+  function captureDrive(drive) {
     const disk = disks[driveDisk[drive]];
-    if (!emu || !disk || !disk.writable) return;
-    let bytes;
+    if (!emu || !disk || !disk.writable) return null;
     try {
-      bytes = emu.export_floppy(drive);
+      disk.bytes = emu.export_floppy(drive);
     } catch (e) {
       disk.writable = false;
       console.warn(`${disk.name} cannot be exported: ${e.message ?? e}`);
-      return;
+      return null;
     }
-    disk.bytes = bytes;
+    return disk;
+  }
+
+  // Store a disk's captured bytes if they differ from the stored copy.
+  async function persistDisk(disk) {
+    const bytes = disk.bytes;
     if (bytesEqual(bytes, disk.stored)) return;
     if (await store.put(diskKey(disk.index), makeRecord(disk.sha256, bytes, Date.now()))) {
       disk.stored = bytes;
@@ -137,6 +144,12 @@ export async function start(kit) {
       storageWarned = true;
       note('This browser cannot store saves for this page; use Export disk to keep them.', true);
     }
+  }
+
+  // Store one drive's disk if the guest has written to it.
+  async function flushDrive(drive) {
+    const disk = captureDrive(drive);
+    if (disk) await persistDisk(disk);
   }
 
   async function flushAll() {
@@ -162,13 +175,26 @@ export async function start(kit) {
         const disk = disks[driveDisk[drive]];
         if (disk) insertDisk(machine, drive, disk);
       }
-      machine.set_volume_percent(Number(volume.value));
-      if (joyMode === 'cd32') machine.set_port_device(2, 'cd32');
+      fitHostSettings(machine);
     } catch (e) {
       machine.free();
       throw e;
     }
     return machine;
+  }
+
+  // What the page, not the machine, owns: the volume and what is plugged
+  // into the controller ports. Applied to a fresh machine and again after
+  // a state load, whose machine comes back with the saving session's idea
+  // of them. Port 1 is the mouse socket unless a gamepad holds it: a state
+  // saved while one did would otherwise restore a stick nothing drives.
+  function fitHostSettings(machine) {
+    machine.set_volume_percent(Number(volume.value));
+    const padPorts = new Set(padAssignments.values());
+    if (!padPorts.has(1)) machine.set_port_device(1, 'mouse');
+    // A CD32 pad's extra buttons only reach a guest through a fitted pad.
+    for (const port of padPorts) machine.set_port_device(port, 'cd32');
+    if (joyMode === 'cd32') machine.set_port_device(2, 'cd32');
   }
 
   // --- audio -----------------------------------------------------------------
@@ -371,7 +397,9 @@ export async function start(kit) {
   function setJoyMode(mode) {
     joyMode = mode;
     joyBtn.textContent = `Joystick: ${mode}`;
-    for (const key of Object.keys(joyHeld)) joyHeld[key] = false;
+    // A key held across the change would be released into the other
+    // mapping; let go of everything under the old one first.
+    releaseHeldKeys();
     // The cd32 mapping's extra buttons only reach a guest through a fitted
     // CD32 pad; the plain modes leave whatever is in the port alone.
     if (mode === 'cd32') emu?.set_port_device(2, 'cd32');
@@ -483,9 +511,35 @@ export async function start(kit) {
   // key scrolls the page.
   const consumedKeys = new Set();
   const pageSpentKeys = new Set();
+  const guestKeys = new Set(); // codes the Amiga keyboard currently holds
   const dialogOpen = () => !!document.querySelector('dialog[open]');
+  // Keys belong to the Amiga while the picture (or nothing) has focus, and
+  // to the page's own controls while one of them does: Tab, the arrows on
+  // the volume slider and the disk list keep working for keyboard users.
+  // Shift+Esc is the way from the picture to the controls.
+  const amigaHasKeys = () => {
+    const active = document.activeElement;
+    return !active || active === document.body || active === canvas;
+  };
+  // Let go of everything held: a key whose release the page will never
+  // see (focus went elsewhere mid-press) must not stay down in the guest.
+  function releaseHeldKeys() {
+    if (emu) for (const code of guestKeys) emu.key_event(code, false);
+    guestKeys.clear();
+    consumedKeys.clear();
+    pageSpentKeys.clear();
+    for (const key of Object.keys(joyHeld)) joyHeld[key] = false;
+    applyJoystick();
+  }
+  window.addEventListener('blur', releaseHeldKeys);
   window.addEventListener('keydown', (e) => {
-    if (!emu || !running || dialogOpen()) return;
+    if (!emu || !running || dialogOpen() || !amigaHasKeys()) return;
+    if (e.code === 'Escape' && e.shiftKey && !document.pointerLockElement) {
+      releaseHeldKeys();
+      pauseBtn.focus();
+      e.preventDefault();
+      return;
+    }
     if (e.repeat) {
       if (consumedKeys.has(e.code)) e.preventDefault();
       return;
@@ -500,7 +554,11 @@ export async function start(kit) {
       e.preventDefault();
       return;
     }
-    if (joystickKey(e.code, true) || emu.key_event(e.code, true)) {
+    if (joystickKey(e.code, true)) {
+      consumedKeys.add(e.code);
+      e.preventDefault();
+    } else if (emu.key_event(e.code, true)) {
+      guestKeys.add(e.code);
       consumedKeys.add(e.code);
       e.preventDefault();
     } else {
@@ -510,11 +568,15 @@ export async function start(kit) {
   window.addEventListener('keyup', (e) => {
     const consumed = consumedKeys.delete(e.code);
     const pageSpent = pageSpentKeys.delete(e.code);
+    guestKeys.delete(e.code);
     if (!emu || !running) return;
     if (pageSpent) {
       e.preventDefault();
       return;
     }
+    // A release the guest saw the press of always reaches it; any other
+    // key let go over one of the page's controls is that control's.
+    if (!consumed && !amigaHasKeys()) return;
     if (joystickKey(e.code, false) || emu.key_event(e.code, false) || consumed) {
       e.preventDefault();
     }
@@ -643,6 +705,15 @@ export async function start(kit) {
 
   volume.addEventListener('input', () => emu?.set_volume_percent(Number(volume.value)));
 
+  // A control used with the mouse hands the keyboard straight back to the
+  // Amiga; one reached with the keyboard keeps focus (a click from the
+  // keyboard has no detail count), so Tab can carry on from it.
+  const focusScreen = () => canvas.focus({ preventScroll: true });
+  $('cl-bar').addEventListener('click', (e) => {
+    if (e.detail > 0 && e.target.closest?.('button')) focusScreen();
+  });
+  volume.addEventListener('pointerup', focusScreen);
+
   function download(blob, name) {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -681,10 +752,13 @@ export async function start(kit) {
         return;
       }
       try {
-        await flushDrive(0);
+        // Capture and swap in one go, then store what was captured: no
+        // guest write can land on the outgoing disk in between.
+        const previous = captureDrive(0);
         driveDisk[0] = next.index;
         insertDisk(emu, 0, next);
         note(`DF0: ${next.name}`);
+        if (previous) await persistDisk(previous);
       } catch (e) {
         note(`Disk change failed: ${e.message ?? e}`, true);
       }
@@ -725,9 +799,8 @@ export async function start(kit) {
     if (!file || !disk || !emu) return;
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
-      // Store the current disk first: the import replaces it for good.
-      await flushDrive(0);
       if (!emu) return;
+      // The import replaces the visitor's copy of this disk for good.
       emu.insert_floppy_writable(0, bytes, disk.name);
       disk.writable = true;
       await flushDrive(0);
@@ -761,25 +834,41 @@ export async function start(kit) {
     stateLoad.addEventListener('click', async () => {
       if (!emu) return;
       const record = await store.get(QUICK_STATE_KEY);
+      if (!emu) return;
       if (!recordMatches(record, config.build)) {
         note('No saved state for this version');
         return;
       }
+      // The load replaces every drive's disk with the state's: keep what
+      // the guest wrote to the ones in the drives now.
+      const outgoing = [];
+      for (let d = 0; d < drives; d++) {
+        const disk = captureDrive(d);
+        if (disk) outgoing.push(disk);
+      }
       try {
         emu.load_state(record.bytes);
-        // The state carries its own disks; follow what it had in each drive.
-        if (Array.isArray(record.driveDisk)) {
-          for (let d = 0; d < drives; d++) driveDisk[d] = record.driveDisk[d] ?? null;
-          if (!diskSelect.parentElement.hidden && driveDisk[0] !== null) {
-            diskSelect.value = String(driveDisk[0]);
-          }
-        }
-        emu.resync_clock();
-        present(true);
-        note('State loaded');
       } catch (e) {
-        fail(e);
+        // A state the core cannot read leaves the running machine as it was.
+        note(`Load failed: ${e.message ?? e}`, true);
+        return;
       }
+      // The state carries its own disks; follow what it had in each drive.
+      if (Array.isArray(record.driveDisk)) {
+        for (let d = 0; d < drives; d++) driveDisk[d] = record.driveDisk[d] ?? null;
+        if (!diskSelect.parentElement.hidden && driveDisk[0] !== null) {
+          diskSelect.value = String(driveDisk[0]);
+        }
+      }
+      // Host-side settings are not part of the machine, so the page's own
+      // are put back over the restored one, as after a boot.
+      fitHostSettings(emu);
+      releaseHeldKeys();
+      resetRenderStrideState(stride);
+      emu.resync_clock();
+      present(true);
+      note('State loaded');
+      for (const disk of outgoing) await persistDisk(disk);
     });
   }
 
@@ -854,15 +943,33 @@ export async function start(kit) {
     if (about.close) about.close();
     else about.removeAttribute('open');
   });
+  about.addEventListener('close', () => canvas.focus({ preventScroll: true }));
   $('cl-erase').addEventListener('click', async () => {
-    if (!window.confirm('Erase the saves this browser holds for this title?')) return;
+    const ask = 'Erase the saves this browser holds for this title and restart it?';
+    if (!window.confirm(ask)) return;
     for (const disk of disks) {
       await store.remove(diskKey(disk.index));
       disk.bytes = disk.pristine;
       disk.stored = disk.pristine;
     }
     await store.remove(QUICK_STATE_KEY);
-    note('Saves erased; they take effect at the next start', true);
+    // A running machine still holds the written disks, and would store
+    // them again at the next poll: put the pristine ones in and power
+    // cycle, so what plays is what is stored.
+    if (emu && running) {
+      try {
+        for (let drive = 0; drive < drives; drive++) {
+          const disk = disks[driveDisk[drive]];
+          if (disk) insertDisk(emu, drive, disk);
+        }
+        emu.reset();
+        resetRenderStrideState(stride);
+      } catch (e) {
+        fail(e);
+        return;
+      }
+    }
+    note('Saves erased', true);
   });
 
   // --- page lifecycle ----------------------------------------------------------
@@ -871,6 +978,11 @@ export async function start(kit) {
   document.addEventListener('visibilitychange', () => {
     if (!running) return;
     if (document.hidden) {
+      // Drop the pending frame so the return re-anchors the pacer instead
+      // of the first frame back sprinting to catch up.
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+      releaseHeldKeys();
       flushAll();
       audioCtx?.suspend().catch(() => {});
     } else if (!paused) {
@@ -907,6 +1019,10 @@ export async function start(kit) {
   async function boot() {
     bootBtn.disabled = true;
     if (config.display.fullscreen) enterFullscreen();
+    // Port fittings live on the machine: forget the pads so the new one
+    // has them fitted afresh as the frame loop finds them again.
+    padAssignments.clear();
+    padPort[1] = padPort[2] = null;
     try {
       emu = buildMachine();
     } catch (e) {
@@ -916,6 +1032,12 @@ export async function start(kit) {
       return;
     }
     await buildAudio();
+    // A restart after a failure reuses the audio stack, which a pause may
+    // have left suspended.
+    if (audioCtx && audioCtx.state !== 'running') {
+      audioCtx.resume().catch(() => {});
+      armAudioUnlock();
+    }
     resetRenderStrideState(stride);
     deferredLastTick = false;
     lastRevision = null;

@@ -80,7 +80,21 @@ export function openSaveStore(gameId, idb) {
           return;
         }
         request.onupgradeneeded = () => request.result.createObjectStore(STORE);
-        request.onsuccess = () => resolve(request.result);
+        request.onsuccess = () => {
+          const db = request.result;
+          // A connection the browser takes away (site data cleared, another
+          // tab upgrading the database) must not stay cached: the next
+          // operation opens a fresh one.
+          const forget = () => {
+            dbPromise = null;
+          };
+          db.onclose = forget;
+          db.onversionchange = () => {
+            db.close();
+            forget();
+          };
+          resolve(db);
+        };
         request.onerror = () => reject(request.error);
         request.onblocked = () => reject(new Error('save database is blocked'));
       });

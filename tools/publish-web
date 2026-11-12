@@ -202,6 +202,10 @@ def load_manifest(path: Path) -> dict:
     if kinds[0] in ("cd", "adf"):
         bare_file_name(kinds[0], payload[kinds[0]])
 
+    icon = manifest.get("branding", {}).get("icon")
+    if icon is not None and (not isinstance(icon, str) or not icon):
+        raise KitError("[branding] icon must be a file path")
+
     display = manifest.get("display", {})
     if "shader" in display and display["shader"] not in SHADERS:
         raise KitError(f"[display] shader must be one of {', '.join(SHADERS)}")

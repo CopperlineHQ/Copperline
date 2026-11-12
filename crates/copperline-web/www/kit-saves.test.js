@@ -43,11 +43,16 @@ function fakeIndexedDb({ failOpen = false, failPut = false } = {}) {
         }
         let data = databases.get(name);
         const db = {
+          closed: false,
+          close() {
+            this.closed = true;
+          },
           createObjectStore: () => {
             data = new Map();
             databases.set(name, data);
           },
           transaction: (storeName, mode) => {
+            if (db.closed) throw new Error('InvalidStateError: the connection is closed');
             const tx = {};
             let failed = false;
             const done = () =>
@@ -73,6 +78,7 @@ function fakeIndexedDb({ failOpen = false, failPut = false } = {}) {
           },
         };
         request.result = db;
+        this.last = db;
         if (!data) request.onupgradeneeded?.();
         request.onsuccess?.();
       });
@@ -154,4 +160,26 @@ test('missing or refusing storage reads as nothing stored', async () => {
 
   const full = openSaveStore('game', fakeIndexedDb({ failPut: true }));
   assert.equal(await full.put(diskKey(0), makeRecord('a', new Uint8Array([1]), 0)), false);
+});
+
+test('a connection the browser takes away is reopened, not reused', async () => {
+  const idb = fakeIndexedDb();
+  const store = openSaveStore('game', idb);
+  const record = makeRecord('abc', new Uint8Array([4, 5]), 2);
+  assert.equal(await store.put(diskKey(0), record), true);
+  assert.equal(idb.opens, 1);
+
+  // Another tab asks to upgrade: this one lets go of its connection.
+  const first = idb.last;
+  first.onversionchange();
+  assert.equal(first.closed, true);
+  assert.deepEqual(await store.get(diskKey(0)), record);
+  assert.equal(idb.opens, 2);
+
+  // The browser closes it outright (site data cleared under the page).
+  const second = idb.last;
+  second.closed = true;
+  second.onclose();
+  assert.equal(await store.put(diskKey(1), record), true);
+  assert.equal(idb.opens, 3);
 });
