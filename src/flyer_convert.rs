@@ -1233,6 +1233,21 @@ pub fn batch_clip_paths(dir: &Path, names: &[&str], replace: bool) -> Vec<PathBu
     taken
 }
 
+/// Copy a clip file as it is (a clip added to a batch needs no
+/// conversion).
+///
+/// A clip already at `to` (it was added from the drive's own folder, and
+/// replacing is on) is left as it is: `std::fs::copy` opens its target
+/// for writing first, which would empty the file it is about to read.
+pub fn copy_clip(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(from), std::fs::canonicalize(to)) {
+        if a == b {
+            return Ok(());
+        }
+    }
+    std::fs::copy(from, to).map(|_| ())
+}
+
 /// `path`, or when that exists `name (2).ext`, `name (3).ext`...: a
 /// default output never replaces a file.
 pub fn unused_path(path: &Path) -> PathBuf {
@@ -1314,6 +1329,23 @@ mod tests {
             fits(&unused_clip_path(dir.path(), "  ", "", &[], false)),
             "Clip"
         );
+    }
+
+    /// Copying a clip that is already where it is going must not open it
+    /// for writing: that would empty it before a byte was read.
+    #[test]
+    fn copying_a_clip_onto_itself_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("Intro");
+        std::fs::write(&clip, b"the clip").unwrap();
+        copy_clip(&clip, &clip).unwrap();
+        assert_eq!(std::fs::read(&clip).unwrap(), b"the clip");
+        // By another spelling of the same file too.
+        copy_clip(&clip, &dir.path().join(".").join("Intro")).unwrap();
+        assert_eq!(std::fs::read(&clip).unwrap(), b"the clip");
+        let other = dir.path().join("Copy");
+        copy_clip(&clip, &other).unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"the clip");
     }
 
     #[test]
