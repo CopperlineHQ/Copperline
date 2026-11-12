@@ -36,8 +36,8 @@
 //! The DSP: each channel has a volume (`$FFFF` = full) and a pan (the API's
 //! signed word, `-$8000` left to `$7FFF` right, which the firmware turns
 //! into 0..`$FFFF` by flipping the top bit), and a ramp: a change reaches
-//! its target linearly over `rate` fields. A channel adds `s·v·(1-p)` to
-//! the left and `s·v·p` to the right output. The sample rate is 735 per
+//! its target linearly over `rate` fields. A channel adds `s*v*(1-p)` to
+//! the left and `s*v*p` to the right output. The sample rate is 735 per
 //! field, 44,055.94 Hz, locked to the video; the Toaster stretches each
 //! frame's sound to the mixer's 44.1 kHz.
 
@@ -1684,7 +1684,7 @@ mod tests {
                 Shown::Clip(r.path.clone(), k),
                 "field {k}"
             );
-            // Left carries 100·n hard left, right −100·n hard right.
+            // Left carries 100*n hard left, right -100*n hard right.
             let want = 100.0 * k as f32 / 32768.0;
             assert!((sound[300].0 - want).abs() < 1e-3, "{k}: {:?}", sound[300]);
             assert!((sound[300].1 + want).abs() < 1e-3);

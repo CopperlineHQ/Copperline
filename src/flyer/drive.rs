@@ -17,7 +17,7 @@
 //! Drive `n` is `bus * 8 + target`: `FA0` (bus A, target 0) is drive 0,
 //! `FB0` drive 8, `FC0` drive 16. Each lives in a folder of that name under
 //! the Toaster's `Flyer` folder. Files are the clips' bytes verbatim, as
-//! FlyerFileSystem copies them (`crates/flyerclip/FORMAT.md` §2).
+//! FlyerFileSystem copies them (`crates/flyerclip/FORMAT.md` section 2).
 
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom, Write};

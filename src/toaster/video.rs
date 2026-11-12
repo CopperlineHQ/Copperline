@@ -449,8 +449,8 @@ impl Key<'_> {
     }
 }
 
-/// One pixel of Program = A·(1−k) + B·k, each gun rounded to nearest:
-/// `(a·(255−k) + b·k + 127) / 255`. The three guns are weighed two at a
+/// One pixel of Program = A*(1-k) + B*k, each gun rounded to nearest:
+/// `(a*(255-k) + b*k + 127) / 255`. The three guns are weighed two at a
 /// time in 16-bit lanes; `(t + (t >> 8)) >> 8` with `t = x + 128` is that
 /// division exactly for every `x` a lane can hold.
 #[inline]
@@ -472,7 +472,7 @@ pub fn blend(pa: u32, pb: u32, k: u8) -> u32 {
     }
 }
 
-/// Program = A·(1−k) + B·k.
+/// Program = A*(1-k) + B*k.
 pub fn mix(a: &[u32], b: &[u32], key: &Key<'_>, out: &mut [u32]) {
     match key {
         Key::Flat(0) => out.copy_from_slice(&a[..out.len()]),
@@ -566,7 +566,7 @@ pub fn amiga_picture(field: &FieldPixels<'_>, x0: i64, out: &mut [u32]) {
 
 /// The per-pixel source codes of a latch effect (`AMWIPE`/`BMWIPE` with
 /// the bus at 7): a pixel whose colour carries the genlock T bit (shown
-/// transparent) sets the source from its low nibbles, b2 + 2·r2 + 4·r1,
+/// transparent) sets the source from its low nibbles, b2 + 2*r2 + 4*r1,
 /// in the muxes' numbering (`LatchLUT`, animfxhandler.a); other pixels
 /// keep the source last set on the line. `None` before the first.
 pub fn latch_codes(field: &FieldPixels<'_>, x0: i64) -> Vec<Option<u8>> {
