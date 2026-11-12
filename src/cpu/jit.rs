@@ -350,6 +350,7 @@ impl M68kMachine {
             self.bus.bus.cpu_pc = self.cpu.pc;
             self.bus.window_offered = false;
             self.bus.jit_bus_boundary = false;
+            self.bus.jit_local.clear();
             let bus_checkpoint = self.bus.bus.slice_bus_advanced_cck();
             self.bus.jit_batch = Some(if budget == 1 {
                 JitBatchTiming::Single
@@ -376,6 +377,9 @@ impl M68kMachine {
             });
             let cpu_was_stopped = self.cpu.is_stopped();
             let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
+            // The map describes this batch's mappings only: exception
+            // entry, interrupt service and the precise loop never use it.
+            self.bus.jit_local.clear();
             if !deferred {
                 // There is no completed prefix within a single instruction,
                 // and a lump defers none. Avoid constructing/copying deferred

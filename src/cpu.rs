@@ -537,6 +537,93 @@ struct CpuBus {
     /// peripheral write, RESET or primary-bank change. Never caches a pointer.
     jit_cache_exclusions_current: bool,
     jit_bus_boundary: bool,
+    /// The local memory the running batch was offered, for the accesses the
+    /// core still sends through this bus (`jit_local_read`). Empty outside
+    /// `run_batch`; descriptors only, never a pointer.
+    jit_local: JitLocalMap,
+}
+
+/// Where a region the batch path reads directly lives.
+#[derive(Clone, Copy)]
+enum JitLocalBacking {
+    Rom,
+    ExtendedRom,
+    MbRam,
+    AccelRam,
+    ZorroRam(usize),
+    /// A device slot's plain boot ROM (`ZorroDevice::plain_rom`).
+    BoardRom(usize),
+}
+
+#[derive(Clone, Copy)]
+struct JitLocalRegion {
+    base: u32,
+    len: u32,
+    writable: bool,
+    backing: JitLocalBacking,
+}
+
+/// The primary window and the additional regions of one batch, in the
+/// order the core was given them. `count` is zero outside `run_batch`.
+#[derive(Clone, Copy)]
+struct JitLocalMap {
+    count: usize,
+    regions: [JitLocalRegion; MAX_FAST_MEM_REGIONS + 1],
+    /// Whether slot 0 holds the primary window; the additional regions
+    /// follow it, or start there when the batch has no primary window.
+    primary: bool,
+}
+
+impl Default for JitLocalMap {
+    fn default() -> Self {
+        Self {
+            count: 0,
+            regions: [JitLocalRegion {
+                base: 0,
+                len: 0,
+                writable: false,
+                backing: JitLocalBacking::Rom,
+            }; MAX_FAST_MEM_REGIONS + 1],
+            primary: false,
+        }
+    }
+}
+
+impl JitLocalMap {
+    #[inline(always)]
+    fn find(&self, addr: u32, size: u32) -> Option<(JitLocalRegion, usize)> {
+        for region in &self.regions[..self.count] {
+            let off = addr.wrapping_sub(region.base);
+            if off < region.len && region.len - off >= size {
+                return Some((*region, off as usize));
+            }
+        }
+        None
+    }
+
+    #[inline]
+    fn clear(&mut self) {
+        self.count = 0;
+        self.primary = false;
+    }
+
+    fn set_primary(&mut self, region: JitLocalRegion) {
+        if !self.primary {
+            // The additional regions arrived first: make room in slot 0.
+            self.regions.copy_within(0..self.count, 1);
+            self.count += 1;
+            self.primary = true;
+        }
+        self.regions[0] = region;
+    }
+
+    fn set_extra(&mut self, extra: &[Option<JitLocalRegion>]) {
+        self.count = usize::from(self.primary);
+        for region in extra.iter().flatten() {
+            self.regions[self.count] = *region;
+            self.count += 1;
+        }
+    }
 }
 
 /// A fast-RAM bank the JIT fastmem window can cover (`CpuBus::jit_fast_mem`).
@@ -632,6 +719,7 @@ impl M68kMachine {
                 jit_batch: None,
                 jit_cache_exclusions_current: false,
                 jit_bus_boundary: false,
+                jit_local: JitLocalMap::default(),
             },
             fpu_enabled,
             jit_enabled: false,
@@ -5062,6 +5150,16 @@ impl CpuBus {
             self.jit_cache_exclusions_current = false;
         }
         self.jit_window_bank = Some(window.base);
+        self.jit_local.set_primary(JitLocalRegion {
+            base: window.base,
+            len: window.len,
+            writable: true,
+            backing: match bank {
+                FastRamBank::Zorro { idx, .. } => JitLocalBacking::ZorroRam(idx),
+                FastRamBank::Motherboard => JitLocalBacking::MbRam,
+                FastRamBank::Accel => JitLocalBacking::AccelRam,
+            },
+        });
         Some(window)
     }
 
@@ -5093,14 +5191,21 @@ impl CpuBus {
             self.jit_cache_exclusions_current = false;
             return regions;
         }
+        let mut local = [None; MAX_FAST_MEM_REGIONS];
         let mut count = 0;
-        let mut push = |ptr, base, len, writable| {
+        let mut push = |ptr, base, len, writable, backing| {
             if len >= 4 && count < regions.len() {
                 regions[count] = Some(FastMemRegion {
                     ptr,
                     base,
                     len,
                     writable,
+                });
+                local[count] = Some(JitLocalRegion {
+                    base,
+                    len,
+                    writable,
+                    backing,
                 });
                 count += 1;
             }
@@ -5116,6 +5221,7 @@ impl CpuBus {
                 ROM_BASE as u32,
                 mem.rom.len() as u32,
                 false,
+                JitLocalBacking::Rom,
             );
         }
         if !mem
@@ -5127,6 +5233,7 @@ impl CpuBus {
                 mem.extended_rom_base as u32,
                 mem.extended_rom.len() as u32,
                 false,
+                JitLocalBacking::ExtendedRom,
             );
         }
         let mb_base = mem.mb_ram_base() as u32;
@@ -5136,6 +5243,7 @@ impl CpuBus {
                 mb_base,
                 mem.mb_ram.len() as u32,
                 true,
+                JitLocalBacking::MbRam,
             );
         }
         if self.jit_window_bank != Some(ACCEL_RAM_BASE as u32) {
@@ -5144,6 +5252,7 @@ impl CpuBus {
                 ACCEL_RAM_BASE as u32,
                 mem.accel_ram.len() as u32,
                 true,
+                JitLocalBacking::AccelRam,
             );
         }
         // Copy descriptors, not allocations; no heap work in the batch path.
@@ -5153,7 +5262,13 @@ impl CpuBus {
         }
         for (base, len, idx) in banks.into_iter().flatten() {
             if self.jit_window_bank != Some(base) {
-                push(mem.zorro.board_ram_mut(idx).as_mut_ptr(), base, len, true);
+                push(
+                    mem.zorro.board_ram_mut(idx).as_mut_ptr(),
+                    base,
+                    len,
+                    true,
+                    JitLocalBacking::ZorroRam(idx),
+                );
             }
         }
         // Boot ROMs a board declares plain (`ZorroDevice::plain_rom`): the
@@ -5166,7 +5281,13 @@ impl CpuBus {
                 continue;
             };
             if u64::from(off) + rom.len() as u64 <= u64::from(len) {
-                push(rom.as_ptr().cast_mut(), base + off, rom.len() as u32, false);
+                push(
+                    rom.as_ptr().cast_mut(),
+                    base + off,
+                    rom.len() as u32,
+                    false,
+                    JitLocalBacking::BoardRom(slot),
+                );
             }
         }
         let ranges = regions.map(|r| r.map(|r| (r.base, r.len)));
@@ -5183,7 +5304,92 @@ impl CpuBus {
         }
         self.window_offered |= count != 0;
         self.jit_cache_exclusions_current = true;
+        self.jit_local.set_extra(&local);
         regions
+    }
+
+    /// Serve a read or fetch the core sent through the bus from the local
+    /// memory its batch was offered. The decoded loop and compiled traces
+    /// reach these regions directly; the instructions the core hands to its
+    /// full dispatcher, extension words and exception frames come here,
+    /// and take the same shortcut. Everything the ordinary path would do
+    /// for such an access is nothing under the batch contract: fast RAM and
+    /// ROM bill no bus time, the cache models hold no line inside an
+    /// offered region, the regions are withheld while any watch, heat map
+    /// or fault injection must see the access, and the batch path takes
+    /// the live interrupt level, not the per-access sample.
+    #[inline]
+    fn jit_local_read(&mut self, address: u32, size: usize, fetch: bool) -> Option<u32> {
+        if self.jit_local.count == 0 {
+            return None;
+        }
+        let (region, off) = self
+            .jit_local
+            .find(address & self.address_mask, size as u32)?;
+        let bytes = self.jit_local_bytes(region)?.get(off..off + size)?;
+        let value = match *bytes {
+            [a, b, c, d] => u32::from_be_bytes([a, b, c, d]),
+            [a, b] => u32::from(u16::from_be_bytes([a, b])),
+            [a] => u32::from(a),
+            _ => read_be(bytes, 0, size),
+        };
+        if fetch {
+            self.last_fetch_cache_hit = false;
+            self.instruction_fetches_cached = false;
+        }
+        Some(value)
+    }
+
+    /// The write counterpart of `jit_local_read`, for the offered RAM. A
+    /// store aimed at ROM takes the ordinary path, which drops it.
+    #[inline]
+    fn jit_local_write(&mut self, address: u32, size: usize, value: u32) -> bool {
+        if self.jit_local.count == 0 {
+            return false;
+        }
+        let Some((region, off)) = self
+            .jit_local
+            .find(address & self.address_mask, size as u32)
+        else {
+            return false;
+        };
+        if !region.writable {
+            return false;
+        }
+        let mem = &mut self.bus.mem;
+        let bytes: &mut [u8] = match region.backing {
+            JitLocalBacking::MbRam => &mut mem.mb_ram,
+            JitLocalBacking::AccelRam => &mut mem.accel_ram,
+            JitLocalBacking::ZorroRam(idx) => mem.zorro.board_ram_mut(idx),
+            JitLocalBacking::Rom | JitLocalBacking::ExtendedRom | JitLocalBacking::BoardRom(_) => {
+                return false;
+            }
+        };
+        let Some(bytes) = bytes.get_mut(off..off + size) else {
+            return false;
+        };
+        match bytes {
+            [a, b, c, d] => [*a, *b, *c, *d] = value.to_be_bytes(),
+            [a, b] => [*a, *b] = (value as u16).to_be_bytes(),
+            [a] => *a = value as u8,
+            _ => write_be(bytes, 0, size, value),
+        }
+        true
+    }
+
+    #[inline(always)]
+    fn jit_local_bytes(&self, region: JitLocalRegion) -> Option<&[u8]> {
+        let mem = &self.bus.mem;
+        Some(match region.backing {
+            JitLocalBacking::Rom => &mem.rom,
+            JitLocalBacking::ExtendedRom => &mem.extended_rom,
+            JitLocalBacking::MbRam => &mem.mb_ram,
+            JitLocalBacking::AccelRam => &mem.accel_ram,
+            JitLocalBacking::ZorroRam(idx) => mem.zorro.board_ram(idx),
+            JitLocalBacking::BoardRom(slot) => {
+                crate::zorro_device::ZorroDevice::plain_rom(self.bus.devices.get(slot)?)?.1
+            }
+        })
     }
 
     /// The fast-RAM bank holding `addr`, if any.
@@ -5490,41 +5696,65 @@ impl AddressBus for CpuBus {
     }
 
     fn read_byte(&mut self, address: u32) -> u8 {
+        if let Some(value) = self.jit_local_read(address, 1, false) {
+            return value as u8;
+        }
         self.sample_ipl();
         self.read_sized(address, 1, CpuBusAccessKind::Read) as u8
     }
 
     fn read_word(&mut self, address: u32) -> u16 {
+        if let Some(value) = self.jit_local_read(address, 2, false) {
+            return value as u16;
+        }
         self.sample_ipl();
         self.read_sized(address, 2, CpuBusAccessKind::Read) as u16
     }
 
     fn read_long(&mut self, address: u32) -> u32 {
+        if let Some(value) = self.jit_local_read(address, 4, false) {
+            return value;
+        }
         self.sample_ipl();
         self.read_sized(address, 4, CpuBusAccessKind::Read)
     }
 
     fn write_byte(&mut self, address: u32, value: u8) {
+        if self.jit_local_write(address, 1, u32::from(value)) {
+            return;
+        }
         self.sample_ipl();
         self.write_sized(address, 1, u32::from(value));
     }
 
     fn write_word(&mut self, address: u32, value: u16) {
+        if self.jit_local_write(address, 2, u32::from(value)) {
+            return;
+        }
         self.sample_ipl();
         self.write_sized(address, 2, u32::from(value));
     }
 
     fn write_long(&mut self, address: u32, value: u32) {
+        if self.jit_local_write(address, 4, value) {
+            return;
+        }
         self.sample_ipl();
         self.write_sized(address, 4, value);
     }
 
     fn read_immediate_word(&mut self, address: u32) -> u16 {
+        if let Some(value) = self.jit_local_read(address, 2, true) {
+            return value as u16;
+        }
         self.sample_ipl();
         self.read_sized(address, 2, CpuBusAccessKind::Fetch) as u16
     }
 
     fn read_immediate_long(&mut self, address: u32) -> u32 {
+        if let Some(value) = self.jit_local_read(address, 4, true) {
+            return value;
+        }
         self.sample_ipl();
         self.read_sized(address, 4, CpuBusAccessKind::Fetch)
     }
@@ -6392,6 +6622,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -6432,6 +6663,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -6483,6 +6715,7 @@ mod tests {
                 jit_batch: None,
                 jit_cache_exclusions_current: false,
                 jit_bus_boundary: false,
+                jit_local: JitLocalMap::default(),
             };
             bus.bus
                 .set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
@@ -6549,6 +6782,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
         // INTENA/INTREQ, whose read ports INTENAR ($01C) and INTREQR ($01E) are
         // adjacent and beam-independent, so the pair reads back deterministically.
@@ -6603,6 +6837,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
         let base = CHIP_RAM_BASE as u32;
         write_chip_long(&mut bus.bus, base, 0x1122_3344);
@@ -6653,6 +6888,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -6712,6 +6948,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
 
         // Warm the opcode longword and a separate extension longword.
@@ -6932,6 +7169,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -7002,6 +7240,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -7148,6 +7387,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -7187,6 +7427,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         };
         // $F00000 with no extended ROM fitted is genuinely undecoded (the
         // chip-register space at $C00000-$DFFFFF is not: Gary mirrors the
@@ -7258,6 +7499,7 @@ mod tests {
             jit_batch: None,
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
+            jit_local: JitLocalMap::default(),
         }
     }
 
@@ -9321,6 +9563,70 @@ mod tests {
         // An access running off the end of the ROM is not plain.
         assert!(jit.bus.board_plain_rom(CODE + rom_len - 2, 4).is_none());
         assert!(jit.bus.board_plain_rom(CODE + rom_len - 2, 2).is_some());
+        Ok(())
+    }
+
+    /// The accesses a batch still sends through the bus take the regions
+    /// the batch was offered directly: same bytes as the ordinary path,
+    /// RAM writable, ROM not, nothing outside a region, and nothing at all
+    /// once the batch is over.
+    #[test]
+    fn jit_local_map_serves_bus_accesses_to_offered_regions_within_a_batch() -> Result<()> {
+        use m68k::{CACR_ED, CACR_EI};
+        let pc = FAST_RAM_BASE as u32 + 0x100;
+        let mut machine = machine_with_program_model(pc, &[0x4E71, 0x60FC], CpuModel::M68030)?;
+        machine.bus.bus.mem.fit_mb_ram(2 * 1024 * 1024);
+        machine.set_cache_emulation(true, true);
+        machine.cpu.cacr = CACR_ED | CACR_EI;
+        machine.apply_cacr_updates();
+        machine.set_jit_enabled(true);
+        let ram = FAST_RAM_BASE as u32 + 0x800;
+        let mb = machine.bus.bus.mem.mb_ram_base() as u32;
+        let rom = ROM_BASE as u32 + 0x10;
+        let bus = &mut machine.bus;
+        bus.bus.cpu_pc = pc;
+        assert!(bus.jit_local_read(ram, 4, false).is_none(), "no batch yet");
+
+        // Capture as the core does when a batch starts.
+        bus.fast_mem().unwrap();
+        bus.fast_mem_regions();
+        bus.write_long(ram, 0x1122_3344);
+        bus.write_word(mb + 2, 0xBEEF);
+        bus.write_byte(mb + 7, 0x5A);
+        assert_eq!(bus.peek_long(ram), 0x1122_3344);
+        assert_eq!(bus.jit_local_read(ram, 4, false), Some(0x1122_3344));
+        assert_eq!(bus.read_word(ram + 2), 0x3344);
+        assert_eq!(bus.read_long(mb), 0x0000_BEEF);
+        assert_eq!(bus.read_byte(mb + 7), 0x5A);
+
+        // ROM reads are served; a store is left to the ordinary path,
+        // which drops it.
+        let word = bus.peek_long(rom);
+        assert_eq!(bus.jit_local_read(rom, 4, true), Some(word));
+        assert!(!bus.jit_local_write(rom, 4, !word));
+        bus.write_long(rom, !word);
+        assert_eq!(bus.read_long(rom), word);
+
+        // Chip RAM is never local, nor is an access running off a region.
+        assert!(bus.jit_local_read(0x1000, 4, false).is_none());
+        assert!(bus
+            .jit_local_read(FAST_RAM_BASE as u32 + 64 * 1024 - 2, 4, false)
+            .is_none());
+        assert!(!bus.jit_local_write(FAST_RAM_BASE as u32 + 64 * 1024 - 2, 4, 0));
+
+        // A fetch reports what a cache miss reports.
+        bus.last_fetch_cache_hit = true;
+        bus.instruction_fetches_cached = true;
+        assert_eq!(bus.read_immediate_word(pc), 0x4E71);
+        assert!(!bus.last_fetch_cache_hit && !bus.instruction_fetches_cached);
+
+        // The map dies with its batch: exception entry, interrupt service
+        // and the precise loop see every access on the ordinary path.
+        machine.step_slice(4)?;
+        assert!(machine.bus.jit_local_read(ram, 4, false).is_none());
+        machine.set_jit_enabled(false);
+        machine.step_slice(4)?;
+        assert!(machine.bus.jit_local_read(ram, 4, false).is_none());
         Ok(())
     }
 

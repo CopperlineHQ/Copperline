@@ -232,7 +232,18 @@ exception frames). The models therefore hold no lines inside the window
 while the core has it (`CpuBus::keep_caches_out_of_window`): capturing a
 window drops the lines it overlaps, and a miss there allocates nothing.
 Under JIT a fast-RAM access is free whether it hits or misses, so nothing
-is lost. The exclusion covers every offered region, ROM included:
+is lost. Those bus-path accesses take a shortcut of their own
+(`CpuBus::jit_local_read`, `jit_local_write`): while a batch runs,
+`CpuBus` keeps descriptors of the regions it offered and serves a read,
+fetch or RAM write inside one straight from memory. Nothing is skipped
+that the batch contract uses, since such an access bills no bus time,
+finds no cache line, has no watch, heat map or fault injection to pass
+(their presence withholds the regions) and takes no interrupt sample (the
+batch path reads the live level). About one instruction in eight of
+compiled C still goes through the bus this way, so the ordinary decode of
+every such access had been a measurable share of host time. The
+descriptors are dropped the moment `run_batch` returns: exception entry,
+interrupt service and the precise loop always take the ordinary path. The exclusion covers every offered region, ROM included:
 capturing a mapping drops the lines it newly covers, a batch that runs
 with no direct regions lets the bus path cache them again, and a restored
 state rebuilds the list, with its evictions, on its first batch. Chip RAM
