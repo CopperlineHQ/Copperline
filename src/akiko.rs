@@ -407,7 +407,7 @@ impl Nvram {
         if self.dirty {
             if let Some(path) = &self.path {
                 if let Err(e) = crate::paths::ensure_parent(path)
-                    .and_then(|()| std::fs::write(path, &self.memory))
+                    .and_then(|()| crate::paths::write_replacing(path, &self.memory))
                 {
                     // Stay dirty so the next STOP retries: a transient
                     // host error must not lose the EEPROM contents (save
@@ -2481,6 +2481,34 @@ mod tests {
         i2c::start(&mut akiko, &mut chip);
         assert!(i2c::write_byte(&mut akiko, &mut chip, 0x55), "no ACK");
         i2c::stop(&mut akiko, &mut chip);
+    }
+
+    /// The EEPROM file holds every CD32 save game and is rewritten whole
+    /// at each STOP. The old file has to stay complete until the new one
+    /// is: a write cut short would leave a short file that loads as
+    /// blank. A second name for the old file shows which happened.
+    #[test]
+    fn nvram_flush_replaces_the_file_instead_of_truncating_it() {
+        let mut chip = no_chip();
+        let mut akiko = Akiko::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cd32-nvram.bin");
+        let old_name = dir.path().join("old-name.bin");
+        std::fs::write(&path, vec![0x11u8; 1024]).unwrap();
+        std::fs::hard_link(&path, &old_name).unwrap();
+        akiko.set_nvram_path(path.clone());
+
+        i2c::start(&mut akiko, &mut chip);
+        assert!(!i2c::write_byte(&mut akiko, &mut chip, 0xA2));
+        assert!(!i2c::write_byte(&mut akiko, &mut chip, 0x42));
+        assert!(!i2c::write_byte(&mut akiko, &mut chip, 0xDE));
+        i2c::stop(&mut akiko, &mut chip);
+
+        assert_eq!(std::fs::read(&path).unwrap()[0x142], 0xDE);
+        assert!(
+            std::fs::read(&old_name).unwrap() == vec![0x11u8; 1024],
+            "the old NVRAM file was overwritten in place"
+        );
     }
 
     /// A failed backing-file write must leave the EEPROM dirty so a

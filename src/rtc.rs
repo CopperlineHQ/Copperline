@@ -624,9 +624,9 @@ impl Rp5c01Rtc {
             // The directory is Copperline's own and may not exist yet; it
             // is made here rather than at bind time so a guest that never
             // writes the clock RAM leaves no empty folder behind.
-            if let Err(e) = crate::paths::ensure_parent(path)
-                .and_then(|()| std::fs::write(path, self.battmem_bytes(emulated_secs)))
-            {
+            if let Err(e) = crate::paths::ensure_parent(path).and_then(|()| {
+                crate::paths::write_replacing(path, &self.battmem_bytes(emulated_secs))
+            }) {
                 // Stay dirty so the next MODE write retries: a transient
                 // host error must not lose the battery state until the
                 // guest happens to change it again.
@@ -1260,6 +1260,34 @@ mod tests {
         rp_write(&mut rtc, 0xD, 0x8);
         assert!(path.exists(), "a changed nibble flushes on MODE restore");
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The battery file is rewritten whole at each flush. The old file
+    /// has to stay complete until the new one is: a write cut short
+    /// would leave a file of the wrong shape, which loads as a fresh
+    /// battery. A second name for the old file shows which happened.
+    #[test]
+    fn rp5c01_battmem_flush_replaces_the_file_instead_of_truncating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("battmem.nvram");
+        let old_name = dir.path().join("old-name.nvram");
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rtc.set_battmem_path(path.clone());
+        rp_write(&mut rtc, 0xD, 0xA);
+        rp_write(&mut rtc, 0x0, 0x5);
+        rp_write(&mut rtc, 0xD, 0x8); // first flush creates the file
+        let first = std::fs::read(&path).unwrap();
+        std::fs::hard_link(&path, &old_name).unwrap();
+
+        rp_write(&mut rtc, 0xD, 0xA);
+        rp_write(&mut rtc, 0x0, 0x6);
+        rp_write(&mut rtc, 0xD, 0x8); // second flush rewrites it
+
+        assert!(std::fs::read(&path).unwrap() != first);
+        assert!(
+            std::fs::read(&old_name).unwrap() == first,
+            "the old battery file was overwritten in place"
+        );
     }
 
     /// A failed backing-file write must leave the dirty bit armed so a
