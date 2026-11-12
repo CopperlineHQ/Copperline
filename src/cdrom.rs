@@ -680,6 +680,15 @@ impl CdImage {
             }
             i = in_file;
         }
+        // Sector headers and the lead-out are addressed LEADIN_SECTORS past
+        // the logical block.
+        if disc.checked_add(LEADIN_SECTORS).is_none() {
+            bail!(
+                "{}: cue layout exceeds the disc address space",
+                cue_path.display()
+            );
+        }
+
         Ok(Self {
             tracks,
             total_sectors: disc,
@@ -1725,6 +1734,29 @@ mod tests {
         let mut data = [0u8; DATA_SECTOR_BYTES];
         image.read_data_sector(0, &mut data).unwrap();
         assert!(data.iter().all(|&b| b == 0x33));
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+    }
+
+    /// Every sector's header and the lead-out are addressed 150 sectors
+    /// past the logical block, so a layout has to leave room for that.
+    #[test]
+    fn a_cue_layout_too_long_to_address_past_the_lead_in_is_refused() {
+        let cue = temp_path("huge.cue");
+        let bin = temp_path("huge.bin");
+        write_file(&bin, &[0u8; DATA_SECTOR_BYTES]);
+        std::fs::write(
+            &cue,
+            format!(
+                "{}  TRACK 01 MODE1/2048\n    PREGAP 954437:08:46\n    INDEX 01 00:00:00\n",
+                file_line(&bin, "BINARY")
+            ),
+        )
+        .unwrap();
+        let Err(err) = CdImage::load(&cue) else {
+            panic!("the layout must be refused");
+        };
+        assert!(format!("{err:#}").contains("disc address space"), "{err:#}");
         let _ = std::fs::remove_file(&cue);
         let _ = std::fs::remove_file(&bin);
     }
