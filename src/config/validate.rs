@@ -2178,7 +2178,7 @@ fn parse_agnus_revision(s: &str) -> Result<AgnusRevision> {
         "8375" | "8372B" => Ok(AgnusRevision::Ecs8375),
         "8374" | "ALICE" => Ok(AgnusRevision::AgaAlice),
         _ => Err(anyhow!(
-            "unknown chipset agnus {:?}: expected OCS / 8370 / 8371 / 8372 / 8372A / 8375 / 8374 / ALICE",
+            "unknown chipset agnus {:?}: expected OCS / 8370 / 8371 / 8372 / 8372A / 8372B / 8375 / 8374 / ALICE",
             s
         )),
     }

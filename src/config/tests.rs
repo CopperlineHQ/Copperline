@@ -2363,6 +2363,27 @@ fn chipset_agnus_denise_overrides_parse() -> Result<()> {
 }
 
 #[test]
+fn the_agnus_error_names_every_accepted_revision() -> anyhow::Result<()> {
+    // 8372B is accepted (it selects the same Agnus as 8375), so the message
+    // that lists the choices has to offer it.
+    let cfg = parse_config("[chipset]\nagnus = \"8372B\"\n")?;
+    assert_eq!(cfg.agnus_revision, AgnusRevision::Ecs8375);
+    let err = parse_config("[chipset]\nagnus = \"8378\"\n").unwrap_err();
+    let message = format!("{err:#}");
+    for name in [
+        "OCS", "8370", "8371", "8372", "8372A", "8372B", "8375", "8374", "ALICE",
+    ] {
+        assert!(
+            message
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|word| word == name),
+            "{name} missing from: {message}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn chip_ram_beyond_agnus_reach_is_rejected() {
     let err = parse_config(
         r#"
