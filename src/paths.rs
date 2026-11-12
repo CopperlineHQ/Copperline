@@ -770,6 +770,91 @@ pub fn ensure_parent(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
+/// Replace the whole of `path` with `bytes` so that the file never holds
+/// less than its old or its new contents.
+///
+/// `std::fs::write` truncates first: a full disk, a quota, or the process
+/// being killed between the truncate and the last byte leaves a short
+/// file, and for a file rewritten as a whole (a card image, battery RAM,
+/// a re-encoded disk) that is the loss of everything in it. So the bytes
+/// go to a sibling temporary file, which takes the destination's name
+/// only once it is complete.
+///
+/// What a plain write would refuse is still refused, with the same error:
+/// the destination is opened for writing first, because replacing a file
+/// is a change to its directory and would otherwise succeed on a file
+/// this user may not write (read-only, or another user's).
+///
+/// The new file is given the old one's mode and, on Unix, its owner and
+/// group. Where that cannot be done (the file is another user's and this
+/// one may not give files away), where the directory will not take a
+/// temporary file, or where the rename is refused (on Windows, while
+/// another program has the file open), the destination is written in
+/// place as it was before this function existed. That case keeps the
+/// truncating write's exposure, deliberately: failing instead would turn
+/// a write that used to land into one that never does. A destination
+/// that does not exist yet, or is not a regular file, is also simply
+/// written.
+///
+/// A symlink is followed, so the link stays a link. Limits: other hard
+/// links to the file keep the old contents; extended attributes and ACLs
+/// are not carried over; and a process killed between creating the
+/// temporary file and renaming it leaves that file behind, hidden, named
+/// after the destination (`.NAME.copperline-XXXXXX`).
+pub fn write_replacing(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::io::Write;
+        let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let Some(old) = std::fs::metadata(&target)
+            .ok()
+            .filter(|meta| meta.is_file())
+        else {
+            return std::fs::write(&target, bytes);
+        };
+        drop(std::fs::OpenOptions::new().write(true).open(&target)?);
+        let staged = target.parent().and_then(|dir| {
+            let name = target.file_name()?.to_string_lossy();
+            tempfile::Builder::new()
+                .prefix(&format!(".{name}.copperline-"))
+                .tempfile_in(dir)
+                .ok()
+        });
+        if let Some(mut temp) = staged {
+            // A failure from here on leaves the destination untouched; the
+            // temporary file is removed as it drops.
+            temp.write_all(bytes)?;
+            if keep_identity(temp.as_file(), &old).is_ok() && temp.persist(&target).is_ok() {
+                return Ok(());
+            }
+        }
+        std::fs::write(&target, bytes)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        std::fs::write(path, bytes)
+    }
+}
+
+/// Give `new` the owner, group and mode of the file it is about to
+/// replace. The owner and group are set first: changing them can clear
+/// mode bits.
+#[cfg(unix)]
+fn keep_identity(new: &std::fs::File, old: &std::fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let born = new.metadata()?;
+    if (born.uid(), born.gid()) != (old.uid(), old.gid()) {
+        std::os::unix::fs::fchown(new, Some(old.uid()), Some(old.gid()))?;
+    }
+    new.set_permissions(old.permissions())
+}
+
+/// Give `new` the mode of the file it is about to replace.
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+fn keep_identity(new: &std::fs::File, old: &std::fs::Metadata) -> std::io::Result<()> {
+    new.set_permissions(old.permissions())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -790,6 +875,110 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn write_replacing_swaps_in_a_complete_file_and_leaves_no_temporary() {
+        let dir = ScratchDir::new("replace");
+        let path = dir.0.join("card.bin");
+        // Nothing there yet: it is simply created.
+        write_replacing(&path, b"first").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        // Something there: a second name for it keeps the old bytes, so
+        // the old file was never truncated.
+        let old_name = dir.0.join("old-name.bin");
+        std::fs::hard_link(&path, &old_name).unwrap();
+        write_replacing(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert_eq!(std::fs::read(&old_name).unwrap(), b"first");
+        let names: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+    }
+
+    #[test]
+    fn write_replacing_still_refuses_a_read_only_file() {
+        let dir = ScratchDir::new("replace-ro");
+        let path = dir.0.join("card.bin");
+        std::fs::write(&path, b"keep").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms.clone()).unwrap();
+        // A privileged user can write a read-only file whatever its mode;
+        // the point is that this path behaves as a plain write does.
+        let plain = std::fs::write(&path, b"keep").is_ok();
+        assert_eq!(write_replacing(&path, b"lost").is_ok(), plain);
+        if !plain {
+            assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+        }
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&path, perms).unwrap();
+    }
+
+    /// Whether this user may write a file is not what its mode's write
+    /// bits say: here the owner has none while group and other do. A plain
+    /// write is refused, so replacing the file through its directory would
+    /// turn a refusal into a silent success.
+    #[cfg(unix)]
+    #[test]
+    fn write_replacing_refuses_a_file_this_user_may_not_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = ScratchDir::new("replace-unwritable");
+        let path = dir.0.join("card.bin");
+        std::fs::write(&path, b"keep").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o022)).unwrap();
+        if std::fs::OpenOptions::new().write(true).open(&path).is_ok() {
+            return; // a privileged user: nothing is refused to it
+        }
+        assert!(write_replacing(&path, b"lost").is_err());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+    }
+
+    /// A replaced file is a new file, which would take this process's
+    /// owner and the directory's group. The old file's are carried over.
+    /// The test uses a group, which an ordinary user can change; it needs
+    /// the user to be in a second group and passes without checking
+    /// anything where there is none.
+    #[cfg(unix)]
+    #[test]
+    fn write_replacing_keeps_the_files_group() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = ScratchDir::new("replace-group");
+        let path = dir.0.join("card.bin");
+        std::fs::write(&path, b"first").unwrap();
+        let born = std::fs::metadata(&path).unwrap().gid();
+        let groups = std::process::Command::new("id").arg("-G").output().unwrap();
+        let other = String::from_utf8_lossy(&groups.stdout)
+            .split_whitespace()
+            .filter_map(|gid| gid.parse::<u32>().ok())
+            .find(|&gid| gid != born && std::os::unix::fs::chown(&path, None, Some(gid)).is_ok());
+        let Some(other) = other else {
+            return;
+        };
+        write_replacing(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert_eq!(std::fs::metadata(&path).unwrap().gid(), other);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_replacing_keeps_a_symlink_and_the_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = ScratchDir::new("replace-link");
+        let real = dir.0.join("real.bin");
+        let link = dir.0.join("link.bin");
+        std::fs::write(&real, b"first").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        write_replacing(&link, b"second").unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        assert_eq!(std::fs::read(&real).unwrap(), b"second");
+        let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o640);
     }
 
     /// The names a run produces, and which stamp each carries. Gathering

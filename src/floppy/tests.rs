@@ -4711,6 +4711,57 @@ fn legacy_extended_adf_refuses_amigados_track_beyond_double_density_sectors() ->
     Ok(())
 }
 
+/// An extended ADF is rewritten whole after each track write. The old
+/// file has to stay complete until the new one is: truncating it and
+/// writing over it leaves no image at all if the write is cut short. A
+/// second name for the old file shows which happened.
+#[test]
+fn extended_adf_write_back_replaces_the_file_instead_of_truncating_it() -> Result<()> {
+    let path = temp_ext2_amigados(&vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR])?;
+    let before = fs::read(&path)?;
+    let old_name = temp_path("old-name.ext.adf");
+    fs::hard_link(&path, &old_name)?;
+    let cfg = FloppyConfig {
+        bridges: std::array::from_fn(|_| None),
+        speed: 100,
+        drives: [
+            Some(FloppyDriveConfig {
+                path: path.clone(),
+                write_protected: false,
+            }),
+            None,
+            None,
+            None,
+        ],
+    };
+    let mut ctrl = FloppyController::from_config(&cfg)?;
+    let mut source = vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR];
+    source[0..BYTES_PER_SECTOR].fill(0xA5);
+    let words = encode_amigados_track(0, &source);
+    let mut chip_ram = vec![0u8; words.len() * 2 + 2];
+    for (i, word) in words.iter().copied().enumerate() {
+        chip_ram[i * 2..i * 2 + 2].copy_from_slice(&word.to_be_bytes());
+    }
+    ctrl.write_prb(!CIAB_DSKMOTOR & !CIAB_DSKSEL0);
+    ctrl.tick(MOTOR_READY_CCK, 0, &mut chip_ram);
+    ctrl.set_dskpt_low(0);
+    let len = DSKLEN_DMAEN | DSKLEN_WRITE | (words.len() as u16 & DSKLEN_MASK);
+    assert!(!ctrl.write_dsklen(len, 0));
+    assert!(!ctrl.write_dsklen(len, 0));
+    let dmacon = DMACON_DMAEN | DMACON_DISK;
+    while !ctrl.tick(ctrl.word_cck(), dmacon, &mut chip_ram) {}
+
+    let after = fs::read(&path)?;
+    assert!(after != before, "the track write reached the image");
+    assert!(
+        fs::read(&old_name)? == before,
+        "the old image was overwritten in place"
+    );
+    let _ = fs::remove_file(&path);
+    let _ = fs::remove_file(&old_name);
+    Ok(())
+}
+
 #[test]
 fn writable_extended_adf_amigados_track_persists_sector_updates() -> Result<()> {
     let path = temp_ext2_amigados(&vec![0u8; SECTORS_PER_TRACK * BYTES_PER_SECTOR])?;
