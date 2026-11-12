@@ -9721,7 +9721,9 @@ mod tests {
                     let at = table + page as usize * 4;
                     chip[at..at + 4].copy_from_slice(&((page << 12) | 1).to_be_bytes());
                 }
-                machine.cpu.mmu_crp_limit = 2;
+                // Lower limit of zero: every root index is in range (a
+                // limit word of $00000002 is an upper limit of zero).
+                machine.cpu.mmu_crp_limit = 0x8000_0002;
                 machine.cpu.mmu_crp_aptr = table as u32;
                 machine.cpu.mmu_tc = 0x80C8_C000;
                 machine.cpu.pmmu_enabled = true;

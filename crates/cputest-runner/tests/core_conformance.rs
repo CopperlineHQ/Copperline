@@ -74,7 +74,9 @@ fn enable_mmu(cpu: &mut CpuCore, bus: &mut Bus) {
         // 030 TC: enabled, 4 KiB pages, ignore top 8 bits, one 12-bit index;
         // CRP DT=2 selects short descriptors (MC68030UM, chapter 9).
         cpu.mmu_tc = 0x80c8_c000;
-        cpu.mmu_crp_limit = 2;
+        // Lower limit of zero: every root index is in range (a limit word
+        // of $00000002 is an upper limit of zero).
+        cpu.mmu_crp_limit = 0x8000_0002;
         for page in 0..4096 {
             bus.write_long(ROOT + page * 4, (page * 4096) | 1);
         }
