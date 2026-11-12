@@ -88,7 +88,9 @@ The target starts halted at reset. The stub supports:
   described to GDB as the `org.gnu.gdb.m68k.core` feature; FPU registers are
   not exposed)
 - Memory read and write operations
-- Breakpoints plus write (`Z2`), read (`Z3`), and access (`Z4`) watchpoints
+- Breakpoints plus write (`Z2`), read (`Z3`), and access (`Z4`) watchpoints.
+  A watchpoint covers at most 4096 bytes and a connection holds at most 32;
+  a request beyond either is answered with an error
 - Single-stepping and continuation; forced PC writes discard stale instruction prefetch
 - `stepi` on a CPU parked in `STOP` carries it to the interrupt that wakes it
   and retires the handler's first instruction, rather than reporting a stop at

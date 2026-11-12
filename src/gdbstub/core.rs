@@ -15,6 +15,12 @@ use anyhow::{anyhow, Context, Result};
 const MONITOR_STEP_BUDGET: usize = 5_000_000;
 /// Machine word watches installed per one GDB connection.
 pub(crate) const GDB_WATCH_WORD_CAP: usize = 8;
+/// The longest watchpoint, in bytes, and how many there may be. A write
+/// watchpoint's bytes are kept and read back after every instruction to
+/// see whether they changed, so both are bounded: together they put a
+/// ceiling on what a step costs and on what the stub holds.
+const MAX_WATCH_BYTES: usize = 4096;
+const MAX_WATCHPOINTS: usize = 32;
 
 pub(crate) const TARGET_XML: &str = r#"<?xml version="1.0"?>
 <target>
@@ -438,19 +444,22 @@ impl GdbCore {
         let access = watch_access_from_packet(packet)?;
         let addr = addr & emu.machine.ui_addr_mask();
         let len = len.max(1);
-        // The watched bytes are read here and again after every step, so
-        // the length is bounded like an `m` read's: "Z2,0,ffffffff" would
-        // otherwise cost a 4 GiB read per instruction.
-        if len > MAX_PACKET_PAYLOAD_BYTES {
+        // The watched bytes are read here and again after every step:
+        // "Z2,0,ffffffff" would otherwise cost a 4 GiB read per
+        // instruction.
+        if len > MAX_WATCH_BYTES {
+            return Ok("E01".to_string());
+        }
+        let existing = self
+            .watchpoints
+            .iter()
+            .position(|w| w.addr == addr && w.len == len && w.access == access);
+        if existing.is_none() && self.watchpoints.len() == MAX_WATCHPOINTS {
             return Ok("E01".to_string());
         }
         let last = emu.machine.debug_read_memory(addr, len);
-        if let Some(existing) = self
-            .watchpoints
-            .iter_mut()
-            .find(|w| w.addr == addr && w.len == len && w.access == access)
-        {
-            existing.last = last;
+        if let Some(existing) = existing {
+            self.watchpoints[existing].last = last;
         } else {
             self.watchpoints.push(Watchpoint {
                 addr,
@@ -1455,17 +1464,39 @@ mod tests {
         Ok(())
     }
 
-    /// bounded like an `m` read's rather than taken from the packet as is.
+    /// A write watchpoint's bytes are read back after every instruction to
+    /// see whether they changed, so neither one watchpoint's length nor
+    /// the number of them is the client's to choose without limit.
     #[test]
-    fn a_watchpoint_longer_than_a_memory_read_is_refused() -> Result<()> {
+    fn watchpoints_are_bounded_in_length_and_in_number() -> Result<()> {
         let mut emu = crate::gdbstub::testkit::emulator_with_loadseg_program();
         let mut core = GdbCore::new(&emu, None);
-        let packet = format!("Z2,1000,{:x}", MAX_PACKET_PAYLOAD_BYTES + 1);
-        assert!(matches!(
-            core.handle_packet(&mut emu, &packet)?,
-            CoreReply::Packet(reply) if reply == "E01"
-        ));
+        let mut reply = |core: &mut GdbCore, packet: String| -> Result<String> {
+            match core.handle_packet(&mut emu, &packet)? {
+                CoreReply::Packet(reply) => Ok(reply),
+                _ => anyhow::bail!("{packet} was not answered with a packet"),
+            }
+        };
+        // The longest watchpoint is a page.
+        assert_eq!(reply(&mut core, "Z2,1000,1001".into())?, "E01");
+        assert_eq!(reply(&mut core, "Z2,1000,100000".into())?, "E01");
         assert!(core.watchpoints.is_empty());
+        assert_eq!(reply(&mut core, "Z2,1000,1000".into())?, "OK");
+        // Thirty-two of them at most.
+        for n in 1..32 {
+            assert_eq!(
+                reply(&mut core, format!("Z2,{:x},2", 0x4000 + n * 2))?,
+                "OK"
+            );
+        }
+        assert_eq!(core.watchpoints.len(), 32);
+        assert_eq!(reply(&mut core, "Z2,5000,2".into())?, "E01");
+        assert_eq!(core.watchpoints.len(), 32);
+        // Setting one that is already there is not a new one.
+        assert_eq!(reply(&mut core, "Z2,1000,1000".into())?, "OK");
+        // Removing one makes room again.
+        assert_eq!(reply(&mut core, "z2,1000,1000".into())?, "OK");
+        assert_eq!(reply(&mut core, "Z2,5000,2".into())?, "OK");
         Ok(())
     }
 
