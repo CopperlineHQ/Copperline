@@ -221,6 +221,50 @@ fn gzip_floppy_limit_covers_the_whole_multi_member_stream() -> Result<()> {
     Ok(())
 }
 
+/// A ZIP local file header for one entry of `ADF_SIZE` bytes, with the
+/// given compression method, CRC-32 and name / extra-field lengths. The
+/// name and extra field themselves are not appended.
+fn zip_local_header(compression: u16, crc: u32, name_len: u16, extra_len: u16) -> Vec<u8> {
+    let mut header = Vec::with_capacity(30);
+    header.extend_from_slice(&[0x50, 0x4b, 0x03, 0x04]); // signature
+    header.extend_from_slice(&20u16.to_le_bytes()); // version needed
+    header.extend_from_slice(&0u16.to_le_bytes()); // flags
+    header.extend_from_slice(&compression.to_le_bytes());
+    header.extend_from_slice(&[0; 4]); // mod time, mod date
+    header.extend_from_slice(&crc.to_le_bytes());
+    header.extend_from_slice(&(ADF_SIZE as u32).to_le_bytes()); // compressed
+    header.extend_from_slice(&(ADF_SIZE as u32).to_le_bytes()); // uncompressed
+    header.extend_from_slice(&name_len.to_le_bytes());
+    header.extend_from_slice(&extra_len.to_le_bytes());
+    header
+}
+
+#[test]
+fn zip_floppy_header_lengths_sum_past_u16_without_overflow() {
+    // The data offset is 30 + name length + extra length; with both 16-bit
+    // fields at their maximum the sum needs more than 16 bits. The archive
+    // ends at the header, so the read must fail cleanly rather than panic
+    // on the addition.
+    let packed = zip_local_header(0, 0, u16::MAX, u16::MAX);
+    let err = decode_zip_floppy_image(&packed).unwrap_err();
+    assert!(format!("{err:#}").contains("unarchiving zipped floppy image"));
+}
+
+#[test]
+fn zip_floppy_skips_the_name_and_extra_field_to_reach_stored_data() -> Result<()> {
+    let adf: Vec<u8> = (0..ADF_SIZE).map(|i| (i * 7) as u8).collect();
+    let mut crc = flate2::Crc::new();
+    crc.update(&adf);
+    let name = b"disk.adf";
+    let extra = [0xAA; 9];
+    let mut packed = zip_local_header(0, crc.sum(), name.len() as u16, extra.len() as u16);
+    packed.extend_from_slice(name);
+    packed.extend_from_slice(&extra);
+    packed.extend_from_slice(&adf);
+    assert_eq!(decode_zip_floppy_image(&packed)?, adf);
+    Ok(())
+}
+
 #[test]
 fn bounded_memory_insert_preserves_the_disk_when_expansion_is_rejected() -> Result<()> {
     let mut ctrl = FloppyController::default();
