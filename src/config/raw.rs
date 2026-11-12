@@ -128,6 +128,9 @@ pub struct RawConfig {
     /// `[[host_disk]]` real host disks, in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) host_disk: Vec<RawHostDisk>,
+    /// `[[tape]]` SCSI tape drives, in file order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) tape: Vec<RawTape>,
     /// `[[zorro]]` board entries, configured in file order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) zorro: Vec<RawZorroBoard>,
@@ -673,6 +676,21 @@ pub(crate) struct RawHostDisk {
     /// writable only when the user has said so explicitly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) read_only: Option<bool>,
+}
+
+/// `[[tape]]`: a SCSI tape drive on the `[scsi]` controller, with its
+/// cartridge.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawTape {
+    /// SCSI ID (0-6) the drive answers on.
+    pub(crate) unit: u8,
+    /// The cartridge: a host directory (one file per tape file) or a
+    /// single host file (a tape holding one tape file).
+    pub(crate) path: String,
+    /// The cartridge's write-protect tab. Absent means writable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) write_protect: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

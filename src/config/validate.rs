@@ -821,7 +821,9 @@ impl TryFrom<RawConfig> for Config {
             ],
             timing: parse_section_timing(raw.scsi.timing.as_deref(), "scsi", &mut errors),
             spin_up: raw.scsi.spin_up.unwrap_or(false),
+            tapes: Default::default(),
         };
+        scsi.tapes = parse_tapes(&raw.tape, &scsi.units)?;
         // Explicit A2091/A4091 boards, and a non-empty SCSI bus on machines
         // which default to one, use their bundled open ROMs (resolved to real
         // paths later). A completely absent [scsi] section must remain
@@ -830,7 +832,8 @@ impl TryFrom<RawConfig> for Config {
         let scsi_requested = scsi_controller_named
             || scsi.rom.is_some()
             || scsi.rom_odd.is_some()
-            || scsi.units.iter().any(Option::is_some);
+            || scsi.units.iter().any(Option::is_some)
+            || scsi.tapes.iter().any(Option::is_some);
         if scsi_requested
             && scsi.controller == ScsiController::A2091
             && scsi.rom.is_none()
@@ -1546,7 +1549,9 @@ impl TryFrom<RawConfig> for Config {
                     && (ide.master.is_some() || ide.slave.is_some() || host_disk_on_ide))
                     || (defaults.sdmac
                         && scsi.controller == ScsiController::A3000
-                        && (scsi.units.iter().any(Option::is_some) || host_disk_on_scsi));
+                        && (scsi.units.iter().any(Option::is_some)
+                            || scsi.tapes.iter().any(Option::is_some)
+                            || host_disk_on_scsi));
                 (has_ide_port || defaults.sdmac) && !builtin_drives
             }),
             akiko: defaults.akiko,
@@ -2822,6 +2827,44 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
 /// configuration is written once and used on a machine whose card reader may
 /// be empty, so a missing disk is a condition to report when the machine is
 /// built, not a reason to refuse to read the file.
+/// `[[tape]]` entries, by SCSI ID. A tape drive takes a whole ID: one that
+/// a `[scsi] unitN` image already holds, or that another `[[tape]]` names,
+/// is refused rather than left to whichever attaches last.
+pub(super) fn parse_tapes(
+    raw: &[RawTape],
+    units: &[Option<DriveImage>; 7],
+) -> Result<[Option<TapeCartridge>; 7]> {
+    let mut tapes: [Option<TapeCartridge>; 7] = Default::default();
+    for (index, entry) in raw.iter().enumerate() {
+        let unit = usize::from(entry.unit);
+        if unit >= tapes.len() {
+            bail!(
+                "tape[{index}] unit = {} is not a SCSI ID a drive can have (0-6; 7 is the \
+                 controller)",
+                entry.unit
+            );
+        }
+        let path = entry.path.trim();
+        if path.is_empty() {
+            bail!("tape[{index}] has no path; name the cartridge's directory or file");
+        }
+        if units[unit].is_some() {
+            bail!(
+                "tape[{index}] and [scsi] unit{unit} are both on SCSI ID {unit}; an ID holds \
+                 one device"
+            );
+        }
+        if tapes[unit].is_some() {
+            bail!("tape[{index}]: SCSI ID {unit} already has a tape drive");
+        }
+        tapes[unit] = Some(TapeCartridge {
+            path: PathBuf::from(path),
+            write_protect: entry.write_protect.unwrap_or(false),
+        });
+    }
+    Ok(tapes)
+}
+
 pub(super) fn parse_host_disks(
     raw: &[RawHostDisk],
     ide: &IdeConfig,
@@ -2894,10 +2937,11 @@ pub(super) fn parse_host_disks(
         let taken = match attach {
             HostDiskAttach::IdeMaster => ide.master.is_some(),
             HostDiskAttach::IdeSlave => ide.slave.is_some(),
-            HostDiskAttach::Scsi(unit) => scsi
-                .units
-                .get(usize::from(unit))
-                .is_some_and(Option::is_some),
+            HostDiskAttach::Scsi(unit) => {
+                let unit = usize::from(unit);
+                scsi.units.get(unit).is_some_and(Option::is_some)
+                    || scsi.tapes.get(unit).is_some_and(Option::is_some)
+            }
             HostDiskAttach::LideMaster(ch) => lide.drives[usize::from(ch) * 2].is_some(),
             HostDiskAttach::LideSlave(ch) => lide.drives[usize::from(ch) * 2 + 1].is_some(),
             // Checked against `[pcmcia]` by `check_pcmcia_host_disks`.

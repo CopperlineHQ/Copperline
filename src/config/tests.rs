@@ -579,6 +579,85 @@ fn the_battery_ram_follows_the_paths_in_force() -> Result<()> {
     Ok(())
 }
 
+/// `[[tape]]` puts a tape drive on a SCSI ID of the `[scsi]` controller. A
+/// tape alone is enough to fit the default controller, as a unit is, and an
+/// ID holds one device.
+#[test]
+fn tape_entries_put_drives_on_scsi_ids() -> Result<()> {
+    let cfg = parse_config(
+        "[[tape]]\nunit = 4\npath = \"backups\"\n\n\
+         [[tape]]\nunit = 5\npath = \"one.tar\"\nwrite_protect = true\n",
+    )?;
+    assert_eq!(
+        cfg.scsi.tapes[4],
+        Some(TapeCartridge {
+            path: PathBuf::from("backups"),
+            write_protect: false,
+        })
+    );
+    assert_eq!(
+        cfg.scsi.tapes[5],
+        Some(TapeCartridge {
+            path: PathBuf::from("one.tar"),
+            write_protect: true,
+        })
+    );
+    assert!(cfg.scsi.tapes[0].is_none());
+    // The tape fitted the default controller with its bundled ROM.
+    assert!(cfg.scsi.enabled());
+    assert_eq!(cfg.scsi.controller, ScsiController::A2091);
+    assert!(cfg.scsi.rom.is_some());
+
+    // On an A3000 the tape sits on the motherboard controller, and the
+    // ROM's scsi.device is kept because there is a device for it to find.
+    let cfg = parse_config("[machine]\nprofile = \"A3000\"\n\n[[tape]]\nunit = 3\npath = \"t\"\n")?;
+    assert_eq!(cfg.scsi.controller, ScsiController::A3000);
+    assert!(cfg.scsi.tapes[3].is_some());
+    assert!(!cfg.rom_scsi_device_disable);
+    Ok(())
+}
+
+#[test]
+fn tape_entries_are_checked_against_the_bus() {
+    for (text, needle) in [
+        ("[[tape]]\nunit = 7\npath = \"t\"\n", "not a SCSI ID"),
+        ("[[tape]]\nunit = 2\npath = \"  \"\n", "no path"),
+        (
+            "[scsi]\nunit2 = \"disk.hdf\"\n\n[[tape]]\nunit = 2\npath = \"t\"\n",
+            "both on SCSI ID 2",
+        ),
+        (
+            "[[tape]]\nunit = 1\npath = \"a\"\n\n[[tape]]\nunit = 1\npath = \"b\"\n",
+            "already has a tape drive",
+        ),
+        (
+            "[[tape]]\nunit = 1\npath = \"a\"\nspeed = 3\n",
+            "unknown field",
+        ),
+    ] {
+        let err = match toml::from_str::<RawConfig>(text) {
+            Ok(raw) => match Config::try_from(raw) {
+                Ok(_) => panic!("accepted: {text}"),
+                Err(e) => format!("{e:#}"),
+            },
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains(needle), "{text}: {err}");
+    }
+}
+
+/// A raw configuration with tapes serializes them back as `[[tape]]`.
+#[test]
+fn tape_entries_round_trip_through_the_raw_config() -> Result<()> {
+    let text = "[[tape]]\nunit = 4\npath = \"backups\"\nwrite_protect = true\n";
+    let raw: RawConfig = toml::from_str(text)?;
+    let written = toml::to_string(&raw)?;
+    let again: RawConfig = toml::from_str(&written)?;
+    assert_eq!(again.tape, raw.tape);
+    assert!(written.contains("[[tape]]"), "{written}");
+    Ok(())
+}
+
 /// A relative media path the working directory does not have is taken from
 /// the matching `[paths]` media folder, so an installed copy started from
 /// anywhere still finds `rom = "KICK31.ROM"`. Each kind looks in its own

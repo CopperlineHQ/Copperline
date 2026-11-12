@@ -28,6 +28,8 @@ use std::path::Path;
 pub mod cd;
 
 pub use cd::ScsiCdRom;
+pub mod tape;
+pub use tape::ScsiTape;
 
 // ----- WD33C93A register file (SASR values) --------------------------------
 
@@ -763,13 +765,14 @@ impl ScsiDisk {
 
 // ----- target dispatch -------------------------------------------------------
 
-/// A device on the SCSI bus: a direct-access disk or a CD-ROM drive. The
-/// host adapters only ever parse a CDB into a bus data phase and resolve a
-/// data-out payload, so this is the whole target interface.
+/// A device on the SCSI bus: a direct-access disk, a CD-ROM drive or a tape
+/// drive. The host adapters only ever parse a CDB into a bus data phase and
+/// resolve a data-out payload, so this is the whole target interface.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub enum ScsiTarget {
     Disk(ScsiDisk),
     CdRom(ScsiCdRom),
+    Tape(ScsiTape),
 }
 
 impl ScsiTarget {
@@ -792,7 +795,7 @@ impl ScsiTarget {
                 )
                 .unwrap_or(u32::MAX)
             }
-            ScsiTarget::CdRom(_) => 0,
+            ScsiTarget::CdRom(_) | ScsiTarget::Tape(_) => 0,
         }
     }
 
@@ -800,7 +803,7 @@ impl ScsiTarget {
     pub(crate) fn pending_host_disk(&self) -> Option<(String, String, bool)> {
         match self {
             ScsiTarget::Disk(disk) => disk.pending_host_disk(),
-            ScsiTarget::CdRom(_) => None,
+            ScsiTarget::CdRom(_) | ScsiTarget::Tape(_) => None,
         }
     }
 
@@ -808,7 +811,7 @@ impl ScsiTarget {
     pub(crate) fn materialize_host_disk(&mut self) -> anyhow::Result<()> {
         match self {
             ScsiTarget::Disk(disk) => disk.materialize_host_disk(),
-            ScsiTarget::CdRom(_) => Ok(()),
+            ScsiTarget::CdRom(_) | ScsiTarget::Tape(_) => Ok(()),
         }
     }
 
@@ -828,7 +831,7 @@ impl ScsiTarget {
     pub fn mechanics(&self) -> Option<&crate::harddrive::mechanics::DriveMechanics> {
         match self {
             ScsiTarget::Disk(disk) => disk.mechanics.as_deref(),
-            ScsiTarget::CdRom(_) => None,
+            ScsiTarget::CdRom(_) | ScsiTarget::Tape(_) => None,
         }
     }
 
@@ -837,7 +840,7 @@ impl ScsiTarget {
     ) -> Option<&mut crate::harddrive::mechanics::DriveMechanics> {
         match self {
             ScsiTarget::Disk(disk) => disk.mechanics.as_deref_mut(),
-            ScsiTarget::CdRom(_) => None,
+            ScsiTarget::CdRom(_) | ScsiTarget::Tape(_) => None,
         }
     }
 
@@ -847,6 +850,7 @@ impl ScsiTarget {
         match self {
             ScsiTarget::Disk(disk) => disk.execute(cdb, lun),
             ScsiTarget::CdRom(cd) => cd.execute(cdb, lun),
+            ScsiTarget::Tape(tape) => tape.execute(cdb, lun),
         }
     }
 
@@ -855,6 +859,7 @@ impl ScsiTarget {
         match self {
             ScsiTarget::Disk(disk) => disk.complete_out(cdb, data),
             ScsiTarget::CdRom(cd) => cd.complete_out(cdb, data),
+            ScsiTarget::Tape(tape) => tape.complete_out(cdb, data),
         }
     }
 
@@ -862,7 +867,7 @@ impl ScsiTarget {
     pub fn cd_ref(&self) -> Option<&ScsiCdRom> {
         match self {
             ScsiTarget::CdRom(cd) => Some(cd),
-            ScsiTarget::Disk(_) => None,
+            ScsiTarget::Disk(_) | ScsiTarget::Tape(_) => None,
         }
     }
 
@@ -870,7 +875,7 @@ impl ScsiTarget {
     pub fn disk_ref(&self) -> Option<&HardDriveImage> {
         match self {
             ScsiTarget::Disk(disk) => Some(&disk.disk),
-            ScsiTarget::CdRom(_) => None,
+            ScsiTarget::CdRom(_) | ScsiTarget::Tape(_) => None,
         }
     }
 
@@ -878,7 +883,7 @@ impl ScsiTarget {
     pub fn cd_mut(&mut self) -> Option<&mut ScsiCdRom> {
         match self {
             ScsiTarget::CdRom(cd) => Some(cd),
-            ScsiTarget::Disk(_) => None,
+            ScsiTarget::Disk(_) | ScsiTarget::Tape(_) => None,
         }
     }
 
@@ -887,7 +892,7 @@ impl ScsiTarget {
     pub fn disk_mut(&mut self) -> Option<&mut HardDriveImage> {
         match self {
             ScsiTarget::Disk(disk) => Some(&mut disk.disk),
-            ScsiTarget::CdRom(_) => None,
+            ScsiTarget::CdRom(_) | ScsiTarget::Tape(_) => None,
         }
     }
 }
@@ -901,6 +906,12 @@ impl From<ScsiDisk> for ScsiTarget {
 impl From<ScsiCdRom> for ScsiTarget {
     fn from(cd: ScsiCdRom) -> Self {
         ScsiTarget::CdRom(cd)
+    }
+}
+
+impl From<ScsiTape> for ScsiTarget {
+    fn from(tape: ScsiTape) -> Self {
+        ScsiTarget::Tape(tape)
     }
 }
 

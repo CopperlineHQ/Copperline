@@ -93,6 +93,9 @@ pub(super) fn prepare_sources(cfg: &mut Config) -> Result<()> {
     // session-only clock on both machines.
     prepared.battmem_path = None;
     prepared.cd32_nvram_path = None;
+    // A tape cartridge is a writable host file or directory: not something
+    // two machines can share, so a netplay machine has no tape drives.
+    prepared.scsi.tapes = Default::default();
     super::validate_config(&prepared)?;
     *cfg = prepared;
     Ok(())
