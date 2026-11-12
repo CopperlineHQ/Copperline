@@ -1332,6 +1332,12 @@ impl Player {
         for p in self.plays.iter_mut().filter(|p| p.paused) {
             p.start = p.start.wrapping_add(1);
         }
+        // The queue is kept in time order and the scan below stops at the
+        // first change not yet due, so the slipped ones go back in line
+        // behind what is now ahead of them.
+        if self.plays.iter().any(|p| p.paused) {
+            self.dsp_queue.sort_by_key(|e| e.time);
+        }
         // DSP changes due.
         let due = self
             .dsp_queue
@@ -1733,6 +1739,39 @@ mod tests {
         add_dsp_event(&mut list, event(4));
         assert_eq!(list.len(), 2);
         assert_eq!((list[1].time, list[1].rate), (0, 3));
+    }
+
+    /// A paused play's level changes slip a field at a time. The changes
+    /// of everything else, queued behind them, still happen when due.
+    #[test]
+    fn a_paused_plays_level_changes_do_not_hold_back_others() {
+        let mut r = rig();
+        let slot = Slot(1);
+        let req = request(caf::AUDIOL | caf::AUDIOR, 0);
+        let clip = info(&r.path);
+        r.player
+            .play_clip(slot, req, clip, 101, &mut r.sram, Some(&r.link))
+            .unwrap();
+        // The play's own changes are due from field 120; this one, on a
+        // channel the play does not use, sits behind them in the queue.
+        insert_dsp(
+            &mut r.player.dsp_queue,
+            DspEvent {
+                time: 125,
+                chan: 5,
+                volume: 0xFFFF,
+                pan: 0,
+                rate: 0,
+                owner: Owner::Sequence,
+            },
+        );
+        assert!(r
+            .player
+            .cont_written(slot, 0xFF, &mut r.sram, Some(&r.link)));
+        for clock in 110..=125 {
+            r.field(clock);
+        }
+        assert_eq!(r.player.dsp[4].volume, 1.0);
     }
 
     #[test]
