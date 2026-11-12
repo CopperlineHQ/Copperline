@@ -32,6 +32,10 @@ for the earlier release notes.
   cartridge is a host directory with one file per tape file, or a single
   host file; the files hold only the data, so `tar` archives are tape files
   as they stand (see docs/guide/configuration.md).
+- The CDTV's battery-backed bookmark RAM is kept in a file, so title saves
+  and preferences survive between sessions: `cdtv-bookmark.bin` in the
+  `[paths]` nvram folder by default, another file with `[cd] nvram`, and
+  session-only as before with `nvram = ""`.
 
 ### Changed
 

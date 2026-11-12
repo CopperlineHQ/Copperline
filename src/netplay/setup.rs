@@ -93,6 +93,7 @@ pub(super) fn prepare_sources(cfg: &mut Config) -> Result<()> {
     // session-only clock on both machines.
     prepared.battmem_path = None;
     prepared.cd32_nvram_path = None;
+    prepared.cdtv_bookmark_path = None;
     // A tape cartridge is a writable host file or directory: not something
     // two machines can share, so a netplay machine has no tape drives.
     prepared.scsi.tapes = Default::default();
@@ -326,6 +327,7 @@ impl Hardware {
         cfg.floppy_connected = self.connected;
         cfg.battmem_path = None;
         cfg.cd32_nvram_path = None;
+        cfg.cdtv_bookmark_path = None;
         cfg.zorro_boards = self.boards.clone();
         let ram = [
             cfg.chip_ram_bytes,
@@ -788,6 +790,7 @@ mod tests {
             assert_eq!(restored.agnus_revision, cfg.agnus_revision);
             assert_eq!(restored.port_devices, cfg.port_devices);
             assert!(restored.battmem_path.is_none() && restored.cd32_nvram_path.is_none());
+            assert!(restored.cdtv_bookmark_path.is_none());
         }
         Ok(())
     }

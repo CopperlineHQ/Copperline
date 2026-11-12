@@ -277,6 +277,9 @@ model = "68000"
 #
 # CD32 NVRAM (save game EEPROM) backing file; defaults to
 # "cd32-nvram.bin" in the [paths] nvram folder on CD32 machines.
+# On a CDTV the same key backs the 16 KiB bookmark RAM (title saves and
+# preferences) and defaults to "cdtv-bookmark.bin" in that folder;
+# nvram = "" keeps the bookmark RAM session-only.
 # nvram = "cd32-nvram.bin"
 
 
