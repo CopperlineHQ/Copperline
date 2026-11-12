@@ -396,7 +396,13 @@ impl App {
             return;
         }
         // A tap: the terminal will not say when the key went up. The
-        // modifiers its report names go down first and up with it.
+        // modifiers its report names go down first and up with it; one
+        // still down from an earlier tap that this report does not name
+        // goes up first, or "A" then "b" typed quickly would be "AB".
+        for stale in stale_tap_modifiers(&s.taps, report.mods) {
+            s.taps.retain(|(c, _)| *c != stale);
+            self.terminal_key_transition(stale, false);
+        }
         let due = self.emu.bus().emulated_frames() + TAP_FRAMES;
         for held in modifier_keycodes(report.mods) {
             if !s.taps.iter().any(|(c, _)| *c == held) {
@@ -770,6 +776,16 @@ fn modifier_keycodes(mods: Mods) -> impl Iterator<Item = KeyCode> {
     .filter_map(|(down, code)| down.then_some(code))
 }
 
+/// The modifiers among the taps still down that a new tap's report does
+/// not name: they belong to the earlier key, not to this one.
+fn stale_tap_modifiers(taps: &[(KeyCode, u64)], mods: Mods) -> Vec<KeyCode> {
+    let all = Mods(Mods::SHIFT | Mods::CTRL | Mods::ALT);
+    modifier_keycodes(all)
+        .filter(|code| taps.iter().any(|(c, _)| c == code))
+        .filter(|code| !modifier_keycodes(mods).any(|wanted| wanted == *code))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,6 +913,28 @@ mod tests {
         let mods: Vec<_> = modifier_keycodes(Mods(Mods::SHIFT | Mods::CTRL)).collect();
         assert_eq!(mods, vec![KeyCode::ShiftLeft, KeyCode::ControlLeft]);
         assert_eq!(modifier_keycodes(Mods::default()).count(), 0);
+    }
+
+    /// A tap's modifiers stay down for a few frames. A second tap inside
+    /// that time that does not name them must not inherit them.
+    #[test]
+    fn a_tap_lets_go_of_modifiers_left_from_the_one_before() {
+        // "A" was just tapped: Shift and the key are down until frame 3.
+        let taps = [(KeyCode::ShiftLeft, 3), (KeyCode::KeyA, 3)];
+        // "b": Shift goes up before it.
+        assert_eq!(
+            stale_tap_modifiers(&taps, Mods::default()),
+            vec![KeyCode::ShiftLeft]
+        );
+        // "B": Shift is wanted again and stays.
+        assert!(stale_tap_modifiers(&taps, Mods(Mods::SHIFT)).is_empty());
+        // Ctrl+b: Shift goes, and Ctrl is not there to go.
+        assert_eq!(
+            stale_tap_modifiers(&taps, Mods(Mods::CTRL)),
+            vec![KeyCode::ShiftLeft]
+        );
+        // Plain keys down are never let go here.
+        assert!(stale_tap_modifiers(&[(KeyCode::KeyA, 3)], Mods::default()).is_empty());
     }
     /// The paste shortcut's modifiers are still reported as held when the
     /// pasted text arrives, so its first key waits for them to come up.
