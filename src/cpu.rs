@@ -3839,21 +3839,23 @@ impl CpuBus {
 
     /// CPU-side chip RAM decode. The motherboard address decode (Gary and
     /// equivalents) routes the whole $000000-$1FFFFF window to Agnus, and
-    /// Agnus only decodes as many address bits as its DRAM reach
-    /// (dma_addr_capability_mask): an OCS 8370/8371 ignores A19/A20, so its
+    /// Agnus only decodes as many address bits as it is wired to see
+    /// (cpu_chip_decode_mask): an OCS 8370/8371 ignores A19/A20, so its
     /// 512 KiB image repeats at $080000/$100000/$180000; the 1 MiB 8372A
-    /// ignores A20, repeating its 1 MiB image at $100000; the 2 MiB
-    /// 8375/Alice decode the full window with no repeat. Within one image,
-    /// addresses past the fitted RAM select no DRAM bank and stay open bus
-    /// (e.g. $080000-$0FFFFF on an 8372A with 512 KiB fitted). Kickstart's
-    /// chip sizing copes: it detects the wrap by checking whether a probe
-    /// write aliased the bottom of RAM.
+    /// ignores A20, repeating its 1 MiB image at $100000, and with only
+    /// 512 KiB of chip RAM its A19 input is strapped to A23, so it repeats
+    /// the first bank like OCS; the 2 MiB 8375/Alice decode the full window
+    /// with no repeat. Within one image, addresses past the fitted RAM
+    /// select no DRAM bank and stay open bus (e.g. $0C0000-$0FFFFF on an
+    /// 8372A with 768 KiB fitted). Kickstart's chip sizing copes: it
+    /// detects the wrap by checking whether a probe write aliased the
+    /// bottom of RAM.
     fn chip_window_offset(&self, addr: u32, size: usize) -> Option<usize> {
         let len = self.bus.mem.chip_ram.len();
         if len == 0 || u64::from(addr) >= CHIP_WINDOW_SIZE {
             return None;
         }
-        let off = (addr & self.bus.agnus.revision().dma_addr_capability_mask()) as usize;
+        let off = (addr & self.bus.agnus.revision().cpu_chip_decode_mask(len)) as usize;
         (off.checked_add(size)? <= len).then_some(off)
     }
 
@@ -6323,15 +6325,17 @@ mod tests {
         assert_eq!(machine.debug_write_memory(0x1E0004, &[0x77]), 1);
         assert_eq!(machine.bus().mem.chip_ram[0x60004], 0x77);
 
-        // 8372A (1 MiB reach, A20 unused): $0E0000 selects the unfitted
-        // second DRAM bank (open bus) while $160000 is the A20 image of
-        // $060000.
+        // 8372A with 512 KiB of chip RAM: the board straps the chip's A19
+        // input to CPU A23 (which is what puts the second DRAM bank at
+        // $C00000 as slow RAM), so chip-window accesses always reach Agnus
+        // with A19 low and the first bank repeats every 512 KiB, as on OCS.
         machine
             .bus_mut()
             .set_agnus_revision(AgnusRevision::Ecs8372Rev4);
-        assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xFF);
-        assert_eq!(machine.debug_write_memory(0x0E0000, &[0x11]), 0);
+        assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xA5);
         assert_eq!(machine.debug_read_memory(0x160000, 1)[0], 0xA5);
+        assert_eq!(machine.debug_write_memory(0x0E0008, &[0x11]), 1);
+        assert_eq!(machine.bus().mem.chip_ram[0x60008], 0x11);
 
         // 8375/Alice (2 MiB reach): the full window is decoded, so nothing
         // past the fitted RAM answers.
@@ -6416,6 +6420,54 @@ mod tests {
     fn m68000_takes_a_request_unmasked_for_two_instructions() -> Result<()> {
         let (counter, pc) = run_unmask_window_wait_loop(CpuModel::M68000, 2)?;
         assert_eq!((counter, pc), (1, 0x0524));
+        Ok(())
+    }
+
+    // An 8372A strapped for 1 MiB of chip RAM sees CPU A19 and decodes both
+    // DRAM banks: the 1 MiB image repeats at $100000 (A20 unused), and with
+    // the second bank only partly fitted the rest of it stays open bus.
+    #[test]
+    fn chip_window_8372a_one_meg_strap_decodes_both_banks() -> Result<()> {
+        use crate::chipset::agnus::AgnusRevision;
+        let mut machine = machine_with_program(0x0500, &[0x4E71])?;
+        machine.bus_mut().mem.chip_ram.resize(768 * 1024, 0);
+        machine
+            .bus_mut()
+            .set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        machine.bus_mut().mem.chip_ram[0x60000] = 0xA5;
+        machine.bus_mut().mem.chip_ram[0xA0000] = 0x5A;
+
+        assert_eq!(machine.debug_read_memory(0x0A0000, 1)[0], 0x5A);
+        assert_eq!(machine.debug_read_memory(0x160000, 1)[0], 0xA5);
+        assert_eq!(machine.debug_read_memory(0x1A0000, 1)[0], 0x5A);
+        // $0E0000 is in the unfitted part of the second bank.
+        assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xFF);
+        assert_eq!(machine.debug_write_memory(0x0E0000, &[0x11]), 0);
+        Ok(())
+    }
+
+    // A loader that sizes chip RAM by writing at $080000 and looking for the
+    // write at $000000 must find the alias on an 8372A machine with 512 KiB
+    // chip RAM, exactly as on OCS. Regression example: a cracked Cannon
+    // Fodder unpacked its game to $080000 on the ECS-Agnus 512K+512K A500
+    // and crashed into a Guru when the probe found no alias.
+    #[test]
+    fn cpu_write_at_512k_aliases_first_bank_on_8372a_512k() -> Result<()> {
+        use crate::chipset::agnus::AgnusRevision;
+        // move.b #$55,$0803FF.l ; move.b $0003FF.l,d1
+        let mut machine = machine_with_program(
+            0x0500,
+            &[
+                0x13FC, 0x0055, 0x0008, 0x03FF, // move.b #$55,$0803FF.l
+                0x1239, 0x0000, 0x03FF, // move.b $0003FF.l,d1
+            ],
+        )?;
+        machine
+            .bus_mut()
+            .set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        machine.step_slice(2)?;
+        assert_eq!(machine.bus().mem.chip_ram[0x3FF], 0x55);
+        assert_eq!(machine.d(1) & 0xFF, 0x55);
         Ok(())
     }
 
@@ -7617,13 +7669,15 @@ mod tests {
         machine_bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
         let mut bus = cpu_bus(machine_bus);
 
-        // A Rev.6 board with an ECS 8372A still has only the fitted 512 KiB
-        // motherboard bank at $000000-$07FFFF. The unfitted upper half of the
-        // 1 MiB Agnus image is open, while A20 repeats the image at $100000.
+        // A Rev.6 board with an ECS 8372A has only the fitted 512 KiB
+        // motherboard bank as chip RAM. With the trapdoor bank at $C00000,
+        // JP2 feeds CPU A23 to the Agnus A19 input, so the CPU never
+        // selects the second DRAM bank inside the chip window: the fitted
+        // bank repeats at $080000, and A20 repeats it again at $100000.
         bus.write_word(0x0000_0000, 0x1111);
         bus.write_word(0x0007_FFFE, 0x2222);
         bus.write_word(0x0008_0000, 0x3333);
-        assert_eq!(bus.read_word(0x0000_0000), 0x1111);
+        assert_eq!(bus.read_word(0x0000_0000), 0x3333, "A19 chip image");
         assert_eq!(bus.read_word(0x0007_FFFE), 0x2222);
         bus.write_word(0x0010_0000, 0x4444);
         assert_eq!(bus.read_word(0x0000_0000), 0x4444, "A20 chip image");

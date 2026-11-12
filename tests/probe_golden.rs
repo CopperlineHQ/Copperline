@@ -554,6 +554,11 @@ probe_tests! {
     // a request pending and opens a window for its handler).
     golden_irqprobe_window => probe("irqprobe-window", "irqprobe-window.bin", 16.0);
     golden_irqprobe_window_aga => probe_aga("irqprobe-window-aga", "irqprobe-window.bin", 16.0);
+    // The first DRAM bank repeats through the CPU's chip window on a
+    // 512K-chip machine, on OCS and on an 8372A strapped for trapdoor RAM
+    // alike (the class of loaders that size chip RAM by its alias).
+    golden_memprobe_chipmirror => probe("memprobe-chipmirror", "memprobe-chipmirror.bin", 16.0);
+    golden_memprobe_chipmirror_ecs => probe_ecs("memprobe-chipmirror-ecs", "memprobe-chipmirror.bin", 16.0);
     // CLXDAT collision matrix bits rendered as cells (the collision
     // matching/enable regression class).
     golden_clxprobe => probe("clxprobe", "clxprobe.bin", 16.0);
