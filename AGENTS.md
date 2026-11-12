@@ -35,8 +35,10 @@ images go in via `[floppy.df0] path` in the config or `--insert-disk-after`:
   --insert-disk-after 0 df0 game.adf
 ```
 
-Running with no arguments at all opens an interactive launcher window; any
-flag suppresses it, so headless invocations never block on it. A
+Running with no arguments at all opens an interactive launcher window.
+`--noaudio`, a ROM path, `--model` and nearly every other flag suppress it,
+so a headless invocation, which passes `--noaudio`, does not block on it;
+`--factory` on its own does not. A
 configuration saved with the launcher's Save default button, or a
 `copperline.toml` beside the executable, auto-loads into any run that names
 no `--config` and finds no `./copperline.toml` -- so for reproducible
@@ -117,8 +119,10 @@ repeat.
 | `--pot-after SECS X Y [PORT]` | Analogue stick/paddle position, 0-255 per axis (default port 2) |
 | `--pen-after SECS X Y [PORT]` | Hold the light pen over pixel (X, Y) of a `--screenshot-after` capture (negative lifts it off); `--joy-after ... red` is its switch |
 | `--insert-disk-after SECS DFN PATH` | Insert a disk image into `df0`..`df3` |
+| `--defer-disk-insert SECS DFN` | Start with DFN empty and insert its configured disk at SECS |
 | `--eject-disk-after SECS DFN` | Eject the disk in `df0`..`df3`, leaving the drive empty (as the status-bar eject button) |
 | `--insert-cd-after SECS PATH` | Swap the CD image in the machine's CD drive (CDTV/CD32/SCSI CD-ROM) |
+| `--freeze-after SECS` | Press the freezer cartridge's button (`--cartridge hrtmon`) |
 | `--expect-screenshot SECS PATH [TOL]` | Compare the frame at SECS with the PNG at PATH (TOL = fraction or pixel count); mismatch writes `<stem>.actual.png` + `<stem>.diff.png`, exit status 3 at run end |
 | `--script FILE` | Same directives from a file, one per line, no leading dashes (`type SECS TEXT`, `expect-screenshot ...` included) |
 | `--record-input PATH` | Record all machine-bound input as a replayable script |
