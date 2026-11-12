@@ -524,6 +524,12 @@ fn cpu_trace_peek_follows_agnus_chip_ram_mirroring() {
 
     assert_eq!(bus.peek_word_any(0x0008_0000), 0xCAFE);
     assert_eq!(bus.peek_cpu_trace_data(0x0008_0000, 2), 0xCAFE);
+
+    // An 8372A with 512 KiB fitted is strapped with A19 following CPU A23,
+    // so the first bank still repeats at $080000.
+    bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+    assert_eq!(bus.peek_word_any(0x0008_0000), 0xCAFE);
+    assert_eq!(bus.peek_cpu_trace_data(0x0008_0000, 2), 0xCAFE);
 }
 
 #[test]

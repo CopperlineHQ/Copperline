@@ -14,6 +14,11 @@ for the earlier release notes.
   in INTREQ and unmasks in INTENA for only a few colour clocks is now
   taken. The CD32 Classic Lotus Trilogy froze at the Lotus 1 race screen,
   with only the HUD drawn, waiting for a handler that never ran.
+- An ECS Agnus 8372A machine with 512K of chip RAM mirrors that RAM at
+  `$080000`, `$100000` and `$180000`, as an OCS machine does. Loaders that
+  size chip RAM by looking for the alias no longer take the default
+  512K + 512K ECS A500 for a 1M-chip machine; a cracked Cannon Fodder ended
+  in a Guru there.
 - With the guest clock pinned (`rtc_time` / `--rtc-time`), `[[filesys]]` and
   `--run` volumes are dated at the seed rather than at the host time, so a
   run with a pinned clock no longer varies from one run to the next.
