@@ -15,7 +15,7 @@ import {
   resetRenderStrideState,
   updateRenderStrideState,
 } from './render-stride.js';
-import { audioGateMaxFrames, newAudioGate } from './audio-gate.js';
+import { audioGateMaxFrames, newAudioGate, rafStarved } from './audio-gate.js';
 import {
   EMPTY_PAD,
   joyKeyMap,
@@ -854,9 +854,7 @@ async function buildAudioStack(suspendForPause) {
       const nowMs = performance.now();
       if (
         keepRunningHidden ||
-        (!document.hidden &&
-          nowMs - lastRafMs > RAF_STARVED_MS &&
-          renderStride.avgStepMs < STEP_OVERLOAD_MS)
+        (!document.hidden && rafStarved(nowMs, lastRafMs, renderStride.avgStepMs))
       ) {
         stepMachine(nowMs, true);
       }
@@ -1042,13 +1040,9 @@ async function boot(request = null) {
 // the web player kit.
 const audioGate = newAudioGate();
 
-// The starved-rAF fallback's threshold: how stale the last animation
-// frame may be before a worklet queue report steps the machine itself.
-// Above the ~33 ms gap of a merely halved (30 Hz) cadence, which the
-// normal tick absorbs by stepping twice; well under the ~100 ms deficit
-// the pacer forgives, past which lost wall time becomes lost emulated
-// time (the slow motion and underruns a starved window shows today).
-const RAF_STARVED_MS = 50;
+// When the last animation frame landed, for the starved-rAF fallback: a
+// worklet queue report steps the machine itself once this goes stale (the
+// rule and its thresholds are rafStarved in audio-gate.js).
 let lastRafMs = 0;
 
 // Adaptive render stride for hosts that cannot afford a frame render on
@@ -1065,17 +1059,6 @@ let lastRafMs = 0;
 // audio; a catch-up burst no longer leaves it stuck there. Old bundles
 // without run_hidden render every step regardless, preserving their
 // existing behaviour.
-// The starved-rAF fallback exists for a THROTTLED host: animation frames
-// withheld from a machine that is cheap to step. On an OVERLOADED host -
-// the machine itself eating more than the worklet's ~29 ms report
-// interval per step - stepping on every report leaves the main thread no
-// idle at all: the page (input, the stat line, devtools) freezes solid
-// while emulated time barely gains, because the wall-paced core cannot
-// exceed the host's throughput however often it is called. Past this
-// step cost the fallback stands down and rAF alone drives the machine,
-// keeping the page usable through the worst stretches (a 68020 decrunch
-// on a slow host) at whatever rate the host can actually sustain.
-const STEP_OVERLOAD_MS = 25;
 // Raw whole-call cost remains the correct signal for the starved-rAF
 // fallback: it decides whether another call right now would monopolise the
 // main thread, not whether one emulated pacing slice is affordable.
