@@ -406,18 +406,39 @@ impl Session {
     fn look_for_interrupt(&mut self) -> std::io::Result<bool> {
         self.stream.set_nonblocking(true)?;
         let mut byte = [0u8; 1];
-        let seen = match self.stream.peek(&mut byte) {
-            // Readable with nothing to read: the client closed. Without
-            // this the machine runs on with nobody to stop it, and the
-            // server never returns to accept another client.
-            Ok(0) => Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "GDB client disconnected while the machine was running",
-            )),
-            Ok(_) if byte[0] == 0x03 => self.stream.read(&mut byte).map(|_| true),
-            Ok(_) => Ok(false),
+        // Bounded so that a client sending without pause cannot hold the
+        // machine here; what is left is looked at on the next poll.
+        let mut seen = Ok(false);
+        for _ in 0..64 {
+            seen = match self.stream.peek(&mut byte) {
+                // Readable with nothing to read: the client closed.
+                // Without this the machine runs on with nobody to stop
+                // it, and the server never returns to accept another
+                // client.
+                Ok(0) => Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "GDB client disconnected while the machine was running",
+                )),
+                Ok(_) if byte[0] == 0x03 => self.stream.read(&mut byte).map(|_| true),
+                // The start of a packet is the packet reader's, and stays
+                // where it is until the machine stops.
+                Ok(_) if byte[0] == b'$' => Ok(false),
+                // Anything else is what the packet reader skips between
+                // packets too: an acknowledgement (of console output sent
+                // during the continue, say) or noise. Left at the head of
+                // the socket it would hide an interrupt, or the client's
+                // disconnect, behind it for good.
+                Ok(_) => match self.stream.read(&mut byte) {
+                    Ok(_) => continue,
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            };
+            break;
+        }
+        let seen = match seen {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
-            Err(e) => Err(e),
+            seen => seen,
         };
         self.stream.set_nonblocking(false)?;
         seen
@@ -605,11 +626,43 @@ mod tests {
             serve(listener, emu, None)
         });
         let mut first = GdbClient::connect(addr);
-        // As gdb does. With acknowledgements on, the "+" sent for the
-        // continue packet is what finds the connection gone; without
-        // them nothing is written until the machine stops.
+        // As gdb does. With acknowledgements on, the "+" written for the
+        // continue packet draws a reset from the closed peer, and the
+        // next poll reports that; without them nothing is written until
+        // the machine stops, and the poll sees only an orderly end.
         assert_eq!(first.request("QStartNoAckMode"), "OK");
         first.send("c");
+        drop(first);
+        let mut second = GdbClient::connect(addr);
+        second.set_read_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(second.request("qC"), "QC1");
+        second.send("k");
+        server.join().unwrap().unwrap();
+    }
+
+    /// What a client sends during a continue other than the interrupt (an
+    /// acknowledgement, say, for console output it was sent) must not sit
+    /// at the head of the socket hiding an interrupt, or a disconnect,
+    /// behind it.
+    #[test]
+    fn a_stray_byte_during_continue_hides_neither_an_interrupt_nor_a_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut emu = emulator_with_loadseg_program();
+            emu.bus_mut().mem.rom[0x1000..0x1002].copy_from_slice(&[0x60, 0xfe]);
+            emu.machine.debug_set_register(17, 0x00f8_1000);
+            serve(listener, emu, None)
+        });
+        let mut first = GdbClient::connect(addr);
+        first.set_read_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(first.request("QStartNoAckMode"), "OK");
+        first.send("c");
+        first.raw(b"+");
+        first.raw(&[0x03]);
+        assert!(first.read_reply().starts_with(['S', 'T']), "a stop reply");
+        first.send("c");
+        first.raw(b"+");
         drop(first);
         let mut second = GdbClient::connect(addr);
         second.set_read_timeout(std::time::Duration::from_secs(10));
