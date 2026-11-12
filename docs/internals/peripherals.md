@@ -321,8 +321,8 @@ status.
 
 The tape is a row of *tape files*, each closed by a filemark, followed by
 end-of-data. The cartridge is a host directory with one host file per tape
-file in name order (files the guest writes are named so they sort last), or
-a single host file, which is a tape holding exactly one tape file -- a
+file in name order (files the guest writes are named so they sort last, and
+`MAX_TAPE_FILES` of them fill the tape), or a single host file, which is a tape holding exactly one tape file -- a
 second one has no room, and writing it fails with VOLUME OVERFLOW and the
 EOM bit as the physical end of a tape does. The host files hold only data,
 so a `tar` archive is a tape file as it stands. The position is a tape

@@ -3165,8 +3165,10 @@ decides what kind:
 - **A directory** is a tape with one host file per tape file, in name
   order. Put `tar` archives in it and the guest finds them as tape files 0,
   1, 2... separated by filemarks; what the guest writes appears as new
-  files, named `00000.tape`, `00001.tape`... (with a leading `~` when that
-  is what it takes to sort after the files already there). Hidden files
+  files, named `00000.tape`, `00001.tape`... (or, when that would not sort
+  after the files already there, the last file's name with `~00002.tape`
+  and so on appended). A directory holds up to 10000 tape files; past
+  that the tape is full. Hidden files
   (a leading `.`) and subdirectories are not part of the tape. The
   directory is read when the machine starts and again at every LOAD, so
   files added from the host show up after the guest unloads and reloads the
