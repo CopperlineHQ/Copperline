@@ -579,8 +579,8 @@ fn the_battery_ram_follows_the_paths_in_force() -> Result<()> {
     Ok(())
 }
 
-/// The CDTV's bookmark RAM is persisted by default, in the same folder as
-/// the other battery-backed memories; `[cd] nvram` moves it and an empty
+/// A session's CDTV bookmark RAM is persisted by default, in the same folder
+/// as the other battery-backed memories; `[cd] nvram` moves it and an empty
 /// string turns it off. A machine without the CDTV's controller has no
 /// bookmark RAM to back, whatever `[cd] nvram` says (on a CD32 that key is
 /// the EEPROM's).
@@ -591,7 +591,15 @@ fn the_cdtv_bookmark_ram_gets_a_backing_file() -> Result<()> {
         nvram: Some(PathBuf::from("elsewhere")),
         ..Default::default()
     });
+    // Until a frontend asks for the default file there is none: a test, a
+    // library user or a `--factory` run starts every CDTV with blank
+    // bookmark RAM and leaves no file behind.
+    crate::cdtv::set_default_bookmark_file(false);
     let cfg = parse_config("[machine]\nprofile = \"CDTV\"\n")?;
+    assert_eq!(cfg.cdtv_bookmark_path, None);
+    crate::cdtv::set_default_bookmark_file(true);
+    let cfg = parse_config("[machine]\nprofile = \"CDTV\"\n")?;
+    crate::cdtv::set_default_bookmark_file(false);
     let bookmark = cfg
         .cdtv_bookmark_path
         .expect("a CDTV has bookmark RAM to persist");

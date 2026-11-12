@@ -1563,7 +1563,10 @@ impl TryFrom<RawConfig> for Config {
                 // An empty path keeps the bookmark RAM session-only.
                 Some("") => None,
                 Some(path) => Some(PathBuf::from(path)),
-                None => Some(crate::paths::cdtv_bookmark_file()),
+                // The default file is the running frontend's to ask for:
+                // not under `--factory`, in tests or in a library, where a
+                // file left by an earlier run would make this one differ.
+                None => crate::cdtv::default_bookmark_file().then(crate::paths::cdtv_bookmark_file),
             },
             cd32_nvram_path: raw
                 .cd

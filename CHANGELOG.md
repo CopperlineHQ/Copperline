@@ -25,7 +25,7 @@ for the earlier release notes.
 - The CDTV's battery-backed bookmark RAM is kept in a file, so title saves
   and preferences survive between sessions: `cdtv-bookmark.bin` in the
   `[paths]` nvram folder by default, another file with `[cd] nvram`, and
-  session-only as before with `nvram = ""`.
+  session-only as before with `nvram = ""` or under `--factory`.
 
 ### Changed
 

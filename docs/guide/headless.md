@@ -411,6 +411,21 @@ Mouse motion is recorded as relative `mouse-after` counts. Light-pen moves
 are recorded as `pen-after` lines in `--screenshot-after` pixels, so a
 replay holds the pen over the same picture position.
 
+## Battery-backed memory between runs
+
+Two identical runs are only identical if they start from the same
+battery-backed memory, and by default some of that memory lives in files
+that one run writes and the next reads:
+
+| Memory | Default file | To pin a run |
+|---|---|---|
+| CDTV bookmark RAM | `cdtv-bookmark.bin`, not used under `--factory` | `--factory`, or `[cd] nvram = ""`, or a scratch file of your own |
+| CD32 save EEPROM | `cd32-nvram.bin`, used under `--factory` too | `[cd] nvram` set to a fresh scratch file |
+| RP5C01 battery RAM (A3000/A4000) | `battmem.nvram`, used under `--factory` too | `[machine] battmem = ""` |
+
+A file named in the configuration is always used, so a test that wants a
+particular starting state can supply one and delete it afterwards.
+
 ## Setting a deterministic real-time clock (RTC)
 
 To test date- and time-dependent guest software, seed the RTC with a fixed timestamp:

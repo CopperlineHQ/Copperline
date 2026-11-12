@@ -27,7 +27,8 @@ is not in the working directory is looked for in the matching media folder
 started from.
 
 `--factory` ignores the saved default and a `copperline.toml` beside the
-executable, and starts from Copperline's own settings. `--config` and
+executable, and starts from Copperline's own settings. It also leaves the
+CDTV's default bookmark RAM file alone (see `[cd]` below). `--config` and
 `./copperline.toml` always win over it anyway. With neither default
 present, the flag changes nothing.
 
@@ -3430,11 +3431,16 @@ bookmark RAM, the 16 KiB of memory at `$DC8000` where `bookmark.device`
 keeps title saves, high scores and the player's preferences. It defaults to
 `cdtv-bookmark.bin` in the `[paths]` nvram folder (a `cdtv-bookmark.bin` in
 the working directory is used from there instead), and `nvram = ""` keeps
-the bookmark RAM session-only, as on a player with a flat battery. The file
-is a raw image of the memory: a shorter file fills the start of the RAM and
-a longer one gives its first 16 KiB. A change reaches the file a quarter of
+the bookmark RAM session-only, as on a player with a flat battery. A run
+started with `--factory` has no default file either, so it neither picks up
+an earlier session's saves nor leaves any; a file named with `[cd] nvram`
+is used whatever the flags. The file is a raw image of the memory. A
+shorter file fills the start of the RAM; a file longer than 16 KiB is not
+a bookmark image, so Copperline reports it, leaves it untouched and keeps
+the RAM session-only for that run. A change reaches the file a quarter of
 an emulated second after the guest makes it, on a reset, and when Copperline
-closes. Loading a save state restores the bookmark RAM the state holds and
+closes; each save writes a new file beside the old one and renames it into
+place, so an interrupted save leaves the previous one intact. Loading a save state restores the bookmark RAM the state holds and
 writes that to the session's file, so the file always matches the machine;
 keep a copy of the file if a state from before a save is about to be loaded
 over it. Netplay sessions never use a backing file.
