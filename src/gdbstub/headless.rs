@@ -386,6 +386,14 @@ impl Session {
                 let _ = self.stream.read(&mut byte);
                 Ok(true)
             }
+            // Readable with nothing to read: the client closed. Without
+            // this the machine runs on with nobody to stop it, and the
+            // server never returns to accept another client.
+            Ok(0) => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "GDB client disconnected while the machine was running",
+            ))
+            .context("polling GDB interrupt"),
             Ok(_) => Ok(false),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
             Err(e) => Err(e).context("polling GDB interrupt"),
@@ -561,6 +569,34 @@ mod tests {
         });
         serve(listener, emulator_with_loadseg_program(), None).unwrap();
         thread.join().unwrap();
+    }
+
+    /// A client that goes away while the machine is running has to be
+    /// noticed, or the continue never ends and nobody can attach again.
+    #[test]
+    fn a_client_that_vanishes_during_continue_frees_the_server_for_the_next() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // A program that never stops by itself: BRA to itself, in
+            // ROM so that nothing the machine does can change it.
+            let mut emu = emulator_with_loadseg_program();
+            emu.bus_mut().mem.rom[0x1000..0x1002].copy_from_slice(&[0x60, 0xfe]);
+            emu.machine.debug_set_register(17, 0x00f8_1000);
+            serve(listener, emu, None)
+        });
+        let mut first = GdbClient::connect(addr);
+        // As gdb does. With acknowledgements on, the "+" sent for the
+        // continue packet is what finds the connection gone; without
+        // them nothing is written until the machine stops.
+        assert_eq!(first.request("QStartNoAckMode"), "OK");
+        first.send("c");
+        drop(first);
+        let mut second = GdbClient::connect(addr);
+        second.set_read_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(second.request("qC"), "QC1");
+        second.send("k");
+        server.join().unwrap().unwrap();
     }
 
     #[test]
