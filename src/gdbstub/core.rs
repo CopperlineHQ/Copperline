@@ -438,6 +438,12 @@ impl GdbCore {
         let access = watch_access_from_packet(packet)?;
         let addr = addr & emu.machine.ui_addr_mask();
         let len = len.max(1);
+        // The watched bytes are read here and again after every step, so
+        // the length is bounded like an `m` read's: "Z2,0,ffffffff" would
+        // otherwise cost a 4 GiB read per instruction.
+        if len > MAX_PACKET_PAYLOAD_BYTES {
+            return Ok("E01".to_string());
+        }
         let last = emu.machine.debug_read_memory(addr, len);
         if let Some(existing) = self
             .watchpoints
@@ -1376,6 +1382,21 @@ mod tests {
         let output = core.handle_monitor(&mut emu, "who F80010")?;
         assert!(output.contains("$00F80010"), "{output}");
         assert!(monitor_help().contains("who ADDR"));
+        Ok(())
+    }
+
+    /// A watchpoint's value is re-read after every step, so its length is
+    /// bounded like an `m` read's rather than taken from the packet as is.
+    #[test]
+    fn a_watchpoint_longer_than_a_memory_read_is_refused() -> Result<()> {
+        let mut emu = crate::gdbstub::testkit::emulator_with_loadseg_program();
+        let mut core = GdbCore::new(&emu, None);
+        let packet = format!("Z2,1000,{:x}", MAX_PACKET_PAYLOAD_BYTES + 1);
+        assert!(matches!(
+            core.handle_packet(&mut emu, &packet)?,
+            CoreReply::Packet(reply) if reply == "E01"
+        ));
+        assert!(core.watchpoints.is_empty());
         Ok(())
     }
 
