@@ -10,7 +10,8 @@ name: Browser demo
 # and left alone. This workflow replaces the parts that must change together
 # with the emulator: the wasm-bindgen bundle (try/pkg), the JS glue that
 # drives the WebEmu API (try/try.js, the netplay modules and QR license,
-# try/render-stride.js, try/serial-telnet.js, try/audio-worklet.js, sourced from
+# try/render-stride.js, try/audio-gate.js, try/input-map.js, try/present-2d.js,
+# try/serial-telnet.js, try/audio-worklet.js, sourced from
 # crates/copperline-web/www), and the AROS ROMs (try/aros).
 #
 # Pushing to the website repository needs the SITE_DEPLOY_KEY secret: the
@@ -155,6 +156,9 @@ jobs:
              crates/copperline-web/pkg/copperline_web_bg.wasm site/try/pkg/
           cp crates/copperline-web/www/try.js \
              crates/copperline-web/www/render-stride.js \
+             crates/copperline-web/www/audio-gate.js \
+             crates/copperline-web/www/input-map.js \
+             crates/copperline-web/www/present-2d.js \
              crates/copperline-web/www/netplay.js \
              crates/copperline-web/www/netplay-rtc.js \
              crates/copperline-web/www/netplay-watch.js \
