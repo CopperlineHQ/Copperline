@@ -852,7 +852,13 @@ vAmiga-verified band colours, border span per the DIW-edge photos), and
 address exactly as on a write: each frame the CPU rewrites COP1LC and
 strobes with `tst.w COPJMP1`, so the stripe must render from the flipped
 list (green), not the vblank-restart list (red) -- the Sleepwalker CD32
-double-buffer flip class; vAmiga-verified), and
+double-buffer flip class; vAmiga-verified),
+`copprobe-clrjmp` (`clr.w COPJMP1` strobes twice, on the read and on the
+write cycle; two lists that begin by pointing COP1LC at a second list are
+strobed that way at both strobe parities, and the Copper's bus-request
+cycle after a CPU strobe makes the second strobe restart the list (green)
+before its COP1LC MOVE lands -- a Copper that fetches at once jumps to
+the second list (red); vAmiga-verified), and
 `sprprobe-banks` (BPLCON4 sprite palette banks: seven sprite bars --
 six unattached, one attached pair -- under four BPLCON4 bands whose
 hue-coded banks show even sprites reading the ESPRM high nibble, odd

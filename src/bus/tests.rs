@@ -1867,7 +1867,7 @@ fn run_copper_guarded_move(revision: AgnusRevision, register: u16, cdang: bool) 
     }
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(8);
     bus
 }
@@ -3132,7 +3132,7 @@ fn copper_jump_latches_bitplane_state_from_chip_ram() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, 0x0100));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // Four MOVEs at the 4-color-clock Copper cadence (last write at +14).
     bus.advance_chipset(18);
 
@@ -3157,7 +3157,7 @@ fn copper_can_fetch_list_from_chip_ram_base() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, 0x0000));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(6);
 
     assert_eq!(bus.denise.palette[0], 0x00F0);
@@ -3175,7 +3175,7 @@ fn copper_interrupt_wait_fires_coper_at_programmed_line() {
     write_chip_word(&mut bus, cop1 + 10, 0xFFFE);
     bus.agnus.cop1lc = cop1 as u32;
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     let target_cck = 0xD4 * COLORCLOCKS_PER_LINE + 0x20;
     bus.advance_chipset(target_cck);
@@ -3227,7 +3227,7 @@ fn bus_with_copper_intreq_move_on_second_word_slot() -> Bus {
     bus.agnus.cop1lc = cop1 as u32;
     bus.agnus.hpos = 0x20;
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     // The first MOVE word is fetched at $20. The CPU's granted read at $21
     // samples before the Copper fetches the value and asserts INTREQ during
@@ -3482,7 +3482,7 @@ fn copper_jump_does_not_raise_delayed_coper_immediately() {
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     assert_eq!(bus.paula.intreq & INT_COPER, 0);
 }
@@ -3498,12 +3498,16 @@ fn copper_dma_enable_gates_instruction_execution() {
 
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     assert_eq!(bus.denise.bplcon0, 0);
 
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x096, 2, (0x8000 | DMACON_DMAEN | DMACON_COPEN) as u64));
+    // The strobe came with DMA off, so the bus-request cycle is still owed:
+    // request at 0x20, first word at 0x22, second word and write at 0x24.
     bus.advance_chipset(4);
+    assert_eq!(bus.denise.bplcon0, 0);
+    bus.advance_chipset(2);
     assert_eq!(bus.denise.bplcon0, 0x4200);
 }
 
@@ -3531,7 +3535,7 @@ fn copper_lc_write_retargets_dormant_copper_pc() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF)); // strobe: list 1, PC = cop1
+    cpu_copjmp_strobe(&mut bus, 0x088); // strobe: list 1, PC = cop1
 
     // Dormant retarget: the rewrite moves the PC, no strobe needed.
     assert!(!bus.custom_write(0x082, 2, redirected as u64));
@@ -3602,8 +3606,8 @@ fn copper_dma_enable_gates_current_pc_until_copjmp_strobe() {
     assert_eq!(bus.denise.palette[0], 0x0999);
     assert_eq!(bus.denise.bplcon0, 0);
 
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
-    bus.advance_chipset(4);
+    cpu_copjmp_strobe(&mut bus, 0x088);
+    bus.advance_chipset(6);
     assert_eq!(bus.denise.bplcon0, 0x4200);
 }
 
@@ -3649,7 +3653,7 @@ fn copjmp_strobe_fires_on_read_access() {
         0xCAFE,
         "the strobe address is undriven: the read must float to the residue"
     );
-    bus.advance_chipset(4);
+    bus.advance_chipset(6);
     assert_eq!(
         bus.denise.bplcon0, 0x4200,
         "a read of COPJMP1 must strobe the jump to COP1LC"
@@ -3663,7 +3667,7 @@ fn copjmp_strobe_fires_on_read_access() {
         0xBEEF,
         "the strobe address is undriven: the read must float to the residue"
     );
-    bus.advance_chipset(4);
+    bus.advance_chipset(6);
     assert_eq!(
         bus.denise.palette[0], 0x0999,
         "a read of COPJMP2 must strobe the jump to COP2LC"
@@ -4628,12 +4632,12 @@ fn copper_write_restrictions_require_copcon_for_blitter_registers() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(4);
     assert_eq!(bus.blitter.bltcon0, 0);
 
     assert!(!bus.custom_write(0x02E, 2, 0x0002));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(4);
     assert_eq!(bus.blitter.bltcon0, 0x1234);
 }
@@ -4702,7 +4706,7 @@ fn ecs_copper_can_clear_copcon_then_loses_lower_register_access() {
     assert!(!bus.custom_write(0x02E, 2, 0x0002));
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(8);
 
     assert_eq!(bus.agnus.copcon, 0);
@@ -4730,13 +4734,13 @@ fn copper_halts_on_forbidden_register_move_until_next_strobe() {
     assert!(!bus.custom_write(0x082, 2, illegal as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, legal as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     bus.advance_chipset(8);
     assert_eq!(bus.denise.palette[0], 0);
     assert!(!bus.copper.is_running());
 
-    assert!(!bus.custom_write(0x08A, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x08A);
     bus.advance_chipset(4);
     assert_eq!(bus.denise.palette[0], 0x0666);
 }
@@ -4761,7 +4765,7 @@ fn forbidden_copper_move_recovers_at_start_of_frame_from_cop1lc() {
     assert!(!bus.custom_write(0x082, 2, legal as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, illegal as u64));
-    assert!(!bus.custom_write(0x08A, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x08A);
     bus.advance_chipset(8);
 
     assert_eq!(bus.denise.palette[0], 0);
@@ -4798,7 +4802,7 @@ fn copper_move_updates_cop1lc_location_register() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(12);
 
     assert_eq!(bus.agnus.cop1lc, 0x030200);
@@ -4820,15 +4824,33 @@ fn copper_cannot_set_copcon_itself() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(8);
 
     assert_eq!(bus.agnus.copcon, 0);
     assert_eq!(bus.blitter.bltcon0, 0);
 }
 
+/// Strobe COPJMP1/COPJMP2 from the CPU so that the Copper's first fetch
+/// from the new list is due at the current beam position. After a CPU
+/// strobe the Copper spends one access-parity cycle requesting the bus
+/// (see `Copper::cpu_strobe`), so the strobe is issued two colour clocks
+/// earlier and the request cycle is run off here. Tests about what a list
+/// does, rather than about the strobe's own latency, start their lists
+/// with this. At the very start of a line there is no earlier colour clock
+/// to issue the strobe from, so the request cycle is left to run in line.
+fn cpu_copjmp_strobe(bus: &mut Bus, register: u64) {
+    if bus.agnus.hpos < 2 {
+        assert!(!bus.custom_write(register, 2, 0xFFFF));
+        return;
+    }
+    bus.agnus.hpos -= 2;
+    assert!(!bus.custom_write(register, 2, 0xFFFF));
+    bus.advance_chipset(2);
+}
+
 #[test]
-fn cpu_copjmp1_strobe_waits_for_target_instruction_dma_slots() {
+fn cpu_copjmp1_strobe_spends_a_request_cycle_before_the_first_fetch() {
     let mut bus = empty_bus();
     let cop1 = 0x0100usize;
     write_chip_word(&mut bus, cop1, 0x0180);
@@ -4840,19 +4862,70 @@ fn cpu_copjmp1_strobe_waits_for_target_instruction_dma_slots() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    assert!(!bus.custom_write(0x088, 2, 0x0000));
 
+    // Bus request at 0x20 (no memory cycle), idle half at 0x21, first-word
+    // fetch at 0x22, idle half at 0x23.
     bus.advance_chipset(1);
+    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
+    bus.advance_chipset(3);
     assert_eq!(bus.denise.palette[0], 0);
     assert!(bus.current_render_events().is_empty());
 
-    // First-word fetch at 0x20, idle half at 0x21, second-word fetch+write
-    // at 0x22 (recorded at its Denise-effective position, 0x26).
-    bus.advance_chipset(2);
+    // Second-word fetch and write at 0x24 (recorded at its
+    // Denise-effective position, 0x28).
+    bus.advance_chipset(1);
     assert_eq!(bus.denise.palette[0], 0x0123);
     let event = &bus.current_render_events()[0];
-    assert_eq!(event.hpos, 0x26);
+    assert_eq!(event.hpos, 0x28);
     assert_eq!(event.source, super::BeamWriteSource::Copper);
+}
+
+#[test]
+fn double_copjmp1_strobe_restarts_a_list_that_rewrites_cop1lc() {
+    // CLR.W COPJMP1 strobes twice, on its read cycle and on its write
+    // cycle four colour clocks later. A list that begins by rewriting
+    // COP1LC must not have that MOVE take effect between the two: the
+    // second strobe would then jump to the half-written address ($10100
+    // here, the new high word with the old low word) instead of
+    // restarting the list.
+    let list = 0x0100usize;
+    let next = 0x0001_0300usize;
+    let half_written = 0x0001_0100usize;
+    for first_strobe_hpos in [0x20, 0x21] {
+        let mut bus = empty_bus();
+        write_chip_word(&mut bus, list, 0x0080); // COP1LCH = $0001
+        write_chip_word(&mut bus, list + 2, 0x0001);
+        write_chip_word(&mut bus, list + 4, 0x0082); // COP1LCL = $0300
+        write_chip_word(&mut bus, list + 6, 0x0300);
+        write_chip_word(&mut bus, list + 8, 0x0180); // COLOR00: the list ran
+        write_chip_word(&mut bus, list + 10, 0x00F0);
+        write_chip_word(&mut bus, list + 12, 0xFFFF);
+        write_chip_word(&mut bus, list + 14, 0xFFFE);
+        write_chip_word(&mut bus, half_written, 0x0180); // must never run
+        write_chip_word(&mut bus, half_written + 2, 0x0F00);
+        write_chip_word(&mut bus, half_written + 4, 0xFFFF);
+        write_chip_word(&mut bus, half_written + 6, 0xFFFE);
+
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+        bus.agnus.hpos = first_strobe_hpos;
+        assert!(!bus.custom_write(0x080, 2, 0x0000));
+        assert!(!bus.custom_write(0x082, 2, list as u64));
+        let _ = bus.read_custom_word(0x088); // the read cycle
+        bus.advance_chipset(4);
+        assert_eq!(
+            bus.agnus.cop1lc, list as u32,
+            "hpos {first_strobe_hpos:#x}: no MOVE has landed before the second strobe"
+        );
+        assert!(!bus.custom_write(0x088, 2, 0x0000)); // the write cycle
+        bus.advance_chipset(24);
+
+        assert_eq!(
+            bus.denise.palette[0], 0x00F0,
+            "hpos {first_strobe_hpos:#x}: the list was restarted"
+        );
+        assert_eq!(bus.agnus.cop1lc, next as u32);
+    }
 }
 
 #[test]
@@ -4875,7 +4948,7 @@ fn copper_move_to_copjmp2_loads_second_list() {
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, cop2 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // COPJMP2 MOVE fetch (4 cck), the strobe's two tail cycles
     // (COP_JMP1/COP_JMP2, reloading the program counter), then the cop2
     // MOVE fetch: write at hpos 0x2A.
@@ -4908,7 +4981,7 @@ fn copper_copjmp2_strobe_waits_for_target_instruction_dma_slots() {
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, cop2 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     bus.advance_chipset(2);
     assert_eq!(bus.denise.palette[0], 0);
@@ -4956,7 +5029,7 @@ fn copper_can_program_cop2lc_before_copjmp2_loop_branch() {
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, stale_cop2 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // Three programming MOVEs, the strobe's two tail cycles
     // (COP_JMP1/COP_JMP2), then the jumped-to MOVE: the final write lands
     // at hpos 0x32.
@@ -4988,7 +5061,7 @@ fn copper_can_program_cop1lc_before_copjmp1_loop_branch() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // Two programming MOVEs and the COPJMP1 MOVE, the strobe's two tail
     // cycles (COP_JMP1/COP_JMP2), then the jumped-to MOVE: the final write
     // lands at hpos 0x32.
@@ -5018,7 +5091,7 @@ fn copper_programmed_cop1lc_sets_automatic_frame_restart() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(8);
 
     assert_eq!(bus.agnus.cop1lc, programmed_cop1 as u32);
@@ -5056,7 +5129,7 @@ fn automatic_vblank_reload_restarts_cop1_after_copjmp2_branch() {
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, cop2 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // MOVE 0x0111 writes at 0x22; the COPJMP2 MOVE, its two strobe tail
     // cycles (COP_JMP1/COP_JMP2), then the cop2 MOVE follow, writing 0x0222
     // at hpos 0x2E. Recorded render events sit at the writes'
