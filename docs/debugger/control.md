@@ -552,7 +552,7 @@ See [profiling limits](profiling.md) for overflow behavior and debugger stepping
 
 ### Breakpoints and traps
 - `break.add {"kind": ...}`: Add a breakpoint, watch, or trap and return its `id`. The kinds and their fields:
-  - `pc`: `addr`, an optional `cond` (`{"lhs", "op", "rhs"}`, where each side is a register name, a number, or `{"mem": ADDR}` for the word there, and `op` is `eq`, `ne`, `lt`, `gt`, `le`, `ge`, or `and`), and an `ignore` count of hits to skip.
+  - `pc`: `addr`, an optional `cond` (`{"lhs", "op", "rhs"}`, where each side is a register name (`d0`-`d7`, `a0`-`a7`, `fp`, `sp`, `sr`, `pc`, which win over the same letters read as hex), a number, or `{"mem": ADDR}` for the word there, and `op` is `eq`, `ne`, `lt`, `gt`, `le`, `ge`, or `and`), and an `ignore` count of hits to skip.
   - `watch`: a memory watch at `addr` with `access` `write` (the default), `read`, or `access`, optionally only for accesses by one `class` (`cpu`, `blitter`, `disk`, `copper`, `bpl1`..`bpl8`, `spr0`..`spr7`, `aud0`..`aud3`) and, for the CPU, only by the instruction at `pc`.
   - `reg_watch`: a write to the custom register `reg` (name or offset).
   - `mmio`: any CPU data access to the `len` bytes at `addr` (default 2), device registers included, with `access` `read`, `write`, or `access` (the default). Its stop reports the access (see the stop event above); for example `{"kind": "mmio", "addr": "0xB80000", "len": 64}` for Akiko.

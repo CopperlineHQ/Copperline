@@ -2252,6 +2252,12 @@ fn parse_break_cond(cond: &Value) -> Result<BreakCond, CtlError> {
 }
 
 fn parse_cond_operand(v: &Value) -> Result<CondOperand, CtlError> {
+    // A register name is tried before a number: `d0`-`d7` and `a0`-`a7` are
+    // valid hex strings too, and read as numbers they would be the
+    // constants $D0-$D7 and $A0-$A7 instead of the registers.
+    if let Some(reg) = v.as_str().and_then(cond_register) {
+        return Ok(reg);
+    }
     if let Some(imm) = value_as_u32(v) {
         return Ok(CondOperand::Imm(imm));
     }
@@ -2265,19 +2271,21 @@ fn parse_cond_operand(v: &Value) -> Result<CondOperand, CtlError> {
             "cond operand must be a register name, a number, or {mem: addr}",
         ));
     };
-    let lower = name.to_ascii_lowercase();
-    match lower.as_str() {
-        "pc" => Ok(CondOperand::Pc),
-        "sr" => Ok(CondOperand::Sr),
-        _ => {
-            let reg = parse_reg_name(&lower)?;
-            Ok(match reg {
-                0..=7 => CondOperand::Data(reg),
-                8..=15 => CondOperand::Addr(reg - 8),
-                _ => unreachable!("parse_reg_name yields 0..=17"),
-            })
-        }
-    }
+    // Not a register and not a number: report it as the register it is not.
+    Err(parse_reg_name(name).err().unwrap_or_else(|| {
+        CtlError::invalid_params("cond operand must be a register name, a number, or {mem: addr}")
+    }))
+}
+
+/// A breakpoint-condition register operand by name (`d0`-`d7`, `a0`-`a7`,
+/// `fp`, `sp`, `sr`, `pc`, in any case), or `None` when `name` is not one.
+fn cond_register(name: &str) -> Option<CondOperand> {
+    Some(match parse_reg_name(name.trim()).ok()? {
+        reg @ 0..=7 => CondOperand::Data(reg),
+        reg @ 8..=15 => CondOperand::Addr(reg - 8),
+        16 => CondOperand::Sr,
+        _ => CondOperand::Pc,
+    })
 }
 
 /// Parse a register selector into the GDB-style register number
@@ -4588,6 +4596,55 @@ mod tests {
             Request::Core(op) => op,
             other => panic!("expected core op, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn cond_operands_read_register_names_before_hex() {
+        // "d0".."d7" and "a0".."a7" are also valid hex strings; a condition
+        // names the register, not the constants $D0..$A7.
+        for n in 0..8usize {
+            assert_eq!(
+                parse_cond_operand(&json!(format!("d{n}"))).unwrap(),
+                CondOperand::Data(n)
+            );
+            assert_eq!(
+                parse_cond_operand(&json!(format!("A{n}"))).unwrap(),
+                CondOperand::Addr(n)
+            );
+        }
+        assert_eq!(
+            parse_cond_operand(&json!("sp")).unwrap(),
+            CondOperand::Addr(7)
+        );
+        assert_eq!(
+            parse_cond_operand(&json!("fp")).unwrap(),
+            CondOperand::Addr(6)
+        );
+        assert_eq!(parse_cond_operand(&json!("pc")).unwrap(), CondOperand::Pc);
+        assert_eq!(parse_cond_operand(&json!("SR")).unwrap(), CondOperand::Sr);
+        // Numbers and prefixed or non-register hex strings stay immediates.
+        assert_eq!(parse_cond_operand(&json!(5)).unwrap(), CondOperand::Imm(5));
+        assert_eq!(
+            parse_cond_operand(&json!("$D0")).unwrap(),
+            CondOperand::Imm(0xD0)
+        );
+        assert_eq!(
+            parse_cond_operand(&json!("0xA7")).unwrap(),
+            CondOperand::Imm(0xA7)
+        );
+        assert_eq!(
+            parse_cond_operand(&json!("d8")).unwrap(),
+            CondOperand::Imm(0xD8)
+        );
+        assert_eq!(
+            parse_cond_operand(&json!({"mem": "0xC00002"})).unwrap(),
+            CondOperand::Mem(0xC00002)
+        );
+        assert!(parse_cond_operand(&json!("bogus")).is_err());
+        // The whole condition, as the DAP adapter sends it.
+        let cond = parse_break_cond(&json!({"lhs": "d0", "op": "eq", "rhs": 5})).unwrap();
+        assert_eq!(cond.lhs, CondOperand::Data(0));
+        assert_eq!(cond.rhs, CondOperand::Imm(5));
     }
 
     #[test]
