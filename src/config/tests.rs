@@ -3668,6 +3668,26 @@ fn the_memory_controller_can_be_selected() -> anyhow::Result<()> {
 }
 
 #[test]
+fn the_memory_controller_name_is_trimmed_and_case_folded() -> anyhow::Result<()> {
+    for (written, expected) in [
+        ("Ramsey-07", MemController::Ramsey7),
+        (" RAMSEY-07 ", MemController::Ramsey7),
+        ("None", MemController::None),
+    ] {
+        let cfg = parse_config(&format!(
+            "[machine]\nprofile = \"A1200\"\nmem_controller = {written:?}\n"
+        ))?;
+        assert_eq!(cfg.mem_controller, expected, "{written:?}");
+    }
+    // A wrong name is still reported as it was written.
+    let err = parse_config("[machine]\nmem_controller = \"Ramsey-08\"\n")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("\"Ramsey-08\""), "{err}");
+    Ok(())
+}
+
+#[test]
 fn log_unmapped_takes_all_or_a_hex_range() -> anyhow::Result<()> {
     let cfg = parse_config(
         r#"

@@ -1265,14 +1265,22 @@ impl TryFrom<RawConfig> for Config {
             Some(s) => parse_denise_revision(s)?,
         };
 
-        let mem_controller = match raw.machine.mem_controller.as_deref() {
+        // Trimmed and case-folded like the section's other named values.
+        let mem_controller = match raw
+            .machine
+            .mem_controller
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
             None => defaults.mem_controller,
             Some("none") => MemController::None,
             Some("ramsey-04") => MemController::Ramsey4,
             Some("ramsey-07") => MemController::Ramsey7,
-            Some(other) => anyhow::bail!(
-                "[machine] mem_controller {other:?} is not one of \
-                 none, ramsey-04, ramsey-07"
+            Some(_) => anyhow::bail!(
+                "[machine] mem_controller {:?} is not one of \
+                 none, ramsey-04, ramsey-07",
+                raw.machine.mem_controller.as_deref().unwrap_or_default()
             ),
         };
 
