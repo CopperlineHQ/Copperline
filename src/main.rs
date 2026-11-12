@@ -1792,6 +1792,11 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.pen_after.is_empty()
         && cli.freeze_after.is_empty()
         && cli.disk_change_after.is_empty()
+        && cli.cd_insert_after.is_empty()
+        && cli.waveform.is_none()
+        && !cli.warp_boot
+        && cli.warp_until.is_none()
+        && cli.live_audio_profile_secs.is_none()
         && cli.record_input.is_none()
         && cli.audio_wav.is_none()
         && cli.audio_live
@@ -2323,6 +2328,21 @@ mod tests {
         ));
         assert!(!launcher_requested(&parse(&["--noaudio"]).unwrap()));
         assert!(!launcher_requested(&parse(&["--run", "hello"]).unwrap()));
+        // Options that are only read once a machine is running count too:
+        // behind the launcher they would be dropped without a word.
+        let specified: [&[&str]; 8] = [
+            &["--insert-cd-after", "5", "game.cue"],
+            &["--waveform", "out.vcd"],
+            &["--warp-boot"],
+            &["--warp-until", "10"],
+            &["--profile-live-audio", "1"],
+            &["--serial-device", "/dev/ttyUSB0"],
+            &["--pcmcia-cf", "card.hdf"],
+            &["--pcmcia-sram", "2M"],
+        ];
+        for args in specified {
+            assert!(!launcher_requested(&parse(args).unwrap()), "{args:?}");
+        }
     }
 
     #[test]

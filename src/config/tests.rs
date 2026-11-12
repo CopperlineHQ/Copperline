@@ -43,6 +43,29 @@ fn host_monitor_selectors_validate_and_round_trip() -> Result<()> {
 }
 
 #[test]
+fn every_single_override_counts_as_specified() {
+    // `is_empty` decides whether a command line named a machine at all (a
+    // bare launch opens the launcher), so each override has to register.
+    assert!(ConfigOverrides::default().is_empty());
+    for overrides in [
+        ConfigOverrides {
+            pcmcia_cf: Some("card.hdf".into()),
+            ..Default::default()
+        },
+        ConfigOverrides {
+            pcmcia_sram: Some("2M".into()),
+            ..Default::default()
+        },
+        ConfigOverrides {
+            serial_device: Some("/dev/ttyUSB0".into()),
+            ..Default::default()
+        },
+    ] {
+        assert!(!overrides.is_empty(), "{overrides:?}");
+    }
+}
+
+#[test]
 fn host_monitor_override_replaces_config_and_can_restore_auto() -> Result<()> {
     let mut raw = RawConfig::parse("[display]\nmonitor = \"primary\"\n")?;
     let overrides = ConfigOverrides {
