@@ -87,7 +87,8 @@ copperline-ctl state-info /tmp/at120.clstate --thumbnail /tmp/at120.png
 Replies print to stdout as one JSON object per line, and notifications
 (`event.*`) print as they arrive. A one-shot request exits with a nonzero
 status when the reply is a JSON-RPC error. The REPL reads one
-`METHOD [JSON-PARAMS]` per line and skips blank lines and `#` comments.
+`METHOD [JSON-PARAMS]` per line and skips blank lines and `#` comments;
+`--repl` with a method on the command line is refused.
 
 The other subcommands work without a session: `state-info` (see
 [State snapshot files](#state-snapshot-files)), `diverge` (below),
