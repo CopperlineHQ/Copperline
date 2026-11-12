@@ -740,6 +740,13 @@ the final encoding to true 35 ns output; cross-checked against vAmigaTS
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
 class; the whole-blit fence collapsed the fill/line bars),
+`bltprobe-post` (A1200 shape: 256 chip writes from a 68020 under an
+all-channel blit, then the DMACONR polls left until the blit ends, as a
+bar and a binary word, with BLTPRI clear and set -- a posted write is a
+bus request and gets the blitter's three-miss yield, so the BLTPRI-clear
+bar is long; a drain that never takes a yielded cycle stalls the writes
+for the whole blit and collapses it to the BLTPRI-set bar; not
+cross-checked against vAmiga, which has no 68020 bus model),
 `ddfprobe-sprmulti` (DMA sprite vertical reuse and an attached 15-colour
 pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render

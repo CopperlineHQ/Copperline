@@ -543,6 +543,10 @@ probe_tests! {
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
     golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 16.0);
+    // 68020 chip writes under an all-channel BLTPRI-clear blit: a posted
+    // write gets the blitter's three-miss yield (the write loop must not
+    // stall for the whole blit).
+    golden_bltprobe_post => probe_aga("bltprobe-post", "bltprobe-post.bin", 16.0);
     // DMA sprite vertical reuse + attached pair placement (the sprite
     // register-FSM regression class).
     golden_ddfprobe_sprmulti => probe("ddfprobe-sprmulti", "ddfprobe-sprmulti.bin", 16.0);

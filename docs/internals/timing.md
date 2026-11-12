@@ -702,11 +702,11 @@ Copper's access clock (`copper`), a BLTPRI-clear blitter hold (`blitter`), or
 a BLTPRI-set blitter bus access (`blitter_nasty`). An idle pipeline cycle is
 not attributed to the blitter. The `port` class describes the 020+ chip
 port's two-clock turnaround, a wait on the CPU's own bus unit rather than a
-denial. A synchronous grant sees the CPU's arbitration view, including the
-three-miss yield; a posted 020+ write drains through ordinary arbitration,
-where a busy blitter keeps every requested access cycle. Tests:
+denial. A synchronous grant and the drain of a posted 020+ write both see
+the CPU's arbitration view, including the three-miss yield. Tests:
 `frame_analyzer_attributes_cpu_wait_to_nice_blitter`,
-`frame_analyzer_attributes_cpu_wait_to_bltpri_bus_access`.
+`frame_analyzer_attributes_cpu_wait_to_bltpri_bus_access`,
+`frame_analyzer_attributes_posted_write_drain_waits_to_the_nice_blitter`.
 The analyzer has two recording levels. The cheap level keeps the one-byte
 owner and CPU-wait grids used by the live heatmap. The full level adds one
 24-byte record per raster colour clock and is armed only for an open Frame

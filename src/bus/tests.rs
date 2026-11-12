@@ -1214,75 +1214,129 @@ fn frame_analyzer_attributes_cpu_wait_to_fixed_dma() {
     assert_eq!(owners[2], b'P');
 }
 
-#[test]
-fn frame_analyzer_attributes_posted_write_drain_waits_to_the_blitter() {
-    // A posted 020 chip write drains through the ordinary arbitration, in
-    // which a busy nice blitter keeps every access cycle: the slowdown
-    // yield that frees a synchronous grant after three misses does not
-    // apply to the drain, so every clock it waits belongs to the blitter,
-    // however many in a row the CPU misses. Only the port turnaround the
-    // following read pays after the drain is the CPU's own.
+/// A 020+ bus with a BLTPRI-clear blit that uses the chip bus on every
+/// cycle (all four channels) and runs for `rows` rows of four words.
+fn bus_with_short_cycle_cpu_and_busy_nice_blitter(rows: u16) -> Bus {
     let mut bus = empty_bus();
     bus.set_chipset_revisions(AgnusRevision::Ecs8375, DeniseRevision::Ecs8373);
     bus.set_cpu_clocks_per_cck(4);
     bus.set_cpu_short_bus_cycle(true);
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
-    bus.agnus.hpos = 0x20;
-    bus.blitter.bltcon0 = 0x0E00;
+    bus.agnus.hpos = 0x40;
+    bus.blitter.bltcon0 = 0x0FCA;
     bus.blitter.bltcon1 = 0;
     bus.blitter.bltafwm = 0xFFFF;
     bus.blitter.bltalwm = 0xFFFF;
-    bus.blitter.bltapt = 0x10;
-    bus.blitter.bltbpt = 0x20;
-    bus.blitter.bltcpt = 0x30;
-    for (off, val) in [
-        (0x10, 0x1111),
-        (0x12, 0x2222),
-        (0x14, 0x3333),
-        (0x16, 0x4444),
-        (0x20, 0xAAAA),
-        (0x22, 0xBBBB),
-        (0x24, 0xCCCC),
-        (0x26, 0xDDDD),
-        (0x30, 0x5555),
-        (0x32, 0x6666),
-        (0x34, 0x7777),
-        (0x36, 0x8888),
-    ] {
-        write_chip_word(&mut bus, off, val);
-    }
-    bus.blitter.start_scheduled((1 << 6) | 4, &bus.mem.chip_ram);
-    bus.advance_chipset(4);
-    bus.set_frame_analyzer_enabled(true);
+    bus.blitter.bltapt = 0x1000;
+    bus.blitter.bltbpt = 0x2000;
+    bus.blitter.bltcpt = 0x3000;
+    bus.blitter.bltdpt = 0x3000;
+    bus.blitter
+        .start_scheduled((rows << 6) | 4, &bus.mem.chip_ram);
+    bus.advance_chipset(8);
+    assert!(bus.blitter.busy);
     bus.set_cpu_bus_arbitration_enabled(true);
+    bus
+}
+
+#[test]
+fn frame_analyzer_attributes_posted_write_drain_waits_to_the_nice_blitter() {
+    // A posted 020 chip write is a bus request like a synchronous access:
+    // a BLTPRI-clear blitter passes it over for the slowdown limit and then
+    // gives up one bus cycle for it. The clocks it waits belong to the
+    // blitter, and so do the ones the following read waits: the blitter
+    // takes its cycles back while the port turns around.
+    let mut bus = bus_with_short_cycle_cpu_and_busy_nice_blitter(64);
+    bus.set_frame_analyzer_enabled(true);
 
     // The write posts without stalling; the read that follows first
-    // retires it, waiting out the blit's remaining source fetches.
+    // retires it.
     bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
     assert_eq!(bus.take_slice_bus_advance().0, 0);
     bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Read);
-    let (cck, _) = bus.take_slice_bus_advance();
-    assert!(!bus.blitter.busy);
+    let _ = bus.take_slice_bus_advance();
+    assert!(
+        bus.blitter.busy,
+        "the write retires long before the blit ends"
+    );
 
     let trace = bus
         .frame_bus_trace()
         .expect("the armed analyzer records the slice");
-    let nice = trace.cpu_wait_by_class[CpuWaitClass::BlitterNice.accounting_index()];
-    let port = trace.cpu_wait_by_class[CpuWaitClass::Port.accounting_index()];
-    assert!(
-        nice > u64::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT),
-        "drain waits stay the blitter's past the slowdown limit: {nice} of {cck}"
-    );
+    let limit = u64::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT);
     assert_eq!(
         trace.cpu_wait_by_kind[CpuBusAccessKind::Write.accounting_index()],
-        nice
+        limit,
+        "the drain waits exactly the slowdown limit"
     );
-    assert!(port >= 1, "the read pays the port turnaround: {port}");
+    let nice = trace.cpu_wait_by_class[CpuWaitClass::BlitterNice.accounting_index()];
+    let port = trace.cpu_wait_by_class[CpuWaitClass::Port.accounting_index()];
+    assert!(nice >= limit, "drain waits are the blitter's: {nice}");
     assert_eq!(
         trace.cpu_wait_by_kind[CpuBusAccessKind::Read.accounting_index()],
-        port
+        nice + port - limit,
+        "the read waits for its own grant after the write retires"
     );
     assert_eq!(trace.cpu_wait_cck, nice + port);
+}
+
+#[test]
+fn posted_write_request_counts_blitter_misses_while_the_cpu_runs_on() {
+    // The bus request of a posted write stays asserted while the execution
+    // unit carries on with work that needs no chip access, so the blitter's
+    // slowdown counter runs for it and the write retires after the limit,
+    // not when the blit ends.
+    let mut bus = bus_with_short_cycle_cpu_and_busy_nice_blitter(64);
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    assert_eq!(bus.take_slice_bus_advance().0, 0);
+    assert_eq!(bus.cpu_posted_write_debt, 1);
+
+    bus.advance_chipset(u32::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT));
+    assert_eq!(bus.cpu_posted_write_debt, 1, "passed over for the limit");
+    bus.advance_chipset(1);
+    assert_eq!(bus.cpu_posted_write_debt, 0, "the blitter yields one cycle");
+    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Cpu);
+    assert!(bus.blitter.busy);
+
+    // The next write posts again without stalling.
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    assert_eq!(bus.take_slice_bus_advance().0, 0);
+}
+
+#[test]
+fn back_to_back_posted_writes_are_not_starved_by_a_nice_blitter() {
+    // With BLTPRI clear the CPU gets one chip cycle for every three the
+    // blitter takes. Back-to-back 020 chip writes therefore advance at
+    // limit + 1 colour clocks each instead of waiting for the whole blit.
+    let mut bus = bus_with_short_cycle_cpu_and_busy_nice_blitter(64);
+    let writes = 16;
+    let mut total = 0;
+    for _ in 0..writes {
+        bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+        total += bus.take_slice_bus_advance().0;
+    }
+    assert!(bus.blitter.busy, "the blit outlasts the writes");
+    let per_write = u32::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT) + 1;
+    assert!(
+        total <= writes * per_write,
+        "{writes} writes took {total} colour clocks"
+    );
+    assert!(
+        total >= (writes - 1) * per_write - 1,
+        "the blitter keeps its three cycles in four: {total}"
+    );
+}
+
+#[test]
+fn posted_write_waits_out_a_bltpri_blitter() {
+    // With BLTPRI set the blitter never yields a bus cycle, to a posted
+    // write no more than to a synchronous access.
+    let mut bus = bus_with_short_cycle_cpu_and_busy_nice_blitter(2);
+    bus.agnus.dmacon |= DMACON_BLTPRI;
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    bus.advance_chipset(u32::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT) + 4);
+    assert!(bus.blitter.busy);
+    assert_eq!(bus.cpu_posted_write_debt, 1);
 }
 
 #[test]
@@ -11928,10 +11982,7 @@ fn stock_cpu_cycle_waits_before_crossing_line_end_refresh() {
     );
     bus.last_chip_bus_owner = ChipBusOwner::Copper;
     assert!(bus.cpu_cycle_crosses_line_end_refresh());
-    assert!(matches!(
-        bus.cpu_bus_denial_class(true),
-        CpuWaitClass::Refresh
-    ));
+    assert!(matches!(bus.cpu_bus_denial_class(), CpuWaitClass::Refresh));
     bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
     let (cck, tick) = bus.take_slice_bus_advance();
     assert!(cck > 2);

@@ -7406,7 +7406,7 @@ impl Bus {
                 || (self.cpu_short_bus_cycle && self.emulated_cck < self.cpu_chip_port_free_at)
             {
                 if self.frame_analyzer_enabled {
-                    self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(kind, true));
+                    self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(kind));
                 }
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 wait_cck += cck;
@@ -7616,23 +7616,22 @@ impl Bus {
     }
 
     /// Advance the chipset until a posted CPU chip write has retired into a
-    /// free chip slot (the drain in `advance_one_chip_bus_quantum`). Quanta
-    /// that could not retire it count as missed CPU slots, like the grant
-    /// wait loop's.
+    /// chip slot (the drain in `advance_one_chip_bus_quantum`). Quanta that
+    /// could not retire it are colour clocks the CPU waited; the drain
+    /// itself counts them towards the blitter's yield, because the request
+    /// is pending whether or not the CPU is stalled behind it.
     fn settle_cpu_posted_writes(&mut self) {
         while self.cpu_posted_write_debt > 0 {
             let debt_before = self.cpu_posted_write_debt;
             if self.frame_analyzer_enabled {
-                // Attributed as the write it is retiring, from the ordinary
-                // arbitration the drain is subject to (no BLS yield, no
-                // fence). A quantum that does drain it records the CPU as
-                // the slot owner instead, so the sample only lands on
-                // genuinely missed clocks.
-                self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(CpuBusAccessKind::Write, false));
+                // Attributed as the write it is retiring. A quantum that
+                // does drain it records the CPU as the slot owner instead,
+                // so the sample only lands on genuinely missed clocks.
+                self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(CpuBusAccessKind::Write));
             }
             let (cck, tick) = self.advance_one_chip_bus_quantum(None);
             if self.cpu_posted_write_debt == debt_before {
-                self.note_cpu_missed_chip_bus_cycle(cck);
+                self.note_cpu_waited_chip_bus_cycle(cck);
             }
             self.record_slice_bus_advance(cck, tick);
         }
@@ -7642,13 +7641,12 @@ impl Bus {
 
     /// The analyzer's attribution of the colour clock the CPU is about to
     /// miss: who holds the slot from the waiting access's point of view
-    /// (`for_cpu`: the CPU's own view for a synchronous grant, the ordinary
-    /// arbitration for a posted-write drain; see `cpu_bus_denial_class`),
-    /// what access is pending, and the instruction that made it.
+    /// (see `cpu_bus_denial_class`), what access is pending, and the
+    /// instruction that made it.
     /// Side-effect free; only evaluated while the frame analyzer is armed.
-    fn cpu_bus_wait_sample(&self, kind: CpuBusAccessKind, for_cpu: bool) -> CpuWaitSample {
+    fn cpu_bus_wait_sample(&self, kind: CpuBusAccessKind) -> CpuWaitSample {
         CpuWaitSample {
-            class: self.cpu_bus_denial_class(for_cpu),
+            class: self.cpu_bus_denial_class(),
             kind,
             pc: self.cpu_pc,
         }
@@ -7678,9 +7676,21 @@ impl Bus {
         self.record_slice_bus_advance(cck, tick);
     }
 
+    /// A colour clock a synchronous CPU access waited for the chip bus.
     fn note_cpu_missed_chip_bus_cycle(&mut self, cck: u32) {
+        self.note_cpu_waited_chip_bus_cycle(cck);
+        self.note_cpu_request_passed_over();
+    }
+
+    /// Wait accounting only: a colour clock the CPU spent stalled behind a
+    /// chip-bus request.
+    fn note_cpu_waited_chip_bus_cycle(&mut self, cck: u32) {
         self.cpu_missed_chip_slots = self.cpu_missed_chip_slots.wrapping_add(1);
         self.cpu_wait_cck_total = self.cpu_wait_cck_total.wrapping_add(u64::from(cck));
+    }
+
+    /// A pending CPU chip-bus request was passed over for one quantum.
+    fn note_cpu_request_passed_over(&mut self) {
         // BLS follows the waiting CPU, not the blitter's current pipeline
         // phase. Fixed DMA can deny the CPU while a disabled blit channel
         // leaves an idle slot; those misses still count towards the yield.
