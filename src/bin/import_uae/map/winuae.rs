@@ -963,6 +963,7 @@ pub fn map(entries: &[Entry], source: &std::path::Path) -> MapOutcome {
             "A1000" => Some("A1000"),
             "A500" => Some("A500"),
             "A500+" => Some("A500Plus"),
+            "A2000" => Some("A2000"),
             "A600" => Some("A600"),
             "A1200" => Some("A1200"),
             "A3000" => Some("A3000"),
@@ -1963,6 +1964,7 @@ mod tests {
     fn chipset_compatible_picks_the_machine_profile() {
         assert!(convert("chipset_compatible=A1200\n").contains(r#"profile = "A1200""#));
         assert!(convert("chipset_compatible=A500\n").contains(r#"profile = "A500""#));
+        assert!(convert("chipset_compatible=A2000\n").contains(r#"profile = "A2000""#));
     }
 
     #[test]

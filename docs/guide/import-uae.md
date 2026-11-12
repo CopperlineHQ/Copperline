@@ -76,7 +76,8 @@ the hardware FS-UAE gives them: the plain `A1200` (and `A1200/3.0`) and `CD32`
 have a 68EC020 and only `A1200/020` a full 68020, the `A3000` and `A4000` carry
 a 68882 and 8 MB of motherboard RAM (the `A4000` is the 68EC030 model, as
 FS-UAE runs it), and `CD32/FMV` fits the FMV module with Copperline's bundled
-open ROM, listed as approximated. Copperline does not model the Blizzard
+open ROM, listed as approximated. `A2000` is the `A2000` profile with the ECS
+chipset. Copperline does not model the Blizzard
 boards, so `A1200/1230`, `A1200/1240` and `A1200/1260` (or an `accelerator`
 option naming one) bring the board's CPU and its 32 MB of board RAM, as
 `[memory] accelerator`, and are listed as approximated. The PowerPC presets
