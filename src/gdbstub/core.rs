@@ -1308,6 +1308,20 @@ pub(crate) fn checksum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte))
 }
 
+/// The packet a received frame carries, given the bytes between `$` and
+/// `#` and the two checksum digits after it. `None` is a frame to answer
+/// with `-`: its checksum does not match, which includes digits that are
+/// not hex.
+///
+/// A frame that passes is acknowledged and then owed a reply. No packet
+/// this stub knows carries bytes that are not UTF-8, so one that does is
+/// passed on with those bytes replaced, in a form the core answers as an
+/// unknown packet, instead of being dropped with the client left waiting.
+pub(crate) fn frame_packet(payload: &[u8], checksum_digits: [u8; 2]) -> Option<String> {
+    let expected = parse_hex_byte(checksum_digits[0], checksum_digits[1]).ok()?;
+    (expected == checksum(payload)).then(|| String::from_utf8_lossy(payload).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1462,6 +1476,19 @@ mod tests {
         }
         assert_eq!(read, xml);
         Ok(())
+    }
+
+    #[test]
+    fn frame_packet_checks_the_sum_and_keeps_every_packet_answerable() {
+        assert_eq!(frame_packet(b"qC", *b"b4").as_deref(), Some("qC"));
+        assert_eq!(frame_packet(b"qC", *b"B4").as_deref(), Some("qC"));
+        assert_eq!(
+            frame_packet(b"qC", *b"00"),
+            None,
+            "a sum that does not match"
+        );
+        assert_eq!(frame_packet(b"qC", *b"zz"), None, "digits that are not hex");
+        assert_eq!(frame_packet(b"\xff", *b"ff").as_deref(), Some("\u{FFFD}"));
     }
 
     /// A write watchpoint's bytes are read back after every instruction to

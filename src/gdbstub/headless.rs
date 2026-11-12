@@ -105,11 +105,22 @@ fn serve_dialect(
     }
 }
 
+/// Marks a session error as a failure of the client's connection. It is
+/// attached where the session reads from, writes to or polls its socket,
+/// and nowhere else, so an I/O error from the machine's side of a step is
+/// not mistaken for the client going away.
+#[derive(Debug)]
+struct ClientConnection;
+
+impl std::fmt::Display for ClientConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GDB client connection failed")
+    }
+}
+
 /// Whether a session error came from its socket rather than the machine.
 fn is_connection_error(error: &anyhow::Error) -> bool {
-    error
-        .chain()
-        .any(|cause| cause.downcast_ref::<std::io::Error>().is_some())
+    error.downcast_ref::<ClientConnection>().is_some()
 }
 
 /// How a [`Session`] ended: a detach/EOF keeps serving, `k` shuts down.
@@ -279,7 +290,11 @@ impl Session {
                 match self.stream.read_exact(&mut byte) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                    Err(e) => return Err(e).context("reading GDB packet"),
+                    Err(e) => {
+                        return Err(e)
+                            .context("reading GDB packet")
+                            .context(ClientConnection)
+                    }
                 }
                 match byte[0] {
                     b'+' | b'-' => continue,
@@ -300,7 +315,11 @@ impl Session {
                 match self.stream.read_exact(&mut byte) {
                     Ok(()) => {}
                     Err(e) if gone(&e) => return Ok(None),
-                    Err(e) => return Err(e).context("reading GDB packet payload"),
+                    Err(e) => {
+                        return Err(e)
+                            .context("reading GDB packet payload")
+                            .context(ClientConnection)
+                    }
                 }
                 if byte[0] == b'#' {
                     break;
@@ -319,30 +338,30 @@ impl Session {
             match self.stream.read_exact(&mut sum_bytes) {
                 Ok(()) => {}
                 Err(e) if gone(&e) => return Ok(None),
-                Err(e) => return Err(e).context("reading GDB packet checksum"),
+                Err(e) => {
+                    return Err(e)
+                        .context("reading GDB packet checksum")
+                        .context(ClientConnection)
+                }
             }
-            // Checksum digits that are not hex are a checksum that does
-            // not match.
-            let expected = parse_hex_byte(sum_bytes[0], sum_bytes[1]).ok();
-            if expected != Some(checksum(&payload)) {
+            let Some(packet) = frame_packet(&payload, sum_bytes) else {
                 if !self.no_ack {
                     self.stream.write_all(b"-").ok();
                 }
                 continue;
-            }
+            };
             if !self.no_ack {
                 self.stream.write_all(b"+").ok();
             }
-            // An acknowledged packet is owed a reply. No packet this stub
-            // knows carries bytes that are not UTF-8, so one that does is
-            // passed on in a form the core answers as unknown.
-            return Ok(Some(String::from_utf8_lossy(&payload).into_owned()));
+            return Ok(Some(packet));
         }
     }
 
     fn send_packet(&mut self, payload: &str) -> Result<()> {
         let sum = checksum(payload.as_bytes());
-        write!(self.stream, "${payload}#{sum:02x}").context("sending GDB packet")?;
+        write!(self.stream, "${payload}#{sum:02x}")
+            .context("sending GDB packet")
+            .context(ClientConnection)?;
         self.stream.flush().ok();
         Ok(())
     }
@@ -376,32 +395,32 @@ impl Session {
         }
     }
 
+    /// Look, without waiting, for an interrupt from the client while the
+    /// machine runs. An error is the connection's: the client is gone.
     fn poll_interrupt(&mut self) -> Result<bool> {
-        self.stream
-            .set_nonblocking(true)
-            .context("setting GDB stream nonblocking")?;
+        self.look_for_interrupt()
+            .context("polling GDB interrupt")
+            .context(ClientConnection)
+    }
+
+    fn look_for_interrupt(&mut self) -> std::io::Result<bool> {
+        self.stream.set_nonblocking(true)?;
         let mut byte = [0u8; 1];
-        let result = match self.stream.peek(&mut byte) {
-            Ok(1) if byte[0] == 0x03 => {
-                let _ = self.stream.read(&mut byte);
-                Ok(true)
-            }
+        let seen = match self.stream.peek(&mut byte) {
             // Readable with nothing to read: the client closed. Without
             // this the machine runs on with nobody to stop it, and the
             // server never returns to accept another client.
             Ok(0) => Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "GDB client disconnected while the machine was running",
-            ))
-            .context("polling GDB interrupt"),
+            )),
+            Ok(_) if byte[0] == 0x03 => self.stream.read(&mut byte).map(|_| true),
             Ok(_) => Ok(false),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
-            Err(e) => Err(e).context("polling GDB interrupt"),
+            Err(e) => Err(e),
         };
-        self.stream
-            .set_nonblocking(false)
-            .context("restoring GDB stream blocking mode")?;
-        result
+        self.stream.set_nonblocking(false)?;
+        seen
     }
 }
 
@@ -597,6 +616,21 @@ mod tests {
         assert_eq!(second.request("qC"), "QC1");
         second.send("k");
         server.join().unwrap().unwrap();
+    }
+
+    /// Only a failure of the client's own connection ends a session as a
+    /// detach. An I/O error from anywhere else is the machine's, and is
+    /// reported.
+    #[test]
+    fn only_an_error_from_the_client_socket_counts_as_the_client_going_away() {
+        let disk = || std::io::Error::other("a host file under the machine failed");
+        let machine = anyhow::Error::new(disk()).context("stepping");
+        assert!(!is_connection_error(&machine));
+        let socket = anyhow::Error::new(disk())
+            .context("sending GDB packet")
+            .context(ClientConnection)
+            .context("serving a client");
+        assert!(is_connection_error(&socket));
     }
 
     #[test]
