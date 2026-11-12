@@ -577,15 +577,21 @@ impl CdImage {
                     });
                     advance(&mut disc, track.pregap)?;
                 }
-                let region_start = track.index0.unwrap_or_else(|| track.index1.unwrap());
+                let first_index = track.index0.unwrap_or_else(|| track.index1.unwrap());
                 let index1 = track.index1.unwrap();
-                if index1 < region_start {
+                if index1 < first_index {
                     bail!(
                         "{}: track {} INDEX 01 before INDEX 00",
                         cue_path.display(),
                         track.number
                     );
                 }
+                // INDEX times are positions within the file, and the file
+                // is laid out whole. Its first track therefore owns the
+                // file from byte 0: sectors ahead of that track's first
+                // index are its pregap, not skipped, or every later track
+                // in the file would land that many sectors early.
+                let region_start = if j == 0 { 0 } else { first_index };
                 let region_end_sector = match file_tracks.get(j + 1) {
                     Some(next) => next.index0.unwrap_or_else(|| next.index1.unwrap()),
                     None => {
@@ -1713,6 +1719,45 @@ mod tests {
         for p in [&cue, &bin, &wav] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    /// Four audio sectors, each filled with its own position in the file.
+    fn numbered_audio_bin(path: &Path) {
+        let mut bytes = Vec::new();
+        for sector in 0..4u8 {
+            bytes.extend(std::iter::repeat_n(sector, RAW_SECTOR_BYTES));
+        }
+        write_file(path, &bytes);
+    }
+
+    /// INDEX times are positions within the FILE. When the first index in a
+    /// file is not at its start, the bytes before it still occupy the disc
+    /// (as the first track's pregap), so later tracks keep their positions.
+    #[test]
+    fn a_file_whose_first_index_is_not_at_its_start_keeps_later_tracks_in_place() {
+        let cue = temp_path("lead.cue");
+        let bin = temp_path("lead.bin");
+        numbered_audio_bin(&bin);
+        std::fs::write(
+            &cue,
+            format!(
+                "{}  TRACK 01 AUDIO\n    INDEX 01 00:00:01\n  \
+                 TRACK 02 AUDIO\n    INDEX 01 00:00:03\n",
+                file_line(&bin, "BINARY")
+            ),
+        )
+        .unwrap();
+        let mut image = CdImage::load(&cue).unwrap();
+        assert_eq!(image.total_sectors(), 4);
+        let starts: Vec<u32> = image.tracks().iter().map(|t| t.start_sector).collect();
+        assert_eq!(starts, [1, 3]);
+        let mut raw = [0u8; RAW_SECTOR_BYTES];
+        for sector in 0..4u32 {
+            image.read_audio_sector(sector, &mut raw).unwrap();
+            assert!(raw.iter().all(|&b| b == sector as u8), "sector {sector}");
+        }
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
     }
 
     /// Editors on Windows save cue sheets with a UTF-8 byte order mark.
