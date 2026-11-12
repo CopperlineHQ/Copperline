@@ -3881,19 +3881,16 @@ fn sleeping_copper_deadline_matches_reference_across_random_beam_spans() {
 }
 
 #[test]
-fn next_copper_wakeup_cck_waits_for_vertical_low_byte_rollover_after_line_255() {
+fn next_copper_wakeup_cck_spans_the_lines_after_the_vertical_low_byte_rollover() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
-    bus.agnus.vpos = 0xFF;
-    bus.agnus.hpos = 0xDF;
     bus.copper.wait(CopperWait::new(0x1B01, 0xFFFE));
 
-    let expected = bus.agnus.cck_until_line_start(0x11B).unwrap();
-    assert_eq!(
-        expected,
-        (COLORCLOCKS_PER_LINE - 0xDF) + 0x1B * COLORCLOCKS_PER_LINE
-    );
-    assert_eq!(bus.next_copper_wakeup_cck(), Some(expected));
+    // Sleeping on line 255 the comparator already matches ($FF >= $1B):
+    // there is no later deadline to skip to.
+    bus.agnus.vpos = 0xFF;
+    bus.agnus.hpos = 0x40;
+    assert_eq!(bus.next_copper_wakeup_cck(), Some(0));
 
     bus.agnus.vpos = 0x100;
     bus.agnus.hpos = 0;
@@ -3958,6 +3955,69 @@ fn copper_line_310_move_lands_at(bitplane_dma: bool) -> Option<u32> {
         }
     }
     None
+}
+
+/// Run a Copper list whose first WAIT is `first_wait` (a position on line
+/// 255), followed by WAIT vp=$36 and a MOVE of $0123 into COLOR00. Returns
+/// the beam line the write landed on.
+fn copper_move_behind_a_line_255_wait_lands_at(first_wait: u16) -> Option<u32> {
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    write_chip_word(&mut bus, cop1, first_wait);
+    write_chip_word(&mut bus, cop1 + 2, 0xFFFE);
+    write_chip_word(&mut bus, cop1 + 4, 0x3601);
+    write_chip_word(&mut bus, cop1 + 6, 0xFFFE);
+    write_chip_word(&mut bus, cop1 + 8, 0x0180);
+    write_chip_word(&mut bus, cop1 + 10, 0x0123);
+    write_chip_word(&mut bus, cop1 + 12, 0xFFFF);
+    write_chip_word(&mut bus, cop1 + 14, 0xFFFE);
+
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.vpos = 0x18;
+    bus.agnus.hpos = 0x30;
+    bus.copper.jump(cop1 as u32);
+
+    for _ in 0..(313 * 227) {
+        bus.advance_chipset(1);
+        if bus.denise.palette[0] == 0x0123 {
+            return Some(bus.agnus.vpos);
+        }
+        if bus.agnus.vpos == 0 && bus.agnus.hpos == 0 {
+            break;
+        }
+    }
+    None
+}
+
+#[test]
+fn copper_wait_evaluated_on_line_255_is_already_satisfied() {
+    // The Copper compares eight vertical bits. A WAIT for line $36 that
+    // is evaluated while the beam is still on line 255 sees $FF >= $36
+    // and releases at once: the MOVE behind it lands on line 255, not on
+    // line $136. (This is why lists hold the Copper to the end of line
+    // 255 first; see the next test.)
+    assert_eq!(
+        copper_move_behind_a_line_255_wait_lands_at(0xFF07),
+        Some(255)
+    );
+    assert_eq!(
+        copper_move_behind_a_line_255_wait_lands_at(0xFF81),
+        Some(255)
+    );
+}
+
+#[test]
+fn copper_wait_fetched_at_the_end_of_line_255_is_evaluated_after_the_wrap() {
+    // WAIT $FFDF, $FFE1 and $FFDD all release late enough on line 255
+    // that the next WAIT's comparison happens after the vertical low byte
+    // has wrapped, so it waits for line 256 + $36.
+    for first_wait in [0xFFDF, 0xFFE1, 0xFFDD] {
+        assert_eq!(
+            copper_move_behind_a_line_255_wait_lands_at(first_wait),
+            Some(310),
+            "first WAIT {first_wait:#06X}"
+        );
+    }
 }
 
 #[test]

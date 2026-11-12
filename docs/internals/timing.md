@@ -408,11 +408,21 @@ counters; the BFD bit controls whether a satisfied position wait must also
 wait for the blitter to go idle.
 
 - Full-mask waits are satisfied once the beam reaches or passes the target
-  in the current 8-bit vertical phase. Near the end of PAL line 255,
-  low-half targets wait for the short post-rollover tail while high-half
-  targets (e.g. `$fc`) stay satisfied because that phase has passed;
-  partial-mask waits with the high vertical bit set likewise stay
-  satisfied across the line-255-to-256 rollover.
+  in the current 8-bit vertical phase: only V7-V0 are compared. On line
+  255 the low byte is `$ff`, so a WAIT for any other line that is
+  evaluated there is already satisfied and releases at once (a list that
+  runs `WAIT $FF07` then `WAIT $0801` moves on during line 255). A list
+  reaches lines 256 and up by holding the Copper to the end of line 255
+  first: behind `WAIT $FFDF` (or `$FFE1`, `$FFDD`) the next WAIT's
+  comparison only happens after the low byte has wrapped to `$00`, which
+  falls out of the instruction-tail and line-end blackout timing below
+  rather than out of a special case for line 255. Partial-mask waits
+  with the high vertical bit set stay satisfied across the
+  line-255-to-256 rollover. Tests:
+  `full_mask_wait_compares_eight_vertical_bits_across_line_255`,
+  `copper_wait_evaluated_on_line_255_is_already_satisfied`,
+  `copper_wait_fetched_at_the_end_of_line_255_is_evaluated_after_the_wrap`,
+  and the vAmiga-verified `copprobe-wait255` golden render.
 - With BFD clear a position-satisfied wait parks while the blitter is
   busy and resumes once the scheduled blit consumes its slots; with BFD
   set it ignores a busy blitter.

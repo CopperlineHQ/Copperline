@@ -643,4 +643,10 @@ probe_tests! {
     // CD32 double-buffer flip regression class). vAmiga-verified: the
     // stripe reads green (read strobed), not red (read inert).
     golden_copprobe_jmpread => probe("copprobe-jmpread", "copprobe-jmpread.bin", 16.0);
+    // The Copper compares eight vertical bits: a WAIT for line $08 that
+    // is evaluated on line 255 ($FF >= $08) releases at once, while the
+    // same WAIT behind WAIT $FFDF is evaluated after the wrap and waits
+    // for line 256+N. vAmiga-verified: red from line 255, green from
+    // line $110.
+    golden_copprobe_wait255 => probe("copprobe-wait255", "copprobe-wait255.bin", 16.0);
 }
