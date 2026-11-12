@@ -410,6 +410,9 @@ impl CdImage {
         let text = std::fs::read_to_string(cue_path)
             .with_context(|| format!("reading cue sheet {}", cue_path.display()))?;
         let dir = cue_path.parent().unwrap_or_else(|| Path::new("."));
+        // A byte order mark is not whitespace, so it would otherwise hide
+        // the first line's keyword.
+        let text = text.strip_prefix('\u{FEFF}').unwrap_or(&text);
 
         let mut files: Vec<(String, FileFormat)> = Vec::new();
         let mut raw_tracks: Vec<RawTrack> = Vec::new();
@@ -677,7 +680,6 @@ impl CdImage {
             }
             i = in_file;
         }
-
         Ok(Self {
             tracks,
             total_sectors: disc,
@@ -1702,6 +1704,29 @@ mod tests {
         for p in [&cue, &bin, &wav] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    /// Editors on Windows save cue sheets with a UTF-8 byte order mark.
+    #[test]
+    fn a_cue_sheet_may_start_with_a_byte_order_mark() {
+        let cue = temp_path("bom.cue");
+        let bin = temp_path("bom.bin");
+        write_file(&bin, &[0x33u8; DATA_SECTOR_BYTES]);
+        std::fs::write(
+            &cue,
+            format!(
+                "{}{}  TRACK 01 MODE1/2048\n    INDEX 01 00:00:00\n",
+                '\u{FEFF}',
+                file_line(&bin, "BINARY")
+            ),
+        )
+        .unwrap();
+        let mut image = CdImage::load(&cue).unwrap();
+        let mut data = [0u8; DATA_SECTOR_BYTES];
+        image.read_data_sector(0, &mut data).unwrap();
+        assert!(data.iter().all(|&b| b == 0x33));
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
     }
 
     #[test]
