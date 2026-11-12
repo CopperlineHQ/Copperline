@@ -3082,7 +3082,11 @@ impl ControllerPort {
             | PortDevice::LightPen
             | PortDevice::None => mouse_joydat(self.counter_x, self.counter_y),
             PortDevice::Joystick | PortDevice::Cd32Pad => {
-                digital_joydat(self.up, self.down, self.left, self.right)
+                // The switches drive the quadrature inputs, which are bits
+                // 1-0 of each counter; bits 7-2 are still the counter the
+                // chip holds (and JOYTEST loads) whatever is plugged in.
+                (mouse_joydat(self.counter_x, self.counter_y) & !JOYDAT_QUADRATURE_BITS)
+                    | digital_joydat(self.up, self.down, self.left, self.right)
             }
             PortDevice::Analogue => {
                 // Paddle buttons are switches on the LEFT/RIGHT lines, which
@@ -3557,12 +3561,17 @@ impl InputState {
         p.pot_y_ohms = y_ohms;
     }
 
-    /// JOYTEST loads both ports' quadrature counters with the same value,
-    /// whatever devices are plugged in.
+    /// JOYTEST loads bits 7-2 of all four quadrature counters with the same
+    /// value, whatever devices are plugged in. Bits 1-0 of each counter
+    /// follow the port's quadrature input pins and are not written (HRM
+    /// appendix A, JOYTEST: data bits 9-8 and 1-0 are "not affected").
     pub fn write_joytest(&mut self, val: u16) {
+        let keep = JOYDAT_QUADRATURE_BITS;
+        let load = val & !keep;
         for p in &mut self.ports {
-            p.counter_y = (val >> 8) as u8;
-            p.counter_x = val as u8;
+            let held = mouse_joydat(p.counter_x, p.counter_y) & keep;
+            p.counter_y = ((held | load) >> 8) as u8;
+            p.counter_x = (held | load) as u8;
         }
     }
 
@@ -3595,6 +3604,11 @@ impl InputState {
         }
     }
 }
+
+/// Bits 1-0 of each JOYxDAT counter (Y1-Y0 in bits 9-8, X1-X0 in bits 1-0):
+/// the state of the port's two quadrature input pairs, which the counters'
+/// bits 7-2 count the wraps of.
+const JOYDAT_QUADRATURE_BITS: u16 = 0x0303;
 
 fn mouse_joydat(x: u8, y: u8) -> u16 {
     ((y as u16) << 8) | x as u16

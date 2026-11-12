@@ -13026,13 +13026,13 @@ fn unplugging_a_device_releases_its_lines_but_keeps_the_counters() {
         .set_joystick(1, true, false, false, false, true, true);
     assert_eq!(
         bus.custom_read(0x00C, 2) as u16,
-        super::digital_joydat(true, false, false, false)
+        0x1034 | super::digital_joydat(true, false, false, false)
     );
 
     // Swapping the joystick for a mouse releases fire and button 2, and
     // the chip-side quadrature counters still hold the JOYTEST value.
     bus.input.set_port_device(1, PortDevice::Mouse);
-    assert_eq!(bus.custom_read(0x00C, 2), 0x1234);
+    assert_eq!(bus.custom_read(0x00C, 2), 0x1034);
     assert_ne!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x80, 0);
     assert_ne!(bus.custom_read(0x016, 2) & 0x4000, 0);
 }
@@ -13093,9 +13093,10 @@ fn empty_port_reads_like_an_idle_mouse() {
     bus.input.set_port_device(0, PortDevice::None);
     assert!(!bus.custom_write(0x036, 2, 0xABCD));
 
-    // Nothing drives the pins: JOY0DAT reports the counters, the pot
-    // pins float high, and /FIR0 stays released.
-    assert_eq!(bus.custom_read(0x00A, 2), 0xABCD);
+    // Nothing drives the pins: JOY0DAT reports the counters (JOYTEST
+    // loads their bits 7-2), the pot pins float high, and /FIR0 stays
+    // released.
+    assert_eq!(bus.custom_read(0x00A, 2), 0xA8CC);
     assert_eq!(bus.custom_read(0x016, 2) & 0x0500, 0x0500);
     assert_ne!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x40, 0);
 }
@@ -13296,12 +13297,14 @@ fn joydat_reports_mouse_until_joystick_engaged() {
     bus.input.ports[1].right = true;
     assert_eq!(bus.custom_read(0x00C, 2), 0x3412);
 
-    // Engaging the joystick switches JOY1DAT to the direction encoding.
+    // Engaging the joystick puts its switches on the quadrature inputs:
+    // bits 1-0 of each counter take the direction encoding, while bits
+    // 7-2 keep the count the mouse left in the chip.
     bus.input
         .set_joystick(1, false, false, false, true, false, false);
     assert_eq!(
         bus.custom_read(0x00C, 2) as u16,
-        super::digital_joydat(false, false, false, true)
+        0x3410 | super::digital_joydat(false, false, false, true)
     );
 }
 
@@ -13389,13 +13392,64 @@ fn vposw_and_vhposw_update_beam_register_reads() {
 }
 
 #[test]
-fn joytest_sets_both_mouse_counter_pairs() {
+fn joytest_loads_bits_7_to_2_of_all_four_counters() {
     let mut bus = empty_bus();
+    bus.input.set_port_device(0, PortDevice::Mouse);
+    bus.input.set_port_device(1, PortDevice::Mouse);
+
+    assert!(!bus.custom_write(0x036, 2, 0xFFFF));
+
+    // HRM appendix A: JOYTEST data bits 15-10 load Y7-Y2 and bits 7-2 load
+    // X7-X2 of both ports' counters; bits 9-8 and 1-0 are not written.
+    assert_eq!(bus.custom_read(0x00A, 2), 0xFCFC);
+    assert_eq!(bus.custom_read(0x00C, 2), 0xFCFC);
 
     assert!(!bus.custom_write(0x036, 2, 0x1234));
+    assert_eq!(bus.custom_read(0x00A, 2), 0x1034);
+    assert_eq!(bus.custom_read(0x00C, 2), 0x1034);
+}
 
-    assert_eq!(bus.custom_read(0x00A, 2), 0x1234);
-    assert_eq!(bus.custom_read(0x00C, 2), 0x1234);
+#[test]
+fn joytest_leaves_the_quadrature_bits_of_each_counter() {
+    let mut bus = empty_bus();
+    bus.input.set_port_device(0, PortDevice::Mouse);
+    // Three counts right and one down: the low two bits of each counter
+    // are the quadrature phase the mouse left its pins at.
+    bus.input.add_mouse_delta(0, 3, 1);
+    assert_eq!(bus.custom_read(0x00A, 2), 0x0103);
+
+    assert!(!bus.custom_write(0x036, 2, 0x0000));
+    assert_eq!(bus.custom_read(0x00A, 2), 0x0103);
+
+    assert!(!bus.custom_write(0x036, 2, 0xA5C3));
+    assert_eq!(bus.custom_read(0x00A, 2), 0xA5C3);
+    assert!(!bus.custom_write(0x036, 2, 0x5A3C));
+    assert_eq!(bus.custom_read(0x00A, 2), 0x593F);
+}
+
+#[test]
+fn joytest_counter_bits_read_back_behind_a_joystick() {
+    let mut bus = empty_bus();
+    bus.input.set_port_device(1, PortDevice::Joystick);
+
+    // The counters are in the chip, not in the controller: with a switch
+    // joystick plugged in, bits 7-2 still read back what JOYTEST loaded
+    // and bits 1-0 of each counter still follow the direction switches.
+    assert!(!bus.custom_write(0x036, 2, 0xFFFF));
+    assert_eq!(bus.custom_read(0x00C, 2), 0xFCFC);
+
+    bus.input
+        .set_joystick(1, false, true, false, true, false, false);
+    assert_eq!(
+        bus.custom_read(0x00C, 2) as u16,
+        0xFCFC | super::digital_joydat(false, true, false, true)
+    );
+
+    assert!(!bus.custom_write(0x036, 2, 0x0000));
+    assert_eq!(
+        bus.custom_read(0x00C, 2) as u16,
+        super::digital_joydat(false, true, false, true)
+    );
 }
 
 #[test]
