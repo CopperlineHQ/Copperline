@@ -1,4 +1,4 @@
-# The machine the osbench numbers in docs/internals/jit-performance.md use.
+# The machine docs/internals/jit-performance.md describes for osbench.
 # Give rom a Kickstart 3.x A3000 image and unit0 a fresh 64 MiB hardfile
 # whose first four bytes are "DOS\1" (see README.md).
 rom = "kicka3000.rom"
