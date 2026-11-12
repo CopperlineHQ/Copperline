@@ -1,8 +1,11 @@
 # Serialized board fixture
 
-`copperhf-board-v79.bin` is bincode 1.x serialization of
+`copperhf-board-v82-abort.bin` is bincode 1.x serialization of
 `BoardDevice::Copperhf(CopperhfBoard::new())`, using the explicit kind ID 13.
-It contains an empty board, no ROM, disk image, path, or user data.
+It contains an empty board, no ROM, disk image, path, or user data. It
+replaces `copperhf-board-v79.bin`: the board payload gained the `CHF_ABORT`
+latch and `CHF_ABORT_STATUS` (two bytes after `doorbell_hi`) when request
+cancellation was added.
 
 The same bytes are decoded and reproduced by
 `zorro_device::state::tests::board_fixture_is_independent_of_optional_features`

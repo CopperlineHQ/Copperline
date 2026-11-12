@@ -24,7 +24,10 @@ protocol in `copperhf_board.h`, served read-only from the board window's
   64-bit reads and writes, `HD_SCSICMD`, `TD_CHANGENUM`/`CHANGESTATE`/
   `PROTSTATUS`/`EJECT`) is unchanged from the guest's point of view -- it
   goes to the doorbell exactly like a CMD_READ, and the host (`src/
-  copperhf.rs`) answers it.
+  copperhf.rs`) answers it. `AbortIO` releases a held
+  `TD_ADDCHANGEINT` itself and asks the board to withdraw a still-queued
+  doorbell request through `CHF_ABORT` (see `copperhf_board.h` and
+  `docs/internals/copperhf.md`, "Cancellation").
 - `mounter.c` (M3) -- the boot-time partition mounter: walks each present
   unit's RDSK/PART chain (polled I/O, its own doorbell/completion spin, no
   MsgPort involved), hand-builds a `DeviceNode` + `FileSysStartupMsg` +

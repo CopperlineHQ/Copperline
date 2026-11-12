@@ -25,6 +25,9 @@
 //     never IOERR_OPENFAIL
 //   - a request the device has queued reading as in flight to CheckIO
 //     until its completion interrupt replies it
+//   - AbortIO: a held TD_ADDCHANGEINT is released with IOERR_ABORTED and
+//     no longer fires; a read is either withdrawn whole or completes
+//     whole; a write is never withdrawn; an idle request is left alone
 //
 // One CMD_WRITE marker per subtest into unit 0, one block apart, so the
 // Rust test can report exactly which check failed rather than a single
@@ -104,6 +107,8 @@ _Static_assert(sizeof(struct SCSICmd) == 30, "sizeof(SCSICmd) == 30");
 #define BLK_SCSI_SENSE 9
 #define BLK_OPEN_ABSENT 10
 #define BLK_INFLIGHT 11
+#define BLK_ABORT 12
+#define BLK_ABORT_SCRATCH 13 /* test_abort's write target, not a marker */
 
 #define UNIT_EMPTY 2 /* a slot the host test leaves unattached */
 #define UNIT_LUN1 10 /* SCSI target 0, LUN 1 in scsi.device's numbering */
@@ -131,6 +136,33 @@ static void change_int_handler(void)
 }
 
 static struct Interrupt change_interrupt;
+
+// A second change interrupt, registered and then aborted before the
+// change-interrupt story ejects unit 1: it must never fire.
+static volatile LONG aborted_fired = 0;
+
+static void aborted_int_handler(void)
+{
+    aborted_fired = 1;
+}
+
+static struct Interrupt aborted_interrupt;
+
+// exec's AbortIO returns its result in D0 (exec.doc: "error - zero if
+// successful"), but this NDK's prototype declares it VOID and the inline
+// drops the register. Same call, LVO -480, with the result kept.
+static LONG abort_io(struct IORequest *ioreq)
+{
+    register LONG result __asm("d0");
+    register struct IORequest *a1 __asm("a1") = ioreq;
+    register struct ExecBase *a6 __asm("a6") = SysBase;
+
+    __asm volatile("jsr a6@(-480:W)"
+                   : "=r"(result), "+r"(a1)
+                   : "r"(a6)
+                   : "d1", "a0", "memory", "cc");
+    return result;
+}
 
 static void fill_marker(UBYTE *buf, const char *marker)
 {
@@ -440,6 +472,112 @@ static BOOL test_inflight(void)
     return done == NULL && req0->io_Error == 0 && req0->io_Actual == BLOCK_SIZE;
 }
 
+// AbortIO (exec.doc: the caller still WaitIO()s whatever AbortIO returns).
+//
+//  1. A request that is not in flight is left alone and reported as not
+//     aborted.
+//  2. A held TD_ADDCHANGEINT -- the one request this device keeps
+//     indefinitely -- is released: AbortIO returns 0, WaitIO returns
+//     IOERR_ABORTED, and a second AbortIO finds nothing. main() checks
+//     after the change-interrupt story's eject that its Interrupt never
+//     fired.
+//  3. A CMD_READ aborted before its completion interrupt can run (under
+//     Disable) has exactly two legal outcomes, and which one happens
+//     depends only on whether the board had delivered it yet: withdrawn
+//     (AbortIO 0, IOERR_ABORTED, io_Actual 0, buffer untouched) or
+//     completed (AbortIO non-zero, no error, full length, the sector's
+//     data). Anything in between -- an "aborted" read that filled the
+//     buffer, a "completed" one that did not -- is the bug.
+//  4. A CMD_WRITE is on its way to the medium from the doorbell on:
+//     AbortIO always reports it as not aborted, and it completes and
+//     reads back.
+static BOOL test_abort(void)
+{
+    long i;
+    LONG aborted;
+    BOOL ok = TRUE;
+
+    // 1: idle (replied by the previous subtest's DoIO).
+    if (abort_io((struct IORequest *)req0) == 0)
+        ok = FALSE;
+
+    // 2: held TD_ADDCHANGEINT.
+    aborted_interrupt.is_Node.ln_Type = NT_INTERRUPT;
+    aborted_interrupt.is_Node.ln_Pri = 0;
+    aborted_interrupt.is_Node.ln_Name = (char *)"chftest_m4.aborted";
+    aborted_interrupt.is_Data = NULL;
+    aborted_interrupt.is_Code = aborted_int_handler;
+    addreq->io_Command = CHF_CMD_TD_ADDCHANGEINT;
+    addreq->io_Flags = 0;
+    addreq->io_Length = sizeof(struct Interrupt);
+    addreq->io_Data = &aborted_interrupt;
+    SendIO((struct IORequest *)addreq);
+    if (CheckIO((struct IORequest *)addreq) != NULL)
+        ok = FALSE;
+    if (abort_io((struct IORequest *)addreq) != 0)
+        ok = FALSE;
+    if (WaitIO((struct IORequest *)addreq) != IOERR_ABORTED || addreq->io_Error != IOERR_ABORTED)
+        ok = FALSE;
+    if (abort_io((struct IORequest *)addreq) == 0)
+        ok = FALSE;
+
+    // 3: a read, aborted before INT2 can reply it.
+    for (i = 0; i < BLOCK_SIZE; i++)
+        readbuf[i] = 0xEE;
+    req0->io_Command = CMD_READ;
+    req0->io_Length = BLOCK_SIZE;
+    req0->io_Data = readbuf;
+    req0->io_Offset = 0;
+    Disable();
+    SendIO((struct IORequest *)req0);
+    aborted = abort_io((struct IORequest *)req0);
+    Enable();
+    WaitIO((struct IORequest *)req0);
+    if (aborted == 0) {
+        if (req0->io_Error != IOERR_ABORTED || req0->io_Actual != 0)
+            ok = FALSE;
+        for (i = 0; i < BLOCK_SIZE; i++) {
+            if (readbuf[i] != 0xEE)
+                ok = FALSE;
+        }
+    } else {
+        if (req0->io_Error != 0 || req0->io_Actual != BLOCK_SIZE)
+            ok = FALSE;
+        for (i = 0; i < BLOCK_SIZE; i++) {
+            if (readbuf[i] != (UBYTE)(i % 251))
+                ok = FALSE;
+        }
+    }
+
+    // 4: a write is never withdrawn.
+    for (i = 0; i < BLOCK_SIZE; i++)
+        writebuf[i] = (UBYTE)(0xA0 ^ i);
+    req0->io_Command = CMD_WRITE;
+    req0->io_Length = BLOCK_SIZE;
+    req0->io_Data = writebuf;
+    req0->io_Offset = (ULONG)BLK_ABORT_SCRATCH * BLOCK_SIZE;
+    Disable();
+    SendIO((struct IORequest *)req0);
+    aborted = abort_io((struct IORequest *)req0);
+    Enable();
+    WaitIO((struct IORequest *)req0);
+    if (aborted == 0 || req0->io_Error != 0 || req0->io_Actual != BLOCK_SIZE)
+        ok = FALSE;
+    req0->io_Command = CMD_READ;
+    req0->io_Length = BLOCK_SIZE;
+    req0->io_Data = readbuf;
+    req0->io_Offset = (ULONG)BLK_ABORT_SCRATCH * BLOCK_SIZE;
+    DoIO((struct IORequest *)req0);
+    if (req0->io_Error != 0)
+        ok = FALSE;
+    for (i = 0; i < BLOCK_SIZE; i++) {
+        if (readbuf[i] != (UBYTE)(0xA0 ^ i))
+            ok = FALSE;
+    }
+
+    return ok;
+}
+
 // The change-interrupt story, on unit 1: TD_ADDCHANGEINT queues our
 // Interrupt and blocks (SendIO -- trackdisk.doc: "this command only
 // returns when the handler is removed"); TD_EJECT (io_Length 1) then bumps
@@ -511,6 +649,7 @@ int main(void)
 {
     BOOL opened0 = FALSE, opened1 = FALSE, openedadd = FALSE;
     BOOL all_ok = TRUE;
+    BOOL abort_ok;
 
     port0 = CreateMsgPort();
     port1 = CreateMsgPort();
@@ -550,8 +689,13 @@ int main(void)
                                     "M4-INQUIRY-BAD");
             all_ok &= write_marker(BLK_SCSI_READCAP, test_scsi_readcap(), "M4-READCAP-OK",
                                     "M4-READCAP-BAD");
+            // Before the story: its eject is what would fire the aborted
+            // change interrupt if AbortIO had left it registered.
+            abort_ok = test_abort();
             all_ok &= write_marker(BLK_CHANGEINT_STORY, test_change_interrupt_story(),
                                     "M4-CHGINT-OK", "M4-CHGINT-BAD");
+            all_ok &= write_marker(BLK_ABORT, abort_ok && !aborted_fired, "M4-ABORT-OK",
+                                    "M4-ABORT-BAD");
             all_ok &= write_marker(BLK_SCSI_SENSE, test_scsi_autosense(), "M4-SENSE-OK",
                                     "M4-SENSE-BAD");
             all_ok &= write_marker(BLK_OPEN_ABSENT, test_open_absent(), "M4-OPENABS-OK",

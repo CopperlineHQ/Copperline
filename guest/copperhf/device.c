@@ -703,15 +703,60 @@ void chf_drain_changes(struct CopperhfDevice *dev)
     }
 }
 
-/* AbortIO(dev, ioreq) -- A6=devbase, A1=ioreq. The M1/M2 protocol executes
- * every request synchronously host-side and completes it before
- * CHF_DOORBELL's write even returns, so by the time a client could call
- * AbortIO the request is already done (or about to be, moments away from
- * INT2) -- there is never anything left to actually cancel. Report
- * IOERR_NOCMD ("not aborted") rather than pretending success. */
+/* AbortIO(dev, ioreq) -- A6=devbase, A1=ioreq. Returns 0 if the request was
+ * withdrawn (it then completes with io_Error = IOERR_ABORTED), IOERR_NOCMD
+ * if there was nothing to withdraw. Either way the caller still has to
+ * WaitIO() the request, per exec.doc/AbortIO; a withdrawn request reaches
+ * its reply port like any other.
+ *
+ * A request this device has not replied yet is in one of three places:
+ *
+ *  - Held here: a TD_ADDCHANGEINT on dev_ChangeInts, which otherwise stays
+ *    until TD_REMCHANGEINT. Unlinked and replied from this call. This is
+ *    the request a task most needs to abort -- one that exits without it
+ *    would WaitIO() forever.
+ *  - Queued on the board, its doorbell rung and the tick that delivers it
+ *    still to come. CHF_ABORT asks the board to withdraw it and
+ *    CHF_ABORT_STATUS says whether it did (copperhf_board.h): a read or a
+ *    board-answered command comes back through the completion queue with
+ *    IOERR_ABORTED; a write, format, update, eject or SCSI command is
+ *    already on its way to the medium and completes normally.
+ *  - Delivered: in the completion queue with its result written, waiting
+ *    for the INT2 drain. Nothing is left to cancel; the board reports it as
+ *    not withdrawn.
+ *
+ * The whole call runs under Disable(): AbortIO may be called from another
+ * task or from an interrupt, the INT2 drain must not reply the request
+ * halfway through the list walk, and the CHF_ABORT write and the
+ * CHF_ABORT_STATUS read must not be separated by another abort.
+ *
+ * A request that is not in flight (ln_Type is not NT_MESSAGE: never sent,
+ * or already replied) is left alone, so aborting a finished request is
+ * harmless. */
 LONG dev_abortio(struct IOStdReq *ioreq __asm("a1"), struct CopperhfDevice *dev __asm("a6"))
 {
-    (void)ioreq;
-    (void)dev;
-    return CHF_IOERR_NOCMD;
+    struct ExecBase *_sysbase = sysbase();
+    UBYTE *board = (UBYTE *)dev->dev_BoardBase;
+    struct Node *node;
+    LONG result = CHF_IOERR_NOCMD;
+
+    Disable();
+    if (ioreq->io_Message.mn_Node.ln_Type == NT_MESSAGE) {
+        for (node = dev->dev_ChangeInts.lh_Head; node->ln_Succ != NULL; node = node->ln_Succ) {
+            if (node == (struct Node *)ioreq)
+                break;
+        }
+        if (node->ln_Succ != NULL) {
+            Remove(node);
+            ioreq->io_Error = CHF_IOERR_ABORTED;
+            ReplyMsg(&ioreq->io_Message);
+            result = 0;
+        } else {
+            *(volatile ULONG *)(board + CHF_ABORT) = (ULONG)ioreq;
+            if (*(volatile UWORD *)(board + CHF_ABORT_STATUS) & 1)
+                result = 0;
+        }
+    }
+    Enable();
+    return result;
 }

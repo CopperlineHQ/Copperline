@@ -47,7 +47,7 @@ description):
 | Register | Offset | Width | Access | Meaning |
 |---|---|---|---|---|
 | `CHF_MAGIC` | 0x4000 | 32 | RO | `"CPHF"` (0x43504846) |
-| `CHF_VERSION` | 0x4004 | 16 | RO | register-protocol version (2) |
+| `CHF_VERSION` | 0x4004 | 16 | RO | register-protocol version (3) |
 | `CHF_UNITS` | 0x4006 | 16 | RO | unit slot count (7) |
 | `CHF_UNIT_PRESENT` | 0x4008 | 16 | RO | bit *n* set = unit *n* configured (a slot stays present after its media is ejected/hot-detached -- see `CHF_UNIT_MEDIA`) |
 | `CHF_UNIT_RDONLY` | 0x400A | 16 | RO | bit *n* set = unit *n*'s image refuses writes (a CHD with no write overlay, a read-only session copy, a physical disk attached read-only); 0 for an ordinary image file |
@@ -58,10 +58,12 @@ description):
 | `CHF_CHANGED_ACK` | 0x4016 | 16 | WO | write a mask; clears those `CHF_CHANGED_MASK` bits |
 | `CHF_UNIT_MEDIA` | 0x4018 | 16 | RO | bit *n* set = unit *n* currently has media (distinct from `CHF_UNIT_PRESENT`, "slot configured") |
 | `CHF_DOORBELL` | 0x4020 | 32 | WO | guest pointer to an IOStdReq; queues work for ordered completion at the next board tick |
+| `CHF_ABORT` | 0x4024 | 32 | WO | guest pointer to an IOStdReq to withdraw; see [Cancellation](#copperhf-cancellation) |
 | `CHF_COMPLETE_GET` | 0x4028 | 32 | RO | oldest completed request pointer, 0 if empty (idempotent -- does not pop) |
 | `CHF_COMPLETE_ACK` | 0x402C | 16 | WO | any write pops the oldest completion |
 | `CHF_IRQ_STATUS` | 0x4030 | 16 | RO | bit 0 = completion queue non-empty; bit 1 = `CHF_CHANGED_MASK` non-zero |
 | `CHF_IRQ_ENABLE` | 0x4032 | 16 | RW | bit 0 = enable INT2 while `CHF_IRQ_STATUS` is non-zero, any bit (reset: 0) |
+| `CHF_ABORT_STATUS` | 0x4034 | 16 | RO | bit 0 = the last `CHF_ABORT` write withdrew its request (reset: 0) |
 
 `io_Unit` on a request is the raw copperhf unit **number** (0..6), not a
 guest `Unit` pointer -- this device has no per-unit `Unit` structures on
@@ -194,9 +196,12 @@ unit 0, and every drive past unit 0, since unit 10 is probed next. On
 success `Open` sets `io_Unit` to the raw unit number, `io_Device` to the
 device base, and `io_Error` to 0. `Close` decrements the open count and never expunges:
 this is a ROM-resident device, so `Expunge` unconditionally refuses
-(returns 0) regardless of open count. `AbortIO` always reports
-`IOERR_NOCMD`; cancellation is not implemented, so queued work continues
-to completion.
+(returns 0) regardless of open count.
+
+`AbortIO` withdraws a request the device has not replied yet where that is
+still possible (see [Cancellation](#copperhf-cancellation)). It returns 0
+when the request was withdrawn and `IOERR_NOCMD` when there was nothing to
+withdraw; as exec requires, the caller `WaitIO`s the request either way.
 
 The stub runs on Kickstart 1.3 (V34): it is built for the 68000, keeps its
 structures word-aligned, and guards its V36+/V37+ calls (`AddBootNode`,
@@ -244,6 +249,52 @@ space falls back to word-sized accesses. None of this changes what the guest
 sees or when. It only bounds the host time a request costs: copying sector by
 sector made a guest streaming large transfers cost far more host time than
 emulated time, and the emulation fell behind real time.
+
+(copperhf-cancellation)=
+### Cancellation
+
+A request the device has not replied yet is in one of three places, and
+`AbortIO` (`device.c`'s `dev_abortio`, the whole call under `Disable()`)
+handles each:
+
+- **Held by the stub.** A `TD_ADDCHANGEINT` stays on the device's pending
+  list until `TD_REMCHANGEINT`. `AbortIO` unlinks it, sets `io_Error` to
+  `IOERR_ABORTED` (-2), and replies it; its interrupt no longer fires on a
+  media change. This is the abort a client most needs: a task that exits
+  without removing its change interrupt would otherwise wait forever on a
+  request the device never replies.
+- **Queued on the board**, its doorbell rung and the board tick that
+  delivers it still to come. The stub writes the request pointer to
+  `CHF_ABORT` and reads the outcome from `CHF_ABORT_STATUS`. The board
+  withdraws a request only while nothing it does has left the board:
+  `CMD_READ` and the 64-bit reads (the data has not reached guest memory
+  yet), and every command the board answers from its own state (`TD_MOTOR`,
+  `TD_GETGEOMETRY`, `TD_CHANGENUM`/`CHANGESTATE`/`PROTSTATUS`, `TD_SEEK64`,
+  `CMD_CLEAR`, unknown commands, and requests that failed validation). A
+  withdrawn request keeps its place in the completion queue and completes
+  with `IOERR_ABORTED` and `io_Actual` 0; no data is written to `io_Data`,
+  and a withdrawn `TD_MOTOR` does not change the motor state. Writes,
+  formats, `CMD_UPDATE`, `TD_EJECT`, and `HD_SCSICMD` are on their way to
+  the medium from the doorbell on and cannot be recalled, as a transfer a
+  real drive has already started cannot: the status reads 0 and the request
+  completes with its real result.
+- **Delivered.** The request is in the completion queue with its result
+  written, waiting for the INT2 drain. Nothing is left to cancel, so the
+  board reports it as not withdrawn and `AbortIO` returns `IOERR_NOCMD`.
+
+Every doorbell produces exactly one completion, withdrawn or not, so the
+INT2 drain needs no special case. `AbortIO` on a request that is not in
+flight (`ln_Type` is not `NT_MESSAGE`) does nothing.
+
+The outcome of `CHF_ABORT` depends only on the board's own doorbell-ordered
+queue, never on how far the worker thread has got. A withdrawn read's job
+may already have run; its result is collected at its queue position and
+dropped, which keeps the worker's results matched to the requests behind
+it. Because a request is delivered at the first tick after its doorbell,
+the queued window is short: with the cycle-stepped CPU cores a request has
+normally been delivered before a guest can reach `AbortIO`, and a core that
+runs several instructions between board ticks (`[cpu] jit`) is where a
+doorbell request is still on the board when the abort arrives.
 
 ### The determinism model
 
