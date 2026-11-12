@@ -1558,6 +1558,13 @@ impl TryFrom<RawConfig> for Config {
             fmv_rom_path,
             cd_image_path: raw.cd.image.map(|p| locate_media(p, Media::Cd)),
             cd_insert_delay_secs,
+            cdtv_bookmark_path: match raw.cd.nvram.as_deref() {
+                _ if !defaults.cdtv_cd => None,
+                // An empty path keeps the bookmark RAM session-only.
+                Some("") => None,
+                Some(path) => Some(PathBuf::from(path)),
+                None => Some(crate::paths::cdtv_bookmark_file()),
+            },
             cd32_nvram_path: raw
                 .cd
                 .nvram

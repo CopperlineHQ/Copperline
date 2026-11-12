@@ -3342,6 +3342,7 @@ profile = "CD32"
 image = "disc.cue"        # cue sheet, bare .iso, Nero .nrg, or CHD .chd
 insert_delay = 0.0        # emulated seconds after power-on to insert
 # nvram = "cd32-nvram.bin" # CD32 save-game EEPROM backing file
+                          # (on a CDTV: the bookmark RAM, "cdtv-bookmark.bin")
 ```
 
 `image` takes a cue sheet, a bare `.iso` (single data track), a Nero
@@ -3423,6 +3424,20 @@ inserted after the boot screen appears. CD32 NVRAM persists to
 `cd32-nvram.bin` in the `[paths]` nvram folder unless overridden with
 `[cd] nvram`; a `cd32-nvram.bin` already in the working directory from an
 earlier Copperline keeps being used from there.
+
+On a CDTV the same key names the backing file of the battery-backed
+bookmark RAM, the 16 KiB of memory at `$DC8000` where `bookmark.device`
+keeps title saves, high scores and the player's preferences. It defaults to
+`cdtv-bookmark.bin` in the `[paths]` nvram folder (a `cdtv-bookmark.bin` in
+the working directory is used from there instead), and `nvram = ""` keeps
+the bookmark RAM session-only, as on a player with a flat battery. The file
+is a raw image of the memory: a shorter file fills the start of the RAM and
+a longer one gives its first 16 KiB. A change reaches the file a quarter of
+an emulated second after the guest makes it, on a reset, and when Copperline
+closes. Loading a save state restores the bookmark RAM the state holds and
+writes that to the session's file, so the file always matches the machine;
+keep a copy of the file if a state from before a save is about to be loaded
+over it. Netplay sessions never use a backing file.
 
 ## `[[zorro]]` -- expansion boards
 

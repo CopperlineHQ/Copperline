@@ -234,6 +234,10 @@ pub struct Config {
     pub cd_insert_delay_secs: f64,
     /// CD32 NVRAM backing file (None = session-only EEPROM).
     pub cd32_nvram_path: Option<PathBuf>,
+    /// CDTV bookmark RAM backing file (`[cd] nvram` on a CDTV), a raw
+    /// 16 KiB image; `None` keeps the bookmark RAM session-only. Defaults
+    /// to `cdtv-bookmark.bin` when the CDTV's CD controller is fitted.
+    pub cdtv_bookmark_path: Option<PathBuf>,
     /// Whether the battery RTC at $DC0000 is fitted. Defaults to false:
     /// the base A500/A500OCS, A600, A1200, A1000, and CD32 shipped without a
     /// battery-backed clock. Only the A500+ (soldered on the Rev 8A board),
@@ -2940,6 +2944,7 @@ impl Default for Config {
             cd_image_path: None,
             cd_insert_delay_secs: 0.0,
             cd32_nvram_path: None,
+            cdtv_bookmark_path: None,
             // The default machine is the A500 Rev 6A, which had no battery
             // clock; only the A500+/CDTV profiles fit one (see
             // machine_profile_defaults).

@@ -6336,6 +6336,12 @@ impl Bus {
         if let (Some(akiko), Some(live)) = (self.akiko.as_mut(), live.akiko.as_mut()) {
             akiko.adopt_trace_from(live);
         }
+        // The CDTV bookmark RAM's backing file is the running session's:
+        // the restored controller takes it over and owes it the restored
+        // contents.
+        if let (Some(cdtv), Some(live)) = (self.cdtv.as_mut(), live.cdtv.as_mut()) {
+            cdtv.adopt_bookmark_file_from(live);
+        }
         // Drive speed is host configuration, not machine state: a loaded
         // state keeps the running session's setting.
         self.floppy.set_speed_percent(live.floppy.speed_percent());
@@ -6385,6 +6391,13 @@ impl Bus {
             .is_some_and(crate::akiko::Akiko::persistent_nvram)
         {
             return Some("persistent CD32 NVRAM");
+        }
+        if self
+            .cdtv
+            .as_ref()
+            .is_some_and(crate::cdtv::CdtvController::persistent_bookmark_ram)
+        {
+            return Some("persistent CDTV bookmark RAM");
         }
         if self.pcmcia.is_some() {
             // A card inserted from the menu after start-up never passed

@@ -4925,6 +4925,10 @@ fn build_machine_inner(
     }
     if cfg.cdtv_cd {
         let mut cdtv = crate::cdtv::CdtvController::new();
+        if let Some(path) = &cfg.cdtv_bookmark_path {
+            info!("cdtv: bookmark RAM persisted to {}", path.display());
+            cdtv.set_bookmark_path(path.clone());
+        }
         if let Some(image) = cd_image.take() {
             if cfg.cd_insert_delay_secs > 0.0 {
                 cdtv.insert_disc_after(image, cfg.cd_insert_delay_secs);

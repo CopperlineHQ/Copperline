@@ -579,6 +579,51 @@ fn the_battery_ram_follows_the_paths_in_force() -> Result<()> {
     Ok(())
 }
 
+/// The CDTV's bookmark RAM is persisted by default, in the same folder as
+/// the other battery-backed memories; `[cd] nvram` moves it and an empty
+/// string turns it off. A machine without the CDTV's controller has no
+/// bookmark RAM to back, whatever `[cd] nvram` says (on a CD32 that key is
+/// the EEPROM's).
+#[test]
+fn the_cdtv_bookmark_ram_gets_a_backing_file() -> Result<()> {
+    let _guard = crate::paths::adopted_store_lock();
+    crate::paths::adopt(crate::pathconf::Paths {
+        nvram: Some(PathBuf::from("elsewhere")),
+        ..Default::default()
+    });
+    let cfg = parse_config("[machine]\nprofile = \"CDTV\"\n")?;
+    let bookmark = cfg
+        .cdtv_bookmark_path
+        .expect("a CDTV has bookmark RAM to persist");
+    assert_eq!(
+        bookmark.file_name().and_then(|n| n.to_str()),
+        Some("cdtv-bookmark.bin")
+    );
+    // No host-data directory, or a legacy file in the working directory,
+    // leaves the bare name (the documented degradation).
+    if crate::paths::config_dir().is_some() && !Path::new("cdtv-bookmark.bin").is_file() {
+        assert!(
+            bookmark.parent().is_some_and(|p| p.ends_with("elsewhere")),
+            "the section in force did not site the bookmark RAM: {bookmark:?}"
+        );
+    }
+    assert!(cfg.cd32_nvram_path.is_none());
+
+    let cfg = parse_config("[machine]\nprofile = \"CDTV\"\n\n[cd]\nnvram = \"my-cdtv.bin\"\n")?;
+    assert_eq!(cfg.cdtv_bookmark_path, Some(PathBuf::from("my-cdtv.bin")));
+
+    let cfg = parse_config("[machine]\nprofile = \"CDTV\"\n\n[cd]\nnvram = \"\"\n")?;
+    assert_eq!(cfg.cdtv_bookmark_path, None);
+
+    for profile in ["A500", "CD32"] {
+        let cfg = parse_config(&format!(
+            "[machine]\nprofile = \"{profile}\"\n\n[cd]\nnvram = \"x.bin\"\n"
+        ))?;
+        assert_eq!(cfg.cdtv_bookmark_path, None, "{profile}");
+    }
+    Ok(())
+}
+
 /// A relative media path the working directory does not have is taken from
 /// the matching `[paths]` media folder, so an installed copy started from
 /// anywhere still finds `rom = "KICK31.ROM"`. Each kind looks in its own
