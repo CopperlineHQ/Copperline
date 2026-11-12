@@ -55,7 +55,7 @@
 # traces = "traces"           # debugger traces and waveform captures
 # configs = "configs"         # configurations saved from the launcher
 # roms = "roms"               # media folders: only used if the folder exists
-# mt32_roms = "roms/mt32"
+# mt32_roms = "roms/mt32"    # default: the mt32 folder inside roms
 # floppies = "floppies"
 # harddrives = "harddrives"
 # cds = "cds"
@@ -206,6 +206,12 @@ model = "68000"
 # core, so it is ignored there). Off by default.
 # jit = true
 
+# With jit = true only: "fixed" (default) runs the JIT at clock_mhz;
+# "fastest" adapts its effective clock to the host while the window paces to
+# real time, like WinUAE's "fastest possible". Not reproducible, and refused
+# without jit or on a 68000/68010. --cpu-speed overrides it for one run.
+# speed = "fastest"
+
 # 68060/68EC060 only: the 68060 dropped MOVEP, CHK2/CMP2, CAS2, misaligned CAS,
 # 64-bit MUL/DIV, and most FPU operations beyond basic arithmetic from
 # silicon. "trap" (default) raises the chip's unimplemented-instruction
@@ -280,7 +286,8 @@ model = "68000"
 
 [memory]
 
-# Chip RAM. Accepts a number with optional unit (K, KB, M, MB).
+# Chip RAM. Accepts a number with optional unit (K, KB, M, MB, G, GB; the
+# KiB/MiB/GiB spellings work too).
 # Must be a multiple of 4 KiB.
 #   OCS: max 512K
 #   ECS: max 2M
@@ -609,16 +616,17 @@ video = "PAL"
 #
 # A drive may be given as a table instead of a bare path, to set the volume
 # label of a directory mount (name), the boot priority of the synthesized RDB
-# partition (bootpri, -128..127, default 0), and/or the directory mount's
-# filesystem (filesystem = "ofs" or "ffs", default "ffs"). Kickstart enters
+# partition (bootpri, -128..127, default 0), the directory mount's
+# filesystem (filesystem = "ofs" or "ffs", default "ffs"), and/or that one
+# drive's own timing (timing, as the section-level key below). Kickstart enters
 # DF0: at 5, so bootpri = 6 boots the hard disk ahead of a floppy; -128 mounts
 # the volume without ever offering it for boot. filesystem = "ofs" is worth
 # setting for a drive meant to work under Kickstart 1.3, whose ROM has no FFS
 # handler built in (real hardware needs one loaded from disk or an RDB
 # FileSystemHeader chain, neither of which Copperline bundles); OFS needs no
-# guest-side setup at all. None of these three apply to an image carrying its
-# own RDB, which keeps its label, priorities, and filesystem recorded inside
-# it.
+# guest-side setup at all. Neither name, bootpri nor filesystem applies to an
+# image carrying its own RDB, which keeps its label, priorities, and
+# filesystem recorded inside it.
 #
 # A path ending in .cue, .iso, .nrg, or a .chd holding a CD attaches an ATAPI
 # CD-ROM drive at that slot instead of a hard disk (see [scsi], above, for the
@@ -842,7 +850,7 @@ video = "PAL"
 # vsync = true
 # hidpi_texture = true
 
-# [recording] -- GIF clip and interactive screenshot settings.
+# [recording] -- GIF clip settings.
 # The clip ring is behind Save Clip as GIF (Cmd/Alt+Shift+G); clip_fps also
 # applies to headless --gif-after captures.
 # clip_seconds: emulated seconds of the presented picture the window keeps
@@ -1044,7 +1052,8 @@ floppy_sounds_volume = 100
 #             guest (RING) rather than being bridged straight through, and
 #             ATA (or S0 auto-answer) picks it up. telnet = true switches
 #             on AT*T1's telnet NVT translation (RFC 854 option negotiation
-#             and CR handling) at power-on; it is off otherwise. Turn it on
+#             and CR handling) at power-on; left unset, a profile stored
+#             with AT&W decides, and it is off without one. Turn it on
 #             for a real telnet server (a BBS), not a raw TCP byte service.
 #             [serial.phonebook] maps a dialable number to a host:port (or
 #             a bare host, which dials the modem's default port);
@@ -1067,7 +1076,8 @@ floppy_sounds_volume = 100
 # listen = "127.0.0.1:1234"
 #
 # Modem mode's own keys (see "modem" above).
-# telnet = true                      # AT*T1 telnet translation at power-on (default off)
+# telnet = true                      # AT*T1 telnet translation at power-on (unset: the
+#                                    # stored AT&W profile decides; off without one)
 # session = "bbs-demo.session"       # replay a scripted session instead of TCP
 # (The [serial.phonebook] table goes after every other [serial] key; see the
 # end of this section.)
@@ -1157,7 +1167,9 @@ floppy_sounds_volume = 100
 #
 # [floppy.df0]
 # path = "Workbench.adf"
+# paths = ["disk1.adf", "disk2.adf"]  # swap playlist, instead of (or after) path
 # write_protected = true
+# enabled = true         # implied by path/paths; false leaves the bay's image out
 #
 # A bay can drive a real 3.5" floppy drive instead, over a Greaseweazle,
 # reading and writing genuine Amiga disks. The pure-Rust FluxBridge library
