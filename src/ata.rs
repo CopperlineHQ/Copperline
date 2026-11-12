@@ -233,15 +233,37 @@ impl IdeDrive {
         Ok(Self::from_disk(disk))
     }
 
-    pub(crate) fn from_disk(disk: HardDriveImage) -> Self {
-        // The classic Amiga HDF geometry: 16 surfaces, 32 sectors per track
-        // (what HDToolBox/RDB tooling defaults to), so the CHS the host
-        // computes from an RDB's physical-drive block agrees with what the
-        // drive decodes.
-        let heads = RDB_HEADS as u8;
-        let spt = RDB_SPT as u8;
-        let cylinders =
-            (disk.total_sectors() / (u64::from(heads) * u64::from(spt))).clamp(1, 65535) as u16;
+    /// The default CHS translation a drive built over `disk` reports.
+    ///
+    /// A disk that carries a Rigid Disk Block was partitioned on a drive of
+    /// some geometry, and the RDSK block records it. The drive presents that
+    /// geometry again, so every block the partition table describes stays
+    /// reachable by CHS: a drive translating with fewer sectors per track
+    /// than the disk was laid out for rounds its capacity down to a whole
+    /// number of its own cylinders and loses the tail of the last partition.
+    /// Without a usable RDSK geometry the drive reports 16 surfaces and 32
+    /// sectors per track, the geometry Amiga hardfile tooling defaults to
+    /// and the one a synthesized RDB is built with.
+    fn default_geometry(disk: &mut HardDriveImage) -> (u8, u8, u16) {
+        let total = disk.total_sectors();
+        let (heads, spt) = disk
+            .rdb_physical_geometry()
+            .filter(|&(cylinders, heads, spt)| {
+                // What an ATA task file can address: head 0-15, sector 1-255.
+                (1..=16).contains(&heads)
+                    && (1..=255).contains(&spt)
+                    && cylinders >= 1
+                    && u64::from(cylinders) * u64::from(heads) * u64::from(spt) <= total
+            })
+            .map_or((RDB_HEADS as u8, RDB_SPT as u8), |(_, heads, spt)| {
+                (heads as u8, spt as u8)
+            });
+        let cylinders = (total / (u64::from(heads) * u64::from(spt))).clamp(1, 65535) as u16;
+        (heads, spt, cylinders)
+    }
+
+    pub(crate) fn from_disk(mut disk: HardDriveImage) -> Self {
+        let (heads, spt, cylinders) = Self::default_geometry(&mut disk);
         Self {
             disk,
             default_heads: heads,
@@ -256,10 +278,10 @@ impl IdeDrive {
 
     /// Open a real host disk as an IDE drive.
     ///
-    /// The geometry comes from the disk's own capacity, exactly as it does
-    /// for an image: the guest's driver reads the RDB the disk already
-    /// carries, so nothing here invents a partition table over media that
-    /// came out of a real Amiga. That is also why there is no unit number to
+    /// The geometry comes from the disk's own capacity and Rigid Disk Block,
+    /// exactly as it does for an image: the guest's driver reads the RDB the
+    /// disk already carries, so nothing here invents a partition table over
+    /// media that came out of a real Amiga. That is also why there is no unit number to
     /// pass -- it names the device a synthesized RDB advertises, and a real
     /// disk brings its own.
     #[cfg(not(target_arch = "wasm32"))]
@@ -269,12 +291,9 @@ impl IdeDrive {
         identity_confirmed: bool,
         writable: bool,
     ) -> anyhow::Result<Self> {
-        let disk =
+        let mut disk =
             HardDriveImage::open_device(device, fingerprint, identity_confirmed, "ide", writable)?;
-        let heads = RDB_HEADS as u8;
-        let spt = RDB_SPT as u8;
-        let cylinders =
-            (disk.total_sectors() / (u64::from(heads) * u64::from(spt))).clamp(1, 65535) as u16;
+        let (heads, spt, cylinders) = Self::default_geometry(&mut disk);
         Ok(Self {
             disk,
             default_heads: heads,
@@ -2290,6 +2309,124 @@ mod tests {
 
         let _ = std::fs::remove_file(&path0);
         let _ = std::fs::remove_file(&path2);
+    }
+
+    /// A disk image of `sectors` sectors with an RDSK block at sector
+    /// `rdsk_lba` recording `cylinders` x `heads` x `spt`.
+    fn rdb_image(
+        name: &str,
+        sectors: usize,
+        rdsk_lba: usize,
+        (cylinders, heads, spt): (u32, u32, u32),
+        valid_checksum: bool,
+    ) -> PathBuf {
+        let mut data = vec![0u8; sectors * SECTOR_SIZE];
+        for (lba, sector) in data.chunks_mut(SECTOR_SIZE).enumerate() {
+            sector[SECTOR_SIZE - 4..].copy_from_slice(&(lba as u32).to_be_bytes());
+        }
+        let block = &mut data[rdsk_lba * SECTOR_SIZE..(rdsk_lba + 1) * SECTOR_SIZE];
+        block.fill(0);
+        block[..4].copy_from_slice(b"RDSK");
+        let mut put = |offset: usize, value: u32| {
+            block[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+        };
+        put(4, 64);
+        put(16, SECTOR_SIZE as u32);
+        put(28, !0); // no partition list
+        put(64, cylinders);
+        put(68, spt);
+        put(72, heads);
+        let sum = (0..64).fold(0u32, |sum, i| {
+            sum.wrapping_add(u32::from_be_bytes(
+                block[i * 4..i * 4 + 4].try_into().unwrap(),
+            ))
+        });
+        let checksum = 0u32.wrapping_sub(sum);
+        block[8..12].copy_from_slice(
+            &(if valid_checksum {
+                checksum
+            } else {
+                checksum.wrapping_add(1)
+            })
+            .to_be_bytes(),
+        );
+        let path = std::env::temp_dir().join(format!(
+            "copperline-ata-geometry-{}-{}-{name}",
+            std::process::id(),
+            rand_suffix()
+        ));
+        std::fs::write(&path, &data).unwrap();
+        path
+    }
+
+    fn identify_word(drive: &IdeDrive, index: usize) -> u16 {
+        let block = drive.identify_block();
+        u16::from(block[index * 2]) | (u16::from(block[index * 2 + 1]) << 8)
+    }
+
+    #[test]
+    fn drive_reports_the_geometry_its_rigid_disk_block_records() {
+        // 16 cylinders of 16 heads x 63 sectors: 16128 sectors, which is not
+        // a whole number of 16 x 32 cylinders (31.5).
+        let path = rdb_image("16x63.hdf", 16 * 16 * 63, 0, (16, 16, 63), true);
+        let drive = IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        assert_eq!((drive.heads, drive.spt, drive.cylinders), (16, 63, 16));
+        assert_eq!(identify_word(&drive, 1), 16, "default cylinders");
+        assert_eq!(identify_word(&drive, 3), 16, "default heads");
+        assert_eq!(identify_word(&drive, 6), 63, "default sectors per track");
+        assert_eq!(identify_word(&drive, 54), 16, "current cylinders");
+        assert_eq!(identify_word(&drive, 56), 63, "current sectors per track");
+        let chs_capacity =
+            u32::from(identify_word(&drive, 57)) | (u32::from(identify_word(&drive, 58)) << 16);
+        assert_eq!(chs_capacity, 16128, "every sector is reachable by CHS");
+
+        // The last sector of the disk by CHS: cylinder 15, head 15, sector 63.
+        let mut bus = AtaBus::new();
+        bus.attach_drive(0, drive);
+        bus.cyl_low[0] = 15;
+        bus.cyl_high[0] = 0;
+        bus.drive_head = 0x0F;
+        bus.sector_number = 63;
+        bus.sector_count = 1;
+        bus.command(0x20); // READ SECTORS
+        assert_eq!(bus.status & ST_ERR, 0, "the last CHS sector is in range");
+        let mut sector = Vec::new();
+        for _ in 0..SECTOR_SIZE / 2 {
+            let word = bus.data_read_word();
+            sector.push((word >> 8) as u8);
+            sector.push(word as u8);
+        }
+        assert_eq!(&sector[SECTOR_SIZE - 4..], &16127u32.to_be_bytes());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn drive_finds_an_rdsk_block_past_sector_zero() {
+        let path = rdb_image("4x17.hdf", 8 * 4 * 17, 3, (8, 4, 17), true);
+        let drive = IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+        assert_eq!((drive.heads, drive.spt, drive.cylinders), (4, 17, 8));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn drive_keeps_the_default_geometry_without_a_usable_rdsk_geometry() {
+        // (name, recorded geometry, checksum valid)
+        for (name, geometry, valid) in [
+            ("badsum.hdf", (16, 16, 63), false), // corrupt block
+            ("heads.hdf", (4, 64, 63), true),    // more heads than a task file addresses
+            ("zero.hdf", (16, 16, 0), true),     // no sectors per track
+            ("large.hdf", (64, 16, 63), true),   // describes more than the disk holds
+        ] {
+            let path = rdb_image(name, 16 * 16 * 63, 0, geometry, valid);
+            let drive =
+                IdeDrive::open(&path, 0, None, 0, crate::diskimage::FileSystem::FFS).unwrap();
+            assert_eq!(
+                (drive.heads, drive.spt, drive.cylinders),
+                (16, 32, 31),
+                "{name}"
+            );
+            let _ = std::fs::remove_file(&path);
+        }
     }
 
     // ----- timed drives (period mechanics) --------------------------------
