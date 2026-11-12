@@ -157,8 +157,12 @@ use wasmtime::{
 pub use crate::wasm_manifest::{WasmCaps, WasmManifest};
 
 // One memory/table per board makes these per-resource limits also bound the
-// total linear memory and table storage of a plugin instance.
-const MAX_LINEAR_MEMORY_BYTES: usize = 64 * 1024 * 1024;
+// total linear memory and table storage of a plugin instance. A board may
+// keep its whole window in linear memory (the bundled zz9k board does), so
+// the limit is the largest board window a configuration can ask for, 256 MiB,
+// plus 64 MiB for the plugin's own code, heap and stack.
+const MAX_BOARD_WINDOW_BYTES: usize = 256 * 1024 * 1024;
+const MAX_LINEAR_MEMORY_BYTES: usize = MAX_BOARD_WINDOW_BYTES + 64 * 1024 * 1024;
 const MAX_TABLE_ELEMENTS: usize = 65_536;
 
 /// Store data for host imports. The Amiga-memory pointer is stored as a
@@ -2389,8 +2393,13 @@ mod tests {
 
     #[test]
     fn plugin_instantiation_rejects_oversized_or_multiple_memories_and_tables() {
+        // One page more than the limit allows.
+        let large_memory = format!(
+            "(module (memory (export \"memory\") {}))",
+            MAX_LINEAR_MEMORY_BYTES / 65536 + 1
+        );
         for (name, wat) in [
-            ("large-memory", "(module (memory (export \"memory\") 1025))"),
+            ("large-memory", large_memory.as_str()),
             (
                 "extra-memory",
                 "(module (memory (export \"memory\") 1) (memory 1))",
@@ -2450,16 +2459,20 @@ mod tests {
 
     #[test]
     fn plugin_init_cannot_grow_memory_past_the_limit() {
+        // From one page, growing by the whole limit goes one page past it.
         let path = write_wasm(
             "bounded-init",
-            r#"
+            &format!(
+                r#"
             (module
               (memory (export "memory") 1)
               (func (export "init")
-                (i32.store (i32.const 0) (memory.grow (i32.const 1024))))
+                (i32.store (i32.const 0) (memory.grow (i32.const {}))))
               (func (export "read") (param i32 i32) (result i32)
                 (i32.load (i32.const 0))))
         "#,
+                MAX_LINEAR_MEMORY_BYTES / 65536
+            ),
         );
         let mut board = WasmBoard::from_file(&path, manifest("bounded-init", false)).unwrap();
         let mut mem = empty_memory();
@@ -3192,6 +3205,21 @@ mod tests {
                 w16(&mut b, &mut host, 0x0004, 0x0088);
                 assert!(!ZorroDevice::int2_line(&b));
                 assert!(!ZorroDevice::int6_line(&b));
+            }
+        }
+
+        /// The board keeps its whole window in the plugin's linear memory,
+        /// so every Zorro III size the configuration accepts (1M-256M) has
+        /// to fit under the store's memory limit.
+        #[test]
+        fn zz9k_boards_of_every_configurable_size_instantiate() {
+            for size in [0x10_0000usize, 0x400_0000, 0x1000_0000] {
+                let cfg = crate::zz9k::board_config(ZorroVersion::III, size, false, None);
+                let mut b = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest)
+                    .unwrap_or_else(|e| panic!("a {size:#x}-byte board: {e:#}"));
+                let mut mem = empty_memory();
+                let mut host = DeviceHost::new(&mut mem);
+                assert_eq!(r16(&mut b, &mut host, 0x0100), 0x5A39, "{size:#x}");
             }
         }
 

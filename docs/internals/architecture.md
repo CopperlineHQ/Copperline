@@ -570,7 +570,7 @@ replaced atomically; automatic paths are owned by the server and removed
 when it drops. See the [control protocol](../debugger/control.md).
 
 `WasmRuntime::instantiate` installs a Wasmtime `StoreLimits` limiter before
-instantiating each plugin. Its one memory (64 MiB) and one table (65,536
+instantiating each plugin. Its one memory (320 MiB) and one table (65,536
 elements) limits also cover reset-created stores and host-initiated memory
 growth on restore. The limiter is host state, so this adds no serialized
 field or save-state format version. See [WASM boards](../zorro.md#wasm-plugin-boards).
