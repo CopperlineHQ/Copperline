@@ -1633,7 +1633,11 @@ impl App {
         capture_field_map_for(CaptureFramingInputs::of(self))
     }
 
-    pub(super) fn save_screenshot(&self, path: &std::path::Path) {
+    pub(super) fn save_screenshot(&mut self, path: &std::path::Path) {
+        // A card that composes its outputs on a thread of its own finishes
+        // the fields of this instant first, so the monitor pictures saved
+        // beside the capture are the same on every run.
+        self.emu.bus_mut().settle_video_slot_outputs();
         self.save_screenshot_with_mode(path, self.native_screenshots);
     }
 
