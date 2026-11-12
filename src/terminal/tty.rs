@@ -153,37 +153,72 @@ fn restore_terminal(restore: &Restore) {
 /// text once the session ends. Reads until the terminal has been quiet for
 /// [`DRAIN_QUIET`], for at most [`DRAIN_BUDGET`].
 fn discard_input(fd: RawFd) {
-    let started = Instant::now();
-    let mut quiet_since = started;
-    let mut buf = [0u8; 1024];
-    while started.elapsed() < DRAIN_BUDGET {
-        // SAFETY: buf is a live, writable slice; fd is an open descriptor.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if n > 0 {
-            quiet_since = Instant::now();
-            continue;
-        }
-        if n == 0 {
-            break;
-        }
-        let err = std::io::Error::last_os_error();
-        if !matches!(
-            err.kind(),
-            std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
-        ) {
-            break;
-        }
-        let quiet = quiet_since.elapsed();
-        if quiet >= DRAIN_QUIET || wait_fd(fd, false, DRAIN_QUIET - quiet).is_err() {
-            break;
-        }
-    }
+    drain_until_quiet(&mut DrainFd(fd));
     // Whatever arrived between the last read and now, in the line
     // discipline's own queue.
     // SAFETY: tcflush on an open descriptor; a failure (not a terminal)
     // leaves nothing to flush.
     unsafe {
         libc::tcflush(fd, libc::TCIFLUSH);
+    }
+}
+
+/// What [`drain_until_quiet`] reads from, waits on and takes the time from:
+/// the terminal and the system clock, or a test's scripted terminal.
+trait DrainSource {
+    /// One non-blocking read: the bytes read, 0 at end of input, or the
+    /// error (`WouldBlock` with nothing queued).
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize>;
+    /// Wait until input is readable or `timeout` has passed.
+    fn wait(&mut self, timeout: Duration) -> std::io::Result<()>;
+    fn now(&self) -> Instant;
+}
+
+struct DrainFd(RawFd);
+
+impl DrainSource for DrainFd {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        // SAFETY: buf is a live, writable slice; fd is an open descriptor.
+        let n = unsafe { libc::read(self.0, buf.as_mut_ptr().cast(), buf.len()) };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(n as usize)
+    }
+
+    fn wait(&mut self, timeout: Duration) -> std::io::Result<()> {
+        wait_fd(self.0, false, timeout)
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
+/// Read and throw away input until none has come for [`DRAIN_QUIET`], or
+/// until [`DRAIN_BUDGET`] has passed.
+fn drain_until_quiet(source: &mut impl DrainSource) {
+    let started = source.now();
+    let mut quiet_since = started;
+    let mut buf = [0u8; 1024];
+    while source.now().duration_since(started) < DRAIN_BUDGET {
+        match source.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => {
+                quiet_since = source.now();
+                continue;
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) => {}
+            Err(_) => break,
+        }
+        let quiet = source.now().duration_since(quiet_since);
+        if quiet >= DRAIN_QUIET || source.wait(DRAIN_QUIET - quiet).is_err() {
+            break;
+        }
     }
 }
 
@@ -1402,18 +1437,129 @@ mod tests {
     fn restoring_discards_input_the_session_never_read() {
         let (restore, _out_read, _out_write, mut in_read, mut in_write) = piped_restore(true);
         in_write.write_all(b"\x1b[<35;120;80M\x1b[97;1:3u").unwrap();
-        // More arrives while the restore is already under way.
-        let late = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(15));
-            in_write.write_all(b"\x1b[<35;121;80M").unwrap();
-            in_write
-        });
         let started = Instant::now();
         restore_terminal(&restore);
-        let _in_write = late.join().unwrap();
         assert_eq!(read_available(&mut in_read), b"");
         assert!(started.elapsed() >= DRAIN_QUIET);
         assert!(started.elapsed() < DRAIN_BUDGET + Duration::from_secs(1));
+    }
+
+    /// A terminal for [`drain_until_quiet`] on a scripted clock. Each
+    /// report arrives at its offset from the start; a wait returns when the
+    /// next one arrives or after its whole timeout, whichever is sooner, and
+    /// nothing else moves the clock. The drain's timing is then exact and
+    /// owes nothing to how the host schedules threads.
+    struct ScriptedTerminal {
+        start: Instant,
+        now: Instant,
+        /// Reports still to arrive: (offset from the start, bytes), in order.
+        due: std::collections::VecDeque<(Duration, Vec<u8>)>,
+        /// Reports that have arrived and not been read.
+        queued: Vec<u8>,
+    }
+
+    impl ScriptedTerminal {
+        fn new(reports: &[(Duration, &[u8])]) -> Self {
+            let start = Instant::now();
+            Self {
+                start,
+                now: start,
+                due: reports
+                    .iter()
+                    .map(|(at, bytes)| (*at, bytes.to_vec()))
+                    .collect(),
+                queued: Vec::new(),
+            }
+        }
+
+        fn elapsed(&self) -> Duration {
+            self.now.duration_since(self.start)
+        }
+
+        /// Bytes the drain has not read, arrived or not.
+        fn unread(&self) -> usize {
+            self.queued.len() + self.due.iter().map(|(_, b)| b.len()).sum::<usize>()
+        }
+    }
+
+    impl DrainSource for ScriptedTerminal {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            while self
+                .due
+                .front()
+                .is_some_and(|(at, _)| self.start + *at <= self.now)
+            {
+                let (_, bytes) = self.due.pop_front().unwrap();
+                self.queued.extend_from_slice(&bytes);
+            }
+            if self.queued.is_empty() {
+                return Err(std::io::ErrorKind::WouldBlock.into());
+            }
+            let n = self.queued.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.queued[..n]);
+            self.queued.drain(..n);
+            Ok(n)
+        }
+
+        fn wait(&mut self, timeout: Duration) -> std::io::Result<()> {
+            let limit = self.now + timeout;
+            self.now = match self.due.front() {
+                Some((at, _)) if self.start + *at <= limit => self.now.max(self.start + *at),
+                _ => limit,
+            };
+            Ok(())
+        }
+
+        fn now(&self) -> Instant {
+            self.now
+        }
+    }
+
+    /// A report that lands while the drain is still waiting for quiet is
+    /// read too, and the wait for quiet starts over from it.
+    #[test]
+    fn a_report_arriving_mid_drain_is_read_and_restarts_the_quiet_period() {
+        let late = DRAIN_QUIET - Duration::from_millis(10);
+        let mut terminal = ScriptedTerminal::new(&[
+            (Duration::ZERO, b"\x1b[<35;120;80M\x1b[97;1:3u"),
+            (late, b"\x1b[<35;121;80M"),
+        ]);
+        drain_until_quiet(&mut terminal);
+        assert_eq!(terminal.unread(), 0);
+        assert_eq!(terminal.elapsed(), late + DRAIN_QUIET);
+    }
+
+    /// Once the terminal has been quiet for the whole period the drain
+    /// stops, and a report arriving after that is left for the flush that
+    /// follows it.
+    #[test]
+    fn a_report_arriving_after_the_quiet_period_is_left_unread() {
+        let late = b"\x1b[<35;121;80M";
+        let mut terminal = ScriptedTerminal::new(&[
+            (Duration::ZERO, b"\x1b[<35;120;80M"),
+            (DRAIN_QUIET + Duration::from_millis(10), late),
+        ]);
+        drain_until_quiet(&mut terminal);
+        assert_eq!(terminal.unread(), late.len());
+        assert_eq!(terminal.elapsed(), DRAIN_QUIET);
+    }
+
+    /// A terminal that never goes quiet is drained for the budget and no
+    /// longer.
+    #[test]
+    fn a_drain_that_never_goes_quiet_stops_at_the_budget() {
+        let gap = Duration::from_millis(10);
+        let reports: Vec<(Duration, &[u8])> = (0..200)
+            .map(|i| (gap * i, b"\x1b[<35;1;1M".as_slice()))
+            .collect();
+        let mut terminal = ScriptedTerminal::new(&reports);
+        drain_until_quiet(&mut terminal);
+        assert!(terminal.unread() > 0);
+        assert!(
+            terminal.elapsed() >= DRAIN_BUDGET && terminal.elapsed() < DRAIN_BUDGET + gap,
+            "drained for {:?}",
+            terminal.elapsed()
+        );
     }
 
     /// A terminal that never stops sending cannot hold the restore up.
