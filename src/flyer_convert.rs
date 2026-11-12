@@ -1125,7 +1125,11 @@ pub fn export(
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("starting ffmpeg")?;
     let errors = drain_stderr(&mut child);
-    let mut stdin = child.stdin.take().context("ffmpeg's input")?;
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("ffmpeg has no input to write to");
+    };
 
     let mut report = Report {
         audio_channels: channels,
@@ -1168,6 +1172,9 @@ pub fn export(
     let err = errors.join().unwrap_or_default();
     drop(audio_file);
     if let Some(e) = decode_err {
+        // ffmpeg finished what it was given: a file that stops where the
+        // clip could no longer be read. It is not the export asked for.
+        let _ = std::fs::remove_file(output);
         return Err(e);
     }
     if !status.success() || write_err.is_some() {
@@ -1457,19 +1464,23 @@ mod tests {
         bytes.truncate((frame + 1 + 2 * 4 * flyerclip::audio::BLOCKS_PER_FIELD) * 512);
         let clip = dir.path().join("Cut off");
         std::fs::write(&clip, bytes).unwrap();
-        // Says where its second input (the sound) is, and takes the rest.
+        // Says where its second input (the sound) is, starts its output
+        // file (the last argument) and takes the rest.
         let seen = dir.path().join("seen");
         let ffmpeg = fake_ffmpeg(
             dir.path(),
             &format!(
                 "for a in \"$@\"; do case \"$a\" in *.pcm) echo \"$a\" > '{}';; esac; done\n\
+                 for a in \"$@\"; do out=\"$a\"; done\necho partial > \"$out\"\n\
                  cat > /dev/null",
                 seen.display()
             ),
         );
-        assert!(export(&ffmpeg, &clip, &dir.path().join("out.mp4"), |_| {}).is_err());
+        let out = dir.path().join("out.mp4");
+        assert!(export(&ffmpeg, &clip, &out, |_| {}).is_err());
         let pcm = std::fs::read_to_string(&seen).unwrap();
         assert!(!Path::new(pcm.trim()).exists(), "{pcm}");
+        assert!(!out.exists(), "a partial output was left behind");
     }
 
     /// Copying a clip that is already where it is going must not open it
