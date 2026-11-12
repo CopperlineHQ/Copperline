@@ -149,13 +149,16 @@ impl HostDrive {
             .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
             .filter(|name| valid_name(name))
             .unwrap_or_else(|| default_volume_name(self.number));
+        let was: Vec<bool> = self.objects.iter().map(|o| o.present).collect();
         for obj in &mut self.objects[1..] {
             obj.present = false;
         }
-        self.scan_dir(0);
+        self.scan_dir(0, &was);
     }
 
-    fn scan_dir(&mut self, dir: usize) {
+    /// List `dir` from the host. `was` is which objects were there before
+    /// this scan.
+    fn scan_dir(&mut self, dir: usize, was: &[bool]) {
         let path = self.folder.join(&self.objects[dir].rel);
         let mut entries: Vec<(String, std::fs::Metadata)> = match std::fs::read_dir(&path) {
             Ok(read) => read
@@ -186,10 +189,17 @@ impl HostDrive {
         for (name, meta) in entries {
             let rel = self.objects[dir].rel.join(&name);
             let kind = if meta.is_dir() { TYPE_DIR } else { TYPE_FILE };
+            // A deleted object stays in the table under its path, so that
+            // a file put back keeps its blocks. A live object renamed onto
+            // such a path shares it: the one that was there before this
+            // scan is the one the host entry stands for.
+            let free = |o: &Object| o.rel == rel && o.kind == kind && !o.present;
             let known = self
                 .objects
                 .iter()
-                .position(|o| o.rel == rel && o.kind == kind && !o.present);
+                .zip(was)
+                .position(|(o, &was)| was && free(o))
+                .or_else(|| self.objects.iter().position(free));
             let index = match known {
                 Some(i) => i,
                 None => {
@@ -224,7 +234,7 @@ impl HostDrive {
             }
             children.push(index);
             if kind == TYPE_DIR {
-                self.scan_dir(index);
+                self.scan_dir(index, was);
             }
         }
         self.objects[dir].children = children;
@@ -677,6 +687,29 @@ mod tests {
         assert!(creatable_name("Clip 1"));
         assert_eq!(creatable_name("NUL"), !cfg!(windows));
         assert_eq!(creatable_name("com1.clip"), !cfg!(windows));
+    }
+
+    /// A deleted object stays in the table under its old path. Renaming a
+    /// live object onto that path must leave the live one in place: an
+    /// open grip names it by header block.
+    #[test]
+    fn a_rename_onto_a_deleted_objects_path_keeps_the_live_object() {
+        let dir = folder();
+        let mut drive = HostDrive::open(dir.path(), 0).unwrap();
+        let b = drive.create_file(0, "B").unwrap();
+        drive.delete(b).unwrap();
+        let a = drive.create_file(0, "A").unwrap();
+        assert_ne!(a, b);
+        drive.write_file(a, 0, b"live").unwrap();
+        let (header, start) = (drive.header_block(a), drive.object(a).unwrap().start);
+        drive.rename(a, 0, "B").unwrap();
+        assert_eq!(drive.lookup(0, "B"), Some(a));
+        assert_eq!(drive.object_at_header(header), Some(a));
+        assert_eq!(drive.object(a).unwrap().start, start);
+        assert!(drive.object(b).is_none(), "the deleted object stays gone");
+        let mut data = [0u8; 4];
+        assert_eq!(drive.read_file(a, 0, &mut data).unwrap(), 4);
+        assert_eq!(&data, b"live");
     }
 
     #[test]
