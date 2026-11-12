@@ -105,8 +105,8 @@ reuses the player binary already built. Package outputs:
   settings and save data stay inside the bundle directory.
 
 The player is built without the control server and GDB stub, ignores every
-`COPPERLINE_*` environment variable, and disables the debugging and
-input-recording shortcuts.
+`COPPERLINE_*` environment variable, and disables the debugging,
+input-recording, performance-overlay and status-bar shortcuts.
 
 ## User experience
 
@@ -119,7 +119,8 @@ button opens a simplified in-game menu:
   centring, CRT shader and its strength, screen tint, fullscreen, VSync,
   monitor bezel
 - **Audio Settings:** output device (or Disabled) and the audio filter
-- **Input Settings:** port devices, joystick input mode, autofire, gamepad
+- **Input Settings:** port devices, joystick input mode, autofire, the
+  on-screen keyboard, Paste as Keystrokes, Share Clipboard, gamepad
   calibration and input mapping
 - **Pause** and **Reset**
 - **Save State** quick save and quick load slots (if enabled in the manifest)
