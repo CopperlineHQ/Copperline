@@ -23,7 +23,8 @@ osbench <dir> <phases> <scale>
 `<scale>` multiplies every phase's iteration count. Each phase prints the
 emulated time it took in 1/50 s ticks and a checksum, and the same lines go
 to `osbench.log` beside the program. `osbench x <file>` is the child the
-launch phase runs.
+launch phase runs. The program names its own directory as `RunProg:`, the
+volume `--run` mounts, so it is meant to be started that way.
 
 ## Running it
 

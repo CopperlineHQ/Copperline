@@ -10,10 +10,11 @@
 // its trailing ':' or '/'. <phases> is any of: F format <dir> as an FFS
 // volume first, c CPU, s exec calls, f filesystem, p process launches.
 // <scale> multiplies every phase's iteration count. Each phase prints the
-// emulated time it took in 1/50 s ticks; the same lines are appended to
-// osbench.log in <dir>'s parent program directory when it can be opened.
-// "osbench x <file>" is the child the launch phase runs: it creates and
-// deletes <file> and returns.
+// emulated time it took in 1/50 s ticks; the same lines go to
+// RunProg:osbench.log, the --run program directory, when it can be opened.
+// The launch phase copies RunProg:osbench to <dir> and runs it from there.
+// "osbench x <file>" is that child: it creates and deletes <file> and
+// returns.
 
 typedef long LONG;
 typedef unsigned long ULONG;
