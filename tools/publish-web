@@ -13,7 +13,7 @@ Usage:
                     [--disk PATH ...] [--out FILE] [--pkg DIR] [--skip-build]
                     [--profile NAME] [--drives N] [--video PAL|NTSC]
                     [--joystick keys|cd32|off] [--rom PATH [--ext-rom PATH]]
-                    [--max-size SIZE]
+                    [--source-url URL] [--max-size SIZE]
 
 Only floppy (`adf`) payloads can be packed: the browser build has no CD
 drive and no host-directory volume. The payload defaults to the file the
@@ -90,6 +90,20 @@ SPECIFIER = re.compile(r"""(\bfrom\s*|\bimport\s*\(?\s*)(['"])(\.\.?/[^'"\n]+)\2
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
+# Raw ADF sizes: 80 cylinders, 2 heads, 11 (double density) or 22 (high
+# density) sectors of 512 bytes.
+ADF_DD_BYTES = 80 * 2 * 11 * 512
+ADF_HD_BYTES = 80 * 2 * 22 * 512
+# Image formats the core reads but cannot write back in their own format,
+# by signature.
+READ_ONLY_FORMATS = [
+    (b"DMS!", "a DMS archive"),
+    (b"CAPS", "an IPF image"),
+    (b"SCP", "a SuperCard Pro flux image"),
+    (b"\x1f\x8b", "a gzip-packed image"),
+    (b"PK\x03\x04", "a zip-packed image"),
+]
+
 
 class KitError(Exception):
     """A problem with the inputs; main() reports it and exits 1."""
@@ -106,17 +120,30 @@ def copperline_version() -> str:
     return "unknown"
 
 
-def source_ref() -> str | None:
-    """The commit the page is built from, for the About box; None outside
-    a git checkout (a source tarball)."""
-    try:
+def source_info() -> dict:
+    """The source the emulator in the page corresponds to: the commit this
+    checkout is at, whether tracked files differ from it, a tag naming that
+    very commit, and `git describe` for the About box. Every value is None
+    (dirty False) outside a git checkout, such as a source archive."""
+    def git(*args: str) -> str:
         out = subprocess.run(
-            ["git", "-C", str(REPO), "describe", "--tags", "--always", "--dirty"],
-            capture_output=True, text=True, check=True,
+            ["git", "-C", str(REPO), *args], capture_output=True, text=True, check=True
         )
+        return out.stdout.strip()
+
+    try:
+        commit = git("rev-parse", "HEAD")
+        dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
+        tags = git("tag", "--points-at", "HEAD").split()
+        describe = git("describe", "--tags", "--always", "--dirty")
     except (OSError, subprocess.CalledProcessError):
-        return None
-    return out.stdout.strip() or None
+        return {"commit": None, "dirty": False, "tag": None, "describe": None}
+    return {
+        "commit": commit or None,
+        "dirty": dirty,
+        "tag": tags[0] if tags else None,
+        "describe": describe or None,
+    }
 
 
 def parse_size(text: str) -> int:
@@ -255,6 +282,32 @@ def check_web_support(manifest: dict) -> list[str]:
     return warnings
 
 
+def check_disk(name: str, data: bytes) -> list[str]:
+    """Warnings about a disk image the page would carry but its drives may
+    not take the way the publisher expects. The machines the web player
+    builds fit double-density drives, and only a plain or UAE extended ADF
+    can be written back, so only those keep a visitor's saves."""
+    if data.startswith((b"UAE-1ADF", b"UAE--ADF")):
+        return []
+    for magic, kind in READ_ONLY_FORMATS:
+        if data.startswith(magic):
+            return [
+                f"{name} is {kind}, which the web player runs write-protected: "
+                "what the title saves to it is not kept"
+            ]
+    if len(data) == ADF_HD_BYTES:
+        return [
+            f"{name} is a high-density image ({len(data):,} bytes); the web player fits "
+            "double-density drives, so check that the page boots"
+        ]
+    if len(data) != ADF_DD_BYTES:
+        return [
+            f"{name} is {len(data):,} bytes, not a standard double-density ADF "
+            f"({ADF_DD_BYTES:,} bytes); check that the page boots"
+        ]
+    return []
+
+
 def scan_imports(source: str) -> list[str]:
     """The relative import specifiers of a module, in source order."""
     return [match.group(3) for match in SPECIFIER.finditer(source)]
@@ -302,7 +355,17 @@ def collect_modules(entry: str, www: Path, pkg: Path) -> dict[str, str]:
             sources[name] = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as e:
             raise KitError(f"cannot read module {name} ({path}): {e}") from e
-        pending.extend(scan_imports(sources[name]))
+        imports = scan_imports(sources[name])
+        # Both this packer and the loader place every specifier against the
+        # page directory. That is only right for a module that sits in it:
+        # one in a subdirectory (wasm-bindgen snippets under ./pkg/, say)
+        # means its own directory, and would be linked to the wrong file.
+        if imports and "/" in rel:
+            raise KitError(
+                f"module {name} is in a subdirectory and imports {imports[0]!r} relative to "
+                "itself; the page links specifiers against the page directory only"
+            )
+        pending.extend(imports)
     return sources
 
 
@@ -455,6 +518,8 @@ def build_page(
     joystick: str = "keys",
     version: str = "unknown",
     ref: str | None = None,
+    commit: str | None = None,
+    source_url: str = SOURCE_URL,
 ) -> tuple[str, dict[str, bytes]]:
     """Assemble the page. Returns it with the {asset name: bytes} map that
     check_self_contained verifies it against."""
@@ -540,7 +605,9 @@ def build_page(
         "disks": disk_config,
         "modules": {"order": order, "entry": ENTRY_MODULE},
         "wasm": WASM_ASSET,
-        "copperline": {"version": version, "source": SOURCE_URL, "ref": ref},
+        "copperline": {
+            "version": version, "source": source_url, "ref": ref, "commit": commit,
+        },
         "notices": notice_config,
         # Identifies this exact pairing of emulator, ROM and disks; a quick
         # save state is only offered back to the build that wrote it.
@@ -621,30 +688,78 @@ def build_pkg(pkg: Path, profile: str) -> None:
         raise KitError(f"building the wasm bundle failed: {e}") from e
 
 
-def notices() -> list[tuple[str, str, bytes]]:
-    version = copperline_version()
+def source_notice(version: str, source: dict, url: str) -> str:
+    """Where the complete corresponding source of the embedded emulator is.
+    It names the exact commit the page was packed from, never a release
+    tag guessed from the version number: a checkout between releases is
+    not the source of the release before it."""
+    commit = source.get("commit")
+    if not commit:
+        return (
+            f"  {url}\n"
+            f"  This page was packed from a source archive of Copperline {version}, "
+            "not a git checkout, so no commit is recorded.\n"
+        )
+    tag = f" (tag {source['tag']})" if source.get("tag") else ""
+    text = f"  {url}\n  commit {commit}{tag}\n"
+    if source.get("dirty"):
+        text += (
+            "\n"
+            "The emulator was built from that commit with local changes that "
+            "are not part of it. Whoever published this page is responsible "
+            "for making those changes available with it.\n"
+        )
+    return text
+
+
+def notices(
+    version: str, source: dict, *, aros: bool, rom_label: str, url: str = SOURCE_URL
+) -> list[tuple[str, str, bytes]]:
+    """The texts the About box offers. They follow what the page actually
+    embeds: the AROS license, acknowledgements and source notice travel
+    with the AROS ROM and are left out when the publisher supplied a ROM."""
+    if aros:
+        rom = (
+            "The boot ROM in this page is the AROS ROM bundled with Copperline, "
+            "a separate work under the AROS Public License 1.1. Its license, "
+            "its acknowledgements and a note of the AROS source it was built "
+            "from (repository and commit) are included here.\n"
+        )
+    else:
+        rom = (
+            f"The boot ROM in this page ({rom_label}) was supplied by the "
+            "publisher of this page. It is a separate work, not part of "
+            "Copperline, and is not covered by Copperline's license.\n"
+        )
     about = (
         f"This page runs on Copperline {version}, a cycle-driven Amiga emulator "
         "licensed under the GNU General Public License v3.0 or later.\n"
         "\n"
         "Complete corresponding source code:\n"
-        f"  {SOURCE_URL} (tag v{version})\n"
-        "\n"
-        "The bundled AROS boot ROM is a separate work under the AROS Public "
-        "License 1.1; its license and acknowledgements are included here.\n"
-        "\n"
+        + source_notice(version, source, url)
+        + "\n"
+        + rom
+        + "\n"
         "The title itself is a separate work by its publisher, carried in "
-        "this file as data, and is not covered by the licenses above.\n"
+        "this file as data, and is not covered by Copperline's license.\n"
     )
-    return [
+    texts = [
         ("about", "About this player", about.encode("utf-8")),
         ("copperline-license", "Copperline license (GPL-3.0-or-later)",
          read_bytes(REPO / "LICENSE", "license")),
-        ("aros-license", "AROS license (APL 1.1)",
-         read_bytes(REPO / "assets/aros/LICENSE", "license")),
-        ("aros-acknowledgements", "AROS acknowledgements",
-         read_bytes(REPO / "assets/aros/ACKNOWLEDGEMENTS", "acknowledgements")),
     ]
+    if aros:
+        texts += [
+            ("aros-license", "AROS license (APL 1.1)",
+             read_bytes(REPO / "assets/aros/LICENSE", "license")),
+            ("aros-acknowledgements", "AROS acknowledgements",
+             read_bytes(REPO / "assets/aros/ACKNOWLEDGEMENTS", "acknowledgements")),
+            # The only file naming the AROS repository and commit the ROM
+            # was built from; tools/publish ships it for the same reason.
+            ("aros-source", "AROS ROM source and provenance",
+             read_bytes(REPO / "assets/aros/README.md", "AROS source notice")),
+        ]
+    return texts
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -673,6 +788,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     ap.add_argument("--rom", type=Path,
                     help="a Kickstart image to embed instead of the bundled AROS ROM")
     ap.add_argument("--ext-rom", type=Path, help="an extended ROM image to go with --rom")
+    ap.add_argument("--source-url", default=SOURCE_URL,
+                    help="where the emulator's source is published, for the About box "
+                         f"(default: {SOURCE_URL}); name your own repository when you "
+                         "pack a modified Copperline")
     ap.add_argument("--max-size", default="64M",
                     help="refuse to write a page larger than this (default: 64M)")
     args = ap.parse_args(argv)
@@ -704,6 +823,9 @@ def run(args: argparse.Namespace) -> Path:
     names = [name for name, _ in disks]
     if len(set(names)) != len(names):
         raise KitError("two disks share a file name; the page tells disks apart by name")
+    for name, data in disks:
+        for message in check_disk(name, data):
+            warn(message)
 
     if args.rom:
         rom = read_bytes(args.rom, "ROM")
@@ -729,6 +851,15 @@ def run(args: argparse.Namespace) -> Path:
             "run without --skip-build, or see docs/guide/browser.md"
         )
 
+    version = copperline_version()
+    source = source_info()
+    if source["dirty"]:
+        warn(
+            f"the working tree has uncommitted changes: the page names commit "
+            f"{source['commit'][:12]} as its source, which does not hold them. Commit "
+            "them (and publish that commit) before distributing a page"
+        )
+
     page, packed = build_page(
         manifest=manifest,
         shell=(WWW / "kit-shell.html").read_text(encoding="utf-8"),
@@ -740,13 +871,17 @@ def run(args: argparse.Namespace) -> Path:
         ext_rom=ext_rom,
         rom_label=rom_label,
         disks=disks,
-        notices=notices(),
+        notices=notices(
+            version, source, aros=not args.rom, rom_label=rom_label, url=args.source_url
+        ),
         icon=icon,
         drives=args.drives,
         video=args.video,
         joystick=args.joystick,
-        version=copperline_version(),
-        ref=source_ref(),
+        version=version,
+        ref=source["describe"],
+        commit=source["commit"],
+        source_url=args.source_url,
     )
     data = page.encode("utf-8")
     if len(data) > max_size:

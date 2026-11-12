@@ -272,6 +272,14 @@ class ModuleGraph(unittest.TestCase):
             (www / "audio-gate.js").write_text(MODULES["./audio-gate.js"])
             (pkg / "copperline_web.js").write_text(MODULES["./pkg/copperline_web.js"])
             self.assertEqual(publish_web.collect_modules("./kit-player.js", www, pkg), MODULES)
+            # A module in a subdirectory means its own directory by "./",
+            # which neither the packer nor the loader resolves.
+            (pkg / "copperline_web.js").write_text("import './snippets/inline0.js';\n")
+            with self.assertRaises(KitError) as caught:
+                publish_web.collect_modules("./kit-player.js", www, pkg)
+            self.assertIn("./pkg/copperline_web.js is in a subdirectory", str(caught.exception))
+            self.assertIn("'./snippets/inline0.js'", str(caught.exception))
+            (pkg / "copperline_web.js").write_text(MODULES["./pkg/copperline_web.js"])
             (www / "audio-gate.js").write_text("import '../outside.js';")
             with self.assertRaises(KitError) as caught:
                 publish_web.collect_modules("./kit-player.js", www, pkg)
@@ -513,6 +521,106 @@ class Page(unittest.TestCase):
         self.assertNotIn("%%", page.split("<body>", 1)[1].split("<script", 1)[0])
 
 
+CLEAN_SOURCE = {
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "dirty": False,
+    "tag": None,
+    "describe": "v9.9.8-176-g0123456789",
+}
+
+
+def notice_map(**overrides) -> dict[str, str]:
+    args = dict(aros=True, rom_label="AROS")
+    args.update(overrides)
+    source = args.pop("source", CLEAN_SOURCE)
+    return {
+        slug: data.decode("utf-8") for slug, _, data in publish_web.notices("9.9.9", source, **args)
+    }
+
+
+class Notices(unittest.TestCase):
+    def test_source_pointer_names_the_exact_commit(self):
+        about = notice_map()["about"]
+        self.assertIn(publish_web.SOURCE_URL, about)
+        self.assertIn("commit 0123456789abcdef0123456789abcdef01234567\n", about)
+        # The version alone does not identify the source of a checkout
+        # between releases, so no release tag is made up from it.
+        self.assertNotIn("v9.9.9", about)
+        self.assertNotIn("local changes", about)
+
+    def test_a_tag_is_named_only_when_it_points_at_the_commit(self):
+        about = notice_map(source=dict(CLEAN_SOURCE, tag="v9.9.9"))["about"]
+        self.assertIn("commit 0123456789abcdef0123456789abcdef01234567 (tag v9.9.9)\n", about)
+
+    def test_dirty_tree_is_stated(self):
+        about = notice_map(source=dict(CLEAN_SOURCE, dirty=True))["about"]
+        self.assertIn("with local changes that are not part of it", about)
+
+    def test_source_archive_and_own_repository(self):
+        archive = {"commit": None, "dirty": False, "tag": None, "describe": None}
+        about = notice_map(source=archive, url="https://example.org/fork")["about"]
+        self.assertIn("https://example.org/fork", about)
+        self.assertNotIn(publish_web.SOURCE_URL, about)
+        self.assertIn("source archive of Copperline 9.9.9", about)
+        self.assertNotIn("commit ", about.replace("no commit is recorded", ""))
+
+    def test_aros_rom_carries_its_license_and_source_notice(self):
+        texts = notice_map()
+        aros = publish_web.REPO / "assets/aros"
+        self.assertEqual(texts["aros-license"], (aros / "LICENSE").read_text())
+        self.assertEqual(texts["aros-acknowledgements"], (aros / "ACKNOWLEDGEMENTS").read_text())
+        # The source notice is the file that names the AROS repository and
+        # the commit the ROM was built from.
+        self.assertEqual(texts["aros-source"], (aros / "README.md").read_text())
+        self.assertIn("https://github.com/aros-development-team/AROS", texts["aros-source"])
+        self.assertIn("AROS Public License 1.1", texts["about"])
+
+    def test_a_supplied_rom_claims_no_aros_notices(self):
+        texts = notice_map(aros=False, rom_label="kick.rom")
+        self.assertEqual(sorted(texts), ["about", "copperline-license"])
+        self.assertNotIn("AROS", texts["about"])
+        self.assertIn("(kick.rom) was supplied by the publisher", texts["about"])
+
+    def test_source_info_reads_this_checkout(self):
+        info = publish_web.source_info()
+        self.assertRegex(info["commit"], r"^[0-9a-f]{40}$")
+        self.assertIsInstance(info["dirty"], bool)
+        self.assertIn(info["commit"][:7], info["describe"])
+        with patch.object(publish_web.subprocess, "run", side_effect=OSError("no git")):
+            self.assertEqual(
+                publish_web.source_info(),
+                {"commit": None, "dirty": False, "tag": None, "describe": None},
+            )
+
+
+class Disks(unittest.TestCase):
+    def test_a_standard_adf_and_an_extended_adf_pass_quietly(self):
+        self.assertEqual(publish_web.check_disk("game.adf", DISK), [])
+        self.assertEqual(publish_web.check_disk("game.adf", b"UAE-1ADF" + blob(20, 5000)), [])
+        self.assertEqual(publish_web.check_disk("game.adf", b"UAE--ADF" + blob(21, 5000)), [])
+
+    def test_a_high_density_image_is_flagged(self):
+        (message,) = publish_web.check_disk("big.adf", bytes(1802240))
+        self.assertIn("big.adf is a high-density image (1,802,240 bytes)", message)
+        self.assertIn("double-density drives", message)
+
+    def test_an_odd_size_is_flagged(self):
+        (message,) = publish_web.check_disk("short.adf", DISK[:-512])
+        self.assertIn("short.adf is 900,608 bytes, not a standard double-density ADF", message)
+
+    def test_formats_that_cannot_be_written_back_are_flagged(self):
+        for magic, kind in (
+            (b"DMS!", "a DMS archive"),
+            (b"CAPS", "an IPF image"),
+            (b"SCP", "a SuperCard Pro flux image"),
+            (b"\x1f\x8b", "a gzip-packed image"),
+            (b"PK\x03\x04", "a zip-packed image"),
+        ):
+            (message,) = publish_web.check_disk("game.img", magic + blob(22, 4000))
+            self.assertIn(f"game.img is {kind}", message)
+            self.assertIn("write-protected", message)
+
+
 class BundleBuild(unittest.TestCase):
     def test_pin_is_read_from_the_web_crate(self):
         self.assertRegex(publish_web.pinned_bindgen_version(), r"^\d+\.\d+\.\d+$")
@@ -610,6 +718,10 @@ class CommandLine(unittest.TestCase):
         )
         (self.pkg / "copperline_web_bg.wasm").write_bytes(WASM)
         self.out = self.dir / "out" / "page.html"
+        self.source = dict(CLEAN_SOURCE)
+        patcher = patch.object(publish_web, "source_info", side_effect=lambda: dict(self.source))
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def run_tool(self, *extra, manifest="game.toml"):
         argv = ["--manifest", str(self.dir / manifest), "--skip-build", "--pkg", str(self.pkg),
@@ -635,6 +747,23 @@ class CommandLine(unittest.TestCase):
             assets["notice/copperline-license"]["data"], (publish_web.REPO / "LICENSE").read_bytes()
         )
         self.assertEqual(assets["notice/aros-license"]["data"], (aros / "LICENSE").read_bytes())
+        self.assertEqual(assets["notice/aros-source"]["data"], (aros / "README.md").read_bytes())
+        self.assertEqual(
+            [item["asset"] for item in config["notices"]],
+            ["notice/about", "notice/copperline-license", "notice/aros-license",
+             "notice/aros-acknowledgements", "notice/aros-source"],
+        )
+        about = assets["notice/about"]["data"].decode()
+        self.assertIn(f"commit {CLEAN_SOURCE['commit']}\n", about)
+        self.assertEqual(
+            config["copperline"],
+            {
+                "version": publish_web.copperline_version(),
+                "source": publish_web.SOURCE_URL,
+                "ref": CLEAN_SOURCE["describe"],
+                "commit": CLEAN_SOURCE["commit"],
+            },
+        )
         self.assertEqual(references, [("link", "href", publish_web.favicon_url(None))])
         self.assertEqual(config["copperline"]["version"], publish_web.copperline_version())
 
@@ -689,6 +818,28 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("cannot read payload", stderr)
 
+    def test_dirty_tree_warns_and_says_so_in_the_page(self):
+        self.source["dirty"] = True
+        status, _, stderr = self.run_tool()
+        self.assertEqual(status, 0)
+        self.assertIn("warning: the working tree has uncommitted changes", stderr)
+        self.assertIn("0123456789ab", stderr)
+        _, assets, _ = publish_web.read_page(self.out.read_text())
+        self.assertIn("local changes", assets["notice/about"]["data"].decode())
+
+    def test_source_url_option(self):
+        status, _, stderr = self.run_tool("--source-url", "https://example.org/fork")
+        self.assertEqual((status, stderr), (0, ""))
+        config, assets, _ = publish_web.read_page(self.out.read_text())
+        self.assertEqual(config["copperline"]["source"], "https://example.org/fork")
+        self.assertIn("https://example.org/fork\n", assets["notice/about"]["data"].decode())
+
+    def test_disk_warnings_reach_the_publisher(self):
+        (self.dir / "game.adf").write_bytes(bytes(1802240))
+        status, _, stderr = self.run_tool()
+        self.assertEqual(status, 0)
+        self.assertIn("warning: game.adf is a high-density image", stderr)
+
     def test_duplicate_disk_names(self):
         status, _, stderr = self.run_tool("--disk", str(self.dir / "game.adf"))
         self.assertEqual(status, 1)
@@ -712,6 +863,13 @@ class CommandLine(unittest.TestCase):
         self.assertEqual(assets["rom/main"]["data"], blob(13, 0x40000))
         self.assertNotIn("rom/ext", assets)
         self.assertEqual(config["rom"]["label"], "kick.rom")
+        # No AROS is in this page, so none of its notices are claimed.
+        self.assertEqual(
+            [item["asset"] for item in config["notices"]],
+            ["notice/about", "notice/copperline-license"],
+        )
+        self.assertFalse([name for name in assets if "aros" in name])
+        self.assertNotIn("AROS", assets["notice/about"]["data"].decode())
         self.assertTrue(references[0][2].startswith("data:image/png;base64,"))
 
         (self.dir / "branded.toml").write_text(MANIFEST + '\n[branding]\nicon = "gone.png"\n')

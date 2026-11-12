@@ -188,10 +188,41 @@ then writes `target/publish/<id>.html`. Python 3.11 or newer is needed.
 | `--video PAL\|NTSC` | Video standard (default: the model's own) |
 | `--joystick keys\|cd32\|off` | Keyboard joystick mode the page starts in (default `keys`) |
 | `--rom PATH`, `--ext-rom PATH` | Embed a Kickstart image you are licensed to redistribute instead of the AROS ROM |
+| `--source-url URL` | Where the emulator's source is published, for the About box (default: the Copperline repository) |
 | `--max-size SIZE` | Refuse to write a page larger than this (default `64M`) |
 
 A page is about 4 MB before its disks; each 880 KiB floppy adds its compressed
 size (base64 costs a third on top of that).
+
+The packer warns about a disk the page's drives may not take the way you
+expect: a high-density image (the machines it builds fit double-density
+drives), a file that is not a standard 880 KiB ADF, and a DMS, IPF, SCP or
+gzip/zip-packed image, which plays write-protected so nothing the title saves
+to it is kept. A plain ADF or a UAE extended ADF is writable.
+
+(web-kit-notices)=
+### Source and license notices
+
+Copperline is GPL-3.0-or-later, so a page you distribute must say where the
+complete source of the emulator inside it is. The About box does: it names
+the repository and the exact commit the page was packed from (and a tag, when
+one points at that very commit), and carries the full license text. That
+makes three things your side of the bargain:
+
+- Pack from a commit that is published. A checkout with uncommitted changes
+  still packs, with a warning, and the page then says it was built from that
+  commit with local changes: commit and publish them before distributing it.
+- If you changed Copperline, pass `--source-url` with the address of your own
+  repository, which must hold the commit the page names.
+- `--skip-build` trusts that the bundle in `--pkg` was built from the
+  checked-out commit; rebuild it after changing commits.
+
+The AROS ROM is a separate work under the AROS Public License 1.1. A page
+that embeds it also carries its license, its acknowledgements and
+`assets/aros/README.md`, which names the AROS repository and commit the ROM
+was built from. With `--rom` no AROS is embedded and none of those are
+claimed: the About box says the ROM was supplied by the publisher, and
+whether you may redistribute it is yours to establish.
 
 ### What the manifest means in a browser
 
@@ -243,9 +274,10 @@ Volume, Fullscreen and About.
   returns to the pristine disks and restarts the title. A page repacked with a changed disk starts
   afresh. A quick save state is offered back only to the exact build that
   wrote it.
-- **About:** names Copperline and where its source is, and shows the
-  Copperline (GPL-3.0-or-later) and AROS (APL 1.1) license texts and the AROS
-  acknowledgements, all carried inside the file.
+- **About:** names Copperline, the source repository and the commit the page
+  was built from, and shows the notices described under
+  [Source and license notices](#web-kit-notices), all carried
+  inside the file.
 
 ### Hosting and browser support
 
@@ -281,6 +313,9 @@ check a hosted copy, and `--screenshot OUT.png` to keep the picture.
 Every asset is a `<script type="text/plain" data-cl-asset="NAME">` block whose
 text is base64 of a zlib stream, with its unpacked size alongside; one
 `<script type="application/json" id="cl-config">` block describes the title.
+Module import specifiers are resolved against the page directory only, so the
+packer refuses a module in a subdirectory that imports relative to itself
+(`wasm-bindgen` snippets under `pkg/`, should the bundle ever grow any).
 A small inline loader (`crates/copperline-web/www/kit-loader.js`) inflates the
 blocks with `DecompressionStream`, removes them from the document, turns the
 page's ES modules into Blob URLs (rewriting each relative import to the Blob
