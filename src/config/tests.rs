@@ -586,13 +586,16 @@ fn the_battery_ram_follows_the_paths_in_force() -> Result<()> {
 fn tape_entries_put_drives_on_scsi_ids() -> Result<()> {
     let cfg = parse_config(
         "[[tape]]\nunit = 4\npath = \"backups\"\n\n\
-         [[tape]]\nunit = 5\npath = \"one.tar\"\nwrite_protect = true\n",
+         [[tape]]\nunit = 5\npath = \"one.tar\"\nwrite_protect = true\n\
+         kind = \"file\"\ncapacity = \"150M\"\n",
     )?;
     assert_eq!(
         cfg.scsi.tapes[4],
         Some(TapeCartridge {
             path: PathBuf::from("backups"),
             write_protect: false,
+            kind: None,
+            capacity: None,
         })
     );
     assert_eq!(
@@ -600,6 +603,8 @@ fn tape_entries_put_drives_on_scsi_ids() -> Result<()> {
         Some(TapeCartridge {
             path: PathBuf::from("one.tar"),
             write_protect: true,
+            kind: Some(crate::scsi::tape::Cartridge::File),
+            capacity: Some(150 * 1024 * 1024),
         })
     );
     assert!(cfg.scsi.tapes[0].is_none());
@@ -633,6 +638,14 @@ fn tape_entries_are_checked_against_the_bus() {
         (
             "[[tape]]\nunit = 1\npath = \"a\"\nspeed = 3\n",
             "unknown field",
+        ),
+        (
+            "[[tape]]\nunit = 1\npath = \"a\"\nkind = \"reel\"\n",
+            "not a kind of cartridge",
+        ),
+        (
+            "[[tape]]\nunit = 1\npath = \"a\"\ncapacity = \"0\"\n",
+            "capacity is zero",
         ),
     ] {
         let err = match toml::from_str::<RawConfig>(text) {

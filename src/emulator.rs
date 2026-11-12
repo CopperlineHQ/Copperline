@@ -3785,8 +3785,9 @@ fn attach_scsi_tapes(
     let mut attached = 0;
     for (unit, tape) in cfg.scsi.tapes.iter().enumerate() {
         let Some(tape) = tape else { continue };
-        let drive = crate::scsi::ScsiTape::open(&tape.path, tape.write_protect)
-            .with_context(|| format!("opening tape {}", tape.path.display()))?;
+        let drive =
+            crate::scsi::ScsiTape::open(&tape.path, tape.kind, tape.write_protect, tape.capacity)
+                .with_context(|| format!("opening tape {}", tape.path.display()))?;
         info!(
             "scsi: unit {unit} tape drive, {} ({})",
             tape.path.display(),

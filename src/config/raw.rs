@@ -691,6 +691,14 @@ pub(crate) struct RawTape {
     /// The cartridge's write-protect tab. Absent means writable.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) write_protect: Option<bool>,
+    /// "directory" or "file". Absent takes it from what `path` is, and a
+    /// path with nothing at it is a new directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) kind: Option<String>,
+    /// How much data the tape holds ("150M", "2G"). Absent means no end
+    /// short of the host's disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) capacity: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]

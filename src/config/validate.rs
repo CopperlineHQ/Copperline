@@ -2815,18 +2815,6 @@ fn parse_floppy_bridge(idx: usize, spec: &str, raw: &RawFloppyDrive) -> Result<F
     })
 }
 
-/// Parse `[[host_disk]]` entries and check they can all be honoured.
-///
-/// Two things are refused here rather than at the point of use. A slot holds
-/// one thing, so two host disks cannot share an attachment point, and a slot
-/// already given an image cannot also be given a disk -- the same rule a
-/// floppy bay follows for a bridge and an image, and for the same reason:
-/// silently preferring one would leave the other quietly ignored.
-///
-/// Whether the disk is actually *there* is deliberately not checked. A
-/// configuration is written once and used on a machine whose card reader may
-/// be empty, so a missing disk is a condition to report when the machine is
-/// built, not a reason to refuse to read the file.
 /// `[[tape]]` entries, by SCSI ID. A tape drive takes a whole ID: one that
 /// a `[scsi] unitN` image already holds, or that another `[[tape]]` names,
 /// is refused rather than left to whichever attaches last.
@@ -2857,14 +2845,50 @@ pub(super) fn parse_tapes(
         if tapes[unit].is_some() {
             bail!("tape[{index}]: SCSI ID {unit} already has a tape drive");
         }
+        let kind = match entry.kind.as_deref().map(str::trim) {
+            None => None,
+            Some(kind) if kind.eq_ignore_ascii_case("directory") => {
+                Some(crate::scsi::tape::Cartridge::Directory)
+            }
+            Some(kind) if kind.eq_ignore_ascii_case("file") => {
+                Some(crate::scsi::tape::Cartridge::File)
+            }
+            Some(other) => bail!(
+                "tape[{index}] kind = \"{other}\" is not a kind of cartridge (\"directory\" \
+                 or \"file\")"
+            ),
+        };
+        let capacity = match entry.capacity.as_deref() {
+            None => None,
+            Some(text) => match parse_size(text, "tape capacity")
+                .with_context(|| format!("tape[{index}]"))?
+            {
+                0 => bail!("tape[{index}] capacity is zero; leave it out for a tape with no end"),
+                bytes => Some(bytes as u64),
+            },
+        };
         tapes[unit] = Some(TapeCartridge {
             path: PathBuf::from(path),
             write_protect: entry.write_protect.unwrap_or(false),
+            kind,
+            capacity,
         });
     }
     Ok(tapes)
 }
 
+/// Parse `[[host_disk]]` entries and check they can all be honoured.
+///
+/// Two things are refused here rather than at the point of use. A slot holds
+/// one thing, so two host disks cannot share an attachment point, and a slot
+/// already given an image cannot also be given a disk -- the same rule a
+/// floppy bay follows for a bridge and an image, and for the same reason:
+/// silently preferring one would leave the other quietly ignored.
+///
+/// Whether the disk is actually *there* is deliberately not checked. A
+/// configuration is written once and used on a machine whose card reader may
+/// be empty, so a missing disk is a condition to report when the machine is
+/// built, not a reason to refuse to read the file.
 pub(super) fn parse_host_disks(
     raw: &[RawHostDisk],
     ide: &IdeConfig,

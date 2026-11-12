@@ -13,11 +13,16 @@
 //! ```
 //!
 //! A directory cartridge keeps one host file per tape file, in name order
-//! (hidden files and subdirectories are not part of the tape). A
-//! single-file cartridge is a tape that holds exactly one tape file: the
-//! host file. Both store nothing but the bytes the initiator wrote, so a
-//! `tar` archive is a tape file as it stands and a tape file written by
-//! the guest is an ordinary host file.
+//! (hidden files and subdirectories are not part of the tape; a link to a
+//! file is). A single-file cartridge is a tape that holds exactly one tape
+//! file: the host file, which is a tape file when it exists, however
+//! short, and a blank tape when it does not. Both store nothing but the
+//! bytes the initiator wrote, so a `tar` archive is a tape file as it
+//! stands and a tape file written by the guest is an ordinary host file.
+//!
+//! The drive only ever touches the cartridge: tape files are names inside
+//! the configured directory (or the configured file itself), read from the
+//! host or made up here, and never paths taken from a save state.
 //!
 //! Host files carry no record marks, so the tape does not remember how its
 //! data was blocked; the drive's block length decides it:
@@ -49,9 +54,14 @@
 //!   end of a tape file; the position is past the filemark. A backward
 //!   space stops on the beginning-of-tape side of it.
 //! - EOM: at beginning-of-tape a backward space stops with NO SENSE and
-//!   EOM; a write the cartridge has no room for (a second tape file on a
-//!   single-file cartridge, or one past the [`MAX_TAPE_FILES`] a
-//!   directory holds) fails with VOLUME OVERFLOW and EOM.
+//!   EOM. A write the cartridge has no room for fails with VOLUME OVERFLOW
+//!   and EOM: data for a second tape file on a single-file cartridge, a
+//!   tape file past the [`MAX_TAPE_FILES`] a directory holds, or data past
+//!   the tape's capacity when it has one. A tape with a capacity also has
+//!   an early-warning zone at its end, where a write is carried out and
+//!   reported with NO SENSE and EOM so the initiator can close its data.
+//!   Filemarks after a single-file cartridge's one tape file only mark the
+//!   end of the data again and are accepted.
 //! - ILI: a block is not the length the READ asked for. SILI suppresses
 //!   the report for a short block in variable mode.
 //! - BLANK CHECK, end-of-data detected: a read or space reached EOD.
@@ -63,8 +73,9 @@ use super::{
     be24, cdb_len, sense_for_io_error, ScsiExec, ASC_INVALID_FIELD_IN_CDB, ASC_INVALID_OPCODE,
     ASC_LOGICAL_UNIT_NOT_READY, ASC_LUN_NOT_SUPPORTED, ASC_MEDIUM_NOT_PRESENT,
     ASC_PARAMETER_LIST_LENGTH_ERROR, ASC_WRITE_PROTECTED, CHECK_CONDITION, GOOD, SENSE_LEN,
-    SK_DATA_PROTECT, SK_ILLEGAL_REQUEST, SK_NOT_READY,
+    SK_ABORTED_COMMAND, SK_DATA_PROTECT, SK_ILLEGAL_REQUEST, SK_NOT_READY,
 };
+use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -104,30 +115,50 @@ const MAX_TRANSFER_BYTES: u64 = 64 * 1024 * 1024;
 /// unique.
 pub const MAX_TAPE_FILES: usize = 10_000;
 
+/// The early-warning zone of a tape with a capacity is its last 1/32nd,
+/// and no more than this.
+const EARLY_WARNING_MAX_BYTES: u64 = 1024 * 1024;
+
 /// Mode page 10h, device configuration: fixed length.
 const PAGE_DEVICE_CONFIGURATION: u8 = 0x10;
 
 /// What the cartridge is on the host.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-enum Cartridge {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Cartridge {
     /// One host file: a tape holding exactly one tape file.
     File,
     /// A host directory: one host file per tape file, in name order.
     Directory,
 }
 
+impl Cartridge {
+    fn noun(self) -> &'static str {
+        match self {
+            Cartridge::File => "file",
+            Cartridge::Directory => "directory",
+        }
+    }
+}
+
 /// A SCSI-2 sequential-access (tape) target.
-#[derive(serde::Serialize, serde::Deserialize)]
+///
+/// The cartridge's files are the host's, not the machine's: a save state
+/// holds the drive (position, mode parameters, which cartridge) and the
+/// names the tape files had, never paths to them. Restoring one reads the
+/// cartridge again and puts the head where the state had it, as far as the
+/// tape that is there now allows (see [`TapeState`]).
 pub struct ScsiTape {
     /// The host file or directory.
     path: PathBuf,
     cartridge: Cartridge,
-    /// Host file names of the tape files, in tape order. Empty names never
-    /// occur; for a single-file cartridge this is empty (blank) or holds
-    /// the one file.
-    files: Vec<PathBuf>,
+    /// Names of the tape files in tape order: file names inside a directory
+    /// cartridge, never paths. A single-file cartridge has none (blank) or
+    /// the one tape file, which is `path` itself.
+    files: Vec<OsString>,
     /// The cartridge's write-protect tab.
     write_protected: bool,
+    /// How many bytes of data the tape holds, when it has an end.
+    capacity: Option<u64>,
     /// The tape is threaded: UNLOAD clears it and LOAD sets it again.
     loaded: bool,
     /// Current block length; 0 is variable-block mode.
@@ -144,6 +175,73 @@ pub struct ScsiTape {
     sense: [u8; SENSE_LEN],
 }
 
+/// What a save state holds of a tape drive. `names` is what the cartridge
+/// held when the state was saved, kept only to notice that it has changed
+/// since: the restored drive reads the cartridge as it is now, and a head
+/// position the tape no longer has is moved to the nearest one it does
+/// (the end of a shortened tape file, or end-of-data), with a warning, so
+/// a changed cartridge shows up when the state is loaded instead of as a
+/// medium error later.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct TapeState {
+    path: PathBuf,
+    cartridge: Cartridge,
+    names: Vec<String>,
+    write_protected: bool,
+    #[serde(default)]
+    capacity: Option<u64>,
+    loaded: bool,
+    block_len: u32,
+    last_block_len: u32,
+    file: usize,
+    offset: u64,
+    buffered_mode: u8,
+    sense: [u8; SENSE_LEN],
+}
+
+impl serde::Serialize for ScsiTape {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TapeState {
+            path: self.path.clone(),
+            cartridge: self.cartridge,
+            names: self.names(),
+            write_protected: self.write_protected,
+            capacity: self.capacity,
+            loaded: self.loaded,
+            block_len: self.block_len,
+            last_block_len: self.last_block_len,
+            file: self.file,
+            offset: self.offset,
+            buffered_mode: self.buffered_mode,
+            sense: self.sense,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ScsiTape {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let state = TapeState::deserialize(deserializer)?;
+        crate::hostbind::restored(crate::hostbind::Kind::Tape, &state.path);
+        let mut tape = Self {
+            path: state.path,
+            cartridge: state.cartridge,
+            files: Vec::new(),
+            write_protected: state.write_protected,
+            capacity: state.capacity,
+            loaded: state.loaded,
+            block_len: state.block_len,
+            last_block_len: state.last_block_len,
+            file: state.file,
+            offset: state.offset,
+            buffered_mode: state.buffered_mode,
+            sense: state.sense,
+        };
+        tape.reconcile(&state.names);
+        Ok(tape)
+    }
+}
+
 /// The fixed-format sense a tape exception condition latches.
 struct Exception {
     key: u8,
@@ -156,20 +254,46 @@ struct Exception {
 }
 
 impl ScsiTape {
-    /// Open the cartridge at `path`: a directory is a multi-file tape, a
-    /// file (or a path that does not exist yet, which becomes a file on the
-    /// first write) a single-file one.
-    pub fn open(path: &Path, write_protected: bool) -> anyhow::Result<Self> {
-        let cartridge = if path.is_dir() {
-            Cartridge::Directory
-        } else {
-            Cartridge::File
+    /// Open the cartridge at `path`.
+    ///
+    /// `kind` says what the cartridge is; `None` takes it from what is at
+    /// `path`: a directory is a multi-file tape and a file a single-file
+    /// one. A path with nothing at it is a new directory cartridge (it is
+    /// created), since that is the kind of tape that can hold whatever the
+    /// guest writes; a blank single-file tape has to be asked for.
+    /// `capacity` is how many bytes of data the tape holds, `None` for a
+    /// tape with no end short of the host's disk.
+    pub fn open(
+        path: &Path,
+        kind: Option<Cartridge>,
+        write_protected: bool,
+        capacity: Option<u64>,
+    ) -> anyhow::Result<Self> {
+        let found = match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => Some(Cartridge::Directory),
+            Ok(_) => Some(Cartridge::File),
+            Err(_) => None,
         };
+        let cartridge = match (kind, found) {
+            (Some(kind), Some(found)) if kind != found => anyhow::bail!(
+                "{} is a {}, not the {} the tape is configured as",
+                path.display(),
+                found.noun(),
+                kind.noun()
+            ),
+            (Some(kind), _) => kind,
+            (None, Some(found)) => found,
+            (None, None) => Cartridge::Directory,
+        };
+        if cartridge == Cartridge::Directory && found.is_none() {
+            std::fs::create_dir_all(path)?;
+        }
         let mut tape = Self {
             path: path.to_path_buf(),
             cartridge,
             files: Vec::new(),
             write_protected,
+            capacity,
             loaded: true,
             block_len: DEFAULT_BLOCK_LEN,
             last_block_len: DEFAULT_BLOCK_LEN,
@@ -179,6 +303,7 @@ impl ScsiTape {
             sense: [0u8; SENSE_LEN],
         };
         tape.scan()?;
+        crate::hostbind::opened(crate::hostbind::Kind::Tape, path);
         Ok(tape)
     }
 
@@ -204,17 +329,43 @@ impl ScsiTape {
         &self.path
     }
 
+    /// The tape files' names, as text.
+    fn names(&self) -> Vec<String> {
+        self.files
+            .iter()
+            .map(|name| name.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// The host file behind tape file `index`: a name inside the cartridge
+    /// directory, or the single-file cartridge's own path. Never anything
+    /// else: names come from reading the directory or from
+    /// [`Self::new_file_name`], not from a save state.
+    fn file_path(&self, index: usize) -> PathBuf {
+        match self.cartridge {
+            Cartridge::File => self.path.clone(),
+            Cartridge::Directory => self.path.join(&self.files[index]),
+        }
+    }
+
     /// Read the cartridge's tape files off the host. Done when the
-    /// cartridge is opened and at every LOAD, so files added to a
-    /// directory while the tape was unloaded are found; the list then
-    /// stays as the drive knows it until the next LOAD.
+    /// cartridge is opened, when a state is restored and at every LOAD, so
+    /// files added to a directory while the tape was unloaded are found;
+    /// the list then stays as the drive knows it until the next LOAD.
+    ///
+    /// A directory's tape files are its regular files, and links to
+    /// regular files, in name order; hidden files (a leading `.`) and
+    /// subdirectories are not part of the tape. A single-file cartridge is
+    /// one tape file if the file exists (an empty file is an empty tape
+    /// file, which is what a filemark written on a blank tape leaves) and a
+    /// blank tape if it does not.
     fn scan(&mut self) -> std::io::Result<()> {
         self.files.clear();
         match self.cartridge {
             Cartridge::File => {
-                // An absent or empty file is a blank tape.
-                if std::fs::metadata(&self.path).is_ok_and(|m| m.is_file() && m.len() > 0) {
-                    self.files.push(self.path.clone());
+                if std::fs::metadata(&self.path).is_ok_and(|m| m.is_file()) {
+                    self.files
+                        .push(self.path.file_name().unwrap_or_default().to_os_string());
                 }
             }
             Cartridge::Directory => {
@@ -222,20 +373,85 @@ impl ScsiTape {
                 for entry in std::fs::read_dir(&self.path)? {
                     let entry = entry?;
                     let name = entry.file_name();
-                    if name.to_string_lossy().starts_with('.') || !entry.file_type()?.is_file() {
+                    if name.to_string_lossy().starts_with('.') {
                         continue;
                     }
-                    names.push(name);
+                    // Through a link to what it names; a dangling one is
+                    // not a file.
+                    if std::fs::metadata(entry.path()).is_ok_and(|m| m.is_file()) {
+                        names.push(name);
+                    }
                 }
                 names.sort();
-                self.files = names.into_iter().map(|n| self.path.join(n)).collect();
+                self.files = names;
             }
         }
         Ok(())
     }
 
+    /// Bring a restored drive back in step with the cartridge as the host
+    /// has it now. `saved` is the tape files' names when the state was
+    /// taken.
+    fn reconcile(&mut self, saved: &[String]) {
+        if let Err(e) = self.scan() {
+            log::warn!(
+                "scsi tape {}: the cartridge cannot be read ({e}); the restored drive is \
+                 unloaded",
+                self.path.display()
+            );
+            self.files.clear();
+            self.loaded = false;
+            self.file = 0;
+            self.offset = 0;
+            return;
+        }
+        let mut changed = self.names() != saved;
+        if self.file > self.files.len() {
+            self.file = self.files.len();
+            self.offset = 0;
+            changed = true;
+        }
+        if self.file == self.files.len() {
+            changed |= self.offset != 0;
+            self.offset = 0;
+        } else {
+            let len = self.file_len(self.file).unwrap_or(0);
+            if self.offset > len {
+                self.offset = len;
+                changed = true;
+            }
+        }
+        if changed {
+            log::warn!(
+                "scsi tape {}: the cartridge is not as the save state left it; the tape is \
+                 used as it is now, with the head at tape file {} offset {}",
+                self.path.display(),
+                self.file,
+                self.offset
+            );
+        }
+    }
+
     fn file_len(&self, index: usize) -> std::io::Result<u64> {
-        Ok(std::fs::metadata(&self.files[index])?.len())
+        Ok(std::fs::metadata(self.file_path(index))?.len())
+    }
+
+    /// Bytes of data on the tape up to the head: what a write at the head
+    /// keeps.
+    fn used_to_head(&self) -> std::io::Result<u64> {
+        let mut used = 0u64;
+        for index in 0..self.file.min(self.files.len()) {
+            used = used.saturating_add(self.file_len(index)?);
+        }
+        Ok(used.saturating_add(self.offset))
+    }
+
+    /// Where the early-warning zone starts on a tape with an end: the
+    /// last part of it, where a write still succeeds but reports
+    /// end-of-medium so the initiator can finish its trailer.
+    fn early_warning(&self) -> Option<u64> {
+        self.capacity
+            .map(|capacity| capacity - (capacity / 32).min(EARLY_WARNING_MAX_BYTES))
     }
 
     /// Whether the cartridge has room for a tape file at `index`.
@@ -246,30 +462,41 @@ impl ScsiTape {
         }
     }
 
-    /// The host file for a new tape file at `index` (the current end of
-    /// the tape). A directory cartridge names it so that it sorts after
-    /// every file already there.
-    fn new_file_path(&self, index: usize) -> PathBuf {
-        match self.cartridge {
-            Cartridge::File => self.path.clone(),
-            Cartridge::Directory => {
-                let last = self
-                    .files
-                    .last()
-                    .and_then(|p| p.file_name())
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let name = format!("{index:05}.tape");
-                // A name that would not sort last takes the last name as
-                // its prefix instead: a longer name with the same start
-                // always sorts after it, whatever characters it is made of.
-                if name.as_str() > last.as_str() {
-                    self.path.join(name)
-                } else {
-                    self.path.join(format!("{last}~{name}"))
+    /// The name of a new tape file at `index`, the current end of a
+    /// directory cartridge: one that sorts after every file already there,
+    /// and no longer than the last name plus a few characters however many
+    /// files the guest writes.
+    fn new_file_name(&self, index: usize) -> OsString {
+        let last = self
+            .files
+            .last()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let plain = format!("{index:05}.tape");
+        if plain.as_str() > last.as_str() {
+            return plain.into();
+        }
+        // The last name is one of ours with a lower number: keep whatever
+        // it starts with and count on.
+        if let Some(stem) = last.len().checked_sub(plain.len()) {
+            if last.is_char_boundary(stem) {
+                let (prefix, tail) = last.split_at(stem);
+                let number = tail
+                    .strip_suffix(".tape")
+                    .filter(|digits| digits.bytes().all(|b| b.is_ascii_digit()))
+                    .and_then(|digits| digits.parse::<usize>().ok());
+                if number.is_some_and(|number| number < index) {
+                    return format!("{prefix}{plain}").into();
                 }
             }
         }
+        // Otherwise share the last name's start up to its first character
+        // that '~' outranks, and put '~' there.
+        let shared = last
+            .char_indices()
+            .find(|&(_, c)| c < '~')
+            .map_or(last.len(), |(at, _)| at);
+        format!("{}~{plain}", &last[..shared]).into()
     }
 
     /// Cut the tape at the head: everything from the current position to
@@ -280,14 +507,15 @@ impl ScsiTape {
         let keep = if self.file < self.files.len() {
             std::fs::OpenOptions::new()
                 .write(true)
-                .open(&self.files[self.file])?
+                .open(self.file_path(self.file))?
                 .set_len(self.offset)?;
             self.file + 1
         } else {
             self.files.len()
         };
-        for path in self.files.drain(keep..) {
-            std::fs::remove_file(&path)?;
+        while self.files.len() > keep {
+            std::fs::remove_file(self.file_path(self.files.len() - 1))?;
+            self.files.pop();
         }
         Ok(())
     }
@@ -296,9 +524,15 @@ impl ScsiTape {
     /// one at end-of-data).
     fn ensure_file_at_position(&mut self) -> std::io::Result<()> {
         if self.file == self.files.len() {
-            let path = self.new_file_path(self.file);
-            std::fs::File::create(&path)?;
-            self.files.push(path);
+            let name = match self.cartridge {
+                Cartridge::File => self.path.file_name().unwrap_or_default().to_os_string(),
+                Cartridge::Directory => self.new_file_name(self.file),
+            };
+            self.files.push(name);
+            if let Err(e) = std::fs::File::create(self.file_path(self.file)) {
+                self.files.pop();
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -481,7 +715,7 @@ impl ScsiTape {
 
     /// Read up to `len` bytes of the tape file under the head.
     fn read_bytes(&mut self, len: u64) -> std::io::Result<Vec<u8>> {
-        let mut file = std::fs::File::open(&self.files[self.file])?;
+        let mut file = std::fs::File::open(self.file_path(self.file))?;
         file.seek(SeekFrom::Start(self.offset))?;
         let mut data = Vec::new();
         file.take(len).read_to_end(&mut data)?;
@@ -648,27 +882,44 @@ impl ScsiTape {
         (bytes <= MAX_TRANSFER_BYTES).then_some(bytes)
     }
 
-    /// Whether a write may start here: `Err` is the sense to report.
-    fn write_gate(&mut self) -> Result<(), Exception> {
-        if self.write_protected {
-            return Err(Exception {
-                key: SK_DATA_PROTECT,
-                flags: 0,
-                asc: ASC_WRITE_PROTECTED,
-                ascq: 0,
-                information: 0,
-            });
+    /// The sense of a write the tape has no room for.
+    fn volume_overflow(residue: u32) -> Exception {
+        Exception {
+            key: SK_VOLUME_OVERFLOW,
+            flags: SENSE_EOM,
+            asc: 0x00,
+            ascq: ASCQ_END_OF_MEDIUM,
+            information: residue,
         }
-        if !self.has_room_for(self.file) {
-            return Err(Exception {
-                key: SK_VOLUME_OVERFLOW,
-                flags: SENSE_EOM,
-                asc: 0x00,
-                ascq: ASCQ_END_OF_MEDIUM,
-                information: 0,
-            });
+    }
+
+    /// The sense of a write that succeeded inside the early-warning zone:
+    /// done, and the end of the tape is near.
+    fn early_warning_reached() -> Exception {
+        Exception {
+            key: SK_NO_SENSE,
+            flags: SENSE_EOM,
+            asc: 0x00,
+            ascq: ASCQ_END_OF_MEDIUM,
+            information: 0,
         }
-        Ok(())
+    }
+
+    /// Bytes a write at the head may add before the end of the tape, or
+    /// `None` on a tape with no end.
+    fn room_at_head(&self) -> std::io::Result<Option<u64>> {
+        match self.capacity {
+            None => Ok(None),
+            Some(capacity) => Ok(Some(capacity.saturating_sub(self.used_to_head()?))),
+        }
+    }
+
+    /// Whether the head is inside the early-warning zone.
+    fn in_early_warning(&self) -> bool {
+        match self.early_warning() {
+            None => false,
+            Some(start) => self.used_to_head().is_ok_and(|used| used >= start),
+        }
     }
 
     fn write_prepare(&mut self, cdb: &[u8]) -> (ScsiExec, u8) {
@@ -678,13 +929,22 @@ impl ScsiTape {
         if bytes == 0 {
             return (ScsiExec::NoData, GOOD);
         }
-        if let Err(mut exception) = self.write_gate() {
+        if self.write_protected {
+            return self.check(SK_DATA_PROTECT, ASC_WRITE_PROTECTED);
+        }
+        // No data phase for a write none of which fits: there is no tape
+        // file to put it in, or not room for one block of it.
+        let one_block = match cdb[1] & 0x01 != 0 {
+            true => u64::from(self.block_len),
+            false => bytes,
+        };
+        let room = match self.room_at_head() {
+            Ok(room) => room,
+            Err(e) => return self.io_error("writing", &e),
+        };
+        if !self.has_room_for(self.file) || room.is_some_and(|room| room < one_block) {
             // Nothing was written: the residue is the whole request.
-            exception.information = be24(cdb, 2);
-            if exception.key == SK_DATA_PROTECT {
-                return self.check(exception.key, exception.asc);
-            }
-            self.raise(&exception);
+            self.raise(&Self::volume_overflow(be24(cdb, 2)));
             return (ScsiExec::NoData, CHECK_CONDITION);
         }
         (ScsiExec::DataOut(bytes as usize), GOOD)
@@ -696,36 +956,77 @@ impl ScsiTape {
             return CHECK_CONDITION;
         }
         let fixed = cdb[1] & 0x01 != 0;
-        // Only what the CDB asked for is written; in fixed mode only whole
-        // blocks, as a short data phase cannot make part of a block.
         let Some(want) = self.write_len(cdb) else {
             self.set_sense(SK_ILLEGAL_REQUEST, ASC_INVALID_FIELD_IN_CDB, 0);
             return CHECK_CONDITION;
         };
-        let mut len = (data.len() as u64).min(want) as usize;
+        // What the command counts in: blocks in fixed mode, bytes otherwise.
+        let unit = match fixed {
+            true => u64::from(self.block_len),
+            false => 1,
+        };
+        let room = match self.room_at_head() {
+            Ok(room) => room.unwrap_or(u64::MAX),
+            Err(e) => return self.io_error("writing", &e).1,
+        };
+        // Only what the CDB asked for is written, only what arrived, and
+        // only what the tape has room for; in fixed mode only whole blocks,
+        // and in variable mode the one block whole or not at all.
+        let arrived = (data.len() as u64).min(want);
+        let mut len = arrived.min(room);
         if fixed {
-            len -= len % self.block_len as usize;
+            len -= len % unit;
+        } else if len < arrived {
+            len = 0;
         }
-        // A data phase that delivered nothing wrote nothing: the tape is
-        // not cut at the head for it.
-        if len == 0 {
-            return GOOD;
+        let fits = len;
+        let len = len as usize;
+        // Nothing to write leaves the tape as it is: it is not cut at the
+        // head for a block that never arrived or does not fit.
+        if len > 0 {
+            let result = (|| -> std::io::Result<()> {
+                self.truncate_at_position()?;
+                self.ensure_file_at_position()?;
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(self.file_path(self.file))?;
+                file.seek(SeekFrom::Start(self.offset))?;
+                file.write_all(&data[..len])
+            })();
+            if let Err(e) = result {
+                return self.io_error("writing", &e).1;
+            }
+            self.offset += fits;
+            if !fixed {
+                self.last_block_len = len as u32;
+            }
         }
-        let result = (|| -> std::io::Result<()> {
-            self.truncate_at_position()?;
-            self.ensure_file_at_position()?;
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&self.files[self.file])?;
-            file.seek(SeekFrom::Start(self.offset))?;
-            file.write_all(&data[..len])
-        })();
-        if let Err(e) = result {
-            return self.io_error("writing", &e).1;
+        let residue = ((want - fits) / unit) as u32;
+        let whole_arrived = match fixed {
+            true => arrived - arrived % unit,
+            false => arrived,
+        };
+        if fits < whole_arrived {
+            // The tape ran out under the write.
+            self.raise(&Self::volume_overflow(residue));
+            return CHECK_CONDITION;
         }
-        self.offset += len as u64;
-        if !fixed && len > 0 {
-            self.last_block_len = len as u32;
+        if arrived < want {
+            // The data phase ended before the command's count was reached,
+            // which only an abort on the bus does. What arrived whole is on
+            // the tape; the rest is the residue.
+            self.raise(&Exception {
+                key: SK_ABORTED_COMMAND,
+                flags: 0,
+                asc: 0x00,
+                ascq: 0x00,
+                information: residue,
+            });
+            return CHECK_CONDITION;
+        }
+        if self.in_early_warning() {
+            self.raise(&Self::early_warning_reached());
+            return CHECK_CONDITION;
         }
         GOOD
     }
@@ -743,19 +1044,25 @@ impl ScsiTape {
         if self.write_protected {
             return self.check(SK_DATA_PROTECT, ASC_WRITE_PROTECTED);
         }
-        // Each filemark closes a tape file; the cartridge has to have room
-        // for every file a filemark closes.
-        let capacity = match self.cartridge {
-            Cartridge::Directory => MAX_TAPE_FILES,
-            Cartridge::File => 1,
+        // Each filemark closes a tape file, and a directory cartridge has
+        // to have room for every file a filemark closes. A single-file
+        // cartridge holds one tape file; filemarks after it mark the end of
+        // the data and nothing more (the two filemarks that close a backup
+        // are both accepted), so they are taken and leave no trace.
+        let closes = match self.cartridge {
+            Cartridge::Directory => count.min(MAX_TAPE_FILES.saturating_sub(self.file)),
+            Cartridge::File => count.min(1usize.saturating_sub(self.file)),
         };
-        let writable = count.min(capacity.saturating_sub(self.file));
+        let accepted = match self.cartridge {
+            Cartridge::Directory => closes,
+            Cartridge::File => count,
+        };
         let result = (|| -> std::io::Result<()> {
-            if writable == 0 {
+            if closes == 0 {
                 return Ok(());
             }
             self.truncate_at_position()?;
-            for _ in 0..writable {
+            for _ in 0..closes {
                 self.ensure_file_at_position()?;
                 self.file += 1;
                 self.offset = 0;
@@ -765,14 +1072,12 @@ impl ScsiTape {
         if let Err(e) = result {
             return self.io_error("writing a filemark", &e);
         }
-        if writable < count {
-            self.raise(&Exception {
-                key: SK_VOLUME_OVERFLOW,
-                flags: SENSE_EOM,
-                asc: 0x00,
-                ascq: ASCQ_END_OF_MEDIUM,
-                information: (count - writable) as u32,
-            });
+        if accepted < count {
+            self.raise(&Self::volume_overflow((count - accepted) as u32));
+            return (ScsiExec::NoData, CHECK_CONDITION);
+        }
+        if self.in_early_warning() {
+            self.raise(&Self::early_warning_reached());
             return (ScsiExec::NoData, CHECK_CONDITION);
         }
         (ScsiExec::NoData, GOOD)
@@ -911,16 +1216,14 @@ impl ScsiTape {
             if let Err(e) = self.truncate_at_position() {
                 return self.io_error("erasing", &e);
             }
-            // An emptied tape file under the head is no tape file at all.
-            // A single-file cartridge keeps its (now empty) host file: the
-            // path is the user's, and an empty file is a blank tape.
+            // An emptied tape file under the head is no tape file at all:
+            // its host file goes, a single-file cartridge's included, since
+            // a file that exists is a tape file and a blank tape has none.
             if self.file < self.files.len() && self.offset == 0 {
-                let path = self.files.remove(self.file);
-                if self.cartridge == Cartridge::Directory {
-                    if let Err(e) = std::fs::remove_file(&path) {
-                        return self.io_error("erasing", &e);
-                    }
+                if let Err(e) = std::fs::remove_file(self.file_path(self.file)) {
+                    return self.io_error("erasing", &e);
                 }
+                self.files.pop();
             }
         }
         (ScsiExec::NoData, GOOD)
@@ -1073,7 +1376,7 @@ mod tests {
         for (file, data) in files {
             std::fs::write(dir.join(file), data).unwrap();
         }
-        let tape = ScsiTape::open(&dir, false).unwrap();
+        let tape = ScsiTape::open(&dir, None, false, None).unwrap();
         (dir, tape)
     }
 
@@ -1205,7 +1508,7 @@ mod tests {
     #[test]
     fn mode_sense_reports_the_write_protect_tab() {
         let dir = scratch("wp-mode");
-        let mut tape = ScsiTape::open(&dir, true).unwrap();
+        let mut tape = ScsiTape::open(&dir, None, true, None).unwrap();
         let (data, _) = run(&mut tape, &[0x1A, 0, 0, 0, 255, 0]);
         assert_eq!(data[2] & 0x80, 0x80);
         let _ = std::fs::remove_dir_all(dir);
@@ -1399,7 +1702,7 @@ mod tests {
     #[test]
     fn writes_make_tape_files_and_filemarks_step_to_the_next() {
         let dir = scratch("write");
-        let mut tape = ScsiTape::open(&dir, false).unwrap();
+        let mut tape = ScsiTape::open(&dir, None, false, None).unwrap();
         // A blank tape: end-of-data at once.
         let (_, status) = run(&mut tape, &read6(true, false, 1));
         assert_eq!(status, CHECK_CONDITION);
@@ -1490,13 +1793,13 @@ mod tests {
         assert_eq!(run(&mut tape, &space6(3, 0)).1, GOOD);
         assert_eq!(run_out(&mut tape, &write6(true, 1), &pattern(3, 512)), GOOD);
         // A freshly opened drive finds it as the third tape file.
-        let mut reopened = ScsiTape::open(&dir, false).unwrap();
+        let mut reopened = ScsiTape::open(&dir, None, false, None).unwrap();
         assert_eq!(reopened.files.len(), 3);
         assert_eq!(run(&mut reopened, &space6(1, 2)).1, GOOD);
         let (data, status) = run(&mut reopened, &read6(true, false, 1));
         assert_eq!(status, GOOD);
         assert_eq!(data, pattern(3, 512));
-        let name = reopened.files[2].file_name().unwrap().to_string_lossy();
+        let name = reopened.files[2].to_string_lossy();
         assert!(name.as_ref() > "zeta.tar", "{name}");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1516,7 +1819,7 @@ mod tests {
         assert_eq!(run_out(&mut tape, &write6(true, 1), &pattern(3, 512)), GOOD);
         assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 1, 0]).1, GOOD);
         assert_eq!(run_out(&mut tape, &write6(true, 1), &pattern(4, 512)), GOOD);
-        let mut reopened = ScsiTape::open(&dir, false).unwrap();
+        let mut reopened = ScsiTape::open(&dir, None, false, None).unwrap();
         assert_eq!(reopened.files.len(), 4);
         assert_eq!(run(&mut reopened, &space6(1, 2)).1, GOOD);
         let (data, _) = run(&mut reopened, &read6(true, false, 1));
@@ -1530,11 +1833,11 @@ mod tests {
     #[test]
     fn a_directory_cartridge_ends_after_its_last_tape_file() {
         let dir = scratch("capacity");
-        let mut tape = ScsiTape::open(&dir, false).unwrap();
+        let mut tape = ScsiTape::open(&dir, None, false, None).unwrap();
         // The head is at the last tape file the cartridge has room for.
         tape.file = MAX_TAPE_FILES - 1;
         tape.files = (0..MAX_TAPE_FILES - 1)
-            .map(|i| dir.join(format!("{i:05}.tape")))
+            .map(|i| format!("{i:05}.tape").into())
             .collect();
         // A request for sixteen million filemarks writes the one that
         // fits and reports the rest as residue at the end of the tape.
@@ -1563,10 +1866,286 @@ mod tests {
         // one, which makes no block at all.
         let cdb = write6(true, 1);
         assert!(matches!(tape.execute(&cdb, 0).0, ScsiExec::DataOut(512)));
-        assert_eq!(tape.complete_out(&cdb, &[0u8; 256]), GOOD);
+        assert_eq!(tape.complete_out(&cdb, &[0u8; 256]), CHECK_CONDITION);
+        // Reported as the aborted command it is, with the block that was
+        // not written as the residue.
+        let (key, flags, valid, info, _, _) = sense(&mut tape);
+        assert_eq!((key, flags, valid, info), (SK_ABORTED_COMMAND, 0, true, 1));
         assert_eq!(std::fs::read(dir.join("a")).unwrap(), pattern(1, 1024));
         assert!(dir.join("b").exists());
+
+        // Two blocks asked for, one and a half delivered: the whole block
+        // is written (cutting the tape there) and one is the residue.
+        let cdb = write6(true, 2);
+        assert!(matches!(tape.execute(&cdb, 0).0, ScsiExec::DataOut(1024)));
+        assert_eq!(tape.complete_out(&cdb, &pattern(9, 768)), CHECK_CONDITION);
+        let (key, _, _, info, _, _) = sense(&mut tape);
+        assert_eq!((key, info), (SK_ABORTED_COMMAND, 1));
+        let mut expected = pattern(1, 512);
+        expected.extend_from_slice(&pattern(9, 768)[..512]);
+        assert_eq!(std::fs::read(dir.join("a")).unwrap(), expected);
+        assert!(!dir.join("b").exists());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn generated_names_stay_short_however_many_tape_files_follow_a_named_one() {
+        // "backup.tar" outranks NNNNN.tape, so the first new file takes a
+        // '~'; every later one only counts on from it.
+        let (dir, mut tape) = directory_tape("naming-chain", &[("backup.tar", pattern(1, 512))]);
+        assert_eq!(run(&mut tape, &space6(3, 0)).1, GOOD);
+        for _ in 0..40 {
+            assert_eq!(run_out(&mut tape, &write6(true, 1), &pattern(2, 512)), GOOD);
+            assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 1, 0]).1, GOOD);
+        }
+        let names = tape.names();
+        assert_eq!(names.len(), 41);
+        assert_eq!(names[1], "~00001.tape");
+        assert_eq!(names[40], "~00040.tape");
+        // In tape order on the host too.
+        let reopened = ScsiTape::open(&dir, None, false, None).unwrap();
+        assert_eq!(reopened.names(), names);
+
+        // A user file numbered ahead of the count gets the same treatment.
+        let (dir2, mut tape) = directory_tape("naming-ahead", &[("00007.tape", pattern(1, 512))]);
+        assert_eq!(run(&mut tape, &space6(3, 0)).1, GOOD);
+        assert_eq!(run_out(&mut tape, &write6(true, 1), &pattern(2, 512)), GOOD);
+        assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 1, 0]).1, GOOD);
+        assert_eq!(run_out(&mut tape, &write6(true, 1), &pattern(3, 512)), GOOD);
+        assert_eq!(tape.names(), ["00007.tape", "~00001.tape", "~00002.tape"]);
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    #[test]
+    fn a_path_with_nothing_at_it_is_a_new_directory_unless_a_file_is_asked_for() {
+        let dir = scratch("absent");
+        let cartridge = dir.join("backups");
+        let mut tape = ScsiTape::open(&cartridge, None, false, None).unwrap();
+        assert!(cartridge.is_dir());
+        // Room for more than one tape file, as a directory has.
+        assert_eq!(run_out(&mut tape, &write6(true, 1), &pattern(1, 512)), GOOD);
+        assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 1, 0]).1, GOOD);
+        assert_eq!(run_out(&mut tape, &write6(true, 1), &pattern(2, 512)), GOOD);
+        assert_eq!(tape.names(), ["00000.tape", "00001.tape"]);
+
+        // Asked for as a file, it is a blank single-file tape.
+        let single = dir.join("one.tar");
+        let tape = ScsiTape::open(&single, Some(Cartridge::File), false, None).unwrap();
+        assert!(!single.exists());
+        assert!(tape.files.is_empty());
+
+        // What is there has to be what was asked for.
+        assert!(ScsiTape::open(&cartridge, Some(Cartridge::File), false, None).is_err());
+        std::fs::write(&single, b"x").unwrap();
+        assert!(ScsiTape::open(&single, Some(Cartridge::Directory), false, None).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_filemark_on_a_blank_single_file_tape_survives_a_reload() {
+        let dir = scratch("blank-filemark");
+        let path = dir.join("one.tar");
+        let mut tape = ScsiTape::open(&path, Some(Cartridge::File), false, None).unwrap();
+        assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 1, 0]).1, GOOD);
+        // An empty tape file: the host file exists and is empty.
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert_eq!(run(&mut tape, &[0x1B, 0, 0, 0, 0, 0]).1, GOOD);
+        assert_eq!(run(&mut tape, &[0x1B, 0, 0, 0, 1, 0]).1, GOOD);
+        // Still a filemark and then end-of-data, not a blank tape.
+        assert_eq!(run(&mut tape, &read6(true, false, 1)).1, CHECK_CONDITION);
+        assert_eq!(sense(&mut tape).1, SENSE_FILEMARK);
+        assert_eq!(run(&mut tape, &read6(true, false, 1)).1, CHECK_CONDITION);
+        assert_eq!(sense(&mut tape).0, SK_BLANK_CHECK);
+
+        // A long erase from the beginning makes it blank again: no file.
+        assert_eq!(run(&mut tape, &[0x01, 0, 0, 0, 0, 0]).1, GOOD);
+        assert_eq!(run(&mut tape, &[0x19, 0x01, 0, 0, 0, 0]).1, GOOD);
+        assert!(!path.exists());
+        assert_eq!(run(&mut tape, &read6(true, false, 1)).1, CHECK_CONDITION);
+        assert_eq!(sense(&mut tape).0, SK_BLANK_CHECK);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_tape_with_a_capacity_warns_near_its_end_and_then_overflows() {
+        // 64 KiB of tape: the early-warning zone is its last 1/32nd, 2 KiB.
+        let dir = scratch("capacity-bytes");
+        let mut tape = ScsiTape::open(&dir, None, false, Some(64 * 1024)).unwrap();
+        // 60 KiB: plain success.
+        for _ in 0..60 {
+            assert_eq!(
+                run_out(&mut tape, &write6(true, 2), &pattern(1, 1024)),
+                GOOD
+            );
+        }
+        assert_eq!(
+            run_out(&mut tape, &write6(true, 2), &pattern(1, 1024)),
+            GOOD
+        );
+        // 62 KiB is where the zone starts: the write that reaches it is
+        // done, and says the end is near.
+        assert_eq!(
+            run_out(&mut tape, &write6(true, 2), &pattern(2, 1024)),
+            CHECK_CONDITION
+        );
+        let (key, flags, valid, info, asc, ascq) = sense(&mut tape);
+        assert_eq!((key, flags, valid, info), (SK_NO_SENSE, SENSE_EOM, true, 0));
+        assert_eq!((asc, ascq), (0x00, ASCQ_END_OF_MEDIUM));
+        assert_eq!(
+            std::fs::metadata(dir.join("00000.tape")).unwrap().len(),
+            62 * 1024
+        );
+        // A filemark in the zone is written and warns the same way.
+        assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 1, 0]).1, CHECK_CONDITION);
+        assert_eq!(sense(&mut tape).1, SENSE_EOM);
+        assert_eq!(tape.file, 1);
+        // Six blocks into 2 KiB of room: four are written, two are the
+        // residue of a volume overflow.
+        assert_eq!(
+            run_out(&mut tape, &write6(true, 6), &pattern(3, 6 * 512)),
+            CHECK_CONDITION
+        );
+        let (key, flags, valid, info, _, _) = sense(&mut tape);
+        assert_eq!(
+            (key, flags, valid, info),
+            (SK_VOLUME_OVERFLOW, SENSE_EOM, true, 2)
+        );
+        assert_eq!(
+            std::fs::read(dir.join("00001.tape")).unwrap(),
+            pattern(3, 6 * 512)[..2048]
+        );
+        // Nothing more fits: no data phase at all.
+        let (exec, status) = tape.execute(&write6(true, 1), 0);
+        assert!(matches!(exec, ScsiExec::NoData));
+        assert_eq!(status, CHECK_CONDITION);
+        assert_eq!(sense(&mut tape).0, SK_VOLUME_OVERFLOW);
+        // Rewound, the room is there again: writing cuts the tape.
+        assert_eq!(run(&mut tape, &[0x01, 0, 0, 0, 0, 0]).1, GOOD);
+        assert_eq!(run_out(&mut tape, &write6(true, 1), &pattern(4, 512)), GOOD);
+
+        // A variable block that does not fit whole is not written at all.
+        let dir2 = scratch("capacity-variable");
+        let mut tape = ScsiTape::open(&dir2, None, false, Some(1000)).unwrap();
+        set_block_len(&mut tape, 0);
+        assert_eq!(
+            run_out(&mut tape, &write6(false, 600), &pattern(1, 600)),
+            GOOD
+        );
+        let (exec, status) = tape.execute(&write6(false, 600), 0);
+        assert!(matches!(exec, ScsiExec::NoData));
+        assert_eq!(status, CHECK_CONDITION);
+        let (key, _, _, info, _, _) = sense(&mut tape);
+        assert_eq!((key, info), (SK_VOLUME_OVERFLOW, 600));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_to_a_file_is_a_tape_file_and_a_dangling_one_is_not() {
+        let (dir, _) = directory_tape("links", &[("b", pattern(2, 512))]);
+        let outside = scratch("links-target");
+        std::fs::write(outside.join("real.tar"), pattern(1, 512)).unwrap();
+        std::os::unix::fs::symlink(outside.join("real.tar"), dir.join("a.tar")).unwrap();
+        std::os::unix::fs::symlink(outside.join("gone"), dir.join("c.tar")).unwrap();
+        let mut tape = ScsiTape::open(&dir, None, false, None).unwrap();
+        assert_eq!(tape.names(), ["a.tar", "b"]);
+        let (data, status) = run(&mut tape, &read6(true, false, 1));
+        assert_eq!(status, GOOD);
+        assert_eq!(data, pattern(1, 512));
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(outside);
+    }
+
+    #[test]
+    fn a_restored_drive_reads_its_tape_files_from_the_cartridge_not_the_state() {
+        // A state names tape files; the restored drive must touch only
+        // what is in its cartridge. Build a state whose names point out of
+        // the cartridge and at a victim file beside it.
+        let (dir, tape) = directory_tape("state-paths", &[("a", pattern(1, 1024))]);
+        let victim = dir.parent().unwrap().join(format!(
+            "copperline-scsi-tape-victim-{}",
+            std::process::id()
+        ));
+        std::fs::write(&victim, b"precious").unwrap();
+        let state = TapeState {
+            path: dir.clone(),
+            cartridge: Cartridge::Directory,
+            names: vec![
+                format!("../{}", victim.file_name().unwrap().to_string_lossy()),
+                victim.to_string_lossy().into_owned(),
+            ],
+            write_protected: false,
+            capacity: None,
+            loaded: true,
+            block_len: 512,
+            last_block_len: 512,
+            file: 0,
+            offset: 0,
+            buffered_mode: 1,
+            sense: [0; SENSE_LEN],
+        };
+        drop(tape);
+        let mut bytes = Vec::new();
+        crate::savestate::chunk::encode(&state, &mut bytes).unwrap();
+        let mut restored: ScsiTape = crate::savestate::chunk::decode(&bytes).unwrap();
+        // The drive has the cartridge's one real tape file.
+        assert_eq!(restored.names(), ["a"]);
+        // REWIND, WRITE, then a long ERASE from the start: the cartridge
+        // changes, the victim does not.
+        assert_eq!(run(&mut restored, &[0x01, 0, 0, 0, 0, 0]).1, GOOD);
+        assert_eq!(
+            run_out(&mut restored, &write6(true, 1), &pattern(5, 512)),
+            GOOD
+        );
+        assert_eq!(run(&mut restored, &[0x01, 0, 0, 0, 0, 0]).1, GOOD);
+        assert_eq!(run(&mut restored, &[0x19, 0x01, 0, 0, 0, 0]).1, GOOD);
+        assert_eq!(std::fs::read(&victim).unwrap(), b"precious");
+        assert!(!dir.join("a").exists());
+        let _ = std::fs::remove_file(&victim);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_restored_drive_takes_the_tape_as_it_is_now() {
+        let (dir, mut tape) = directory_tape(
+            "state-changed",
+            &[("a", pattern(1, 2048)), ("b", pattern(2, 1024))],
+        );
+        // Head 512 bytes into tape file 1.
+        assert_eq!(run(&mut tape, &space6(1, 1)).1, GOOD);
+        run(&mut tape, &read6(true, false, 1));
+        let mut bytes = Vec::new();
+        crate::savestate::chunk::encode(&tape, &mut bytes).unwrap();
+
+        // Unchanged cartridge: the head is where it was.
+        let mut same: ScsiTape = crate::savestate::chunk::decode(&bytes).unwrap();
+        let (data, status) = run(&mut same, &read6(true, false, 1));
+        assert_eq!(status, GOOD);
+        assert_eq!(data, pattern(2, 1024)[512..]);
+
+        // Tape file 1 shortened behind the state's back: the head is at
+        // its new end, so the next read meets the filemark instead of a
+        // medium error.
+        std::fs::write(dir.join("b"), pattern(2, 100)).unwrap();
+        let mut shorter: ScsiTape = crate::savestate::chunk::decode(&bytes).unwrap();
+        assert_eq!((shorter.file, shorter.offset), (1, 100));
+        assert_eq!(run(&mut shorter, &read6(true, false, 1)).1, CHECK_CONDITION);
+        assert_eq!(sense(&mut shorter).1, SENSE_FILEMARK);
+
+        // Tape file 1 gone: the head is at end-of-data.
+        std::fs::remove_file(dir.join("b")).unwrap();
+        let mut fewer: ScsiTape = crate::savestate::chunk::decode(&bytes).unwrap();
+        assert_eq!((fewer.file, fewer.offset), (1, 0));
+        assert_eq!(run(&mut fewer, &read6(true, false, 1)).1, CHECK_CONDITION);
+        assert_eq!(sense(&mut fewer).0, SK_BLANK_CHECK);
+
+        // The cartridge itself gone: the drive comes back unloaded.
+        std::fs::remove_dir_all(&dir).unwrap();
+        let mut gone: ScsiTape = crate::savestate::chunk::decode(&bytes).unwrap();
+        assert_eq!(run(&mut gone, &[0x00, 0, 0, 0, 0, 0]).1, CHECK_CONDITION);
+        assert_eq!(sense(&mut gone).0, SK_NOT_READY);
     }
 
     #[test]
@@ -1574,7 +2153,7 @@ mod tests {
         let (dir, _) = directory_tape("hidden", &[("a", pattern(1, 512))]);
         std::fs::write(dir.join(".DS_Store"), b"junk").unwrap();
         std::fs::create_dir(dir.join("sub")).unwrap();
-        let tape = ScsiTape::open(&dir, false).unwrap();
+        let tape = ScsiTape::open(&dir, None, false, None).unwrap();
         assert_eq!(tape.files.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1690,7 +2269,7 @@ mod tests {
     fn a_single_file_cartridge_holds_one_tape_file() {
         let dir = scratch("single");
         let path = dir.join("backup.tar");
-        let mut tape = ScsiTape::open(&path, false).unwrap();
+        let mut tape = ScsiTape::open(&path, Some(Cartridge::File), false, None).unwrap();
         assert!(!path.exists(), "a blank tape makes no file until written");
         assert_eq!(run(&mut tape, &read6(true, false, 1)).1, CHECK_CONDITION);
         assert_eq!(sense(&mut tape).0, SK_BLANK_CHECK);
@@ -1702,7 +2281,8 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), pattern(1, 1024));
         // Its filemark is the one the file already ends in.
         assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 1, 0]).1, GOOD);
-        // There is no room for a second tape file: neither data...
+        // There is no room for a second tape file: data after the
+        // filemark is refused before any data phase.
         let (exec, status) = tape.execute(&write6(true, 1), 0);
         assert!(
             matches!(exec, ScsiExec::NoData),
@@ -1715,25 +2295,28 @@ mod tests {
             (SK_VOLUME_OVERFLOW, SENSE_EOM, true, 1)
         );
         assert_eq!((asc, ascq), (0x00, ASCQ_END_OF_MEDIUM));
-        // ...nor another filemark.
-        assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 1, 0]).1, CHECK_CONDITION);
-        assert_eq!(sense(&mut tape).0, SK_VOLUME_OVERFLOW);
+        // Further filemarks only mark the end of the data again: accepted,
+        // and the tape file is untouched.
+        assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 1, 0]).1, GOOD);
         assert_eq!(std::fs::read(&path).unwrap(), pattern(1, 1024));
 
-        // Two filemarks from inside the file: one fits, one does not.
+        // The two filemarks that close a backup, written from inside the
+        // file: both are taken, and the first cuts the tape file at the
+        // head.
         assert_eq!(run(&mut tape, &[0x01, 0, 0, 0, 0, 0]).1, GOOD);
         run(&mut tape, &read6(true, false, 1));
-        assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 2, 0]).1, CHECK_CONDITION);
-        let (key, flags, valid, info, _, _) = sense(&mut tape);
-        assert_eq!(
-            (key, flags, valid, info),
-            (SK_VOLUME_OVERFLOW, SENSE_EOM, true, 1)
-        );
-        // The filemark that fit cut the tape file where the head was.
+        assert_eq!(run(&mut tape, &[0x10, 0, 0, 0, 2, 0]).1, GOOD);
         assert_eq!(std::fs::read(&path).unwrap(), pattern(1, 512));
+        // The head is at end-of-data, one filemark back is the file's end.
+        assert_eq!(run(&mut tape, &read6(true, false, 1)).1, CHECK_CONDITION);
+        assert_eq!(sense(&mut tape).0, SK_BLANK_CHECK);
+        assert_eq!(run(&mut tape, &space6(1, -1)).1, GOOD);
+        assert_eq!(run(&mut tape, &space6(0, -1)).1, GOOD);
+        let (data, _) = run(&mut tape, &read6(true, false, 1));
+        assert_eq!(data, pattern(1, 512));
 
         // An existing file opens as a one-file tape and reads back.
-        let mut reopened = ScsiTape::open(&path, false).unwrap();
+        let mut reopened = ScsiTape::open(&path, Some(Cartridge::File), false, None).unwrap();
         let (data, status) = run(&mut reopened, &read6(true, false, 1));
         assert_eq!(status, GOOD);
         assert_eq!(data, pattern(1, 512));
@@ -1743,7 +2326,7 @@ mod tests {
     #[test]
     fn a_write_protected_tape_refuses_every_write() {
         let (dir, _) = directory_tape("protected", &[("a", pattern(1, 1024))]);
-        let mut tape = ScsiTape::open(&dir, true).unwrap();
+        let mut tape = ScsiTape::open(&dir, None, true, None).unwrap();
         let (exec, status) = tape.execute(&write6(true, 1), 0);
         assert!(matches!(exec, ScsiExec::NoData));
         assert_eq!(status, CHECK_CONDITION);

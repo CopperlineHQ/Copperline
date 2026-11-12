@@ -1254,9 +1254,14 @@ floppy_sounds_volume = 100
 # as 00000.tape, 00001.tape... -- or a single host file, which is a tape
 # holding exactly one tape file. The files hold only the data, no tape
 # container format.
+# A path with nothing at it yet becomes a directory unless kind = "file".
+# capacity gives the tape an end (with an early-warning zone before it);
+# without it the guest can write until the host disk is full.
 # [[tape]]
 # unit = 4                 # SCSI ID 0-6
 # path = "backups"         # a directory, or a single file
+# kind = "directory"       # or "file"; default: whatever path is
+# capacity = "150M"        # default: no end
 # write_protect = true     # the cartridge's write-protect tab
 #
 # [[host_disk]]

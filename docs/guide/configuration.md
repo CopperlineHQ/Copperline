@@ -3144,6 +3144,8 @@ controller = "a2091"
 [[tape]]
 unit = 4                  # SCSI ID 0-6 on the [scsi] controller
 path = "backups"          # a directory, or a single file
+# kind = "file"           # "directory" or "file"; default: what path is
+# capacity = "150M"       # how much data the tape holds; default: no end
 # write_protect = true    # the cartridge's write-protect tab
 ```
 
@@ -3160,24 +3162,38 @@ number, with whatever tape software it would use on real hardware.
 
 `path` is the cartridge, used as written (relative paths are relative to
 the directory Copperline is started from), and what it is on the host
-decides what kind:
+decides what kind. A path with nothing at it yet is made a directory;
+`kind = "file"` asks for a blank single-file tape instead, and a `kind`
+that contradicts what is at the path is an error when the machine starts:
 
 - **A directory** is a tape with one host file per tape file, in name
   order. Put `tar` archives in it and the guest finds them as tape files 0,
   1, 2... separated by filemarks; what the guest writes appears as new
-  files, named `00000.tape`, `00001.tape`... (or, when that would not sort
-  after the files already there, the last file's name with `~00002.tape`
-  and so on appended). A directory holds up to 10000 tape files; past
-  that the tape is full. Hidden files
-  (a leading `.`) and subdirectories are not part of the tape. The
-  directory is read when the machine starts and again at every LOAD, so
-  files added from the host show up after the guest unloads and reloads the
-  tape.
+  files named `00000.tape`, `00001.tape`... When a file already in the
+  directory would sort after such a name, the new files are named
+  `~00001.tape`, `~00002.tape`... instead, so that they still come last. A
+  directory holds up to 10000 tape files; past that the tape is full.
+  Hidden files (a leading `.`) and subdirectories are not part of the tape;
+  a symbolic link to a file is a tape file like any other, and the guest's
+  writes go through it. The directory is read when the machine starts and
+  again at every LOAD, so files added from the host show up after the guest
+  unloads and reloads the tape.
 - **A file** is a tape holding exactly one tape file: the host file
-  itself. A path that does not exist yet is a blank tape and becomes a file
-  on the first write. There is no room on it for a second tape file, so a
-  write after the first filemark fails as the end of the tape would
-  (VOLUME OVERFLOW, with the end-of-medium bit).
+  itself. The file is a tape file whenever it exists, even empty, and a
+  blank tape when it does not; writing creates it and a long erase from the
+  beginning of the tape removes it. There is no room on it for a second
+  tape file, so data written after the first filemark fails as the end of
+  the tape would (VOLUME OVERFLOW, with the end-of-medium bit). Further
+  filemarks are accepted, so software that closes a backup with two of them
+  finishes cleanly.
+
+`capacity` gives the tape an end: a size such as `"150M"` or `"2G"`,
+counting the data in all its tape files. Near the end (the last 1/32nd of
+the tape, at most 1 MiB) a write is still carried out but reports
+end-of-medium, which is the early warning backup software uses to close the
+tape; at the end, a write stops with VOLUME OVERFLOW and the number of
+blocks it could not place. Without `capacity` the tape has no end and a
+guest can write until the host disk is full.
 
 Either way the host files hold nothing but the data: a tape file the guest
 writes with `tar` is a `tar` archive on the host, and the other way round.
@@ -3191,6 +3207,15 @@ bytes as it asks for, up to the end of the tape file. Every tape file ends
 in a filemark, whether or not the guest wrote one after its data, and
 writing anywhere on the tape discards everything from there to the end, as
 on a real tape.
+
+A save state holds the drive -- where the head is, the block length, which
+cartridge -- but not the cartridge's contents, which stay in the host files
+whatever state is loaded. Loading a state reads the cartridge again as it is
+now; if it no longer matches what the state was saved with (a tape file
+missing, added, or shorter than the head position), Copperline logs a
+warning and puts the head at the nearest position the tape still has. A
+state whose cartridge path this session has not opened is reported like any
+other state that reaches for a new host file.
 
 `write_protect = true` slides the cartridge's write-protect tab: writes,
 filemarks and erases fail with a DATA PROTECT error and MODE SENSE reports

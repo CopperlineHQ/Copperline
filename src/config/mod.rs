@@ -1536,6 +1536,10 @@ pub struct TapeCartridge {
     pub path: PathBuf,
     /// The write-protect tab.
     pub write_protect: bool,
+    /// What the cartridge is; `None` goes by what is at `path`.
+    pub kind: Option<crate::scsi::tape::Cartridge>,
+    /// Bytes of data the tape holds; `None` is a tape with no end.
+    pub capacity: Option<u64>,
 }
 
 /// `[copperhf]`: Copperline's own virtual hardfile controller
