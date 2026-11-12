@@ -27,9 +27,11 @@ mod chd;
 #[cfg(feature = "cd-mp3")]
 mod mp3;
 mod nrg;
+pub(crate) mod subcode;
 mod wav;
 
 pub use audio::FileFormat;
+pub use subcode::SUBCODE_FRAME_BYTES;
 
 pub const SECTORS_PER_SECOND: u32 = 75;
 pub const DATA_SECTOR_BYTES: usize = 2048;
@@ -127,6 +129,52 @@ enum Backend {
 struct BinBackend {
     sources: Vec<Source>,
     extents: Vec<Extent>,
+    /// The image file's stored subcode, when a `.sub` file sits beside it.
+    subcode: Option<SubFile>,
+}
+
+/// A CloneCD-style `.sub` file: 96 bytes of subcode for every sector of
+/// the image file it sits beside, in the image's own sector order, each
+/// frame stored channel after channel (see [`subcode`]).
+#[derive(Debug)]
+struct SubFile {
+    path: PathBuf,
+    file: File,
+    /// Sector size of the image file the frames are counted against.
+    sector_bytes: u64,
+}
+
+impl SubFile {
+    /// Open `path` as the subcode of an image of `sectors` sectors.
+    fn open(path: &Path, sectors: u64, sector_bytes: u64) -> Result<Self> {
+        let file =
+            File::open(path).with_context(|| format!("opening subcode {}", path.display()))?;
+        let len = file
+            .metadata()
+            .with_context(|| format!("stat {}", path.display()))?
+            .len();
+        if len != sectors * SUBCODE_FRAME_BYTES as u64 {
+            bail!(
+                "{}: {len} bytes is not 96 bytes of subcode for each of the image's \
+                 {sectors} sectors",
+                path.display()
+            );
+        }
+        crate::hostbind::opened(crate::hostbind::Kind::Cd, path);
+        Ok(Self {
+            path: path.to_path_buf(),
+            file,
+            sector_bytes,
+        })
+    }
+
+    fn read(&mut self, frame: u64) -> Result<[u8; SUBCODE_FRAME_BYTES]> {
+        let mut stored = [0u8; SUBCODE_FRAME_BYTES];
+        self.file
+            .seek(SeekFrom::Start(frame * SUBCODE_FRAME_BYTES as u64))?;
+        self.file.read_exact(&mut stored)?;
+        Ok(subcode::from_channel_order(&stored))
+    }
 }
 
 /// One `FILE` of a cue sheet (or the bare ISO itself) as sector storage.
@@ -248,6 +296,10 @@ enum CdImageState {
         total_sectors: u32,
         #[serde(default)]
         fault: Box<crate::diskfault::FaultPolicySet>,
+        /// The `.sub` file the image was loaded with, reopened like the
+        /// sources so a resumed run reads the same subcode.
+        #[serde(default)]
+        subcode: Option<PathBuf>,
     },
     Chd {
         path: PathBuf,
@@ -270,6 +322,12 @@ impl serde::Serialize for CdImage {
                 extents: bin.extents.clone(),
                 total_sectors: self.total_sectors,
                 fault: self.fault.clone(),
+                subcode: bin
+                    .subcode
+                    .as_ref()
+                    .map(|sub| state_path(&sub.path, false))
+                    .transpose()
+                    .map_err(serde::ser::Error::custom)?,
             },
             Backend::Chd(chd) => CdImageState::Chd {
                 path: state_path(chd.path(), false).map_err(serde::ser::Error::custom)?,
@@ -289,6 +347,7 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                 extents,
                 total_sectors,
                 fault,
+                subcode,
             } => {
                 let sources = sources
                     .iter()
@@ -301,10 +360,28 @@ impl<'de> serde::Deserialize<'de> for CdImage {
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
+                let mut bin = BinBackend {
+                    sources,
+                    extents,
+                    subcode: None,
+                };
+                if let Some(path) = subcode {
+                    state_path(&path, true)
+                        .and_then(|local| {
+                            crate::hostbind::restored(crate::hostbind::Kind::Cd, &local);
+                            bin.open_subcode(&local)
+                        })
+                        .map_err(|e| {
+                            serde::de::Error::custom(format!(
+                                "reopening CD subcode {}: {e:#}",
+                                path.display()
+                            ))
+                        })?;
+                }
                 Ok(Self {
                     tracks,
                     total_sectors,
-                    backend: Backend::Bin(BinBackend { sources, extents }),
+                    backend: Backend::Bin(bin),
                     fault,
                 })
             }
@@ -381,6 +458,20 @@ impl CdImage {
             );
         }
         let sectors = (len / DATA_SECTOR_BYTES as u64) as u32;
+        let mut bin = BinBackend {
+            sources: vec![source],
+            extents: vec![Extent {
+                disc_start: 0,
+                sector_count: sectors,
+                kind: TrackKind::Mode1_2048,
+                storage: Storage::Source {
+                    source: 0,
+                    byte_offset: 0,
+                },
+            }],
+            subcode: None,
+        };
+        bin.find_subcode();
         Ok(Self {
             tracks: vec![CdTrack {
                 number: 1,
@@ -390,18 +481,7 @@ impl CdImage {
             }],
             total_sectors: sectors,
             fault: Box::new(crate::diskfault::FaultPolicySet::default()),
-            backend: Backend::Bin(BinBackend {
-                sources: vec![source],
-                extents: vec![Extent {
-                    disc_start: 0,
-                    sector_count: sectors,
-                    kind: TrackKind::Mode1_2048,
-                    storage: Storage::Source {
-                        source: 0,
-                        byte_offset: 0,
-                    },
-                }],
-            }),
+            backend: Backend::Bin(bin),
         })
     }
 
@@ -678,10 +758,16 @@ impl CdImage {
             i = in_file;
         }
 
+        let mut bin = BinBackend {
+            sources,
+            extents,
+            subcode: None,
+        };
+        bin.find_subcode();
         Ok(Self {
             tracks,
             total_sectors: disc,
-            backend: Backend::Bin(BinBackend { sources, extents }),
+            backend: Backend::Bin(bin),
             fault: Box::new(crate::diskfault::FaultPolicySet::default()),
         })
     }
@@ -837,6 +923,30 @@ impl CdImage {
         self.apply_read_fault(sector, buf)
     }
 
+    /// The subcode frame the pickup reads with `sector`, one symbol per
+    /// byte (P in bit 7 ... W in bit 0). R-W come from the image when it
+    /// stored them (a `.sub` file, a CHD with raw subcode) and are blank
+    /// otherwise; Q is the image's when its CRC checks, and otherwise the
+    /// position regenerated from the track layout. See [`subcode`].
+    pub fn subcode_frame(&mut self, sector: u32) -> [u8; SUBCODE_FRAME_BYTES] {
+        let stored = match &mut self.backend {
+            Backend::Bin(bin) => bin.read_subcode(sector),
+            Backend::Chd(chd) => chd.read_subcode(sector),
+        };
+        match stored {
+            Some(frame) => subcode::with_position(frame, &self.tracks, sector),
+            None => subcode::regenerated_frame(&self.tracks, sector),
+        }
+    }
+
+    /// Whether the image stores subcode of its own (R-W content).
+    pub fn has_stored_subcode(&self) -> bool {
+        match &self.backend {
+            Backend::Bin(bin) => bin.subcode.is_some(),
+            Backend::Chd(chd) => chd.has_raw_subcode(),
+        }
+    }
+
     /// Whether `sector` falls inside an audio track region.
     pub fn is_audio_sector(&self, sector: u32) -> bool {
         self.sector_kind(sector).is_some_and(|k| !k.is_data())
@@ -857,6 +967,63 @@ impl CdImage {
 }
 
 impl BinBackend {
+    /// The one sector size every stored extent uses, if the image is a
+    /// single plain file laid out that uniformly -- the only shape a
+    /// `.sub` file's frame count can be matched against.
+    fn uniform_sector_bytes(&self) -> Option<u64> {
+        let [source] = self.sources.as_slice() else {
+            return None;
+        };
+        if !matches!(source.data, SourceData::Binary(_)) {
+            return None;
+        }
+        let mut sizes = self
+            .extents
+            .iter()
+            .filter(|e| matches!(e.storage, Storage::Source { .. }))
+            .map(|e| e.kind.sector_bytes() as u64);
+        let first = sizes.next()?;
+        sizes.all(|size| size == first).then_some(first)
+    }
+
+    /// Attach the subcode file at `path`.
+    fn open_subcode(&mut self, path: &Path) -> Result<()> {
+        let sector_bytes = self
+            .uniform_sector_bytes()
+            .context("subcode needs an image stored in one file with one sector size")?;
+        let sectors = self.sources[0].byte_len / sector_bytes;
+        self.subcode = Some(SubFile::open(path, sectors, sector_bytes)?);
+        Ok(())
+    }
+
+    /// Look for `<image>.sub` beside the image file and attach it. A file
+    /// that is there but does not fit the image is reported and ignored:
+    /// the disc still loads, with regenerated subcode.
+    fn find_subcode(&mut self) {
+        let Some(source) = self.sources.first() else {
+            return;
+        };
+        let path = source.path.with_extension("sub");
+        if !path.is_file() || self.uniform_sector_bytes().is_none() {
+            return;
+        }
+        match self.open_subcode(&path) {
+            Ok(()) => log::info!("cd: subcode from {}", path.display()),
+            Err(e) => log::warn!("cd: ignoring subcode file: {e:#}"),
+        }
+    }
+
+    /// The stored subcode frame of `sector`, if the image has one for it.
+    fn read_subcode(&mut self, sector: u32) -> Option<[u8; SUBCODE_FRAME_BYTES]> {
+        let extent = self.extent_for_sector(sector)?;
+        let Storage::Source { byte_offset, .. } = extent.storage else {
+            return None;
+        };
+        let in_extent = u64::from(sector - extent.disc_start);
+        let sub = self.subcode.as_mut()?;
+        sub.read(byte_offset / sub.sector_bytes + in_extent).ok()
+    }
+
     fn extent_for_sector(&self, sector: u32) -> Option<&Extent> {
         self.extents
             .iter()
@@ -1083,7 +1250,14 @@ fn state_path(path: &Path, reading: bool) -> Result<PathBuf> {
 impl CdImage {
     pub fn source_paths(&self) -> Vec<PathBuf> {
         match &self.backend {
-            Backend::Bin(bin) => bin.sources.iter().map(|s| s.path.clone()).collect(),
+            // The subcode file is a source like the image it belongs to:
+            // a frontend that maps or verifies media sees it too.
+            Backend::Bin(bin) => bin
+                .sources
+                .iter()
+                .map(|s| s.path.clone())
+                .chain(bin.subcode.iter().map(|sub| sub.path.clone()))
+                .collect(),
             Backend::Chd(chd) => vec![chd.path().to_path_buf()],
         }
     }
@@ -1171,6 +1345,147 @@ mod tests {
 
         let _ = std::fs::remove_file(&cue);
         let _ = std::fs::remove_file(&bin);
+    }
+
+    /// A two-track raw image (one MODE1/2352 sector, three audio sectors)
+    /// with its cue sheet; returns (cue, bin).
+    fn write_raw_disc(name: &str) -> (PathBuf, PathBuf) {
+        let cue = temp_path(&format!("{name}.cue"));
+        let bin = cue.with_extension("bin");
+        let mut bytes = vec![0u8; RAW_SECTOR_BYTES];
+        for s in 0..3u8 {
+            bytes.extend(std::iter::repeat_n(0xA0 + s, RAW_SECTOR_BYTES));
+        }
+        write_file(&bin, &bytes);
+        write_file(
+            &cue,
+            format!(
+                "FILE \"{}\" BINARY\n  TRACK 01 MODE1/2352\n    INDEX 01 00:00:00\n  \
+                 TRACK 02 AUDIO\n    INDEX 01 00:00:01\n",
+                bin.file_name().unwrap().to_string_lossy()
+            )
+            .as_bytes(),
+        );
+        (cue, bin)
+    }
+
+    /// A `.sub` file for `sectors` sectors: P and Q blank, and each of
+    /// R-W holding `sector + channel` in its twelve bytes.
+    fn sub_file_bytes(sectors: u8) -> Vec<u8> {
+        let mut out = Vec::new();
+        for sector in 0..sectors {
+            out.extend_from_slice(&[0u8; 24]);
+            for channel in 2..8u8 {
+                out.extend_from_slice(&[sector + channel; 12]);
+            }
+        }
+        out
+    }
+
+    /// Channel `channel` (0 = P ... 7 = W) of a symbol-per-byte frame.
+    fn channel_of(frame: &[u8; SUBCODE_FRAME_BYTES], channel: u8) -> [u8; 12] {
+        let mut out = [0u8; 12];
+        for (i, symbol) in frame.iter().enumerate() {
+            if symbol & (0x80 >> channel) != 0 {
+                out[i / 8] |= 0x80 >> (i % 8);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_image_without_stored_subcode_gets_the_position_in_q_and_blank_r_to_w() {
+        let (cue, bin) = write_raw_disc("nosub");
+        let mut image = CdImage::load(&cue).unwrap();
+        assert!(!image.has_stored_subcode());
+        let frame = image.subcode_frame(2);
+        assert_eq!(
+            channel_of(&frame, 1),
+            subcode::q_channel_position(image.tracks(), 2)
+        );
+        assert!(frame.iter().all(|&symbol| symbol & !0x40 == 0));
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+    }
+
+    #[test]
+    fn a_sub_file_beside_the_image_supplies_r_to_w() {
+        let (cue, bin) = write_raw_disc("withsub");
+        let sub = bin.with_extension("sub");
+        write_file(&sub, &sub_file_bytes(4));
+        let mut image = CdImage::load(&cue).unwrap();
+        assert!(image.has_stored_subcode());
+        assert_eq!(image.source_paths(), vec![bin.clone(), sub.clone()]);
+        for sector in 0..4u8 {
+            let frame = image.subcode_frame(u32::from(sector));
+            for channel in 2..8u8 {
+                assert_eq!(
+                    channel_of(&frame, channel),
+                    [sector + channel; 12],
+                    "sector {sector} channel {channel}"
+                );
+            }
+            // The file's Q was blank, so the position is regenerated.
+            assert_eq!(
+                channel_of(&frame, 1),
+                subcode::q_channel_position(image.tracks(), u32::from(sector))
+            );
+            assert_eq!(channel_of(&frame, 0), [0u8; 12]);
+        }
+
+        // A save state reopens the subcode file with the image.
+        let encoded = bincode::serialize(&image).unwrap();
+        let mut restored: CdImage = bincode::deserialize(&encoded).unwrap();
+        assert!(restored.has_stored_subcode());
+        assert_eq!(restored.subcode_frame(3), image.subcode_frame(3));
+        // And refuses to resume without it, as it does for the image.
+        drop(restored);
+        std::fs::remove_file(&sub).unwrap();
+        let err = bincode::deserialize::<CdImage>(&encoded)
+            .map(|_| ())
+            .expect_err("the subcode file is gone")
+            .to_string();
+        assert!(err.contains("subcode"), "{err}");
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+    }
+
+    #[test]
+    fn a_sub_file_keeps_a_valid_stored_q() {
+        let (cue, bin) = write_raw_disc("subq");
+        let sub = bin.with_extension("sub");
+        // Sector 1 carries a valid position packet for some other
+        // address; the image's word is taken for it.
+        let foreign = subcode::q_channel_position(
+            &[CdTrack {
+                number: 7,
+                kind: TrackKind::Audio,
+                start_sector: 0,
+                sector_count: 100,
+            }],
+            40,
+        );
+        let mut bytes = sub_file_bytes(4);
+        bytes[SUBCODE_FRAME_BYTES + 12..SUBCODE_FRAME_BYTES + 24].copy_from_slice(&foreign);
+        write_file(&sub, &bytes);
+        let mut image = CdImage::load(&cue).unwrap();
+        assert_eq!(channel_of(&image.subcode_frame(1), 1), foreign);
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+        let _ = std::fs::remove_file(&sub);
+    }
+
+    #[test]
+    fn a_sub_file_of_the_wrong_size_is_ignored() {
+        let (cue, bin) = write_raw_disc("badsub");
+        let sub = bin.with_extension("sub");
+        write_file(&sub, &sub_file_bytes(3));
+        let mut image = CdImage::load(&cue).unwrap();
+        assert!(!image.has_stored_subcode());
+        assert!(image.subcode_frame(1).iter().all(|&s| s & !0x40 == 0));
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+        let _ = std::fs::remove_file(&sub);
     }
 
     #[test]

@@ -3316,6 +3316,7 @@ of boot volume around an ordinary Amiga executable and warp-boots into
 it. It is command-line only by design (no config section) and is covered in
 [](run.md).
 
+(cd-config)=
 ## `[cd]` -- CDTV and CD32
 
 ```toml
@@ -3340,6 +3341,16 @@ formats, with DAO (`CUES`/`DAOI`, `CUEX`/`DAOX`) or TAO (`ETNF`/`ETN2`)
 track layouts. MODE1/2048, MODE1/2352, MODE2/2336, MODE2/2352, and CD-DA
 tracks are supported; multi-session discs and images with stored subchannel
 bytes are rejected explicitly.
+
+Subcode: every image delivers its Q-channel position to the machine. The
+R-W channels, which carry CD+G graphics, exist only in images that stored
+them, and Copperline reads two forms: a CloneCD-style `.sub` file with the
+same name as the image file (`game.bin` + `game.sub`, or `game.img` +
+`game.sub` next to the cue sheet that names it; 96 bytes per sector), and a
+CHD created with raw subcode (`SUBTYPE:RW_RAW` in its track metadata). The
+`.sub` file must match a single-file image sector for sector; one that does
+not is reported in the log and ignored. Both the CD32 and the CDTV receive
+the data while the disc plays.
 
 CDXL video discs need no special setting: mount the image on a `CD32`
 profile and launch it as on the console. For a bare ISO, Copperline promotes

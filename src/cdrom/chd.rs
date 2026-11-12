@@ -67,6 +67,9 @@ struct Region {
     /// CHD frame holding the region's first sector; `None` for unstored
     /// gap sectors, which read as zero fill.
     chd_frame: Option<u32>,
+    /// The frames' 96 subcode bytes hold the track's raw subcode
+    /// (`SUBTYPE:RW_RAW`), one symbol per byte as the drive reads it.
+    raw_subcode: bool,
 }
 
 /// One track's `CHT2`/`CHTR` metadata, as written by chdman.
@@ -81,6 +84,8 @@ struct RawTrack {
     /// file and counted in `frames`.
     pregap_stored: bool,
     postgap: u32,
+    /// `SUBTYPE:RW_RAW`: the frames carry the drive's raw subcode.
+    raw_subcode: bool,
 }
 
 /// Refuse a CHD whose header describes more than a CD can hold, before the
@@ -300,6 +305,7 @@ impl ChdImage {
                     sector_count: track.pregap,
                     kind: track.kind,
                     chd_frame: None,
+                    raw_subcode: false,
                 });
                 disc = disc.checked_add(track.pregap).ok_or_else(overflow)?;
             }
@@ -309,6 +315,7 @@ impl ChdImage {
                     sector_count: track.frames,
                     kind: track.kind,
                     chd_frame: Some(chd_frame),
+                    raw_subcode: track.raw_subcode,
                 });
                 disc = disc.checked_add(track.frames).ok_or_else(overflow)?;
             }
@@ -318,6 +325,7 @@ impl ChdImage {
                     sector_count: track.postgap,
                     kind: track.kind,
                     chd_frame: None,
+                    raw_subcode: false,
                 });
                 disc = disc.checked_add(track.postgap).ok_or_else(overflow)?;
             }
@@ -368,6 +376,26 @@ impl ChdImage {
 
     pub(super) fn sector_kind(&self, sector: u32) -> Option<TrackKind> {
         self.region_for_sector(sector).map(|r| r.kind)
+    }
+
+    /// Whether any track stores raw subcode.
+    pub(super) fn has_raw_subcode(&self) -> bool {
+        self.regions.iter().any(|r| r.raw_subcode)
+    }
+
+    /// The stored subcode frame of `sector`: the 96 bytes after the
+    /// sector data in its frame slot, for a track with raw subcode.
+    pub(super) fn read_subcode(&mut self, sector: u32) -> Option<[u8; super::SUBCODE_FRAME_BYTES]> {
+        let region = self.region_for_sector(sector)?;
+        if !region.raw_subcode {
+            return None;
+        }
+        let frame = region.chd_frame? + (sector - region.disc_start);
+        self.load_hunk(frame / self.frames_per_hunk).ok()?;
+        let offset = (frame % self.frames_per_hunk) as usize * FRAME_BYTES + RAW_SECTOR_BYTES;
+        let mut out = [0u8; super::SUBCODE_FRAME_BYTES];
+        out.copy_from_slice(&self.hunk_buf[offset..offset + super::SUBCODE_FRAME_BYTES]);
+        Some(out)
     }
 
     /// Read the stored payload of `sector`: `buf` is
@@ -445,6 +473,7 @@ fn parse_track_metadata(text: &str) -> Result<RawTrack> {
     let mut pregap = 0u32;
     let mut pgtype = "";
     let mut postgap = 0u32;
+    let mut raw_subcode = false;
     for word in text.split_whitespace() {
         let Some((key, value)) = word.split_once(':') else {
             continue;
@@ -456,8 +485,11 @@ fn parse_track_metadata(text: &str) -> Result<RawTrack> {
             "PREGAP" => pregap = value.parse().context("bad PREGAP length")?,
             "PGTYPE" => pgtype = value,
             "POSTGAP" => postgap = value.parse().context("bad POSTGAP length")?,
-            // SUBTYPE/PGSUB (subcode layout) do not matter here: the
-            // subcode bytes of each frame are simply never read.
+            // RW_RAW is the drive's own symbol-per-byte subcode and is
+            // served as stored. RW ("cooked": R-W packs already
+            // de-interleaved and corrected) is not what a drive delivers
+            // and is left unread, like NONE; PGSUB follows SUBTYPE.
+            "SUBTYPE" => raw_subcode = value == "RW_RAW",
             _ => {}
         }
     }
@@ -473,6 +505,7 @@ fn parse_track_metadata(text: &str) -> Result<RawTrack> {
         pregap,
         pregap_stored: pregap > 0 && pgtype.starts_with('V'),
         postgap,
+        raw_subcode,
     })
 }
 
@@ -609,6 +642,59 @@ mod tests {
                 ),
             ],
         );
+    }
+
+    #[test]
+    fn raw_subcode_tracks_serve_their_stored_frames() {
+        // Track 1 has no subcode; track 2 stores raw subcode: R-W hold
+        // 0x15 + sector in every symbol, P and Q are blank.
+        let path = temp_path("subcode.chd");
+        let mut data = Vec::new();
+        data.extend(track_frames(
+            &(0..4u8)
+                .map(|s| frame(&[s; DATA_SECTOR_BYTES]))
+                .collect::<Vec<_>>(),
+        ));
+        data.extend(track_frames(
+            &(0..3u8)
+                .map(|s| {
+                    let mut f = frame(&[0u8; RAW_SECTOR_BYTES]);
+                    f[RAW_SECTOR_BYTES..].fill(0x15 + s);
+                    f
+                })
+                .collect::<Vec<_>>(),
+        ));
+        write_chd_v5(
+            &path,
+            HUNK_BYTES,
+            FRAME_BYTES as u32,
+            &data,
+            &[
+                cht2(
+                    "TRACK:1 TYPE:MODE1 SUBTYPE:NONE FRAMES:4 PREGAP:0 PGTYPE:MODE1 \
+                     PGSUB:NONE POSTGAP:0",
+                ),
+                cht2(
+                    "TRACK:2 TYPE:AUDIO SUBTYPE:RW_RAW FRAMES:3 PREGAP:0 PGTYPE:MODE1 \
+                     PGSUB:RW_RAW POSTGAP:0",
+                ),
+            ],
+        );
+        let mut image = CdImage::load(&path).unwrap();
+        assert!(image.has_stored_subcode());
+        // Track 1: nothing stored, so only the regenerated Q.
+        assert!(image.subcode_frame(1).iter().all(|&s| s & !0x40 == 0));
+        // Track 2: the stored R-W, with the position put into the blank Q.
+        for sector in 4..7u32 {
+            let frame = image.subcode_frame(sector);
+            let rw = 0x15 + (sector - 4) as u8;
+            assert!(frame.iter().all(|&s| s & 0x3F == rw), "sector {sector}");
+            assert_eq!(
+                crate::cdrom::subcode::q_channel_of(&frame),
+                crate::cdrom::subcode::q_channel_position(image.tracks(), sector)
+            );
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

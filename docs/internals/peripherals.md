@@ -1079,10 +1079,25 @@ CD buffers in fast RAM when a board is fitted -- paced at single speed and
 raising the DMAC interrupt on completion. The drive handshake lines (SBCP,
 SCOR, STCH, STEN) and the drive/DAC control strobes run through a 6525 TPI
 in the same 64 KiB window. CD audio streams into the shared mixer ring like
-the CD32's; subcode payload (CD+G) is not implemented, so SCOR pulses while
-the motor runs but SBCP never presents data. The 256 KiB extended ROM sits
-at `$F00000`, and the battery-backed bookmark RAM at `$DC8000` (16 KiB,
-mirrored to `$DCFFFF`) is session-only: it is not yet persisted to a file.
+the CD32's.
+
+The drive's subcode output is wired to the 6525, and the model follows the
+wire. With nothing playing, SCOR pulses once per CD frame (75 Hz) and SBCP
+stays quiet. While a sector plays, its 96-byte subcode frame (below) is
+clocked out behind it: SCOR marks the frame, then one byte per subcode
+symbol period follows -- 98 symbols span the 1/75 s frame, so the period is
+`CCK_PER_CD_FRAME / 98` colour clocks, 7350 bytes a second. Each byte lands
+on port A and raises SBCP (port C bit 0, active low, and the 6525's
+interrupt latch); reading port A takes SBCP away, and a byte nobody read is
+replaced by the next, as in the shift register. Port A presents the symbol
+bit-reversed (P in bit 0 ... W in bit 7), per WinUAE's `cdtv.cpp`. Starting,
+pausing or stopping a play abandons the frame in transit. Data reads do not
+produce subcode bytes. A CD+G disc therefore plays its graphics data out to
+the guest when the image stored it, and any disc delivers its Q position.
+
+The 256 KiB extended ROM sits at `$F00000`, and the battery-backed bookmark
+RAM at `$DC8000` (16 KiB, mirrored to `$DCFFFF`) is session-only: it is not
+yet persisted to a file.
 `[cd] insert_delay` (which the CD32 drive also honours) holds the disc out
 of the tray for that many emulated seconds, for discs that only boot when
 inserted after the boot screen.
@@ -1102,9 +1117,21 @@ Every sector the pickup delivers, data read or CD-DA play alike, comes with
 its 96-byte subcode frame: with the subcode flag enabled Akiko DMAs it into
 the misc page's subcode area (alternating 128-byte halves, `$FFFF $0000` end
 marker, offset register advanced by 100) and raises the subcode interrupt.
-Image formats carry no subchannel data, so the Q channel is regenerated from
-the TOC as an ADR 1 position packet (control, track, index, track-relative
-and absolute MSF in BCD, CRC) with P and R-W blank. That stream is what the
+The frame comes from the image layer (`CdImage::subcode_frame`,
+`cdrom/subcode.rs`), which the CDTV drive shares: one symbol per byte, P in
+bit 7 through W in bit 0. Most images carry no subchannel data, so the Q
+channel is regenerated from the TOC as an ADR 1 position packet (control,
+track, index, track-relative and absolute MSF in BCD, CRC) with P and R-W
+blank. An image that stored its subcode supplies R-W, which is where CD+G
+graphics and CD-TEXT live: a CloneCD-style `.sub` file beside a
+single-file cue or ISO image (96 bytes per sector, channel after channel,
+checked against the image's sector count and reopened with the image on a
+state load), or a CHD track marked `SUBTYPE:RW_RAW`. Stored P and Q are
+passed through only when the stored Q packet's CRC verifies; rippers
+commonly leave them blank, and then the regenerated position takes their
+place. Not read: a CHD's "cooked" `SUBTYPE:RW` (packs already
+de-interleaved and corrected, which is not what a drive delivers) and cue
+`CDG` tracks (2448-byte sectors). That stream is what the
 Kickstart `cd.device` turns into `CD_ADDFRAMEINT` server calls and
 `CD_QCODEMSF`/`CD_QCODELSN` positions, and the drive's SubQ command reports
 the same position while a play is running or paused (regression example:
