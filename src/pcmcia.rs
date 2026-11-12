@@ -750,7 +750,7 @@ impl SramCard {
         let Some(path) = &self.path else {
             return;
         };
-        match std::fs::write(path, &self.data) {
+        match crate::paths::write_replacing(path, &self.data) {
             Ok(()) => self.dirty = false,
             Err(e) => log::warn!(
                 "pcmcia: SRAM card write-back to {} failed: {e}",
@@ -897,6 +897,29 @@ mod tests {
         let mut again = SramCard::new(64 * 1024, Some(&path), false).unwrap();
         assert_eq!(again.read_common(0x10, 2), 0x1234);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// The card file is rewritten whole on every flush. The old file has
+    /// to stay complete until the new one is, or a write cut short leaves
+    /// a short file that the next attach quietly zero-fills. A second
+    /// name for the old file shows which happened.
+    #[test]
+    fn sram_card_flush_replaces_the_file_instead_of_truncating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("card.bin");
+        let old_name = dir.path().join("old-name.bin");
+        std::fs::write(&path, vec![0x11u8; 64 * 1024]).unwrap();
+        std::fs::hard_link(&path, &old_name).unwrap();
+
+        let mut card = SramCard::new(64 * 1024, Some(&path), false).unwrap();
+        card.write_common(0x10, 2, 0x1234);
+        card.flush();
+
+        assert_eq!(&std::fs::read(&path).unwrap()[0x10..0x12], &[0x12, 0x34]);
+        assert!(
+            std::fs::read(&old_name).unwrap() == vec![0x11u8; 64 * 1024],
+            "the old card file was overwritten in place"
+        );
     }
 
     #[test]
