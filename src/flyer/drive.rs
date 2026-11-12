@@ -184,7 +184,7 @@ impl HostDrive {
                     false
                 }
         });
-        entries.sort_by_key(|(name, _)| name.to_ascii_uppercase());
+        entries.sort_by(|(a, _), (b, _)| listing_order(a, b));
         let mut children = Vec::with_capacity(entries.len());
         for (name, meta) in entries {
             let rel = self.objects[dir].rel.join(&name);
@@ -560,6 +560,17 @@ pub fn creatable_name(name: &str) -> bool {
         && !(cfg!(windows) && crate::filesys::is_windows_alias_name(name))
 }
 
+/// The order a directory lists in: by name without regard to case, as the
+/// firmware compares names, and between names that differ only in case (a
+/// case-sensitive host can hold both) by the names themselves. The host's
+/// own listing order, which varies from one filesystem to the next, never
+/// decides: it would otherwise pick the objects' block numbers.
+fn listing_order(a: &str, b: &str) -> std::cmp::Ordering {
+    a.to_ascii_uppercase()
+        .cmp(&b.to_ascii_uppercase())
+        .then_with(|| a.cmp(b))
+}
+
 /// The firmware's `CompareStrings`: equal ignoring ASCII case.
 pub fn names_match(a: &str, b: &str) -> bool {
     a.eq_ignore_ascii_case(b)
@@ -802,6 +813,16 @@ mod tests {
         .unwrap();
         drive.scan();
         assert_ne!(drive.object(clip).unwrap().start, start);
+    }
+
+    /// Two names that differ only in case sort the same way whichever
+    /// the host lists first.
+    #[test]
+    fn names_differing_only_in_case_list_in_a_fixed_order() {
+        for mut names in [["clip", "Take", "CLIP"], ["CLIP", "clip", "Take"]] {
+            names.sort_by(|a, b| listing_order(a, b));
+            assert_eq!(names, ["CLIP", "clip", "Take"]);
+        }
     }
 
     #[test]
