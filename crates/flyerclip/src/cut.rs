@@ -39,10 +39,20 @@ pub fn sub_clip(master: &Clip, start: u32, fields: u32, parts: Parts) -> Result<
     }
     let mut writer = ClipWriter::copy_of(&master.header, video, if audio { chans } else { 0 });
     let data = master.bytes();
-    for frame in &master.frames[first..last] {
+    for (i, frame) in master.frames[first..last].iter().enumerate() {
         let mut header = frame.header.clone();
         let from = (frame.block as usize + 1) * BLOCK;
-        let to = ((frame.block + header.length) as usize * BLOCK).min(data.len());
+        // The length is the file's word for it: a frame ends there, and no
+        // later than the next frame's header or the end of the clip.
+        let next = master
+            .frames
+            .get(first + i + 1)
+            .map_or(data.len(), |f| f.block as usize * BLOCK);
+        let to = (frame.block as usize)
+            .saturating_add(header.length as usize)
+            .saturating_mul(BLOCK)
+            .min(next)
+            .min(data.len());
         if from > to {
             return Err(Error::OutOfRange {
                 block: frame.block as u64,
@@ -162,6 +172,31 @@ mod tests {
             snd.audio().1[..],
             master.audio().1[4 * 735 * 2..8 * 735 * 2]
         );
+    }
+
+    /// A frame header's length is the file's word for it. A frame still
+    /// ends where the next one starts, however long it says it is.
+    #[test]
+    fn a_frame_claiming_to_run_past_the_next_one_is_cut_there() {
+        let bytes = test_clip(4);
+        let mut master = Clip::read(&bytes).unwrap();
+        let parts = Parts {
+            video: true,
+            audio: true,
+        };
+        let honest = sub_clip(&master, 0, 8, parts).unwrap();
+        for length in [u32::MAX, 0x0100_0000] {
+            for frame in &mut master.frames {
+                frame.header.length = length;
+            }
+            let cut = sub_clip(&master, 0, 8, parts).unwrap();
+            assert_eq!(cut.len(), honest.len(), "length {length:#x}");
+            let sub = Clip::read(&cut).unwrap();
+            assert_eq!(
+                sub.decode_field(5).unwrap(),
+                master.decode_field(5).unwrap()
+            );
+        }
     }
 
     #[test]
