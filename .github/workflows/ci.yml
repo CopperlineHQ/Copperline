@@ -24,7 +24,10 @@ env:
 # checks share one Linux job and one entry rather than one macOS entry each.
 jobs:
   build:
-    timeout-minutes: 30
+    # A cold build (a new stable toolchain, or an evicted cache) takes 25 to
+    # 30 minutes on a hosted macOS runner, and only a build that finishes on
+    # main saves the cache that makes the following ones warm.
+    timeout-minutes: 45
     # Keep the existing check name for branch-protection rules. The ci
     # profile inherits release semantics without shipping-only fat LTO.
     name: Build (release)
