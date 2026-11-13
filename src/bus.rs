@@ -1770,6 +1770,21 @@ pub struct RenderRegisterSnapshot {
     pub long_field: bool,
 }
 
+impl RenderRegisterSnapshot {
+    /// The same snapshot with the sprite registers taken from the
+    /// hardware-true view (CPU/Copper writes and sprite DMA fetches) instead
+    /// of the CPU/Copper write shadow. With sprite DMA idle that view is
+    /// what Denise's display latches hold.
+    pub(crate) fn with_hardware_sprite_latch(mut self) -> Self {
+        self.sprpos = self.spr_hw_pos;
+        self.sprctl = self.spr_hw_ctl;
+        self.sprdata = self.spr_hw_data;
+        self.sprdatb = self.spr_hw_datb;
+        self.spr_armed = self.spr_hw_armed;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuBusAccessKind {
     Fetch,
@@ -11598,6 +11613,7 @@ fn live_manual_sprite_sprite_collision_bits_in_range(
     x_stop: i32,
     display_enable_x: Option<i32>,
     latched_clxdat: u16,
+    sprite_dma_idle: bool,
 ) -> u16 {
     if beam_y < 0 {
         return 0;
@@ -11607,8 +11623,14 @@ fn live_manual_sprite_sprite_collision_bits_in_range(
     if x_start >= x_stop {
         return 0;
     }
-    let sources =
-        live_manual_sprite_collision_sources(frame_base, source_index, beam_y, x_start, x_stop);
+    let sources = live_manual_sprite_collision_sources(
+        frame_base,
+        source_index,
+        beam_y,
+        x_start,
+        x_stop,
+        sprite_dma_idle,
+    );
     if sources.len() < 2 {
         return 0;
     }
@@ -11708,6 +11730,7 @@ fn live_manual_sprite_playfield_collision_bits_in_range(
     x_stop: i32,
     display_enable_x: Option<i32>,
     latched_clxdat: u16,
+    sprite_dma_idle: bool,
 ) -> u16 {
     if beam_y < 0 {
         return 0;
@@ -11717,8 +11740,14 @@ fn live_manual_sprite_playfield_collision_bits_in_range(
     if x_start >= x_stop {
         return 0;
     }
-    let sources =
-        live_manual_sprite_collision_sources(frame_base, source_index, beam_y, x_start, x_stop);
+    let sources = live_manual_sprite_collision_sources(
+        frame_base,
+        source_index,
+        beam_y,
+        x_start,
+        x_stop,
+        sprite_dma_idle,
+    );
     if sources.is_empty() {
         return 0;
     }
@@ -11810,12 +11839,18 @@ fn live_manual_sprite_playfield_collision_bits_in_range(
     clxdat
 }
 
+/// `sprite_dma_idle` says no sprite DMA has fetched in the frame so far.
+/// Denise has no vertical comparator, so an armed sprite then serializes on
+/// every line; with sprite DMA running, the CPU/Copper write shadow in
+/// `frame_base` is not the whole register history and a source is kept to
+/// its VSTART/VSTOP window, as the renderer's replay keeps a seeded latch.
 fn live_manual_sprite_collision_sources(
     frame_base: RenderRegisterSnapshot,
     event_index: &BeamEventIndex,
     beam_y: i32,
     x_start: i32,
     x_stop: i32,
+    sprite_dma_idle: bool,
 ) -> Vec<LiveManualSpriteCollisionSource> {
     let mut sprpos = frame_base.sprpos;
     let mut sprctl = frame_base.sprctl;
@@ -11880,6 +11915,7 @@ fn live_manual_sprite_collision_sources(
             bitplane_shres(frame_base.bplcon0),
             frame_base.fmode,
             beam_y,
+            sprite_dma_idle,
             interval_start[sprite].max(x_start),
             source_stop.min(x_stop),
         );
@@ -11906,6 +11942,7 @@ fn live_manual_sprite_collision_sources(
             bitplane_shres(frame_base.bplcon0),
             frame_base.fmode,
             beam_y,
+            sprite_dma_idle,
             interval_start[sprite].max(x_start),
             x_stop,
         );
@@ -12147,16 +12184,19 @@ fn push_live_manual_sprite_source(
     shres: bool,
     fmode: u16,
     beam_y: i32,
+    sprite_dma_idle: bool,
     x_start: i32,
     x_stop: i32,
 ) {
     if x_start >= x_stop || !spr_armed {
         return;
     }
-    let vstart = sprite_vstart_from_words(sprpos, sprctl);
-    let vstop = sprite_vstop_from_ctl(sprctl);
-    if beam_y < vstart || beam_y >= vstop {
-        return;
+    if !sprite_dma_idle {
+        let vstart = sprite_vstart_from_words(sprpos, sprctl);
+        let vstop = sprite_vstop_from_ctl(sprctl);
+        if beam_y < vstart || beam_y >= vstop {
+            return;
+        }
     }
     sources.push(LiveManualSpriteCollisionSource {
         sprite,
@@ -12826,6 +12866,7 @@ fn live_manual_bpl_collision_bits_in_range(
     x_stop: i32,
     vertical_open: bool,
     display_enable_x: Option<i32>,
+    sprite_dma_idle: bool,
 ) -> u16 {
     const MANUAL_BPL_WORD_BITS: usize = 16;
     const MAX_BPLCON1_DELAY: usize = 15;
@@ -12875,6 +12916,7 @@ fn live_manual_bpl_collision_bits_in_range(
                 MAX_MANUAL_BPL_NATIVE_SAMPLES,
                 vertical_open,
                 display_enable_x,
+                sprite_dma_idle,
             );
         }
     }
@@ -12914,6 +12956,7 @@ fn live_manual_bpl_word_collision_bits(
     max_native_samples: usize,
     vertical_open: bool,
     display_enable_x: Option<i32>,
+    sprite_dma_idle: bool,
 ) -> u16 {
     const MANUAL_BPL_WORD_BITS: usize = 16;
 
@@ -12934,8 +12977,14 @@ fn live_manual_bpl_word_collision_bits(
         SpriteDmaMatchTimeline::new(frame_base.fmode, std::iter::empty())
     };
     let sources = live_sprite_playfield_collision_sources(sprite_lines, beam_y, &sprite_timeline);
-    let manual_sources =
-        live_manual_sprite_collision_sources(frame_base, sprite_index, beam_y, x_start, x_stop);
+    let manual_sources = live_manual_sprite_collision_sources(
+        frame_base,
+        sprite_index,
+        beam_y,
+        x_start,
+        x_stop,
+        sprite_dma_idle,
+    );
     let mut clxdat = 0u16;
     let mut x_cursor = segment_x;
     let mut native_idx = 0usize;

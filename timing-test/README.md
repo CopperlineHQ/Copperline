@@ -752,6 +752,10 @@ disable-re-enable punch / disable / cold-restart sequence -- the issue #74
 deferred AUDxEN-disable class, which the Paula HRM rework regressed once;
 the punch's gap-and-phase signature and the seamless handoff from DMA
 cycle interrupts to the free-running IRQ-mode tick are both pinned), and
+`sprprobe-armline` (sprite DMA never enabled; three sprites armed once by
+the CPU with control words for an empty, a sixteen-line and an inverted
+vertical window -- Denise has no vertical comparator, so all three are
+full-height bars; vAmiga-verified),
 `sprprobe-latch` (sprite DMA fetches land in the Denise display latches:
 bars armed manually with SPREN off, a DMA phase whose terminator CTL
 fetch disarms every channel and overwrites SPR0's data words, then SPREN

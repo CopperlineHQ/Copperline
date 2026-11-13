@@ -9726,10 +9726,10 @@ fn manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
     bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[2] = pos;
-    bus.denise.sprctl[2] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(2, pos);
+    bus.denise.write_sprctl(2, ctl);
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
 
@@ -9750,10 +9750,10 @@ fn frame_end_completes_unread_live_sprite_sprite_clxdat() {
     bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[2] = pos;
-    bus.denise.sprctl[2] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(2, pos);
+    bus.denise.write_sprctl(2, ctl);
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
 
@@ -9774,12 +9774,12 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
     bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[1] = pos;
-    bus.denise.sprctl[1] = ctl | 0x0080;
-    bus.denise.sprpos[2] = pos;
-    bus.denise.sprctl[2] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(1, pos);
+    bus.denise.write_sprctl(1, ctl | 0x0080);
+    bus.denise.write_sprpos(2, pos);
+    bus.denise.write_sprctl(2, ctl);
     bus.denise.clxcon = 1 << 12;
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
@@ -9806,12 +9806,12 @@ fn attached_manual_sprite_odd_data_writes_accumulate_later_live_sprite_sprite_cl
     bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[1] = pos;
-    bus.denise.sprctl[1] = ctl | 0x0080;
-    bus.denise.sprpos[2] = pos;
-    bus.denise.sprctl[2] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(1, pos);
+    bus.denise.write_sprctl(1, ctl | 0x0080);
+    bus.denise.write_sprpos(2, pos);
+    bus.denise.write_sprctl(2, ctl);
     bus.denise.clxcon = 1 << 12;
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
@@ -9833,12 +9833,12 @@ fn attached_manual_sprite_odd_data_writes_accumulate_later_live_sprite_sprite_cl
 fn attached_manual_sprite_sources_preserve_even_intervals_outside_odd_attachment() {
     let mut bus = empty_bus();
     let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprdata[0] = 0xA000;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprdata(0, 0xA000);
     bus.denise.spr_armed[0] = true;
-    bus.denise.sprpos[1] = pos;
-    bus.denise.sprctl[1] = ctl | 0x0080;
+    bus.denise.write_sprpos(1, pos);
+    bus.denise.write_sprctl(1, ctl | 0x0080);
     let frame_base = bus.capture_render_snapshot();
     let events = [BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
@@ -9849,7 +9849,7 @@ fn attached_manual_sprite_sources_preserve_even_intervals_outside_odd_attachment
     }];
 
     let event_index = BeamEventIndex::from_register_writes(&events);
-    let sources = live_manual_sprite_collision_sources(frame_base, &event_index, 0x2C, 0, 8);
+    let sources = live_manual_sprite_collision_sources(frame_base, &event_index, 0x2C, 0, 8, true);
 
     assert!(sources.iter().any(|source| {
         source.sprite == 0
@@ -9892,9 +9892,9 @@ fn manual_sprite_position_write_on_compare_boundary_preserves_live_source() {
     let second_hstart = 0x008E;
     let (first_pos, ctl) = sprite_control_words(0x2C, 0x2D, first_hstart);
     let (second_pos, _) = sprite_control_words(0x2C, 0x2D, second_hstart);
-    bus.denise.sprpos[0] = first_pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprdata[0] = 0xFFFF;
+    bus.denise.write_sprpos(0, first_pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprdata(0, 0xFFFF);
     bus.denise.spr_armed[0] = true;
     let frame_base = bus.capture_render_snapshot();
     let boundary_hpos = u32::from(first_hstart / 2) + DENISE_HPOS_LAG_CCK;
@@ -9914,6 +9914,7 @@ fn manual_sprite_position_write_on_compare_boundary_preserves_live_source() {
         0x2C,
         first_base_x,
         first_base_x + 2,
+        true,
     );
 
     assert!(sources.iter().any(|source| {
@@ -9943,8 +9944,8 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     // still match (CLXCON_RESET's all-six-planes=1 never matches one plane ->
     // no collision on hardware).
     bus.denise.clxcon = 0x0FC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
@@ -10026,6 +10027,57 @@ fn latched_sprite_collides_in_a_frame_with_no_sprite_register_writes() {
 }
 
 #[test]
+fn armed_sprite_collides_on_every_line_whatever_its_control_words_say() {
+    // Denise has no vertical comparator: VSTART/VSTOP only steer Agnus's
+    // sprite DMA. With sprite DMA off, a sprite armed by an SPRxDATA write
+    // whose control words describe an empty window (VSTART = VSTOP = 0)
+    // still serializes, and collides, on every line.
+    let (pos, ctl) = sprite_control_words_for_output(0, 0, 0x0082);
+    assert_eq!((pos >> 8, ctl >> 8, ctl & 0x0006), (0, 0, 0));
+    let arm = |bus: &mut Bus| {
+        assert!(!bus.custom_write(0x140, 2, u64::from(pos)));
+        assert!(!bus.custom_write(0x142, 2, u64::from(ctl)));
+        assert!(!bus.custom_write(0x146, 2, 0x0000));
+        assert!(!bus.custom_write(0x144, 2, 0x8000));
+    };
+    let observe = |bus: &mut Bus| {
+        let _ = bus.custom_read(0x00E, 2);
+        bus.current_frame_visible_start_vpos = 0x2C;
+        stage_one_plane_collision_row(bus);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = 0x38;
+        advance_collision_fixture_observation(bus, 6);
+        bus.custom_read(0x00E, 2)
+    };
+
+    // The frame the sprite is armed in: the writes land before the line.
+    let mut bus = empty_bus();
+    bus.begin_new_beam_frame();
+    bus.agnus.vpos = 0x20;
+    bus.agnus.hpos = 0x40;
+    arm(&mut bus);
+    assert!(!bus.current_frame_collision_sprite_events.is_empty());
+    assert_eq!(observe(&mut bus), 0x8022);
+
+    // A later frame with no sprite register writes at all.
+    let mut bus = empty_bus();
+    arm(&mut bus);
+    bus.begin_new_beam_frame();
+    assert!(bus.current_frame_collision_sprite_events.is_empty());
+    assert_eq!(observe(&mut bus), 0x8022);
+
+    // While sprite DMA runs, the write shadow is not the whole register
+    // history and stays limited to its control words' window.
+    let mut bus = empty_bus();
+    bus.begin_new_beam_frame();
+    bus.agnus.vpos = 0x20;
+    bus.agnus.hpos = 0x40;
+    arm(&mut bus);
+    bus.current_frame_sprite_dma_observed = true;
+    assert_eq!(observe(&mut bus), 0x8000);
+}
+
+#[test]
 fn sprite_disarmed_by_sprctl_does_not_collide_in_later_frames() {
     let mut bus = empty_bus();
     let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
@@ -10083,10 +10135,10 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() 
     bus.denise.ddfstrt = 0x0038;
     bus.denise.ddfstop = 0x0038;
     bus.denise.bplcon0 = 0x1000;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[1] = pos;
-    bus.denise.sprctl[1] = ctl | 0x0080;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(1, pos);
+    bus.denise.write_sprctl(1, ctl | 0x0080);
     bus.denise.clxcon = 1 << 12;
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
@@ -11085,8 +11137,8 @@ fn manual_sprite_and_bpl1dat_writes_accumulate_live_sprite_playfield_clxdat() {
     // One-bitplane playfield: match only bitplane 1 (absent planes 2-6 read 0
     // and still match); CLXCON_RESET's all-six-planes=1 never matches.
     bus.denise.clxcon = 0x0FC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
     bus.current_frame_render_base = bus.capture_render_snapshot();
 
     bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
@@ -13563,8 +13615,8 @@ fn clxdat_transfer_leaves_bus_tail_collision_for_next_read() {
         bus.denise.diwstrt = 0x2C83;
         bus.denise.diwstop = 0x2DC1;
         for sprite in [0, 2] {
-            bus.denise.sprpos[sprite] = pos;
-            bus.denise.sprctl[sprite] = ctl;
+            bus.denise.write_sprpos(sprite, pos);
+            bus.denise.write_sprctl(sprite, ctl);
         }
         bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
         bus.current_frame_render_base = bus.capture_render_snapshot();
