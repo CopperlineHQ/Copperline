@@ -285,6 +285,7 @@ impl Bus {
                     sprite,
                     hstart: line_data.hstart,
                     hsub_70ns: line_data.hsub_70ns,
+                    hsub_35ns: line_data.hsub_35ns,
                     beam_y: 0,
                     data: line_data.data,
                     datb: line_data.datb,
@@ -1119,9 +1120,14 @@ impl Bus {
             return None;
         };
         let quantum = sprite_fetch_quantum(self.agnus.fmode());
+        let aga = matches!(self.agnus.revision(), AgnusRevision::AgaAlice);
         let line_data = DisplaySpriteLineData {
             hstart: sprite_hstart_from_words(state.pos, state.ctl),
-            hsub_70ns: bitplane_shres(self.denise.bplcon0) && sprite_hsub_70ns_from_ctl(state.ctl),
+            // Lisa applies both sub-pixel position bits in every mode; on
+            // ECS Denise the 70 ns bit counts in super-hi-res.
+            hsub_70ns: (aga || bitplane_shres(self.denise.bplcon0))
+                && sprite_hsub_70ns_from_ctl(state.ctl),
+            hsub_35ns: aga && state.ctl & 0x0008 != 0,
             data,
             datb,
             data_ext,
@@ -1135,6 +1141,7 @@ impl Bus {
             sprite,
             hstart: line_data.hstart,
             hsub_70ns: line_data.hsub_70ns,
+            hsub_35ns: line_data.hsub_35ns,
             beam_y,
             data: line_data.data,
             datb: line_data.datb,

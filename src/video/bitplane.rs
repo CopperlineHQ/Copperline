@@ -5059,7 +5059,11 @@ pub fn sprite_framebuffer_origin(bus: &Bus, sprite: usize) -> Option<(i32, i32)>
         0
     };
     let x = (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - DIW_HSTART_FB0 + shift) * 2
-        + i32::from(top.hsub_70ns && base.bplcon0 & BPLCON0_SHRES != 0);
+        + i32::from(
+            top.hsub_70ns
+                && (matches!(base.agnus_revision, AgnusRevision::AgaAlice)
+                    || base.bplcon0 & BPLCON0_SHRES != 0),
+        );
     // Logical sprite coordinates live in the hi-res pitch domain; the
     // presented canvas may be double-width for a 35 ns super-hi-res scan.
     let scale = bus.frame_canvas_scale() as i32;

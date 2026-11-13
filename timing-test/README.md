@@ -752,6 +752,12 @@ disable-re-enable punch / disable / cold-restart sequence -- the issue #74
 deferred AUDxEN-disable class, which the Paula HRM rework regressed once;
 the punch's gap-and-phase signature and the seamless handoff from DMA
 cycle interrupts to the free-running IRQ-mode tick are both pinned), and
+`agafine-scroll` (AGA: eight bands with BPLCON1 H1/H0 and H5-H2 values
+stepping a lo-res bar by 0, 1, 2, 3, 4, 5, 11 and 20 samples of 35 ns, and
+sprite 0 re-armed per band with SPRxCTL bits 4 and 3 for offsets of 0 to 3
+samples -- Lisa's sub-pixel scroll and sprite position; odd steps show as
+half-bright columns on the 70 ns canvas; no reference emulator models
+either, see the probe header),
 `sprprobe-latch` (sprite DMA fetches land in the Denise display latches:
 bars armed manually with SPREN off, a DMA phase whose terminator CTL
 fetch disarms every channel and overwrites SPR0's data words, then SPREN

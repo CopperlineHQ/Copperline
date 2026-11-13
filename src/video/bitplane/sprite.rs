@@ -11,6 +11,8 @@ use super::*;
 pub(super) struct SpriteLine {
     pub(super) hstart: i32,
     pub(super) hsub_70ns: bool,
+    /// AGA: SPRxCTL bit 3, a further 35 ns of horizontal position.
+    pub(super) hsub_35ns: bool,
     pub(super) beam_y: i32,
     pub(super) data: u16,
     pub(super) datb: u16,
@@ -63,7 +65,9 @@ impl<'a> SpriteLineSampler<'a> {
         let mut bit_stops_subpixels = [0i32; SPRITE_LINE_MAX_BITS + 1];
         let mut bit_values = [0u8; SPRITE_LINE_MAX_BITS];
         let mut bit_count = 0usize;
-        let mut subpixel_cursor = base_x * 2;
+        // SPRxCTL's 35 ns bit (Lisa) moves the whole serializer by one
+        // sample, below the framebuffer pitch.
+        let mut subpixel_cursor = base_x * 2 + i32::from(line.hsub_35ns);
         bit_stops_subpixels[0] = subpixel_cursor;
 
         for w in 0..line.width_words() {
@@ -232,6 +236,7 @@ impl BeamSpriteState {
                     held.vstop,
                     held.line.hstart,
                     held.line.hsub_70ns,
+                    held.line.hsub_35ns,
                     held.line.attached,
                 );
                 sprpos[i] = pos;
@@ -309,7 +314,9 @@ impl BeamSpriteState {
         let held = self.held[sprite];
         let hstart = crate::bus::sprite_hstart_for_fmode(sprite_hstart(pos, ctl), self.fmode);
         let hsub_70ns = sprite_hsub_70ns(ctl);
-        let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, self.bplcon0, self.fmode);
+        let hsub_35ns = self.aga && sprite_hsub_35ns(ctl);
+        let base_x =
+            sprite_nominal_base_framebuffer_x(pos, ctl, self.bplcon0, self.fmode, self.aga);
         // A held sprite was already active when SPREN was cleared. With no
         // sprite DMA slot running, the DMA descriptor's stop comparator cannot
         // retire the latched data; later SPRxPOS writes simply reposition it.
@@ -317,6 +324,7 @@ impl BeamSpriteState {
             return Some(SpriteLine {
                 hstart,
                 hsub_70ns,
+                hsub_35ns,
                 beam_y,
                 data: held.line.data,
                 datb: held.line.datb,
@@ -366,6 +374,7 @@ impl BeamSpriteState {
         Some(SpriteLine {
             hstart,
             hsub_70ns,
+            hsub_35ns,
             beam_y,
             data,
             datb,
@@ -835,7 +844,8 @@ pub(super) fn flush_manual_sprite_lines(
         if mode == ManualSpriteFlushMode::PreserveStartedOutput && beam_y == end_line {
             let pos = regs.sprpos[sprite];
             let ctl = regs.sprctl[sprite];
-            let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, regs.bplcon0, regs.fmode);
+            let base_x =
+                sprite_nominal_base_framebuffer_x(pos, ctl, regs.bplcon0, regs.fmode, regs.aga);
             if x_stop as i32 >= base_x {
                 x_stop = FB_WIDTH;
             }
@@ -1632,6 +1642,7 @@ pub(super) fn collect_sprite_lines_into(
                         .map(|hstart| SpriteLine {
                             hstart,
                             hsub_70ns: line.hsub_70ns,
+                            hsub_35ns: line.hsub_35ns,
                             beam_y: line.beam_y,
                             data: line.data,
                             datb: line.datb,
@@ -1724,7 +1735,14 @@ fn sprite_base_framebuffer_x_resolved(
         * 2;
     let sample_x = base_x.clamp(0, FB_WIDTH.saturating_sub(1) as i32) as usize;
     let control = control_at_x(base_control, control_segments, sample_x);
-    base_x + i32::from(hsub_70ns && control.shres())
+    base_x + i32::from(hsub_70ns && sprite_hsub_70ns_applies(control.aga(), control.shres()))
+}
+
+/// Whether SPRxCTL's 70 ns position bit moves the sprite. Lisa applies it
+/// (and the 35 ns bit below it) in every display mode; on ECS Denise the
+/// model applies it in super-hi-res, where sprite pixels are that fine.
+pub(super) fn sprite_hsub_70ns_applies(aga: bool, shres: bool) -> bool {
+    aga || shres
 }
 
 pub(super) fn sprite_nominal_base_framebuffer_x(
@@ -1732,11 +1750,14 @@ pub(super) fn sprite_nominal_base_framebuffer_x(
     ctl: u16,
     bplcon0: u16,
     fmode: u16,
+    aga: bool,
 ) -> i32 {
     let hstart = crate::bus::sprite_hstart_for_fmode(sprite_hstart(pos, ctl), fmode);
     (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - diw_hstart_fb0() + active_canvas_shift_h())
         * 2
-        + i32::from(sprite_hsub_70ns(ctl) && bplcon0 & BPLCON0_SHRES != 0)
+        + i32::from(
+            sprite_hsub_70ns(ctl) && sprite_hsub_70ns_applies(aga, bplcon0 & BPLCON0_SHRES != 0),
+        )
 }
 
 pub(super) fn sprite_display_enable_x_for_y(
@@ -1887,11 +1908,17 @@ pub(super) fn sprite_hsub_70ns(ctl: u16) -> bool {
     ctl & 0x0010 != 0
 }
 
+/// SPRxCTL bit 3: Lisa's 35 ns horizontal position bit.
+pub(super) fn sprite_hsub_35ns(ctl: u16) -> bool {
+    ctl & 0x0008 != 0
+}
+
 pub(super) fn sprite_control_words_from_parts(
     vstart: i32,
     vstop: i32,
     hstart: i32,
     hsub_70ns: bool,
+    hsub_35ns: bool,
     attached: bool,
 ) -> (u16, u16) {
     let vstart = vstart as u16;
@@ -1904,6 +1931,9 @@ pub(super) fn sprite_control_words_from_parts(
         | (hstart & 0x0001);
     if hsub_70ns {
         ctl |= 0x0010;
+    }
+    if hsub_35ns {
+        ctl |= 0x0008;
     }
     if attached {
         ctl |= 0x0080;
@@ -1968,6 +1998,7 @@ mod performance_tests {
                 let line = SpriteLine {
                     hstart: DIW_HSTART_FB0 - crate::bus::SPRITE_OUTPUT_DELAY_LORES,
                     hsub_70ns: false,
+                    hsub_35ns: false,
                     beam_y: PAL_VISIBLE_LINE0 + row as i32,
                     data: 0xA55A,
                     datb: 0x3333,
