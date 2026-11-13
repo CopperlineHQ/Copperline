@@ -1293,12 +1293,41 @@ RP5C01's battery RAM persists to `[machine] battmem` (default
 `battmem.nvram`) in the `.nvram` layout WinUAE and Amiberry use, so AmigaOS
 `battmem.resource` settings survive a power cycle.
 
-Reads reflect the host's local time; guest writes only affect the emulated
-latch, bank, and control state (and the RP5C01's battery RAM), never the
-host clock. A seed (`[machine] rtc_time`, `--rtc-time`) replaces the host
-clock: the chip powers on reading the seed and ticks with emulated time, so
-reads are reproducible byte-for-byte, and `rtc_frozen` stops the tick
-altogether (see [](../guide/configuration)).
+Until the guest touches the counters, reads reflect the time source: the
+host's local time, or a seed (`[machine] rtc_time`, `--rtc-time`), which
+replaces the host clock: the chip powers on reading the seed and ticks with
+emulated time, so reads are reproducible byte-for-byte, and `rtc_frozen`
+stops the tick altogether (see [](../guide/configuration)).
+
+The counters themselves are read/write, as on both parts. Stopping the
+clock or writing a digit detaches the chip from the time source: it then
+holds its own BCD digit counters (a digit is loaded exactly as written, so
+the order of a multi-digit update does not matter) and carries once per
+second of the time source by the part's rules:
+
+- the day of the week is a free-running counter, not derived from the
+  date;
+- the MSM6242 takes the leap year from the year digits (divisible by
+  four); the RP5C01 from its leap-year counter (block 1, select B; 0 is a
+  leap year), which counts up with the year;
+- 12-hour mode reads 12, 1 .. 11 with the PM flag in the ten-hours digit
+  (bit 2 on the MSM6242, bit 1 on the RP5C01); changing the 24/12 select
+  does not convert the digits.
+
+The MSM6242's CF register holds STOP, REST and the 24/12 select: the clock
+counts while STOP and REST are both clear, and REST clears the divider
+below the seconds, so the first carry after a restart is one whole second
+later. HOLD freezes the registers for reading without stopping the divider;
+BUSY reads 1 for 190 microseconds after each carry; writing the 30-second
+adjust bit rounds the seconds to the nearest minute, restarts the divider
+and clears itself. TEST is not modelled. On the RP5C01, MODE's TIMER EN
+stops and starts the carries (the divider keeps its count across the
+stop) and RESET bit 1 clears the divider.
+
+A time the guest sets lasts for the session and its save states. The host
+clock is never changed, and a power cycle or a new `rtc.set` starts again
+from the time source. Tests: the `msm6242_*` and `rp5c01_*` tests in
+`rtc.rs`.
 
 The part is four bits wide and wired to the low byte lane alone, so it answers
 on odd addresses while the even lane floats with the bus -- with or without a

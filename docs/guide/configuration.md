@@ -467,6 +467,13 @@ cycle restarts the emulated timeline and therefore restarts a seeded clock
 from `rtc_time`; a guest-initiated reboot (the 68000 `RESET` instruction)
 leaves it ticking, like real battery-backed hardware.
 
+The guest can set the clock: the chip's counters are read/write, so
+`SetClock SAVE` (or the Time preferences editor, or another OS's `hwclock`)
+takes effect and the clock counts on from the written time. That time
+belongs to the running machine: it survives a guest reboot and travels in
+save states, but the host clock is never changed, and the next power cycle
+starts again from the host time or from `rtc_time`.
+
 The `A3000` and `A4000` profiles are the big-box machines. They carry a
 Ramsey memory controller (`mem_controller`), whose two registers answer at
 `$DE0003` and `$DE0043`, and Gary rather than Gayle -- so no PCMCIA slot and
