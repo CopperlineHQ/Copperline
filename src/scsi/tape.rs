@@ -1172,8 +1172,12 @@ impl ScsiTape {
 
     /// SPACE over filemarks. Forward the head ends past the last one
     /// spaced over; backward it ends on the beginning-of-tape side of it.
+    /// A count of zero moves nothing.
     fn space_filemarks(&mut self, count: i64) -> Option<Exception> {
-        if count >= 0 {
+        if count == 0 {
+            return None;
+        }
+        if count > 0 {
             let ahead = (self.files.len() - self.file.min(self.files.len())) as i64;
             if count <= ahead {
                 self.file += count as usize;
@@ -1365,9 +1369,15 @@ mod tests {
     }
 
     /// `len` bytes that say where they are in tape file `file`.
+    /// Test data whose every 256-byte stretch differs, so a block read
+    /// from the wrong place in a tape file does not compare equal.
     fn pattern(file: u8, len: usize) -> Vec<u8> {
         (0..len)
-            .map(|i| file.wrapping_mul(31).wrapping_add(i as u8))
+            .map(|i| {
+                file.wrapping_mul(31)
+                    .wrapping_add(i as u8)
+                    .wrapping_add(((i >> 8) as u8).wrapping_mul(13))
+            })
             .collect()
     }
 
@@ -2250,6 +2260,23 @@ mod tests {
         // Setmarks are not supported.
         assert_eq!(run(&mut tape, &space6(4, 1)).1, CHECK_CONDITION);
         assert_eq!(sense(&mut tape).0, SK_ILLEGAL_REQUEST);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn space_with_a_zero_count_leaves_the_head_where_it_is() {
+        let (dir, mut tape) = directory_tape(
+            "space-zero",
+            &[("a", pattern(1, 1536)), ("b", pattern(2, 512))],
+        );
+        // One block into file 0, a zero count over filemarks or over
+        // blocks moves nothing: the next read is the second block.
+        let (data, _) = run(&mut tape, &read6(true, false, 1));
+        assert_eq!(data, pattern(1, 1536)[..512]);
+        assert_eq!(run(&mut tape, &space6(1, 0)).1, GOOD);
+        assert_eq!(run(&mut tape, &space6(0, 0)).1, GOOD);
+        let (data, _) = run(&mut tape, &read6(true, false, 1));
+        assert_eq!(data, pattern(1, 1536)[512..1024]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
