@@ -1454,16 +1454,12 @@ impl Bus {
         // encodes the start/last_fetch_hpos bounds). The vpos gates below only
         // matter on color clocks that are actually bitplane slots, so testing
         // the pattern first lets the off-slot majority skip them entirely.
-        let is_slot = if hpos < SLOT_MASK_BITS {
+        if hpos < SLOT_MASK_BITS {
             plan.slot_mask[(hpos / 64) as usize] & (1u64 << (hpos % 64)) != 0
         } else {
             // Programmable line wider than the bitmask: fall back to the math.
             Self::plan_slot_at(&plan, hpos)
-        };
-        if !is_slot {
-            return false;
         }
-        true
     }
 
     /// Whether `hpos` is a bitplane fetch slot for `plan`, from the fetch

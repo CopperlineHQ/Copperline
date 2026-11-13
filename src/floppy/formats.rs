@@ -451,8 +451,11 @@ pub(super) fn decode_zip_floppy_image(data: &[u8], expanded_limit: usize) -> Res
     cursor.read_exact(&mut u16buf)?;
     let extra_field_length = u16::from_le_bytes(u16buf);
 
-    // Skip the file name and extra field to reach the compressed data
-    cursor.set_position((30 + file_name_length + extra_field_length) as u64);
+    // Skip the file name and extra field to reach the compressed data.
+    // Both lengths are 16-bit header fields, so their sum with the fixed
+    // header can exceed u16; widen before adding. An offset past the end
+    // leaves the reader at EOF and the read below reports it.
+    cursor.set_position(30 + u64::from(file_name_length) + u64::from(extra_field_length));
 
     let mut decompressed = vec![0; uncomp_size as usize];
 

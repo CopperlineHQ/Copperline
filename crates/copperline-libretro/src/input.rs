@@ -69,9 +69,12 @@ impl Controls {
                     } else {
                         port as u32
                     };
-                    for axis in 0..2 {
-                        self.pending[port][axis] = self.pending[port][axis]
-                            .saturating_add(i32::from(input(mouse, abi::MOUSE, axis as u32)));
+                    for (axis, pending) in self.pending[port].iter_mut().enumerate() {
+                        *pending = pending.saturating_add(i32::from(input(
+                            mouse,
+                            abi::MOUSE,
+                            axis as u32,
+                        )));
                     }
                     let [x, y] = self.pending[port].map(|value| value.clamp(-100, 100));
                     self.pending[port][0] -= x;
