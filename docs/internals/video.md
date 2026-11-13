@@ -451,7 +451,16 @@ super-hi-res pair takes (HAM takes both plane groups' sub-pixel delay from
 playfield 1). A playfield written through BPLxDAT without bitplane DMA keeps
 whole-pixel scroll. The live collision path follows: on Lisa a sprite meets
 a playfield only where both are present in the same 35 ns sample, with the
-scroll decoded from all eight bits of each BPLCON1 field. WinUAE applies the
+scroll decoded from all eight bits of each BPLCON1 field. Two things follow
+the sprite's 35 ns offset. A repositioned sprite's segments (several SPRxPOS
+writes on one line) clip at the offset too, so they join without a half
+pixel between them. And a mid-line BPLCON4 write reaches the sprite colour
+lookup one 35 ns sample into the framebuffer column it is placed at: the
+left half of that column keeps the old bank. SANITY's Roots 2.0 shows both:
+its Copper-coloured sprite screen sets the 35 ns bit on all eight sprites so
+their pixel edges meet the bank switches it makes every 96 pixels, and with
+the switch on a whole column each one left a dark half-pixel line (test
+`aga_sprite_colour_bank_switches_one_35ns_sample_into_its_column`). WinUAE applies the
 same position and scroll bits; neither vAmiga 5 nor a hardware capture was
 available to check the sub-pixel collision pitch, which follows the AGA
 documentation. Tests: `aga_lores_playfield_scrolls_in_quarter_pixel_steps`,

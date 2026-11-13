@@ -806,12 +806,13 @@ impl Bus {
                         if diag_sprcap_matches(want, line.beam_y) {
                             let st = &self.display_dma_sprite_state[sprite];
                             log::info!(
-                                "sprcap f={} s{} y={} hstart={} hsub={} att={} w={} A={:04X} {:04X?} B={:04X} {:04X?} vstrt={} vstop={} ena={} ptr={:06X}",
+                                "sprcap f={} s{} y={} hstart={} hsub={} ctl={:04X} att={} w={} A={:04X} {:04X?} B={:04X} {:04X?} vstrt={} vstop={} ena={} ptr={:06X}",
                                 self.emulated_frames,
                                 line.sprite,
                                 line.beam_y,
                                 line.hstart,
-                                u8::from(line.hsub_70ns),
+                                2 * u8::from(line.hsub_70ns) + u8::from(line.hsub_35ns),
+                                st.ctl,
                                 u8::from(line.attached),
                                 line.width_words,
                                 line.data,

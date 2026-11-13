@@ -3337,6 +3337,81 @@ fn aga_sprite_position_bits_move_a_lores_sprite_in_35ns_steps() {
 }
 
 #[test]
+fn aga_sprite_colour_bank_switches_one_35ns_sample_into_its_column() {
+    // BPLCON4 selects the sprite colour bank. A mid-line write reaches the
+    // sprite colour lookup one 35 ns sample after the framebuffer column it
+    // is placed at, so the left half of that column still shows the old
+    // bank. A sprite two lo-res pixels wide straddles a switch at column 6.
+    let mut state = RenderState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        dmacon: DMACON_DMAEN | DMACON_SPREN,
+        bplcon4: 0x0011,
+        ..blank_state()
+    };
+    state.palette.write_ocs(17, 0x0F00);
+    // Entry 33: the same sprite colour in bank 2 (high and low nibbles).
+    state.palette.write_entry(33, false, 0x00F0);
+    state.palette.write_entry(33, true, 0x00F0);
+    let ram = vec![0; 64];
+    let base_palettes = [state.palette; FB_HEIGHT];
+    let palette_segments = vec![Vec::new(); FB_HEIGHT];
+    let base_control = ControlState::from_render_state(&state);
+    let base_controls = [base_control; FB_HEIGHT];
+    let mut control_segments = vec![Vec::new(); FB_HEIGHT];
+    control_segments[0].push(ControlSegment {
+        x: 6,
+        control: ControlState {
+            bplcon4: 0x0022,
+            ..base_control
+        },
+    });
+    let playfield_mask = vec![0u8; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
+    let captured = [CapturedSpriteLine {
+        sprite: 0,
+        hstart: SPRITE_HSTART_FB0 + 2,
+        hsub_70ns: false,
+        hsub_35ns: false,
+        beam_y: PAL_VISIBLE_LINE0,
+        data: 0xC000,
+        datb: 0,
+        attached: false,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+    }];
+    render_sprites(
+        &state,
+        &ram,
+        &mut fb,
+        SpriteClip {
+            x_start: 0,
+            x_stop: FB_WIDTH,
+            y_start: 0,
+            y_stop: FB_HEIGHT,
+        },
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &playfield_mask,
+        &mut collision_pixels,
+        [false; 8],
+        &captured,
+        true,
+    );
+
+    let red = rgb12_to_rgba8(0x0F00);
+    let green = rgb12_to_rgba8(0x00F0);
+    assert_eq!(fb[3], rgb12_to_rgba8(0));
+    assert_eq!(fb[4], red);
+    assert_eq!(fb[5], red);
+    assert_eq!(fb[6], rgba8_blend_halves(red, green));
+    assert_eq!(fb[7], green);
+}
+
+#[test]
 fn bplcon3_spres_hires_applies_to_attached_sprite_pairs() {
     let mut state = RenderState {
         dmacon: DMACON_DMAEN | DMACON_SPREN,

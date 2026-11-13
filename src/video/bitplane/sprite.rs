@@ -96,21 +96,35 @@ impl<'a> SpriteLineSampler<'a> {
         }
     }
 
+    /// The span of 35 ns samples this line may paint. A line's clip span
+    /// is where its serializer runs between two of the sprite's reloads,
+    /// so it carries the sprite's own 35 ns offset: when a sprite is
+    /// repositioned along a line, each segment ends in the sample where
+    /// the next one starts, and no half pixel falls between them.
+    fn clip_subpixels(&self) -> (i32, i32) {
+        let offset = i32::from(self.line.hsub_35ns);
+        (
+            self.line.x_start as i32 * 2 + offset,
+            self.line.x_stop as i32 * 2 + offset,
+        )
+    }
+
     pub(super) fn framebuffer_range(&self) -> Option<(i32, i32)> {
+        let (clip_start, clip_stop) = self.clip_subpixels();
         let start = self.bit_stops_subpixels[0]
+            .max(clip_start)
             .div_euclid(2)
-            .max(self.line.x_start as i32)
             .max(0);
-        let stop = (self.bit_stops_subpixels[self.bit_count] + 1)
+        let stop = (self.bit_stops_subpixels[self.bit_count].min(clip_stop) + 1)
             .div_euclid(2)
-            .min(self.line.x_stop as i32)
             .min(FB_WIDTH as i32);
         (start < stop).then_some((start, stop))
     }
 
     pub(super) fn subpixel_bits_at(&self, subpixel: i32) -> u8 {
-        if subpixel < self.line.x_start as i32 * 2
-            || subpixel >= self.line.x_stop as i32 * 2
+        let (clip_start, clip_stop) = self.clip_subpixels();
+        if subpixel < clip_start
+            || subpixel >= clip_stop
             || subpixel < self.bit_stops_subpixels[0]
             || subpixel >= self.bit_stops_subpixels[self.bit_count]
         {
@@ -1306,21 +1320,25 @@ pub(super) fn render_attached_sprite_pair_lines(
             if sprite_mask & (0b11 << even_sprite) != 0b11 << even_sprite {
                 continue;
             }
-            let resolve = |idx| {
-                let color_idx = sprite_color_entry(control, even_sprite, idx, true);
+            let bank_controls =
+                sprite_bank_controls(base_controls[y], &control_segments[y], x_usize, control);
+            let resolve = |idx, half: usize| {
+                let color_idx = sprite_color_entry(bank_controls[half], even_sprite, idx, true);
                 let entry =
                     palette_entry_at_x(&base_palettes[y], &palette_segments[y], x_usize, color_idx);
                 sprite_pixel_rgba(control, entry)
             };
-            let (left, right) = if left_visible && right_visible && left_idx == right_idx {
-                let pixel = resolve(left_idx);
-                (Some(pixel), Some(pixel))
-            } else {
-                (
-                    left_visible.then(|| resolve(left_idx)),
-                    right_visible.then(|| resolve(right_idx)),
-                )
-            };
+            let same_bank = bank_controls[0].bplcon4 == bank_controls[1].bplcon4;
+            let (left, right) =
+                if left_visible && right_visible && left_idx == right_idx && same_bank {
+                    let pixel = resolve(left_idx, 0);
+                    (Some(pixel), Some(pixel))
+                } else {
+                    (
+                        left_visible.then(|| resolve(left_idx, 0)),
+                        right_visible.then(|| resolve(right_idx, 1)),
+                    )
+                };
             let canvas_scale = super::active_canvas_scale();
             let out_base = y * FB_WIDTH * canvas_scale + x_usize * canvas_scale;
             paint_sprite_subpixel_pair(
@@ -1431,6 +1449,28 @@ pub(super) fn clip_sprite_lines_around_register_lines(
         }
     }
     *lines = clipped;
+}
+
+/// The control state whose BPLCON4 selects the sprite colour bank in each
+/// 35 ns half of framebuffer pixel `x`.
+///
+/// On Lisa a BPLCON4 write reaches the sprite colour lookup one 35 ns
+/// sample after the framebuffer column the write is placed at: the left
+/// half of that column still shows the old bank. Software that switches
+/// the bank mid-line under a sprite sets SPRxCTL's 35 ns position bit so
+/// the sprite's pixel edges fall on the switch (SANITY's Roots 2.0 does on
+/// all eight sprites of its Copper-coloured sprite screen); with the
+/// switch on a whole column, each one left a half-pixel of the wrong bank.
+fn sprite_bank_controls(
+    base_control: ControlState,
+    control_segments: &[ControlSegment],
+    x: usize,
+    control: ControlState,
+) -> [ControlState; 2] {
+    if !control.aga() || control_segments.is_empty() || x == 0 {
+        return [control; 2];
+    }
+    [control_at_x(base_control, control_segments, x - 1), control]
 }
 
 #[inline]
@@ -1553,18 +1593,21 @@ pub(super) fn draw_sprite_line(
         if super::active_debug_sprite_mask() & (1 << sprite) == 0 {
             continue;
         }
-        let resolve = |idx| {
-            let color_idx = sprite_color_entry(control, sprite, idx, false);
+        let bank_controls =
+            sprite_bank_controls(base_controls[y], &control_segments[y], x, control);
+        let resolve = |idx, half: usize| {
+            let color_idx = sprite_color_entry(bank_controls[half], sprite, idx, false);
             let entry = palette_entry_at_x(&base_palettes[y], &palette_segments[y], x, color_idx);
             sprite_pixel_rgba(control, entry)
         };
-        let (left, right) = if left_visible && right_visible && left_idx == right_idx {
-            let pixel = resolve(left_idx);
+        let same_bank = bank_controls[0].bplcon4 == bank_controls[1].bplcon4;
+        let (left, right) = if left_visible && right_visible && left_idx == right_idx && same_bank {
+            let pixel = resolve(left_idx, 0);
             (Some(pixel), Some(pixel))
         } else {
             (
-                left_visible.then(|| resolve(left_idx)),
-                right_visible.then(|| resolve(right_idx)),
+                left_visible.then(|| resolve(left_idx, 0)),
+                right_visible.then(|| resolve(right_idx, 1)),
             )
         };
         let canvas_scale = super::active_canvas_scale();
