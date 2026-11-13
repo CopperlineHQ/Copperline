@@ -532,26 +532,46 @@ impl CdtvController {
     /// it and renamed over it, so a crash or a full disk part-way leaves
     /// the previous saves as they were. Nothing falls back to writing the
     /// file in place; a failure is the caller's to retry.
+    ///
+    /// The new file is created exclusively under a name of its own
+    /// (`.NAME.copperline-XXXXXX`). A fixed name could already be there as
+    /// someone else's file, or as a link whose target would be written
+    /// through, and two sessions on one bookmark file would share it and
+    /// rename each other's unfinished writes into place.
     fn replace_file(path: &std::path::Path, image: &[u8]) -> std::io::Result<()> {
-        use std::io::Write;
         // The directory is Copperline's own and may not exist yet; it is
         // made here rather than at bind time so a player that never saves
         // leaves no empty folder behind.
         crate::paths::ensure_parent(path)?;
-        let mut temp_name = path.file_name().unwrap_or_default().to_os_string();
-        temp_name.push(".tmp");
-        let temp = path.with_file_name(temp_name);
-        let written = (|| {
-            let mut file = std::fs::File::create(&temp)?;
-            file.write_all(image)?;
-            file.sync_all()?;
-            drop(file);
-            std::fs::rename(&temp, path)
-        })();
-        if written.is_err() {
-            let _ = std::fs::remove_file(&temp);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::io::Write;
+            let dir = match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => std::path::Path::new("."),
+            };
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let prefix = format!(".{name}.copperline-");
+            let mut staging = tempfile::Builder::new();
+            staging.prefix(&prefix);
+            // The mode an ordinary new file gets, not a temporary file's
+            // owner-only one: the umask still applies.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                staging.permissions(std::fs::Permissions::from_mode(0o666));
+            }
+            // Dropped on any failure below, which removes it.
+            let mut temp = staging.tempfile_in(dir)?;
+            temp.write_all(image)?;
+            temp.as_file().sync_all()?;
+            temp.persist(path).map(drop).map_err(|e| e.error)
         }
-        written
+        // A browser build has no host files to write.
+        #[cfg(target_arch = "wasm32")]
+        {
+            std::fs::write(path, image)
+        }
     }
 
     /// The INT2 (PORTS) line: the 6525's interrupt output plus the
@@ -2189,6 +2209,27 @@ mod tests {
         path
     }
 
+    /// A per-test folder for a backing file, emptied first.
+    fn bookmark_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-cdtv-bookmark-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The names in a folder, sorted.
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
     /// Advance the controller by `cck` colour clocks in line-sized ticks.
     fn run_cck(cdtv: &mut CdtvController, cck: u32) {
         let mut ring = CdAudioRing::default();
@@ -2329,35 +2370,47 @@ mod tests {
 
     #[test]
     fn a_save_replaces_the_file_whole_and_never_leaves_a_short_one() {
-        let path = bookmark_file("replace");
-        let mut temp_name = path.file_name().unwrap().to_os_string();
-        temp_name.push(".tmp");
-        let temp = path.with_file_name(temp_name);
-        let _ = std::fs::remove_dir_all(&temp);
+        let dir = bookmark_dir("replace");
+        let path = dir.join("bookmark.bin");
         let mut cdtv = CdtvController::new();
         cdtv.set_bookmark_path(path.clone());
         cdtv.battram_write(0, 1, 0x41);
         cdtv.flush_bookmark_ram();
         assert_eq!(std::fs::read(&path).unwrap()[0], 0x41);
-        assert!(!temp.exists(), "the temporary file is renamed away");
+        assert_eq!(names_in(&dir), ["bookmark.bin"], "nothing staged is left");
 
-        // The new image cannot be written beside the file (a directory
-        // sits where the temporary file goes): the save fails, stays
-        // pending, and the previous image is still there in full.
-        std::fs::create_dir_all(&temp).unwrap();
-        cdtv.battram_write(0, 1, 0x42);
-        cdtv.flush_bookmark_ram();
-        assert!(cdtv.battram_dirty);
-        let kept = std::fs::read(&path).unwrap();
-        assert_eq!((kept.len(), kept[0]), (BOOKMARK_RAM_BYTES, 0x41));
+        // The new image cannot be written beside the file (the folder
+        // takes no new files): the save fails, stays pending, and the
+        // previous image is still there in full.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |mode| std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(&dir, mode(0o555)).unwrap();
+            // A privileged user creates files there whatever the mode
+            // says, and has nothing refused to check.
+            let probe = dir.join("probe");
+            let refused = std::fs::write(&probe, b"").is_err();
+            let _ = std::fs::remove_file(&probe);
+            if refused {
+                cdtv.battram_write(0, 1, 0x42);
+                cdtv.flush_bookmark_ram();
+                assert!(cdtv.battram_dirty);
+                let kept = std::fs::read(&path).unwrap();
+                assert_eq!((kept.len(), kept[0]), (BOOKMARK_RAM_BYTES, 0x41));
+            }
 
-        // Once it can be, the pending save lands.
-        std::fs::remove_dir_all(&temp).unwrap();
-        cdtv.flush_bookmark_ram();
-        assert!(!cdtv.battram_dirty);
-        assert_eq!(std::fs::read(&path).unwrap()[0], 0x42);
+            // Once it can be, the pending save lands.
+            std::fs::set_permissions(&dir, mode(0o755)).unwrap();
+            if refused {
+                cdtv.flush_bookmark_ram();
+                assert!(!cdtv.battram_dirty);
+                assert_eq!(std::fs::read(&path).unwrap()[0], 0x42);
+                assert_eq!(names_in(&dir), ["bookmark.bin"]);
+            }
+        }
         drop(cdtv);
-        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2416,6 +2469,44 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap()[0], 0x61);
         drop(cdtv);
         let _ = std::fs::remove_dir_all(&blocker);
+    }
+
+    /// The flush stages the image in a file of its own making. A fixed
+    /// staging name beside the bookmark file could already be someone
+    /// else's file, or a link to one, and would be written through.
+    #[test]
+    fn a_bookmark_flush_leaves_a_sibling_named_like_a_staging_file_alone() {
+        let dir = bookmark_dir("staging");
+        let path = dir.join("bookmark.bin");
+        let sibling = dir.join("bookmark.bin.tmp");
+        std::fs::write(&sibling, b"someone else's").unwrap();
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        cdtv.battram_write(0, 1, 0x61);
+        cdtv.flush_bookmark_ram();
+        assert!(!cdtv.battram_dirty);
+        assert_eq!(std::fs::read(&path).unwrap()[0], 0x61);
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"someone else's");
+        // Nothing staged is left behind.
+        assert_eq!(names_in(&dir), ["bookmark.bin", "bookmark.bin.tmp"]);
+
+        // The same name as a link: what it points at is not written, and
+        // the bookmark file does not become the link.
+        #[cfg(unix)]
+        {
+            let unrelated = dir.join("unrelated.txt");
+            std::fs::write(&unrelated, b"keep").unwrap();
+            std::fs::remove_file(&sibling).unwrap();
+            std::os::unix::fs::symlink(&unrelated, &sibling).unwrap();
+            cdtv.battram_write(0, 1, 0x62);
+            cdtv.flush_bookmark_ram();
+            assert!(!cdtv.battram_dirty);
+            assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
+            assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+            assert_eq!(std::fs::read(&path).unwrap()[0], 0x62);
+        }
+        drop(cdtv);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
