@@ -125,11 +125,21 @@ impl Rtc {
 
     /// A CPU reset does not reach the battery-backed chip; see the concrete
     /// chips' `reset` for what little state drops back to power-on defaults.
-    pub fn reset(&mut self) {
+    /// `emulated_secs` is the instant of the reset.
+    pub fn reset(&mut self, emulated_secs: f64) {
         match self {
             Rtc::Msm6242(chip) => chip.reset(),
-            Rtc::Rp5c01(chip) => chip.reset(),
+            Rtc::Rp5c01(chip) => chip.reset(emulated_secs),
         }
+    }
+
+    /// The emulated time coordinate has gone back to zero from
+    /// `emulated_secs`, as it does at a keyboard reset or a power cycle. A
+    /// seeded time source starts again from its seed; counters the guest
+    /// has set are the battery-backed chip's own and count on from where
+    /// they stand.
+    pub fn emulated_time_restarted(&mut self, emulated_secs: f64) {
+        self.clock_mut().emulated_time_restarted(emulated_secs);
     }
 
     /// Configure the power-on clock value (`None` restores the live host
@@ -517,6 +527,23 @@ impl ClockSource {
             if chip.since.is_none() {
                 chip.since = Some(now - chip.frac);
             }
+        }
+    }
+
+    /// Keep running counters where they are when emulated time goes back
+    /// to zero from `emulated_secs`. Only a ticking seed counts emulated
+    /// time; the host clock, a frozen seed and the fixed override do not
+    /// move with it.
+    fn emulated_time_restarted(&mut self, emulated_secs: f64) {
+        #[cfg(test)]
+        if self.test_time.is_some() {
+            return;
+        }
+        if fixed_secs_override().is_some() || self.seed_unix.is_none() || self.frozen {
+            return;
+        }
+        if let Some(since) = self.chip.as_mut().and_then(|chip| chip.since.as_mut()) {
+            *since -= emulated_secs;
         }
     }
 
@@ -1061,10 +1088,11 @@ impl Rp5c01Rtc {
     /// alarm registers, 12/24 select, and battery RAM all survive. Only
     /// the volatile-looking selector state returns to its power-on
     /// default, which is also the first thing any OS probe
-    /// re-establishes; a clock the reset found stopped runs again.
-    pub fn reset(&mut self) {
+    /// re-establishes; a clock the reset found stopped runs again, from
+    /// the reset's own instant `emulated_secs`.
+    pub fn reset(&mut self, emulated_secs: f64) {
         self.mode = Self::MODE_TIMER_EN;
-        self.clock.start(0.0);
+        self.clock.start(emulated_secs);
     }
 }
 
@@ -1617,6 +1645,61 @@ mod tests {
         ]
     }
 
+    /// A guest reboot (the 68000 RESET instruction) pulses the reset line
+    /// while emulated time runs on. A clock it finds stopped starts again
+    /// at that instant: none of the session so far is counted into it.
+    #[test]
+    fn rp5c01_reset_starts_a_stopped_clock_at_the_instant_of_the_reset() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        // 100 seconds in the clock reads 02:00:09; TIMER EN goes low.
+        rtc.write(0xD * 4, 4, 0x0, 100.0);
+        let stopped = rp_digits(&mut rtc, 100.0);
+        assert_eq!(stopped, digits(9, 0, 0, 2, 18, 3, 5, stopped[12]));
+
+        rtc.reset(100.0);
+        assert_eq!(rp_read_at(&mut rtc, 0xD, 100.0), 0x8);
+        assert_eq!(rp_digits(&mut rtc, 100.0), stopped);
+        assert_eq!(rp_digits(&mut rtc, 100.9), stopped);
+        assert_eq!(rp_read_at(&mut rtc, 0x0, 101.0), 0); // 02:00:10
+        assert_eq!(rp_read_at(&mut rtc, 0x1, 101.0), 1);
+    }
+
+    /// A keyboard reset or a power cycle takes emulated time back to zero,
+    /// and a seeded source back to its seed. Counters the guest has set
+    /// are the chip's own: they neither stall until emulated time catches
+    /// up nor lose what they had counted.
+    #[test]
+    fn a_time_the_guest_set_counts_on_when_emulated_time_restarts() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        let written = digits(42, 37, 1, 3, 14, 7, 95, 5);
+        rp_set_and_start(&mut rtc, written, 3, 100.0);
+        assert_eq!(
+            rp_digits(&mut rtc, 105.0),
+            digits(47, 37, 1, 3, 14, 7, 95, 5)
+        );
+
+        // The reset comes at 110.5 seconds; time starts again from zero.
+        rtc.reset(110.5);
+        rtc.clock.emulated_time_restarted(110.5);
+        assert_eq!(rp_digits(&mut rtc, 0.0), digits(52, 37, 1, 3, 14, 7, 95, 5));
+        assert_eq!(rp_digits(&mut rtc, 0.4), digits(52, 37, 1, 3, 14, 7, 95, 5));
+        assert_eq!(rp_digits(&mut rtc, 0.5), digits(53, 37, 1, 3, 14, 7, 95, 5));
+
+        // A clock the reset found stopped starts with the new timeline.
+        rtc.write(0xD * 4, 4, 0x0, 20.0);
+        let stopped = rp_digits(&mut rtc, 20.0);
+        rtc.reset(30.0);
+        rtc.clock.emulated_time_restarted(30.0);
+        assert_eq!(rp_digits(&mut rtc, 0.0), stopped);
+        assert_eq!(rp_read_at(&mut rtc, 0x0, 1.0), (stopped[0] + 1) % 10);
+
+        // A clock still on its seed goes back to the seed, as before.
+        let mut mirror = seeded_rp5c01(VECTOR_UNIX);
+        mirror.reset(110.5);
+        mirror.clock.emulated_time_restarted(110.5);
+        assert_eq!(mirror.clock.current_unix(0.0, mirror.rules()), VECTOR_UNIX);
+    }
+
     #[test]
     fn rp5c01_counters_take_a_written_time_and_count_from_it() {
         let mut rtc = seeded_rp5c01(VECTOR_UNIX);
@@ -1760,7 +1843,7 @@ mod tests {
         assert_eq!(rp_read(&mut rtc, 0x0), 0xA);
         assert_eq!(rp_read(&mut rtc, 0xC), 0x0);
 
-        rtc.reset();
+        rtc.reset(0.0);
         assert_eq!(rp_read(&mut rtc, 0xD), 0x8); // selector back to power-on
         rp_write(&mut rtc, 0xD, 0xB);
         assert_eq!(rp_read(&mut rtc, 0x0), 0xA); // RAM kept

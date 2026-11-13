@@ -470,9 +470,10 @@ leaves it ticking, like real battery-backed hardware.
 The guest can set the clock: the chip's counters are read/write, so
 `SetClock SAVE` (or the Time preferences editor, or another OS's `hwclock`)
 takes effect and the clock counts on from the written time. That time
-belongs to the running machine: it survives a guest reboot and travels in
-save states, but the host clock is never changed, and the next power cycle
-starts again from the host time or from `rtc_time`.
+belongs to the running machine: it counts on through a guest reboot and a
+keyboard reset, and travels in save states, but the host clock is never
+changed, and the next power cycle starts again from the host time or from
+`rtc_time`.
 
 The `A3000` and `A4000` profiles are the big-box machines. They carry a
 Ramsey memory controller (`mem_controller`), whose two registers answer at

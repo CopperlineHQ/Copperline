@@ -1324,6 +1324,12 @@ and clears itself. TEST is not modelled. On the RP5C01, MODE's TIMER EN
 stops and starts the carries (the divider keeps its count across the
 stop) and RESET bit 1 clears the divider.
 
+The reset line does not reach the counters. It returns the RP5C01's MODE to
+its power-on value, so a clock it finds stopped starts again at the instant
+of the reset. A 68000 `RESET` instruction leaves emulated time running; a
+keyboard reset takes it back to zero, and with it a chip still mirroring a
+seed, while counters the guest has set count on from where they stand.
+
 A time the guest sets lasts for the session and its save states. The host
 clock is never changed, and a power cycle or a new `rtc.set` starts again
 from the time source. Tests: the `msm6242_*` and `rp5c01_*` tests in
