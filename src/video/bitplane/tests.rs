@@ -1971,6 +1971,133 @@ fn late_lowres_ddf_stop_hold_keeps_left_origin_unadvanced() {
     assert_eq!(fb[first_fetch_x + 1], rgb12_to_rgba8(0x00F0));
 }
 
+/// Render one lo-res or hi-res AGA row of one plane whose only set pixels
+/// are the sixteen of its second word, and return the framebuffer row.
+fn render_aga_edge_row(bplcon0: u16, bplcon1: u16) -> Vec<u32> {
+    let control = ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        dmacon: DMACON_DMAEN | DMACON_BPLEN,
+        bplcon0,
+        bplcon1,
+        diwstrt: ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16,
+        diwstop: (((PAL_VISIBLE_LINE0 + 1) as u16) << 8) | STANDARD_DIW_HSTOP as u16,
+        ddfstrt: if bplcon0 & 0x8000 != 0 {
+            0x003C
+        } else {
+            0x0038
+        },
+        ddfstop: 0x00D0,
+        ..ControlState::default()
+    };
+    let words = control.words_per_row(native_frame_width_for_control(control));
+    let mut plane = vec![0; words];
+    plane[1] = 0xFFFF;
+    let planes = vec![plane];
+    let (x_start, x_stop) = control.display_window_x();
+    let plan = DenisePlannedPlayfieldLine::new(0, x_start, x_stop, &planes, words * 16);
+    let mut palette = Palette::new();
+    palette.write_ocs(1, 0x0FFF);
+    let mut fb = vec![0; FB_PIXELS];
+    let mut playfield_mask = vec![0; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let mut clxdat = 0;
+    render_planned_playfield_line(
+        &plan,
+        &mut fb,
+        &mut playfield_mask,
+        &mut collision_pixels,
+        &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
+        &mut clxdat,
+        palette,
+        &[],
+        0,
+        control,
+        &[],
+        0,
+        control.bplcon1,
+        control.bplcon0,
+        0,
+        0,
+        &h_row_for(control),
+        PAL_VISIBLE_LINE0,
+        0.0,
+        0,
+    );
+    fb[..FB_WIDTH].to_vec()
+}
+
+/// Where the lit block of `row` starts and stops, in 35 ns samples: a
+/// fully lit pixel counts two, a half-lit (blended) one counts one on the
+/// side its neighbours say.
+fn lit_span_35ns(row: &[u32]) -> (usize, usize) {
+    let full = rgb12_to_rgba8(0x0FFF);
+    let lit: Vec<usize> = (0..row.len()).filter(|&x| row[x] == full).collect();
+    let (first, last) = (lit[0], *lit.last().unwrap());
+    let background =
+        |pixel: u32| pixel == rgb12_to_rgba8_alpha(0, false) || pixel == rgb12_to_rgba8(0);
+    let half_before = !background(row[first - 1]);
+    let half_after = !background(row[last + 1]);
+    (
+        first * 2 - usize::from(half_before),
+        (last + 1) * 2 + usize::from(half_after),
+    )
+}
+
+#[test]
+fn aga_lores_playfield_scrolls_in_quarter_pixel_steps() {
+    // BPLCON1 bits 9-8 (PF1H1-0) delay a lo-res playfield by 35 ns each:
+    // a quarter of a lo-res pixel, half a framebuffer pixel. Bits 3-0 keep
+    // their whole lo-res pixels on top.
+    let (base_start, base_stop) = lit_span_35ns(&render_aga_edge_row(0x1001, 0x0000));
+    assert_eq!(base_stop - base_start, 16 * 4);
+    for (bplcon1, samples) in [
+        (0x0100, 1),
+        (0x0200, 2),
+        (0x0300, 3),
+        (0x0001, 4),
+        (0x0101, 5),
+        (0x0302, 11),
+        (0x0005, 20),
+    ] {
+        let (start, stop) = lit_span_35ns(&render_aga_edge_row(0x1001, bplcon1));
+        assert_eq!(
+            (start - base_start, stop - base_stop),
+            (samples, samples),
+            "BPLCON1 {bplcon1:#06X}"
+        );
+    }
+}
+
+#[test]
+fn aga_hires_playfield_scrolls_in_half_pixel_steps() {
+    // In hi-res a native pixel is 70 ns, so only PF1H0 is below it.
+    let (base_start, base_stop) = lit_span_35ns(&render_aga_edge_row(0x9001, 0x0000));
+    assert_eq!(base_stop - base_start, 16 * 2);
+    for (bplcon1, samples) in [(0x0100, 1), (0x0200, 2), (0x0300, 3), (0x0001, 4)] {
+        let (start, stop) = lit_span_35ns(&render_aga_edge_row(0x9001, bplcon1));
+        assert_eq!(
+            (start - base_start, stop - base_stop),
+            (samples, samples),
+            "BPLCON1 {bplcon1:#06X}"
+        );
+    }
+}
+
+#[test]
+fn ecs_playfield_ignores_the_bits_above_the_scroll_nibbles() {
+    let ecs = |bplcon1| {
+        let control = ControlState {
+            bplcon0: 0x1000,
+            bplcon1,
+            ..ControlState::default()
+        };
+        (control.pf1_scroll(), control.fine_scroll(2))
+    };
+    assert_eq!(ecs(0x0300), (0, None));
+    assert_eq!(ecs(0x3303), (3, None));
+}
+
 #[test]
 fn late_ddf_bitplane_output_starts_at_first_word_fetch() {
     let standard_ddf = ControlState {

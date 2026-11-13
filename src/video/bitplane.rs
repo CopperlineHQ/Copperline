@@ -1283,7 +1283,8 @@ impl ControlState {
     /// super-hires units. The old OCS/ECS nibble bits are renamed to H2..H5,
     /// preserving old lo-res scroll values, while the new bits provide
     /// sub-lores positioning and the extra range needed by wide FMODE fetches.
-    fn aga_bplcon1_scroll_samples(&self, pf2: bool) -> usize {
+    /// This is the scroll in 35 ns samples, wrapped to the fetch width.
+    fn aga_bplcon1_scroll_35ns(&self, pf2: bool) -> usize {
         let shres_scroll = if pf2 {
             ((self.bplcon1 >> 12) & 0x0001)
                 | ((self.bplcon1 >> 12) & 0x0002)
@@ -1303,19 +1304,51 @@ impl ControlState {
                 | ((self.bplcon1 >> 4) & 0x0040)
                 | ((self.bplcon1 >> 4) & 0x0080)
         } as usize;
-        let samples_per_native = if self.shres() {
+        let samples_per_native = self.scroll_samples_per_native();
+        // The reload tap wraps within the fetched 16/32/64 native samples,
+        // not that many lores pixels. In SHRES BPL32, legacy tap 8 already
+        // wraps; a lores-sized mask incorrectly keeps it 32 samples late.
+        let fetch_mask = 16 * self.fetch_quantum() as usize * samples_per_native - 1;
+        shres_scroll & fetch_mask
+    }
+
+    /// 35 ns samples per native pixel: 4 lo-res, 2 hi-res, 1 super-hi-res.
+    fn scroll_samples_per_native(&self) -> usize {
+        if self.shres() {
             1
         } else if self.hires() {
             2
         } else {
             4
+        }
+    }
+
+    /// The whole native pixels of a playfield's AGA scroll.
+    fn aga_bplcon1_scroll_samples(&self, pf2: bool) -> usize {
+        self.aga_bplcon1_scroll_35ns(pf2) / self.scroll_samples_per_native()
+    }
+
+    /// What is left of a playfield's AGA scroll below one native pixel, in
+    /// 35 ns samples: BPLCON1's H1/H0 bits in lo-res, H0 in hi-res. Lisa
+    /// delays the playfield by these too, so a lo-res picture moves in
+    /// quarter-pixel steps. Zero off AGA and in super-hi-res.
+    fn scroll_subsamples(&self, pf2: bool) -> usize {
+        if !self.aga() {
+            return 0;
+        }
+        self.aga_bplcon1_scroll_35ns(pf2) % self.scroll_samples_per_native()
+    }
+
+    /// The sub-pixel scroll of both playfields when either has one and the
+    /// row has planes that use it.
+    fn fine_scroll(&self, nplanes: usize) -> Option<[usize; 2]> {
+        let pf1 = self.scroll_subsamples(false);
+        let pf2 = if nplanes >= 2 {
+            self.scroll_subsamples(true)
+        } else {
+            0
         };
-        // The reload tap wraps within the fetched 16/32/64 native samples,
-        // not that many lores pixels. In SHRES BPL32, legacy tap 8 already
-        // wraps; a lores-sized mask incorrectly keeps it 32 samples late.
-        let fetch_mask = 16 * self.fetch_quantum() as usize * samples_per_native - 1;
-        let shres_scroll = shres_scroll & fetch_mask;
-        shres_scroll / samples_per_native
+        (pf1 != 0 || pf2 != 0).then_some([pf1, pf2])
     }
 
     fn scroll_for_plane(&self, plane: usize) -> usize {
@@ -6408,6 +6441,55 @@ fn fast_playfield_run_interior(
     Some((x_lo as usize, x_hi as usize, f0 as usize, planes_mask))
 }
 
+/// Write one framebuffer pixel whose two 35 ns halves were resolved
+/// separately: the halves stay apart for sprite composition and blend into
+/// one pixel on the standard canvas, as a super-hi-res pair does.
+fn write_playfield_half_pair(
+    samples: [DeniseBitplaneSample; 2],
+    outputs: [DenisePlayfieldOutput; 2],
+    control: ControlState,
+    collision_table: &[CollisionPixel; 256],
+    fb: &mut [u32],
+    playfield_mask: &mut [u8],
+    sprite_subpixels: &mut SpriteSubpixelState,
+    collision_pixels: &mut [CollisionPixel],
+    clxdat: &mut u16,
+    fb_idx: usize,
+    out_base: usize,
+    canvas_scale: usize,
+) {
+    let composite = shres_composite_sample(samples[0], samples[1]);
+    let collision = collision_table[composite.idx as usize];
+    let pf_mask = collision.playfield_mask();
+    *clxdat |= collision.clxdat_bits();
+    if pf_mask != 0 {
+        playfield_mask[fb_idx] = pf_mask;
+    }
+    collision_pixels[fb_idx] = collision;
+    sprite_subpixels.playfield_masks[fb_idx] = [
+        collision_table[samples[0].idx as usize].playfield_mask(),
+        collision_table[samples[1].idx as usize].playfield_mask(),
+    ];
+    let pair: [u32; 2] = std::array::from_fn(|half| {
+        let transparent =
+            control.genlock_transparent(outputs[half].color_latch, Some(samples[half]), false);
+        rgb24_to_rgba8_alpha(outputs[half].color, !transparent)
+    });
+    sprite_subpixels.pixels[fb_idx] = pair;
+    sprite_subpixels.set_source(
+        fb_idx,
+        [
+            pixel_source_for_playfield(outputs[0].pf_mask),
+            pixel_source_for_playfield(outputs[1].pf_mask),
+        ],
+    );
+    if canvas_scale == 2 {
+        fb[out_base..out_base + 2].copy_from_slice(&pair);
+    } else {
+        fb[out_base] = rgba8_blend_halves(pair[0], pair[1]);
+    }
+}
+
 /// The interior itself: one prepared byte, two table loads, and the stores
 /// per sample. Mirrors the per-pixel loop's visible-sample body exactly for
 /// the constant case the eligibility check proved: opaque alpha (genlock
@@ -6649,6 +6731,9 @@ fn render_planned_playfield_line_impl(
 ) {
     let mut ham_color = rgb12_to_rgb24(color_rgb12(palette[0]));
     let mut next_ham_native_x = 0usize;
+    // The last native sample the sub-pixel scroll path resolved in HAM, kept
+    // so the two 35 ns halves that share it advance the hold colour once.
+    let mut fine_ham_last: Option<(usize, DenisePlayfieldOutput)> = None;
     let mut x = plan.x_start;
     let beam_y = visible_line0 + plan.y as i32;
     let ham_diag = ham_pixel_diag_spec().filter(|spec| {
@@ -6764,6 +6849,16 @@ fn render_planned_playfield_line_impl(
         let background_rgb24 = rgb12_to_rgb24(color_rgb12(palette[0]));
         let nplanes = sample_control.nplanes().min(plan.plane_words.len());
         let delays = std::array::from_fn(|plane| sample_control.sample_delay_for_plane(plane));
+        // AGA sub-pixel scroll: BPLCON1's bits below one native pixel delay
+        // a lo-res or hi-res playfield by 35 ns samples. Such a run is
+        // resolved one framebuffer pixel at a time, two 35 ns samples each,
+        // the way a super-hi-res run is.
+        let fine_scroll = if shres {
+            None
+        } else {
+            sample_control.fine_scroll(nplanes)
+        };
+        let fine_samples_per_native = sample_control.scroll_samples_per_native() as i64;
         let hold_final_fetch_sample = pixel_control.holds_final_lowres_fetch_sample_at_diwstop();
         let ham_mode = output_control.ham();
         let indexed_outputs = if ham_mode {
@@ -6785,7 +6880,7 @@ fn render_planned_playfield_line_impl(
         // content. All edges - scroll lead-in, the DDFSTOP hold pixel,
         // window, segment and fetch-span boundaries - keep the per-pixel
         // loop below, which runs before and after the interior unchanged.
-        let fast_interior = if fast_runs {
+        let fast_interior = if fast_runs && fine_scroll.is_none() {
             fast_playfield_run_interior(
                 plan,
                 x,
@@ -6841,6 +6936,164 @@ fn render_planned_playfield_line_impl(
                     }
                     continue;
                 }
+            }
+            if let Some(fine) = fine_scroll {
+                let visible =
+                    line_visible && window_open && x < plan.x_stop && x >= bpl_output_start_x;
+                let plane_mask = active_debug_plane_mask();
+                let position = 2 * (x - plan.x_start) as i64;
+                let mut halves: [Option<(DeniseBitplaneSample, DenisePlayfieldOutput)>; 2] =
+                    [None; 2];
+                let mut last_native_x = None;
+                for (half, slot) in halves.iter_mut().enumerate() {
+                    // Native sample each playfield shows in this 35 ns
+                    // half, relative to the first fetched sample.
+                    let relative = |subsamples: usize| {
+                        (position + half as i64 - subsamples as i64)
+                            .div_euclid(fine_samples_per_native)
+                            - pixel_fetch_start_native_x as i64
+                    };
+                    let pf1 = relative(fine[0]);
+                    let pf2 = if nplanes >= 2 && !ham_mode {
+                        relative(fine[1])
+                    } else {
+                        pf1
+                    };
+                    let latest = pf1.max(pf2);
+                    if latest < 0 {
+                        continue;
+                    }
+                    let native_x = latest as usize + native_x_offset;
+                    last_native_x = Some(native_x);
+                    if ham_mode {
+                        // The hold colour advances once per native sample,
+                        // in order; both planes' groups follow PF1 here.
+                        let output = match fine_ham_last {
+                            Some((resolved, output)) if resolved == native_x => output,
+                            _ if native_x >= next_ham_native_x => {
+                                let preroll_stop = native_x.min(plan.fetched_pixels);
+                                while next_ham_native_x < preroll_stop {
+                                    let skipped =
+                                        plan.sample_prepared(nplanes, &delays, next_ham_native_x);
+                                    denise_playfield_output(
+                                        output_control,
+                                        &palette,
+                                        skipped.idx & plane_mask,
+                                        &mut ham_color,
+                                    );
+                                    next_ham_native_x += 1;
+                                }
+                                let sample = plan.sample_prepared_with_final_fetch_hold(
+                                    nplanes,
+                                    &delays,
+                                    native_x,
+                                    hold_final_fetch_sample,
+                                );
+                                let output = denise_playfield_output(
+                                    output_control,
+                                    &palette,
+                                    sample.idx & plane_mask,
+                                    &mut ham_color,
+                                );
+                                next_ham_native_x = native_x + 1;
+                                fine_ham_last = Some((native_x, output));
+                                output
+                            }
+                            _ => {
+                                let sample = plan.sample_prepared(nplanes, &delays, native_x);
+                                let mut scratch = ham_color;
+                                denise_playfield_output(
+                                    output_control,
+                                    &palette,
+                                    sample.idx & plane_mask,
+                                    &mut scratch,
+                                )
+                            }
+                        };
+                        let sample = plan.sample_prepared_with_final_fetch_hold(
+                            nplanes,
+                            &delays,
+                            native_x,
+                            hold_final_fetch_sample,
+                        );
+                        *slot = Some((sample, output));
+                        continue;
+                    }
+                    if !visible {
+                        continue;
+                    }
+                    // A playfield one native sample behind the other taps
+                    // its planes one sample later.
+                    let mut fine_delays = delays;
+                    for (plane, delay) in fine_delays.iter_mut().enumerate() {
+                        let own = if plane & 1 == 0 { pf1 } else { pf2 };
+                        *delay += (latest - own) as i32;
+                    }
+                    let sample = plan.sample_prepared_with_final_fetch_hold(
+                        nplanes,
+                        &fine_delays,
+                        native_x,
+                        hold_final_fetch_sample,
+                    );
+                    let output = match indexed_outputs {
+                        Some(outputs) => {
+                            cached_indexed_output(outputs, sample.idx & plane_mask, &mut ham_color)
+                        }
+                        None => denise_playfield_output(
+                            output_control,
+                            &palette,
+                            sample.idx & plane_mask,
+                            &mut ham_color,
+                        ),
+                    };
+                    *slot = Some((sample, output));
+                }
+                if !ham_mode {
+                    if !visible {
+                        ham_color = background_rgb24;
+                    }
+                    if let Some(native_x) = last_native_x {
+                        next_ham_native_x = next_ham_native_x.max(native_x + 1);
+                    }
+                }
+                if visible && (halves[0].is_some() || halves[1].is_some()) {
+                    // A half ahead of the first fetched sample shows the
+                    // background, as the pixels left of it do.
+                    let blank = || {
+                        let mut scratch = background_rgb24;
+                        (
+                            DeniseBitplaneSample {
+                                idx: 0,
+                                nplanes,
+                                active: false,
+                            },
+                            denise_playfield_output(output_control, &palette, 0, &mut scratch),
+                        )
+                    };
+                    let (left, left_out) = halves[0].unwrap_or_else(blank);
+                    let (right, right_out) = halves[1].unwrap_or_else(blank);
+                    write_playfield_half_pair(
+                        [left, right],
+                        [left_out, right_out],
+                        pixel_control,
+                        collision_table,
+                        fb,
+                        playfield_mask,
+                        sprite_subpixels,
+                        collision_pixels,
+                        clxdat,
+                        plan.y * FB_WIDTH + x,
+                        plan.y * out_w + x * canvas_scale,
+                        canvas_scale,
+                    );
+                }
+                x += 1;
+                // Runs hand over on native pixel boundaries, as the stepped
+                // loop below leaves them.
+                if x >= run_stop && (x - plan.x_start).is_multiple_of(pixel_repeat) {
+                    break;
+                }
+                continue;
             }
             let output_native_x = ((x - plan.x_start) / pixel_repeat) * native_per_pixel;
             let Some(relative_native_x) = output_native_x.checked_sub(pixel_fetch_start_native_x)
