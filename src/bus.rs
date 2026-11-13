@@ -1790,8 +1790,13 @@ pub enum CpuBusAccessKind {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CpuBusSamplePhase {
+    /// Before the granted chip-bus slot.
     Start,
+    /// After the granted slot, before the cycle's trailing colour clock.
     End,
+    /// After the trailing colour clock: the 68000 has finished this word's
+    /// bus cycle, which is where a word-sized access returns its data.
+    Complete,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -7482,6 +7487,7 @@ impl Bus {
                 sample(self, slot, slot_stride, CpuBusSamplePhase::End);
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 self.record_slice_bus_advance(cck, tick);
+                sample(self, slot, slot_stride, CpuBusSamplePhase::Complete);
             }
             if trace_cpu_bus {
                 self.diag_cpu_bus_access(
@@ -10018,11 +10024,20 @@ impl Bus {
                 } else {
                     CpuBusSamplePhase::End
                 };
-                if matches!(word_off, 0x00E | 0x01E) && phase == sample_phase {
-                    // CLXDAT samples/clears before the word's trailing
-                    // clocks; INTREQR retains its end-of-slot sampling.
+                if matches!(word_off, 0x00E | 0x01E) {
+                    if phase == sample_phase {
+                        // CLXDAT samples/clears before the word's trailing
+                        // clocks; INTREQR retains its end-of-slot sampling.
+                        bus.flush_timed_devices();
+                        sampled_words[slot as usize] = Some(bus.read_custom_word(word_off));
+                    }
+                } else if size == 4 && slot == 0 && phase == CpuBusSamplePhase::Complete {
+                    // A 68000 long read is two word cycles on the chips'
+                    // 16-bit bus. The first word is returned when its own
+                    // cycle completes, one whole cycle before the second,
+                    // exactly where a word read of that register returns.
                     bus.flush_timed_devices();
-                    sampled_words[slot as usize] = Some(bus.read_custom_word(word_off));
+                    sampled_words[0] = Some(bus.read_custom_word(word_off));
                 }
             },
         );
