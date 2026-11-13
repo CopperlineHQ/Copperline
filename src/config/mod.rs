@@ -2434,6 +2434,13 @@ impl CpuModel {
         matches!(self, CpuModel::M68060 | CpuModel::M68EC060)
     }
 
+    /// Whether this is a 68040-family part (full or EC). Only the full
+    /// 68040 has the FPU whose unimplemented instructions and unsupported
+    /// data types `[cpu] unimplemented` governs.
+    pub fn is_68040(self) -> bool {
+        matches!(self, CpuModel::M68040 | CpuModel::M68EC040)
+    }
+
     /// Whether the external address bus is 32 bits wide. Only the 68000,
     /// 68010 and 68EC020 bring out 24 address lines, so they cannot reach
     /// Zorro III space or the big-box CPU-slot RAM.
@@ -2483,10 +2490,11 @@ impl CpuModel {
     }
 }
 
-/// What a 68060 does with the instructions dropped from its silicon:
-/// faithful traps (the OS-side 68060.library emulates them, as on real
-/// accelerator boards) or direct native execution for systems without
-/// the library.
+/// What a 68060 does with the instructions dropped from its silicon, and a
+/// 68040 with the floating-point instructions and data types its FPU leaves
+/// to software: faithful traps (the OS-side 68060.library or 68040.library
+/// emulates them, as on real hardware) or direct native execution for
+/// systems without the library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum UnimplementedPolicy {
     #[default]

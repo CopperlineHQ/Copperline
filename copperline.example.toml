@@ -206,12 +206,14 @@ model = "68000"
 # core, so it is ignored there). Off by default.
 # jit = true
 
-# 68060/68EC060 only: the 68060 dropped MOVEP, CHK2/CMP2, CAS2, misaligned CAS,
-# 64-bit MUL/DIV, and most FPU operations beyond basic arithmetic from
-# silicon. "trap" (default) raises the chip's unimplemented-instruction
-# exceptions for the OS-side 68060.library to emulate, exactly like a
-# real accelerator board; "native" executes them directly for systems
-# without the library.
+# 68040 and 68060 only. The 68060 dropped MOVEP, CHK2/CMP2, CAS2, misaligned
+# CAS, 64-bit MUL/DIV, and most FPU operations beyond basic arithmetic from
+# silicon. The 68040's FPU leaves the transcendental instructions, FMOVECR,
+# FINT/FINTRZ, packed decimal and denormalized or unnormalized operands to
+# software. "trap" (default) raises the chip's exceptions for the OS-side
+# 68060.library or 68040.library to emulate, exactly like the real
+# hardware; "native" executes them directly for systems without the
+# library.
 # unimplemented = "trap"
 
 

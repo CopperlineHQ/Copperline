@@ -77,10 +77,11 @@ impl TryFrom<RawConfig> for Config {
                         UnimplementedPolicy::Trap
                     }
                 };
-                if !cpu.is_68060() {
+                if !cpu.is_68060() && !cpu.is_68040() {
                     errors.push(anyhow!(
-                        "[cpu] unimplemented applies only to the 68060/68EC060 \
-                         (other models implement their full instruction sets)"
+                        "[cpu] unimplemented applies only to the 68040 and 68060 \
+                         families (other models implement their full instruction \
+                         sets)"
                     ));
                 }
                 policy
