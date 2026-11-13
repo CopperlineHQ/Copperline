@@ -348,7 +348,7 @@ pub fn sweep(dir: &Path, max_age: std::time::Duration) -> usize {
             .parse()
             .ok()
     };
-    let has = |name: String| names.iter().any(|n| *n == name);
+    let has = |name: String| names.contains(&name);
     let mut removed = 0;
     let mut remove = |name: &str| {
         if std::fs::remove_file(dir.join(name)).is_ok() {
