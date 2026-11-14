@@ -471,12 +471,21 @@ fn udp_pair_with_delay(delay: u8, window: u8) -> Result<()> {
     ];
     let mut queued = Vec::<(u64, usize, Vec<u8>)>::new();
     let mut packets = 0u64;
-    for tick in 0..1500 {
+    // A tick is this test's virtual clock for retries, proxy delays and the
+    // first player's pauses, but the packets cross real loopback sockets,
+    // which deliver in their own time. A tick in which neither peer ran a
+    // frame costs microseconds, so a count of ticks is no measure of how
+    // long the sockets were given: such a tick waits a moment instead, and
+    // the loop gives up only after as long without a frame as a session
+    // allows a silent peer.
+    let mut last_frame = Instant::now();
+    for tick in 0u64.. {
+        let mut stepped = false;
         for player in 0..2 {
             let frame = sessions[player].status().frame;
             // A virtual transport tick is the retry clock for this test.
             sessions[player].links[0].last_sent = None;
-            sessions[player].step(
+            stepped |= sessions[player].step(
                 &mut machines[player],
                 input(frame, player as u64),
                 frame < 120 && (player != 0 || !(30..42).contains(&(tick % 90))),
@@ -503,6 +512,14 @@ fn udp_pair_with_delay(delay: u8, window: u8) -> Result<()> {
             .all(|s| s.status().checked_frame == 120 && s.status().confirmed_frame == 120)
         {
             break;
+        }
+        if stepped {
+            last_frame = Instant::now();
+        } else if last_frame.elapsed() >= Duration::from_secs(10) {
+            // The assertions below say how far the peers got.
+            break;
+        } else {
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
     for session in &sessions {
