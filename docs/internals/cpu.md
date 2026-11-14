@@ -741,6 +741,16 @@ two-colour-clock cadence. Memory is currently updated before the deferred
 slot retires, so DMA can observe a posted write early; this is a modelling
 limitation.
 
+A posted write is still a CPU bus request for as long as it is pending,
+whether or not execution has stalled behind it. Every colour clock that
+passes it over counts towards the blitter's slowdown yield, so with BLTPRI
+clear the blitter gives up one bus cycle for it after three misses, the
+same one-in-four share a synchronous access gets. With BLTPRI set the write
+waits for a cycle the blit does not use. Tests:
+`posted_write_request_counts_blitter_misses_while_the_cpu_runs_on`,
+`back_to_back_posted_writes_are_not_starved_by_a_nice_blitter`,
+`posted_write_waits_out_a_bltpri_blitter`; golden probe `bltprobe-post`.
+
 Custom-register reads use a separate return path: one colour clock for
 data return, another for crossing the chipset's 16-bit bus, and one CPU
 synchronizer clock. They are deliberately not aligned to the chip-RAM

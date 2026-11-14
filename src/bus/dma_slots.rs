@@ -250,20 +250,31 @@ impl Bus {
             None if eligible => self.free_chip_bus_slot_owner(),
             None => self.scheduled_dma_owner_after_fixed(false, fixed_dma_owner),
         };
-        if self.cpu_posted_write_debt > 0
-            && forced_owner.is_none()
-            && matches!(owner, ChipBusOwner::Idle)
-            && cck >= CHIP_BUS_SLOT_CCK
-            && self.emulated_cck >= self.cpu_chip_port_free_at
-        {
-            // A posted CPU chip write retires into this otherwise-idle slot.
-            // The port turns around in 2 colour clocks, so drains (and any
-            // following CPU chip access) pace to every other colour clock;
-            // see `cpu_posted_write_debt`.
-            owner = ChipBusOwner::Cpu;
-            self.cpu_posted_write_debt -= 1;
-            self.cpu_chip_port_free_at = self.emulated_cck + 2;
-            self.note_cpu_granted_chip_bus_cycle();
+        if self.cpu_posted_write_debt > 0 && forced_owner.is_none() {
+            // A posted CPU chip write is a bus request like any other: it
+            // retires into an idle slot, or into a slot a BLTPRI-clear
+            // blitter gives up once the request has been passed over for
+            // the slowdown limit (the blitter then holds its bus cycle for
+            // a colour clock, exactly as for a synchronous grant). The port
+            // turns around in 2 colour clocks, so drains (and any following
+            // CPU chip access) pace to every other colour clock; see
+            // `cpu_posted_write_debt`.
+            let slot_available = matches!(owner, ChipBusOwner::Idle)
+                || (matches!(owner, ChipBusOwner::Blitter) && self.blitter_yields_to_waiting_cpu());
+            if slot_available
+                && cck >= CHIP_BUS_SLOT_CCK
+                && self.emulated_cck >= self.cpu_chip_port_free_at
+            {
+                owner = ChipBusOwner::Cpu;
+                self.cpu_posted_write_debt -= 1;
+                self.cpu_chip_port_free_at = self.emulated_cck + 2;
+                self.note_cpu_granted_chip_bus_cycle();
+            } else {
+                // The request stays asserted whether or not the CPU is
+                // stalled behind it, so every quantum that passes it over
+                // counts towards the blitter's yield.
+                self.note_cpu_request_passed_over();
+            }
         }
         if diag_blt_slots() && self.blitter.busy {
             eprintln!(
@@ -878,16 +889,13 @@ impl Bus {
     }
 
     /// Who is denying the CPU the current colour clock, for the frame
-    /// analyzer's wait attribution. `for_cpu` selects the arbitration view
-    /// the waiting access is actually subject to: a synchronous grant sees
-    /// the CPU's view (`scheduled_dma_owner(true)`), so the slowdown
-    /// counter's yield reads as a free slot; a posted
-    /// 020+ write drains through the ordinary arbitration
-    /// (`scheduled_dma_owner(false)`), where a busy blitter keeps every
-    /// access cycle. A slot the access could have used is the 020+ port
-    /// turnaround wait.
-    pub(super) fn cpu_bus_denial_class(&self, for_cpu: bool) -> CpuWaitClass {
-        match self.scheduled_dma_owner(for_cpu) {
+    /// analyzer's wait attribution. A synchronous grant and the drain of a
+    /// posted 020+ write are both subject to the CPU's arbitration view
+    /// (`scheduled_dma_owner(true)`), in which the slowdown counter's yield
+    /// reads as a free slot. A slot the access could have used is the 020+
+    /// port turnaround wait.
+    pub(super) fn cpu_bus_denial_class(&self) -> CpuWaitClass {
+        match self.scheduled_dma_owner(true) {
             ChipBusOwner::Refresh => CpuWaitClass::Refresh,
             ChipBusOwner::Bitplane => CpuWaitClass::Bitplane,
             ChipBusOwner::Sprite => CpuWaitClass::Sprite,
