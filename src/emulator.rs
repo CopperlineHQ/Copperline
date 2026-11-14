@@ -6228,6 +6228,69 @@ mod tests {
     }
 
     #[test]
+    fn stopped_cpu_fast_forward_ends_at_an_audio_dma_block_end_interrupt() {
+        use crate::chipset::paula::INT_AUD0;
+
+        // Channel 0 plays a 16-word block from DMA: its interrupt comes
+        // once per block, 2 * 16 * 124 colour clocks apart, and nothing
+        // else is due in between. The CPU is stopped a few words into a
+        // block, with the start-up interrupt already acknowledged.
+        let prepare = || {
+            let mut emu = emulator_stopped_waiting_for_vblank(0x2700);
+            {
+                let bus = emu.machine.bus_mut();
+                bus.custom_write(0x0A0, 2, 0x0000); // AUD0LCH
+                bus.custom_write(0x0A2, 2, 0x2000); // AUD0LCL
+                bus.custom_write(0x0A4, 2, 16); // AUD0LEN
+                bus.custom_write(0x0A6, 2, 124); // AUD0PER
+                bus.custom_write(0x0A8, 2, 0); // AUD0VOL
+                bus.custom_write(0x096, 2, 0x8201); // DMACON: SET DMAEN AUD0EN
+                bus.advance_cpu_idle_devices(4 * 227 + 3 * 248);
+                assert_ne!(bus.paula.intreq & INT_AUD0, 0, "start-up interrupt");
+                bus.custom_write(0x09C, 2, u64::from(INT_AUD0));
+                assert_eq!(bus.paula.intreq & INT_AUD0, 0);
+            }
+            emu
+        };
+
+        // Where Paula raises the block-end interrupt, one colour clock at
+        // a time.
+        let mut reference = prepare();
+        let raised_at = {
+            let bus = reference.machine.bus_mut();
+            let mut left = 2 * 16 * 124 + 2 * 227;
+            while bus.paula.intreq & INT_AUD0 == 0 {
+                assert!(left > 0, "no block-end interrupt");
+                bus.advance_cpu_idle_devices(1);
+                left -= 1;
+            }
+            bus.emulated_cck()
+        };
+
+        // The fast-forward must stop there too, wherever in the block each
+        // nap starts: an interrupt raised inside a nap is only seen when
+        // the nap is over.
+        let mut emu = prepare();
+        let cap = super::INSTRUCTIONS_PER_REALTIME_SLICE;
+        let mut idle = true;
+        let mut naps = 0;
+        while emu.bus().paula.intreq & INT_AUD0 == 0 {
+            emu.run_one_step_mode(&mut idle, cap, true).unwrap();
+            assert!(emu.machine.stopped());
+            naps += 1;
+            assert!(
+                naps < 100_000,
+                "the stopped CPU never reached the interrupt"
+            );
+        }
+        assert_eq!(
+            emu.bus().emulated_cck(),
+            raised_at,
+            "the nap that crossed the block end should have ended at the interrupt"
+        );
+    }
+
+    #[test]
     fn a_single_step_carries_a_stopped_cpu_to_its_wake_up_interrupt() {
         let mut emu = emulator_stopped_waiting_for_vblank(0x2000);
         let retired = emu.retired_instructions();

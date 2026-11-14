@@ -1517,15 +1517,26 @@ impl Paula {
         !self.uart_break_active() && self.serial_tx_pin_high
     }
 
+    /// Colour clocks before which no channel can raise its interrupt from
+    /// the period counter: a bound for the stopped-CPU fast-forward, which
+    /// must end by the time an interrupt that wakes the CPU is raised.
+    ///
+    /// Only the period counter raises interrupts asynchronously (word and
+    /// half-word boundaries in states 010/011); DMA-arrival and CPU-write
+    /// interrupts are raised synchronously at the slot or MMIO write.
+    ///
+    /// - IRQ-mode output interrupts at every word start, and attach-period
+    ///   mode can raise at the 010 -> 011 boundary as well: the bound is
+    ///   the next such boundary.
+    /// - DMA mode interrupts once per block, at the first word start after
+    ///   the fetch that found the length counter on its final word. Each
+    ///   word start requests one fetch and each fetch counts one word, so
+    ///   with `n` words still to count the interrupt cannot come before
+    ///   the `n`th word start from now. The bound follows the block down
+    ///   to its end instead of engaging only on the final word: a
+    ///   fast-forward that starts earlier in the block would otherwise run
+    ///   straight through the block end and deliver the interrupt late.
     pub fn next_audio_irq_cck(&self, dmacon: u16) -> Option<u32> {
-        // Only the period counter raises interrupts asynchronously (word
-        // and half-word boundaries in states 010/011); DMA-arrival and
-        // CPU-write interrupts are raised synchronously at the slot or
-        // MMIO write. Bound the caller's step only when the upcoming
-        // boundary can actually interrupt: IRQ-mode output interrupts at
-        // every word start, DMA mode only around a length rollover
-        // (intreq2 pending, or the final word is in flight) or in
-        // attach-period mode (010 -> 011 raises in IRQ mode / rollover).
         self.chans
             .iter()
             .enumerate()
@@ -1533,24 +1544,35 @@ impl Paula {
                 if !ch.outputting() {
                     return None;
                 }
-                let on = Self::aud_on(dmacon, ch_idx);
-                let may_irq = !on || ch.intreq2 || ch.audlen <= 1 || self.aud_ap(ch_idx);
-                if !may_irq {
-                    return None;
-                }
+                let period_cck = if ch.per == 0 {
+                    0x1_0000
+                } else {
+                    u32::from(ch.per)
+                };
                 // The 010 -> 011 boundary raises only in attach-period
                 // mode; otherwise the earliest interrupting edge is the
                 // following word start, one period later.
                 let extra = if ch.state == AUD_OUT_HI && !self.aud_ap(ch_idx) {
-                    if ch.per == 0 {
-                        0x1_0000
-                    } else {
-                        u32::from(ch.per)
-                    }
+                    period_cck
                 } else {
                     0
                 };
-                Some(ch.percnt.saturating_add(extra).max(1))
+                let next_edge = ch.percnt.saturating_add(extra).max(1);
+                let on = Self::aud_on(dmacon, ch_idx);
+                // A channel whose period the previous channel modulates
+                // reloads AUDxPER from that channel's data, so its later
+                // word starts cannot be placed from the current period.
+                let period_modulated = ch_idx > 0 && self.aud_ap(ch_idx - 1);
+                if !on || ch.intreq2 || self.aud_ap(ch_idx) || period_modulated {
+                    return Some(next_edge);
+                }
+                let words_to_count = if ch.audlen == 0 {
+                    0x1_0000
+                } else {
+                    u32::from(ch.audlen)
+                };
+                let later_words = (words_to_count - 1).saturating_mul(period_cck.saturating_mul(2));
+                Some(next_edge.saturating_add(later_words))
             })
             .min()
     }
@@ -2911,6 +2933,61 @@ mod tests {
             unique_left.len() > 1,
             "output frames should reflect byte changes inside the tick: {frames:?}"
         );
+    }
+
+    #[test]
+    fn audio_irq_deadline_never_passes_a_dma_block_end_interrupt() {
+        // The stopped-CPU fast-forward naps for `next_audio_irq_cck` colour
+        // clocks at a time. Whatever point of a DMA block the nap starts
+        // at, the block-end interrupt must not be raised before the nap is
+        // over, or the CPU takes it late.
+        for (len, per) in [(2u16, 124u16), (3, 124), (16, 124), (32, 200), (5, 428)] {
+            let (mut paula, _) = paula_with_collect_sink();
+            let ram = vec![0u8; 256];
+            let dmacon = DMACON_DMAEN | 0x0001;
+            paula.write_audio_reg(0x00, 0, 0);
+            paula.write_audio_reg(0x02, 0, 0);
+            paula.write_audio_reg(0x04, len, 0);
+            paula.write_audio_reg(0x06, per, 0);
+            paula.write_audio_reg(0x08, 0, 0);
+
+            let block_cck = 2 * u64::from(len) * u64::from(per);
+            // The latest nap end promised since the last interrupt.
+            let mut promised: Option<u64> = None;
+            let mut block_ends = 0;
+            for t in 0..(5 * block_cck + 4 * 227) {
+                if paula.chans[0].outputting() {
+                    let deadline = paula
+                        .next_audio_irq_cck(dmacon)
+                        .unwrap_or_else(|| panic!("len {len} per {per} t {t}: no deadline"));
+                    let end = t + u64::from(deadline);
+                    promised = Some(promised.map_or(end, |p| p.max(end)));
+                    if paula.chans[0].audlen > 2 && !paula.chans[0].intreq2 {
+                        assert!(
+                            deadline > 2 * u32::from(per),
+                            "len {len} per {per} t {t}: the bound should span the words \
+                             still to count, got {deadline}"
+                        );
+                    }
+                }
+                let irq = paula.tick_audio(1, dmacon, &ram);
+                if irq & INT_AUD0 != 0 {
+                    if let Some(end) = promised.take() {
+                        assert!(
+                            t + 1 >= end,
+                            "len {len} per {per}: interrupt in colour clock {t}, inside a nap \
+                             promised to last until {end}"
+                        );
+                        block_ends += 1;
+                    }
+                    assert!(!paula.write_intreq(INT_AUD0));
+                }
+            }
+            assert!(
+                block_ends >= 3,
+                "len {len} per {per}: {block_ends} block ends"
+            );
+        }
     }
 
     #[test]

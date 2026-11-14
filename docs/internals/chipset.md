@@ -199,7 +199,13 @@ of propagation to the CPU IPL pins (see [interrupt-recognition latency](timing.m
   after the raise rather than a whole idle step late. Without that bound
   the handler entry jitters across raster lines, which breaks software
   that rewrites sprite descriptors straight after the vertical-blank
-  interrupt (regression example: *Spooky Town* by Ghostown).
+  interrupt (regression example: *Spooky Town* by Ghostown). The
+  fast-forward is bounded by interrupts still to come as well, each device
+  reporting the earliest moment it can raise one. For an audio channel
+  playing from DMA that is the end of its block: `Paula::next_audio_irq_cck`
+  places it from the words the length counter still has to count, so a
+  nap that starts anywhere in a block ends at the block-end interrupt
+  rather than running through it.
 
 The rest of Paula:
 
