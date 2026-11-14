@@ -87,8 +87,9 @@ struct Branding {
 
 /// The models the root crate's `parse_machine_model` accepts, normalized
 /// the same way, so a typo fails the build rather than the shipped binary.
-const MODELS: [&str; 10] = [
-    "A1000", "A500", "A500OCS", "A500PLUS", "A600", "A1200", "A3000", "A4000", "CDTV", "CD32",
+const MODELS: [&str; 11] = [
+    "A1000", "A500", "A500OCS", "A500PLUS", "A2000", "A600", "A1200", "A3000", "A4000", "CDTV",
+    "CD32",
 ];
 
 fn normalize_model(s: &str) -> String {

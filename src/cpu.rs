@@ -7958,6 +7958,53 @@ mod tests {
     }
 
     #[test]
+    fn a2000_rev6_1mb_chip_empty_c00000_and_motherboard_clock_are_cpu_visible() {
+        use crate::chipset::agnus::AgnusRevision;
+        use crate::chipset::denise::DeniseRevision;
+
+        // The B2000 Rev 6.x board: the 8372A addresses the board's whole
+        // megabyte as chip RAM, nothing is fitted at $C00000, and the OKI
+        // clock is on the motherboard. Gary is the A500's part.
+        let mut machine_bus = test_bus(reset_rom(0, 0));
+        machine_bus.mem.zorro = ZorroChain::default();
+        machine_bus.mem.chip_ram.resize(1024 * 1024, 0);
+        machine_bus.mem.slow_ram.clear();
+        machine_bus.set_chipset_revisions(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ocs);
+        machine_bus.set_rtc_chip(crate::rtc::RtcChip::Msm6242);
+        machine_bus.set_rtc_present(true);
+        let mut bus = cpu_bus(machine_bus);
+
+        // Both DRAM banks of the 1 MiB Agnus image are fitted, and A20 is
+        // not decoded, so the image repeats once at $100000.
+        bus.write_word(0x0000_0000, 0x1111);
+        bus.write_word(0x0008_0000, 0x2222);
+        bus.write_word(0x000F_FFFE, 0x3333);
+        assert_eq!(bus.read_word(0x0000_0000), 0x1111);
+        assert_eq!(bus.read_word(0x0008_0000), 0x2222, "second 512 KiB bank");
+        assert_eq!(bus.read_word(0x000F_FFFE), 0x3333);
+        bus.write_word(0x0018_0000, 0x4444);
+        assert_eq!(bus.read_word(0x0008_0000), 0x4444, "A20 chip image");
+
+        // With no RAM at $C00000 Gary's coarse decode hands the very first
+        // address to the custom chips, which is how Kickstart's sizing
+        // finds no expansion RAM there: INTENA written through $C0F09A
+        // reads back as INTENAR, not as memory.
+        bus.write_word(0x00C0_F09A, 0x8004);
+        assert_eq!(bus.read_word(0x00DF_F01C), 0x0004, "mirror INTENA write");
+        assert_eq!(bus.read_word(0x00C0_F01C), 0x0004, "mirror INTENAR read");
+        bus.write_word(0x00DF_F09A, 0x3FFF);
+
+        // The clock answers at $DC0000 the way every OS probe asks: a
+        // nibble written to the MSM6242's control register E reads back,
+        // where an empty socket reads zero.
+        set_clock_reg(&mut bus, 0xE, 0x9);
+        assert_eq!(clock_reg(&mut bus, 0xE), 0x9, "MSM6242 control E");
+
+        // The 8362 Denise beside the ECS Agnus has no DENISEID register.
+        assert_eq!(bus.read_word(0x00DF_F07C) & 0x00FF, 0x00FF, "no DENISEID");
+    }
+
+    #[test]
     fn fpu_family_is_forced_to_line_f_when_fpu_disabled() -> Result<()> {
         let mut rom = reset_rom(0x0007_FFFE, 0x0000_0100);
         rom[0x2C..0x30].copy_from_slice(&0x0000_0200u32.to_be_bytes());

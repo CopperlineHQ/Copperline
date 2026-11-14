@@ -237,8 +237,8 @@ pub struct Config {
     /// Whether the battery RTC at $DC0000 is fitted. Defaults to false:
     /// the base A500/A500OCS, A600, A1200, A1000, and CD32 shipped without a
     /// battery-backed clock. Only the A500+ (soldered on the Rev 8A board),
-    /// the CDTV, and the big-box A3000/A4000 carry one by default; the A600HD
-    /// and a clock-equipped A1200 set `[machine] rtc = true`.
+    /// the CDTV, and the big-box A2000/A3000/A4000 carry one by default; the
+    /// A600HD and a clock-equipped A1200 set `[machine] rtc = true`.
     pub rtc_present: bool,
     /// Which clock part answers there (`[machine] rtc_chip`): the OKI
     /// MSM6242 on most boards, the Ricoh RP5C01 on the A3000/A4000 -- a
@@ -2563,8 +2563,8 @@ pub enum MachineModel {
     /// A500 Rev 6A: the ECS "Fatter" 8372A Agnus (1 MiB chip reach, software
     /// PAL/NTSC switch) with the original OCS 8362 Denise.
     A500,
-    /// Early A500 (Rev 3/5), equivalent to an A2000: the 512 KiB OCS "Fat
-    /// Agnus" (8370/8371) with OCS 8362 Denise.
+    /// Early A500 (Rev 3/5), the same chips as an early (Rev 4.x) A2000: the
+    /// 512 KiB OCS "Fat Agnus" (8370/8371) with OCS 8362 Denise.
     A500Ocs,
     A500Plus,
     A600,
@@ -2593,6 +2593,13 @@ pub enum MachineModel {
     /// Ramsey-07 with the same stock 4 MB of motherboard fast RAM. Same
     /// story on Gayle and slow RAM as the A3000.
     A4000,
+    /// A2000 (B2000 Rev 6.x): the A500 Rev 6A chips on a big-box board --
+    /// the 1 MiB ECS 8372A Agnus with the OCS 8362 Denise and a 68000 at
+    /// 7.09 MHz -- with the board's 1 MiB of soldered RAM all chip RAM, no
+    /// $C00000 RAM, and the battery-backed OKI MSM6242 clock. Gary decodes
+    /// the motherboard exactly as on the A500; the five Zorro II slots are
+    /// the autoconfig chain every profile has.
+    A2000,
 }
 
 /// Identity of a ROM image: its length and a CRC-32 of its bytes. Enough to

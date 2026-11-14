@@ -124,7 +124,7 @@ range checks as the equivalent TOML fields:
 
 | Flag | Overrides | Accepts |
 |---|---|---|
-| `--model NAME` | `[machine] profile` | `A1000`, `A500`, `A500OCS`, `A500Plus`, `A600`, `A1200`, `A3000`, `A4000`, `CDTV`, `CD32` |
+| `--model NAME` | `[machine] profile` | `A1000`, `A500`, `A500OCS`, `A500Plus`, `A2000`, `A600`, `A1200`, `A3000`, `A4000`, `CDTV`, `CD32` |
 | `--chipset NAME` | `[chipset] revision` | `OCS`, `ECS`, `AGA` |
 | `--video STANDARD` | `[chipset] video` | `PAL`, `NTSC` |
 | `--cpu MODEL` | `[cpu] model` | `68000`, `68010`, `68EC020`, `68020`, `68EC030`, `68030`, `68EC040`, `68040`, `68EC060`, `68060` |
@@ -379,8 +379,8 @@ written and never consult this section.
 
 ```toml
 [machine]
-profile = "A1200" # A1000, A500, A500OCS, A500Plus (A500+), A600, A1200, A3000, A4000, CDTV, CD32
-rtc = true        # add a battery RTC (default: only A500+/CDTV/A3000/A4000 ship with one)
+profile = "A1200" # A1000, A500, A500OCS, A500Plus (A500+), A2000, A600, A1200, A3000, A4000, CDTV, CD32
+rtc = true        # add a battery RTC (default: only A500+/A2000/CDTV/A3000/A4000 ship with one)
 # rtc_chip = "RP5C01"              # MSM6242 (default) or RP5C01 (A3000/A4000 default)
 # rtc_time = "2005-03-18 01:58:29" # seed the clock; it then ticks in emulated time
 # rtc_frozen = true                # stop the seeded clock at rtc_time exactly
@@ -404,8 +404,9 @@ gives a plain 8371/8362 OCS machine.
 |---|---|---|---|---|---|
 | `A1000` | OCS (8361/8367 Agnus, OCS Denise) | 68000 @ 7.09 MHz | 256K | 0 | WCS, boot ROM + Kickstart disk |
 | `A500` | Rev 6A: ECS 8372A Agnus, OCS 8362 Denise | 68000 @ 7.09 MHz | 512K (up to 1M) | 512K | -- |
-| `A500OCS` | OCS (8371 Fat Agnus, OCS Denise) | 68000 @ 7.09 MHz | 512K | 512K | early A500 / A2000 |
+| `A500OCS` | OCS (8371 Fat Agnus, OCS Denise) | 68000 @ 7.09 MHz | 512K | 512K | early A500 (Rev 3/5) |
 | `A500Plus` | ECS (8375 Agnus, ECS Denise) | 68000 @ 7.09 MHz | 1M | 0 | RTC |
+| `A2000` | Rev 6.x: ECS 8372A Agnus, OCS 8362 Denise | 68000 @ 7.09 MHz | 1M | 0 | RTC, Zorro II slots |
 | `A600` | ECS (8375 Agnus, ECS Denise) | 68000 @ 7.09 MHz | 1M | 0 | Gayle IDE |
 | `A1200` | AGA (Alice/Lisa) | 68EC020 @ 14.18 MHz | 2M | 0 | Gayle IDE |
 | `A3000` | ECS | 68030 @ 25 MHz | 2M | 0 | Ramsey-04 with 4M motherboard RAM, RP5C01 RTC, SCSI, Z3660 RTG |
@@ -415,14 +416,15 @@ gives a plain 8371/8362 OCS machine.
 
 `rtc` exists because most Amigas shipped without a battery-backed clock. The
 `A500Plus` (an OKI RTC soldered to the Rev 8A
-board), `CDTV`, `A3000`, and `A4000` fit one by default; the base
+board), `A2000`, `CDTV`, `A3000`, and `A4000` fit one by default; the base
 A500/A500OCS, A600, A1200, A1000, and CD32 have none. Set `rtc = true` to add
 one -- for an A600HD or a clock-equipped A1200, say -- so the Workbench clock
 keeps time.
 
 `rtc_chip` names the part in that socket, because Commodore used two with
 different register protocols: the OKI **MSM6242** on the small boxes, the
-CDTV, and the aftermarket clock expansions, and the Ricoh **RP5C01** on the
+A2000, the CDTV, and the aftermarket clock expansions, and the Ricoh
+**RP5C01** on the
 A3000/A4000 motherboards (the Ricoh also carries 26 nibbles of battery RAM,
 which AmigaOS uses via `battmem.resource` on those machines). The default
 follows the profile -- `RP5C01` on `A3000`/`A4000`, `MSM6242` everywhere else
@@ -518,6 +520,30 @@ the stock 512K but accepts up to 1M (`[memory] chip = "1M"`); more than 1M is
 rejected because the 8372A cannot address it. Booting with no `[machine]`
 section uses the same Rev 6A defaults; select `A500OCS` or set
 `[chipset] revision = "OCS"` for the older 8371/8362 machine.
+
+The `A2000` profile models the B2000 Rev 6.x motherboard, the revision most
+A2000s are: the same chip pair as the A500 Rev 6A (the 8372A Agnus with the
+OCS 8362 Denise), a 68000 at 7.09 MHz, the board's 1 MiB of soldered RAM all
+addressed as chip RAM, nothing at `$C00000`, and the battery-backed OKI
+MSM6242 clock on the motherboard. Its Gary is the A500's part, so the
+motherboard address decode is the A500's. The board's five Zorro II slots are
+the autoconfig chain every profile has: `[memory] fast`, `[scsi]` (an A2091
+makes it an A2000HD), `[[zorro]]` and the other Zorro II boards configure on
+it with no further setup. There is no slot count to configure and none is
+enforced. The other board revisions are overrides on the same profile:
+
+| Board | Settings on top of `profile = "A2000"` |
+|---|---|
+| Rev 4.x (8371 Fat Agnus, 512K chip plus 512K at `$C00000`) | `[chipset] revision = "OCS"`, `[memory] chip = "512K"`, `slow = "512K"` |
+| Rev 6.x (the default) | none |
+| Late Rev 6 with the ECS Denise | `[chipset] revision = "ECS"` (or `denise = "ECS"`) |
+| With an accelerator in the CPU slot | `[cpu] model`, plus `[memory] accelerator` for its RAM |
+
+`revision = "OCS"` on its own is refused, because the 8371 cannot address
+the Rev 6.x board's megabyte as chip RAM. The original German A2000-A (an
+A1000-derived design without Gary) is not modelled. The profile boots the
+bundled AROS ROM like every other, and Commodore's A500/A2000 Kickstarts
+(1.2, 1.3, 2.0x and 3.1) as the `A500` profile does.
 
 ## `[emulation]`
 
@@ -907,7 +933,9 @@ for example):
 - `denise`: `OCS`/`8362`, `ECS`/`8373`, `LISA`/`4203`.
 
 The ECS preset picks an 8372A for up to 1M chip RAM and an 8375 above; the
-`A500Plus` and `A600` profiles always use the 8375, as the real boards did.
+`A500Plus` and `A600` profiles always use the 8375, as the real boards did,
+and the `A500` and `A2000` profiles the 8372A with the OCS Denise until a
+`revision` says otherwise.
 The AGA preset resolves to Alice and Lisa: 8 bitplanes, the 256-entry
 25-bit palette with BPLCON3 BANK/LOCT banking, HAM8, FMODE wide bitplane and
 sprite fetch (DMA and manual sprites), SSCAN2/BSCAN2 scan doubling, 35 ns
@@ -2984,7 +3012,7 @@ owner reports and reviews:
 | A1200 (`[ide]`) | `conner-cp2064` | the A1200HD's Conner "60 meg" |
 | A4000 (`[ide]`) | `seagate-st3144a` | the early A4000/040's 120 MB drive |
 | A3000 (`[scsi]`, `controller = "a3000"`) | `quantum-lps-52s` | the A3000's 52 MB Quantum |
-| A2091 in a big-box machine (`[scsi]`) | `quantum-lps-52s` | the A2000HD's 52 MB Quantum |
+| A2091 in an A2000 or another big-box machine (`[scsi]`) | `quantum-lps-52s` | the A2000HD's 52 MB Quantum |
 | A2091 on an A500, A500+, A1000 or CDTV (`[scsi]`) | `seagate-st125n` | the A590 side-car's 20 MB Seagate |
 | A4091 (`[scsi]`, `controller = "a4091"`) | `seagate-st31200n` | a 1 GB SCSI-2 drive, the class the A4000T shipped with |
 | any machine (`[lide]`) | `wd-ac2120` | a period 3.5" IDE drive |

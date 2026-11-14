@@ -235,8 +235,8 @@ model = "68000"
 # driver would only cost boot time probing an empty bus. With drives it runs,
 # since scsi.device is their boot path. Set explicitly to win either way.
 # [machine]
-# profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A600 | A1200 | A3000 | A4000 | CDTV | CD32
-# rtc = true            # add a $DC0000 battery RTC (default: only A500+/CDTV/A3000/A4000 have one)
+# profile = "A600"      # A1000 | A500 | A500OCS | A500Plus | A2000 | A600 | A1200 | A3000 | A4000 | CDTV | CD32
+# rtc = true            # add a $DC0000 battery RTC (default: only A500+/A2000/CDTV/A3000/A4000 have one)
 # rtc_chip = "RP5C01"   # clock part: MSM6242 (OKI, the default) or RP5C01 (Ricoh, the
 #                       # A3000/A4000 part and their profile default; Linux/m68k requires
 #                       # it on those machines). Setting the key implies rtc = true.

@@ -2190,8 +2190,8 @@ fn help_text() -> String {
          --warp-boot                    warp the boot: unthrottled until the boot storage has\n  \
          \x20                            been idle for [emulation] warp_boot_idle seconds\n  \
          --warp-until SECS              warp the boot until an absolute emulated time\n  \
-         --model NAME                   machine profile: A1000, A500, A500OCS, A500Plus, A600,\n  \
-         \x20                              A1200, A3000, A4000, CDTV, CD32\n  \
+         --model NAME                   machine profile: A1000, A500, A500OCS, A500Plus, A2000,\n  \
+         \x20                              A600, A1200, A3000, A4000, CDTV, CD32\n  \
          --chipset NAME                 chipset preset: OCS, ECS, or AGA\n  \
          --video STANDARD               video timing: PAL or NTSC\n  \
          --cpu MODEL                    CPU: 68000, 68010, 68EC020, 68020, 68030, 68040, or\n  \

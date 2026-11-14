@@ -514,10 +514,13 @@ fn rtc_chip_defaults_per_profile_and_implies_a_fitted_clock() -> Result<()> {
         assert!(cfg.rtc_present, "{profile}");
         assert_eq!(cfg.rtc_chip, RtcChip::Rp5c01, "{profile}");
     }
-    // The clock-equipped small boxes keep the OKI one.
-    let cfg = parse_config("[machine]\nprofile = \"A500+\"\n")?;
-    assert!(cfg.rtc_present);
-    assert_eq!(cfg.rtc_chip, RtcChip::Msm6242);
+    // The clock-equipped small boxes keep the OKI one, and so does the
+    // A2000: the Ricoh part arrived with the A3000.
+    for profile in ["A500+", "A2000"] {
+        let cfg = parse_config(&format!("[machine]\nprofile = \"{profile}\"\n"))?;
+        assert!(cfg.rtc_present, "{profile}");
+        assert_eq!(cfg.rtc_chip, RtcChip::Msm6242, "{profile}");
+    }
 
     // Naming a chip fits the clock on a machine that has none...
     let cfg = parse_config("[machine]\nrtc_chip = \"RP5C01\"\n")?;
@@ -1776,7 +1779,7 @@ fn machine_profile_defaults_match_bare_profile_configs() -> Result<()> {
     // the guest size 1 MiB of the 2 MiB fitted chip RAM.
     use MachineModel::*;
     for model in [
-        A1000, A500, A500Ocs, A500Plus, A600, A1200, A3000, A4000, Cdtv, Cd32,
+        A1000, A500, A500Ocs, A500Plus, A600, A1200, A3000, A4000, Cdtv, Cd32, A2000,
     ] {
         let direct = machine_profile_defaults(model);
         let piped = parse_config(&format!("[machine]\nprofile = \"{model:?}\"\n"))?;
@@ -2198,6 +2201,142 @@ fn a500ocs_profile_is_a_plain_512k_ocs_machine() -> Result<()> {
     )
     .unwrap_err();
     assert!(err.to_string().contains("chipset maximum"), "{err:#}");
+    Ok(())
+}
+
+#[test]
+fn a2000_profile_is_the_rev6_board_with_1mb_chip_and_a_clock() -> Result<()> {
+    // The B2000 Rev 6.x board: the 1 MiB 8372A Agnus with the OCS 8362
+    // Denise, the board's 1 MiB of soldered RAM all chip RAM (so nothing
+    // at $C00000), a 68000 at the PAL 7.09 MHz, the OKI clock on the
+    // motherboard, and the A500's Gary (no Gayle, no Fat Gary, no Ramsey).
+    let cfg = parse_config(
+        r#"
+            [machine]
+            profile = "A2000"
+            "#,
+    )?;
+    assert_eq!(cfg.machine, Some(MachineModel::A2000));
+    assert_eq!(cfg.chipset, Chipset::Ecs);
+    assert_eq!(cfg.agnus_revision, AgnusRevision::Ecs8372Rev4);
+    assert_eq!(cfg.denise_revision, DeniseRevision::Ocs);
+    assert_eq!(cfg.cpu, CpuModel::M68000);
+    assert!(
+        (cfg.cpu_clock_mhz - 7.09).abs() < 0.01,
+        "{}",
+        cfg.cpu_clock_mhz
+    );
+    assert!(!cfg.fpu);
+    assert_eq!(cfg.chip_ram_bytes, 1024 * 1024);
+    assert_eq!(cfg.slow_ram_bytes, 0);
+    assert_eq!(cfg.fast_ram_bytes, 0);
+    assert_eq!(cfg.mb_ram_bytes, 0);
+    assert!(cfg.rtc_present);
+    assert_eq!(cfg.rtc_chip, crate::rtc::RtcChip::Msm6242);
+    assert_eq!(cfg.gate_array, GateArray::None);
+    assert_eq!(cfg.mem_controller, MemController::None);
+    assert!(!cfg.sdmac);
+    assert_eq!(cfg.rtg, RtgCard::None);
+    assert_eq!(cfg.floppy_connected, [true, false, false, false]);
+
+    // The name parses the way every model name does.
+    for name in ["a2000", "A-2000", "A 2000"] {
+        assert_eq!(parse_machine_model(name)?, MachineModel::A2000, "{name}");
+    }
+    Ok(())
+}
+
+#[test]
+fn a2000_agnus_reach_and_chipset_overrides_select_the_other_board_revisions() -> Result<()> {
+    // The 8372A reaches 1 MiB and no further: 2 MiB of chip RAM is
+    // rejected rather than silently fitting the A500+'s 8375.
+    let err = parse_config(
+        r#"
+            [machine]
+            profile = "A2000"
+            [memory]
+            chip = "2M"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Agnus address reach"), "{err:#}");
+
+    // The Rev 4.x board: the 512 KiB OCS Fat Agnus, with the second half
+    // megabyte decoded at $C00000 instead. The clock stays.
+    let cfg = parse_config(
+        r#"
+            [machine]
+            profile = "A2000"
+            [chipset]
+            revision = "OCS"
+            [memory]
+            chip = "512K"
+            slow = "512K"
+            "#,
+    )?;
+    assert_eq!(cfg.machine, Some(MachineModel::A2000));
+    assert_eq!(cfg.agnus_revision, AgnusRevision::Ocs);
+    assert_eq!(cfg.denise_revision, DeniseRevision::Ocs);
+    assert_eq!(cfg.slow_ram_bytes, 512 * 1024);
+    assert!(cfg.rtc_present);
+
+    // The OCS Fat Agnus cannot address the Rev 6.x board's 1 MiB as chip
+    // RAM, so the preset alone is refused instead of losing half of it.
+    let err = parse_config(
+        r#"
+            [machine]
+            profile = "A2000"
+            [chipset]
+            revision = "OCS"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("chipset maximum"), "{err:#}");
+
+    // The late Rev 6 boards fitted the ECS Denise beside the same Agnus.
+    let cfg = parse_config(
+        r#"
+            [machine]
+            profile = "A2000"
+            [chipset]
+            revision = "ECS"
+            "#,
+    )?;
+    assert_eq!(cfg.agnus_revision, AgnusRevision::Ecs8372Rev4);
+    assert_eq!(cfg.denise_revision, DeniseRevision::Ecs8373);
+    assert_eq!(cfg.chip_ram_bytes, 1024 * 1024);
+    Ok(())
+}
+
+#[test]
+fn a2000_zorro_slots_take_ram_and_a_scsi_board_without_further_setup() -> Result<()> {
+    // The slots are the Zorro II autoconfig chain: 8 MiB of fast RAM and
+    // an A2091 configure on the stock machine with nothing else set.
+    let cfg = parse_config(
+        r#"
+            [machine]
+            profile = "A2000"
+            [memory]
+            fast = "8M"
+            [scsi]
+            controller = "a2091"
+            "#,
+    )?;
+    assert_eq!(cfg.fast_ram_bytes, 8 * 1024 * 1024);
+    assert_eq!(cfg.scsi.controller, ScsiController::A2091);
+    assert!(cfg.scsi.enabled());
+
+    // Zorro III and the A3000's motherboard SCSI are not on this board.
+    let err = parse_config(
+        r#"
+            [machine]
+            profile = "A2000"
+            [memory]
+            z3 = "16M"
+            "#,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("32-bit"), "{err:#}");
     Ok(())
 }
 

@@ -45,8 +45,8 @@ cd = "game.iso"
 # sha256 = "0123456789abcdef..."
 
 [machine]
-# Any Copperline machine model: A500, A500+, A600, A1200, A3000, A4000,
-# A1000, CDTV, CD32.
+# Any Copperline machine model: A500, A500+, A2000, A600, A1200, A3000,
+# A4000, A1000, CDTV, CD32.
 model = "CD32"
 # Optional RAM overrides on the model profile ("512K", "2M", "8M", ...).
 # chip = "2M"

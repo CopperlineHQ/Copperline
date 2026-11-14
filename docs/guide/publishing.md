@@ -28,7 +28,7 @@ cd = "skyhawks.iso"          # CD image (ISO, CUE/BIN, CHD)
 # sha256 = "..."             # Optional SHA-256 payload integrity check
 
 [machine]
-model = "CD32"               # A500, A500+, A600, A1200, A3000, A4000, A1000, CDTV, CD32
+model = "CD32"               # A500, A500+, A2000, A600, A1200, A3000, A4000, A1000, CDTV, CD32
 # chip = "2M"                # Optional memory overrides
 # fast = "8M"
 # slow = "512K"

@@ -117,10 +117,11 @@ fn model_preset(model: &str) -> Option<Preset> {
             accelerator: Some("blizzard-1260"),
             ..A1200
         },
-        // Copperline has no A2000 profile; the A500 is the same chipset
-        // generation and the closest machine it does model.
+        // The A2000 profile brings the board's clock and its 1M of chip
+        // RAM with nothing at $C00000.
         "A2000" => Preset {
             chipset: "ECS",
+            profile: "A2000",
             chip: "1M",
             ..A500
         },
@@ -1403,6 +1404,16 @@ mod tests {
         let text = "uae_cpu_model = 68EC030\n";
         assert!(!convert_valid(text).contains("model ="));
         assert_eq!(flagged_keys(text), ["uae_cpu_model"]);
+    }
+
+    #[test]
+    fn the_a2000_preset_maps_to_the_a2000_profile() {
+        // The profile, not the A500 with more chip RAM: it is what brings
+        // the motherboard clock and leaves $C00000 empty.
+        let out = convert_valid("amiga_model = A2000\n");
+        assert!(out.contains(r#"profile = "A2000""#), "{out}");
+        assert!(out.contains(r#"chip = "1M""#), "{out}");
+        assert!(out.contains(r#"model = "68000""#), "{out}");
     }
 
     #[test]

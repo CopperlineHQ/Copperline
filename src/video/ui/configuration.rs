@@ -24,8 +24,8 @@ pub(in crate::video::ui) const LAUNCH_MARGIN: usize = 8;
 pub(in crate::video::ui) const LAUNCH_MODEL_H: usize = 22;
 pub(in crate::video::ui) const LAUNCH_MODEL_GAP: usize = 4;
 /// Machines per row in the selector grid before it wraps; the grid rebalances
-/// so the buttons fill the width (eight fit one row; the current ten models
-/// wrap to two balanced rows).
+/// so the buttons fill the width (eight fit one row; the current eleven
+/// models wrap to rows of six and five, each filling the width).
 pub(in crate::video::ui) const LAUNCH_MODEL_MAX_PER_ROW: usize = 8;
 /// Width of the left-hand vertical category-tab column.
 pub(in crate::video::ui) const LAUNCH_SIDEBAR_W: usize = 116;
@@ -69,11 +69,22 @@ pub(in crate::video::ui) fn launcher_model_grid() -> (usize, usize) {
     (rows, count.div_ceil(rows))
 }
 
+/// Index of the first machine on the selector grid's last row, the row the
+/// page below it sits under.
+fn launcher_model_last_row_start() -> usize {
+    let (rows, per_row) = launcher_model_grid();
+    (rows - 1) * per_row
+}
+
 pub(in crate::video::ui) fn launcher_model_rect(rect: Rect, i: usize) -> Rect {
     let (_, per_row) = launcher_model_grid();
     let avail = rect.w - 2 * LAUNCH_MARGIN;
-    let w = (avail - (per_row - 1) * LAUNCH_MODEL_GAP) / per_row;
     let (row, col) = (i / per_row, i % per_row);
+    // Each row shares the width among the buttons it actually holds, so a
+    // short last row (an odd number of machines) still fills the panel
+    // rather than leaving a hole at its end.
+    let in_row = per_row.min(launcher::MODELS.len() - row * per_row);
+    let w = (avail - (in_row - 1) * LAUNCH_MODEL_GAP) / in_row;
     Rect {
         x: rect.x + LAUNCH_MARGIN + col * (w + LAUNCH_MODEL_GAP),
         y: launcher_model_top(rect) + row * (LAUNCH_MODEL_H + LAUNCH_MODEL_GAP),
@@ -185,14 +196,14 @@ pub(in crate::video::ui) fn launcher_toggle_rect(rect: Rect, row_y: usize) -> Re
 pub(in crate::video::ui) const LAUNCH_NAV_PER_ROW: usize = 4;
 
 /// A nav-row button, in the machine selector's own size and rhythm: same
-/// width, same height, same gap, and the first one sits in the machine
-/// grid's second column so it lines up with the button above it. Four to a
-/// row, wrapping after that.
+/// width, same height, same gap, and the first one sits in the second
+/// column of the machine grid's last row so it lines up with the button
+/// above it. Four to a row, wrapping after that.
 pub(in crate::video::ui) fn launcher_nav_button_rect(rect: Rect, slot: usize) -> Rect {
-    // Column 1 of the machine grid, which is where the pane's own left
-    // edge very nearly falls: taking the grid's column exactly is what
-    // makes the two rows read as one column of buttons.
-    let above = launcher_model_rect(rect, 1);
+    // Column 1 of the machine row directly above, which is where the
+    // pane's own left edge very nearly falls: taking that row's column
+    // exactly is what makes the two rows read as one column of buttons.
+    let above = launcher_model_rect(rect, launcher_model_last_row_start() + 1);
     let (row, col) = (slot / LAUNCH_NAV_PER_ROW, slot % LAUNCH_NAV_PER_ROW);
     Rect {
         x: above.x + col * (above.w + LAUNCH_MODEL_GAP),

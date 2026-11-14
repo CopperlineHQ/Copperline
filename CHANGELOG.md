@@ -10,6 +10,12 @@ for the earlier release notes.
 
 ### Added
 
+- An `A2000` machine profile (`--model A2000`, `[machine] profile = "A2000"`,
+  and in the configuration screen's machine selector): the B2000 Rev 6.x
+  board, with the 8372A Agnus and OCS Denise, 1M of chip RAM, the
+  battery-backed MSM6242 clock and its Zorro II slots. The Rev 4.x and late
+  Rev 6 boards are overrides on it (see docs/guide/configuration.md). The
+  FS-UAE and WinUAE importers map their `A2000` to it.
 - `--terminal` shows and drives the machine in a terminal that speaks the
   Kitty graphics and keyboard protocols (kitty, Ghostty, WezTerm) instead of
   a window, including over SSH with no display server. F12 is the host key;
