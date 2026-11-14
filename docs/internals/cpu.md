@@ -114,21 +114,41 @@ without a bus call. The primary window (`AddressBus::fast_mem`) is the
 fast-RAM bank the batch starts executing in, else the bank it covered last
 (a call into ROM or an interrupt handler in chip RAM keeps its caller's
 bank, with the caller's stack and data), else the largest bank. Following
-the code matters because the guest decides where things live: Kickstart
-3.2 on an A3000 gives the motherboard RAM it sizes itself a higher
-allocation priority (30) than a Zorro III board (20), so with 16 MB on the
-motherboard and a 256 MB board, ExecBase, libraries and programs land in
-the smaller bank first. Up to eight further regions
-(`AddressBus::fast_mem_regions`) cover read-only main and extended ROM and
-the other motherboard, accelerator and Zorro fast-RAM banks. Chip and slow
-RAM, the boot-time ROM overlay, WCS and device or cartridge mappings stay
-on the bus. A store or a whole read-modify-write instruction aimed at ROM,
-and an access that crosses a region boundary, falls back to the bus before
-the instruction changes any register. The mappings are captured afresh for
-each native batch and never serialized, but the primary bank choice is
-saved with the machine (`MachineRuntimeState::jit_window_bank`): with more
-banks fitted than the table holds it still decides which accesses allocate
-cache lines, so it is emulated state, not only host speed.
+the code matters because the guest decides where things live: Kickstart 3.2
+on an A3000 gives the motherboard RAM it sizes itself a higher allocation
+priority (30) than a Zorro III board (20), so with 16 MB on the motherboard
+and a 256 MB board, ExecBase, libraries and programs land in the smaller
+bank first.
+
+Up to eight further regions (`AddressBus::fast_mem_regions`) cover
+read-only main and extended ROM and the other motherboard, accelerator and
+Zorro fast-RAM banks, and then the boot ROM of any expansion board that
+declares it plain (`ZorroDevice::plain_rom`). Copperline's own boards do:
+`copperhf.device` and the HOSTFS handlers execute in place from their board
+windows, and through the device path every opcode word they fetch is a
+two-colour-clock expansion-bus access that also flushes the timed devices.
+Mapped as local memory that code runs like Kickstart's, in deadline-bounded
+batches and compiled traces, which more than halves the emulated time
+small-file traffic on a `copperhf` volume takes. Only the ROM bytes are
+mapped: a board's registers, tables and pools, and every write to its
+window, stay on the device path, and the precise core keeps the
+expansion-bus timing for all of it. Chip and slow RAM, the boot-time ROM
+overlay, WCS and every other device or cartridge mapping stay on the bus. A
+store or a whole read-modify-write instruction aimed at ROM, and an access
+that crosses a region boundary, falls back to the bus before the
+instruction changes any register.
+
+The host pointers are taken afresh for each native batch and never
+serialized. Which regions exist is worked out once and reused by the
+batches that follow (a batch ends at every shared-bus access, so OS code
+starts one every few dozen instructions) until something that can move a
+mapping happens: a write to anything but memory or the custom chips, RESET,
+a new primary bank, or the end of the CPU slice. Custom-chip writes are
+exempt because no register there moves a CPU mapping and the OS writes
+INTENA for every `Disable` and `Enable`. The primary bank choice is saved
+with the machine (`MachineRuntimeState::jit_window_bank`): with more banks
+fitted than the table holds it still decides which accesses allocate cache
+lines, so it is emulated state, not only host speed.
 
 The timing contract is deliberately approximate
 (`M68kMachine::step_slice_jit`):
@@ -183,9 +203,8 @@ The timing contract is deliberately approximate
   one-instruction batch gets no direct pointers (it cannot enter a native
   trace), but its local accesses keep the same cache exclusions as the
   batches around it.
-  With cache models present a slice reuses those exclusions until a
-  peripheral write, RESET or a new primary bank invalidates them; slice
-  entry and state adoption always rebuild them;
+  A slice reuses those exclusions on the same terms as the region list
+  above; slice entry and state adoption always rebuild them;
 - interrupts are recognized at batch boundaries from the live
   INTENA/INTREQ state, and a fast-RAM or ROM batch also ends as soon as a
   pending level rises above the mask (an SR write unmasking it, say). A
@@ -212,30 +231,42 @@ instruction completes. Code that is rewritten, has its cache cleared
 and runs again within one batch (LoadSeg over previously cached chip
 RAM, then CacheClearU) therefore executes the new bytes.
 
-The fastmem window is offered with the cache models present. The core
-reads and writes the window directly, past every `CpuBus` method, so a
-store there never reaches the data cache's write-through invalidation,
-and the instruction cache does not snoop anyway: a line held inside the
-window would serve stale bytes to the accesses the batch still sends
-through the bus (instructions the full dispatcher runs, extension words,
-exception frames). The models therefore hold no lines inside the window
-while the core has it (`CpuBus::keep_caches_out_of_window`): capturing a
-window drops the lines it overlaps, and a miss there allocates nothing.
-Under JIT a fast-RAM access is free whether it hits or misses, so nothing
-is lost. The exclusion covers every offered region, ROM included:
-capturing a mapping drops the lines it newly covers, a batch that runs
-with no direct regions lets the bus path cache them again, and a restored
-state rebuilds the list, with its evictions, on its first batch. Chip RAM
-is never offered and stays cached. Code inside any region is coherent the
-moment it changes, whether the guest rewrites it or a device DMAs it there
-(LoadSeg through copperhf): compiled traces compare their code bytes on
-every entry, and no cache line can hold the old bytes. All regions are
-withheld while something must see every plain fast-RAM access:
-memory-write debug hooks, the heat map, SMC detection, and injected bus
-faults force each access back onto the bus. Arming any per-instruction
-debug or diagnostic hook (breakpoints, watches, traces,
-`COPPERLINE_DBG_*`) drops the whole slice back to the precise loop, so the
-debugger always sees every instruction.
+The fastmem window is offered with the cache models present. The core reads
+and writes the window directly, past every `CpuBus` method, so a store
+there never reaches the data cache's write-through invalidation, and the
+instruction cache does not snoop anyway: a line held inside the window
+would serve stale bytes to the accesses the batch still sends through the
+bus (instructions the full dispatcher runs, extension words, exception
+frames). The models therefore hold no lines inside the window while the
+core has it (`CpuBus::keep_caches_out_of_window`): capturing a window drops
+the lines it overlaps, and a miss there allocates nothing. Under JIT a
+fast-RAM access is free whether it hits or misses, so nothing is lost. The
+exclusion covers every offered region, ROM included: capturing a mapping
+drops the lines it newly covers, a batch that runs with no direct regions
+lets the bus path cache them again, and a restored state rebuilds the list,
+with its evictions, on its first batch. Chip RAM is never offered and stays
+cached. Code inside any region is coherent the moment it changes, whether
+the guest rewrites it or a device DMAs it there (LoadSeg through copperhf):
+compiled traces compare their code bytes on every entry, and no cache line
+can hold the old bytes. All regions are withheld while something must see
+every plain fast-RAM access: memory-write debug hooks, the heat map, SMC
+detection, and injected bus faults force each access back onto the bus.
+Arming any per-instruction debug or diagnostic hook (breakpoints, watches,
+traces, `COPPERLINE_DBG_*`) drops the whole slice back to the precise loop,
+so the debugger always sees every instruction.
+
+The accesses a batch still sends through the bus take a shortcut of their
+own (`CpuBus::jit_local_read`, `jit_local_write`): while a batch runs,
+`CpuBus` keeps descriptors of the regions it offered and serves a read,
+fetch or RAM write inside one straight from memory. Nothing is skipped that
+the batch contract uses, since such an access bills no bus time, finds no
+cache line, has no watch, heat map or fault injection to pass (their
+presence withholds the regions) and takes no interrupt sample (the batch
+path reads the live level). About one instruction in eight of compiled C
+still goes through the bus this way, so the ordinary decode of every such
+access had been a measurable share of host time. The descriptors are
+dropped the moment `run_batch` returns: exception entry, interrupt service
+and the precise loop always take the ordinary path.
 
 The regions hold physical addresses, and they stay in use when the guest
 enables the MMU (bundled AROS does at boot, as do mmu.library, MuForce and

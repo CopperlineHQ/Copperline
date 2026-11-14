@@ -738,6 +738,8 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   behaves like an ideal accelerator running at `clock_mhz`: one
   instruction per CPU clock with zero-wait fast RAM and ROM, so a 50 MHz
   68040 delivers on the order of 50 MIPS (raise `clock_mhz` for more).
+  The boot ROMs of Copperline's own `[copperhf]` and `[[filesys]]` boards
+  count as ROM here, so their drivers run at CPU speed too.
   The CPU runs ahead of the chipset in batches that end at the next
   hardware event or chip-bus access, and interrupts are recognized only
   there, so chip-level races and cycle-counted effects no longer line up;

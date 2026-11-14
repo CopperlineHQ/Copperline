@@ -174,6 +174,43 @@ real time. Require exit status zero and extract every output archive to verify
 that its contents hash to the original input. Throughput without correct output
 is not an accepted result.
 
+### A build tool's mix (`osbench`)
+
+A build run inside AmigaOS is mostly not a CPU loop: it is short stretches
+of compiled code between exec and dos.library calls, small-file traffic and
+process launches. `guest/osbench` produces that mix in five phases that can
+be run one at a time (its README has the command line and the machine, an
+A3000 with Kickstart 3.x and a `copperhf` hardfile it formats itself):
+compiled C in fast RAM, exec allocator calls, small files on FFS, and
+launches of a command loaded from the volume. It reports the emulated time
+each phase took.
+
+Read two numbers from every run, because they bind in different modes. The
+process's CPU time is the host cost of the work, which is what limits a
+high fixed `clock_mhz` once the host is saturated. The emulated time is
+what a session that keeps real time waits for, and at a high clock it is
+almost all shared-bus time: chip-RAM reads of `AbsExecBase`, INTENA writes
+from `Disable` and `Enable`, CIA and board register accesses. A change can
+move either without the other, so report both, per phase, with a bare
+format-only run subtracted for the boot.
+
+Things this workload has shown, worth checking again after changes to the
+batch path:
+
+- OS code ends a batch every few dozen instructions, so anything done per
+  batch start costs like something done per instruction.
+- Code that executes in place from an expansion board's ROM is a device
+  access per opcode word unless the board declares the ROM plain
+  ([the batch execution mode](cpu.md#the-batch-jit-execution-mode)).
+- Compiled C spends most of its host time in the core's decoded loop, not
+  in compiled traces, and about one instruction in eight reaches `CpuBus`
+  through the full dispatcher.
+- `speed = "fastest"` finishes a fixed amount of work later than a high
+  fixed clock run flat out: it holds the machine at real time and leaves
+  the host headroom, where an overloaded fixed clock simply lets emulated
+  time fall behind. Use a fixed clock to finish a batch job soonest and
+  `fastest` to keep the machine responsive while it runs.
+
 ## Audio, DMA and rendering
 
 Use a sustained Paula/DMA/rendering workload as well as the CPU-heavy program.

@@ -42,6 +42,20 @@ pub(super) struct JitTiming {
     irq_level: u8,
     host_stop: bool,
     stop_state_stale: bool,
+    /// Nothing cached above can end the batch: the state is fresh, no
+    /// interrupt is pending at any level, the host has no stop and no
+    /// shared-bus fetch is waiting to finish. The boundary hook then has
+    /// only `jit_bus_boundary` to look at. Cleared with every
+    /// `stop_state_stale`.
+    quiet: bool,
+}
+
+/// What a bus access under the batch path is doing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum JitAccess {
+    Read,
+    Fetch,
+    Write,
 }
 
 /// The pending interrupt level and host stop condition for a batch boundary.
@@ -67,10 +81,19 @@ impl CpuBus {
         matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_)))
     }
 
+    /// Whether a read or fetch stays off the shared bus and every device.
     fn jit_plain_access(&self, address: u32, size: usize) -> bool {
-        matches!(
-            self.classify_plain_memory(self.mask(address), size),
-            Some(
+        let addr = self.mask(address);
+        self.jit_plain_memory(addr, size)
+            .unwrap_or_else(|| self.board_plain_rom(addr, size).is_some())
+    }
+
+    /// Local RAM and ROM, `None` when `addr` is not memory at all. A write
+    /// stops here: one aimed at a board's boot ROM is a device access.
+    fn jit_plain_memory(&self, addr: u32, size: usize) -> Option<bool> {
+        self.classify_plain_memory(addr, size).map(|region| {
+            matches!(
+                region,
                 PlainMemRegion::Rom(_)
                     | PlainMemRegion::OverlayRom(_)
                     | PlainMemRegion::ExtendedRom(_)
@@ -78,7 +101,26 @@ impl CpuBus {
                     | PlainMemRegion::AccelRam(_)
                     | PlainMemRegion::ZorroRam(..)
             )
-        )
+        })
+    }
+
+    /// The bytes at `addr` inside a configured board's plain boot ROM
+    /// (`ZorroDevice::plain_rom`), when the whole access fits in it. The
+    /// batch path reads and executes such a ROM as zero-wait local memory,
+    /// like Kickstart; the precise loop keeps the board's bus timing and
+    /// never asks.
+    pub(super) fn board_plain_rom(&self, addr: u32, size: usize) -> Option<&[u8]> {
+        if !self.jit_enabled {
+            return None;
+        }
+        let (crate::zorro::BoardBacking::Device(slot), off) =
+            self.bus.mem.zorro.device_region_at(addr, size)?
+        else {
+            return None;
+        };
+        let (rom_off, rom) = crate::zorro_device::ZorroDevice::plain_rom(&self.bus.devices[slot])?;
+        let start = off.checked_sub(rom_off)? as usize;
+        rom.get(start..start.checked_add(size)?)
     }
 
     /// `fetch` marks an instruction-stream access. The completed prefix is
@@ -86,17 +128,22 @@ impl CpuBus {
     /// instruction may still finish in this batch: the core repeats a fetch
     /// when the host yields between fetch and dispatch, which would bill the
     /// same shared-bus fetch twice. Interrupts and deadlines still yield there.
-    pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize, fetch: bool) {
+    pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize, access: JitAccess) {
+        let fetch = access == JitAccess::Fetch;
         // A one-instruction batch has no completed prefix before this access,
         // and returns to the host before the next instruction anyway. A lump
         // defers nothing and bills at its end.
         if matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_)))
-            && !self.jit_plain_access(address, size)
+            && !match access {
+                JitAccess::Write => self.jit_plain_memory(self.mask(address), size) == Some(true),
+                JitAccess::Read | JitAccess::Fetch => self.jit_plain_access(address, size),
+            }
         {
             self.flush_jit_batch_prefix();
             if let Some(JitBatchTiming::Multiple(timing)) = self.jit_batch.as_mut() {
                 // The access itself can raise interrupts or move the beam.
                 timing.stop_state_stale = true;
+                timing.quiet = false;
                 if fetch {
                     timing.fetch_retired.get_or_insert(timing.observed_retired);
                     return;
@@ -122,6 +169,10 @@ impl CpuBus {
             return false;
         };
         timing.observed_retired = retired;
+        // The common case, a run of local instructions with nothing pending.
+        if timing.quiet && !self.jit_bus_boundary {
+            return false;
+        }
         // Always allow progress on entry, including a bring-up interrupt whose
         // vector has not been installed yet. The host applies that guard.
         if retired == 0 {
@@ -134,6 +185,7 @@ impl CpuBus {
             (timing.irq_level, timing.host_stop) = jit_stop_state(&self.bus, timing.deadline);
             timing.stop_state_stale = false;
         }
+        timing.quiet = !timing.host_stop && timing.irq_level == 0 && timing.fetch_retired.is_none();
         timing.host_stop || timing.irq_level > ((sr >> 8) & 7) as u8
     }
 
@@ -173,6 +225,7 @@ impl CpuBus {
             timing.retired = retired;
             self.flush_timed_devices_dcache_coherent();
             timing.stop_state_stale = true;
+            timing.quiet = false;
         }
         self.diag_current_pc = pc;
         self.bus.cpu_pc = pc;
@@ -201,6 +254,7 @@ impl CpuBus {
             irq_level: 0,
             host_stop: false,
             stop_state_stale: true,
+            quiet: false,
         }));
     }
 }
@@ -310,6 +364,7 @@ impl M68kMachine {
             self.bus.bus.cpu_pc = self.cpu.pc;
             self.bus.window_offered = false;
             self.bus.jit_bus_boundary = false;
+            self.bus.jit_local.clear();
             let bus_checkpoint = self.bus.bus.slice_bus_advanced_cck();
             self.bus.jit_batch = Some(if budget == 1 {
                 JitBatchTiming::Single
@@ -332,10 +387,14 @@ impl M68kMachine {
                     irq_level: 0,
                     host_stop: false,
                     stop_state_stale: true,
+                    quiet: false,
                 })
             });
             let cpu_was_stopped = self.cpu.is_stopped();
             let result = self.cpu.run_batch(&mut self.bus, budget, &[]);
+            // The map describes this batch's mappings only: exception
+            // entry, interrupt service and the precise loop never use it.
+            self.bus.jit_local.clear();
             if !deferred {
                 // There is no completed prefix within a single instruction,
                 // and a lump defers none. Avoid constructing/copying deferred

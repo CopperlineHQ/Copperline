@@ -21,6 +21,11 @@ for the earlier release notes.
 
 ### Changed
 
+- `[cpu] jit` runs the `[copperhf]` device driver and the `[[filesys]]`
+  handlers at CPU speed: their boot ROMs are mapped as local memory, like
+  Kickstart, instead of costing an expansion-bus access for every opcode.
+  Filesystem-heavy work on those volumes takes less than half the emulated
+  time it did. The precise core is unchanged.
 - The browser, libretro and publisher-kit player frontends are now members
   of the repository's Cargo workspace. They share the root `Cargo.lock` and
   build into the root `target/` directory, so a source-built libretro core

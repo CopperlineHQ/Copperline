@@ -497,6 +497,17 @@ pub trait ZorroDevice {
         None
     }
 
+    /// The board's boot ROM as (window offset, bytes), when the CPU may read
+    /// it as plain memory: reads there have no side effects and observe no
+    /// device state, and the bytes change only through a guest write to the
+    /// window. The batch CPU path (`[cpu] jit`) maps such a ROM directly,
+    /// the way it maps Kickstart, so a driver that executes in place from
+    /// the board window stops paying a device access for every opcode word.
+    /// `None` (the default) keeps every access on the device path.
+    fn plain_rom(&self) -> Option<(u32, &[u8])> {
+        None
+    }
+
     /// Advance the device by the elapsed `cck` colour clocks. The bus calls
     /// every installed board at each timed-device boundary, then samples its
     /// interrupt lines. Boards own their internal idle fast paths.
@@ -580,6 +591,14 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Copperhf(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::write(d, off, size, value, host),
             BoardDevice::Flyer(d) => ZorroDevice::write(d.as_mut(), off, size, value, host),
+        }
+    }
+
+    fn plain_rom(&self) -> Option<(u32, &[u8])> {
+        match self {
+            BoardDevice::Filesys(d) => ZorroDevice::plain_rom(d),
+            BoardDevice::Copperhf(d) => ZorroDevice::plain_rom(d),
+            _ => None,
         }
     }
 

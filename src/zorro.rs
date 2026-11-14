@@ -988,6 +988,18 @@ impl ZorroChain {
         &mut self.boards[idx].ram
     }
 
+    /// Configured device windows as (base, length, device slot), primary
+    /// window (window 0) of each board only: where a board's boot ROM sits.
+    pub(crate) fn primary_device_windows(&self) -> impl Iterator<Item = (u32, u32, usize)> + '_ {
+        self.device_regions.iter().filter_map(|&(base, len, idx)| {
+            let spec = &self.boards[idx].spec;
+            match spec.backing {
+                BoardBacking::Device(slot) if spec.window == 0 => Some((base, len, slot)),
+                _ => None,
+            }
+        })
+    }
+
     /// Locate `addr..addr+size` inside a configured device board's window,
     /// returning the backing kind and byte offset.
     pub fn device_region_at(&self, addr: u32, size: usize) -> Option<(BoardBacking, u32)> {

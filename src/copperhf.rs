@@ -1884,6 +1884,13 @@ impl ZorroDevice for CopperhfBoard {
         }
     }
 
+    /// The boot ROM image: the device stub and INT2 server run in place
+    /// from it (`guest/copperhf/entry.s`), and `rom_read` serves nothing
+    /// but these bytes there.
+    fn plain_rom(&self) -> Option<(u32, &[u8])> {
+        Some((ROM_OFFSET as u32, COPPERHF_ROM))
+    }
+
     fn peek_word(&self, off: u32) -> Option<u16> {
         if off < ROM_WINDOW_END {
             return Some(rom_read(off, 2) as u16);

@@ -8097,7 +8097,10 @@ impl Bus {
             self.floppy.next_completion_cck(self.agnus.dmacon),
             self.floppy.next_sync_irq_cck(self.agnus.dmacon),
             self.floppy.next_index_pulse_cck(),
-            Some(self.next_frame_event_cck()),
+            // No frame term: the frame cannot end before the scanline does
+            // (`Agnus::cck_until_next_frame` starts from the same remainder
+            // of this line), and finding its end walks every line left in
+            // the frame, once per batch.
         ]
         .into_iter()
         .flatten()
