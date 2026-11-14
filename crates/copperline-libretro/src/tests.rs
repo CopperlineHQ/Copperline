@@ -26,14 +26,14 @@ unsafe extern "C" fn environment(command: u32, data: *mut c_void) -> bool {
     HOST.with(|host| {
         let mut host = host.borrow_mut();
         match command {
-            9 | 31 => {
+            ENVIRONMENT_GET_SYSTEM_DIRECTORY | ENVIRONMENT_GET_SAVE_DIRECTORY => {
                 unsafe {
                     *data.cast::<*const c_char>() = host.root.as_ptr();
                 }
                 true
             }
-            10 => unsafe { *data.cast::<u32>() == 1 },
-            15 => {
+            ENVIRONMENT_SET_PIXEL_FORMAT => unsafe { *data.cast::<u32>() == PIXEL_FORMAT_XRGB8888 },
+            ENVIRONMENT_GET_VARIABLE => {
                 let variable = unsafe { &mut *data.cast::<Variable>() };
                 let key = unsafe { CStr::from_ptr(variable.key) };
                 variable.value = match key.to_bytes() {
@@ -46,7 +46,7 @@ unsafe extern "C" fn environment(command: u32, data: *mut c_void) -> bool {
                 };
                 true
             }
-            6 => {
+            ENVIRONMENT_SET_MESSAGE => {
                 let message = unsafe { &*data.cast::<Message>() };
                 host.messages.push(
                     unsafe { CStr::from_ptr(message.msg) }
@@ -55,11 +55,16 @@ unsafe extern "C" fn environment(command: u32, data: *mut c_void) -> bool {
                 );
                 true
             }
-            32 | 37 => {
+            ENVIRONMENT_SET_SYSTEM_AV_INFO | ENVIRONMENT_SET_GEOMETRY => {
                 host.av_changes += 1;
                 true
             }
-            36 => {
+            // RETRO_ENVIRONMENT_SET_MEMORY_MAPS, written out as libretro.h
+            // defines it (36 | RETRO_ENVIRONMENT_EXPERIMENTAL) and not
+            // through the core's own constant. A frontend matches the
+            // command whole, so a core that leaves the bit off gets no map
+            // through, and the memory-map tests below then see none.
+            0x1_0024 => {
                 let map = unsafe { &*data.cast::<MemoryMap>() };
                 host.maps.push(
                     unsafe {
@@ -69,14 +74,17 @@ unsafe extern "C" fn environment(command: u32, data: *mut c_void) -> bool {
                 );
                 true
             }
-            35 => {
+            ENVIRONMENT_SET_CONTROLLER_INFO => {
                 let ports = data.cast::<ControllerInfo>();
                 host.controller_ports = (0..8)
                     .take_while(|&i| unsafe { (*ports.add(i)).num_types != 0 })
                     .count();
                 true
             }
-            11 | 13 | 16 | 18 => true,
+            ENVIRONMENT_SET_INPUT_DESCRIPTORS
+            | ENVIRONMENT_SET_DISK_CONTROL_INTERFACE
+            | ENVIRONMENT_SET_VARIABLES
+            | ENVIRONMENT_SET_SUPPORT_NO_GAME => true,
             _ => false,
         }
     })
@@ -109,6 +117,17 @@ unsafe extern "C" fn audio_one_frame(data: *const i16, frames: usize) -> usize {
         return 0;
     }
     unsafe { audio(data, 1) }
+}
+
+/// libretro.h defines three of the commands this core sends with
+/// `RETRO_ENVIRONMENT_EXPERIMENTAL` set, and a frontend matches a command
+/// whole. This pins the numbers themselves.
+#[test]
+fn experimental_environment_commands_carry_the_experimental_bit() {
+    assert_eq!(ENVIRONMENT_EXPERIMENTAL, 0x10000);
+    assert_eq!(ENVIRONMENT_SET_MEMORY_MAPS, 36 | 0x10000);
+    assert_eq!(ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, 47 | 0x10000);
+    assert_eq!(ENVIRONMENT_GET_SAVESTATE_CONTEXT, 72 | 0x10000);
 }
 
 #[test]
