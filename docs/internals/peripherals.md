@@ -1110,9 +1110,30 @@ produced only for a sector that actually plays, and a play is held back
 while the host mixer's ring is full, so subcode stalls with it. A CD+G disc therefore plays its graphics data out to
 the guest when the image stored it, and any disc delivers its Q position.
 
-The 256 KiB extended ROM sits at `$F00000`, and the battery-backed bookmark
-RAM at `$DC8000` (16 KiB, mirrored to `$DCFFFF`) is session-only: it is not
-yet persisted to a file.
+The 256 KiB extended ROM sits
+at `$F00000`. The battery-backed bookmark RAM at `$DC8000` (16 KiB,
+mirrored to `$DCFFFF`) persists to a raw image file (`[cd] nvram`, default
+`cdtv-bookmark.bin` in the nvram folder). The default file is only given to
+a machine once a frontend has asked for it (`cdtv::set_default_bookmark_file`,
+which `main` sets from `--factory`), so tests, library users and `--factory`
+runs start blank and stay reproducible; a configured file is always used.
+A file that cannot be read, or that is longer than the RAM, is never bound.
+The RAM is plain SRAM with no
+transaction to mark the end of a save, so the controller tracks whether the
+RAM differs from the file -- only a write that changes a byte counts -- and
+writes the whole image a quarter of an emulated second after the first
+unwritten change, on a system reset, and when the controller is dropped.
+Each save goes to a temporary file beside the image and is renamed over it,
+never written in place, so the previous image survives a failed save; a
+failed save stays pending and is retried at the next interval. The file is
+the running session's, not the machine's: it is not part of a save state,
+and on a state load the restored controller takes the live one's file over
+and, if its RAM differs, writes the restored contents
+(`CdtvController::adopt_bookmark_file_from`, from
+`Bus::adopt_host_resources`). A machine with a backing file is excluded
+from run-ahead for the same reason as one with a persistent CD32 EEPROM: a
+host write cannot be rewound. The credit-card memory slot at `$E00000` is
+not modelled.
 `[cd] insert_delay` (which the CD32 drive also honours) holds the disc out
 of the tray for that many emulated seconds, for discs that only boot when
 inserted after the boot screen.

@@ -1464,8 +1464,10 @@ pub(crate) struct RawCd {
     /// after the boot screen).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) insert_delay: Option<f64>,
-    /// CD32 NVRAM (save game EEPROM) backing file. Defaults to
-    /// "cd32-nvram.bin" on CD32 machines.
+    /// The CD machine's battery-backed save memory backing file: the
+    /// CD32's NVRAM (save game EEPROM), default "cd32-nvram.bin", or the
+    /// CDTV's bookmark RAM, default "cdtv-bookmark.bin". On a CDTV an
+    /// empty string keeps the bookmark RAM session-only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) nvram: Option<String>,
 }

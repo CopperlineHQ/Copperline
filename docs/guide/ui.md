@@ -1440,8 +1440,8 @@ directory is:
 
 with a folder inside it for each kind of file: `screenshots/`, `states/`
 (named saves and the quick-save slots), `recordings/` (video captures, GIF
-clips and recorded input scripts), `nvram/` (battery-backed clock RAM and CD32 game
-saves), `traces/` (debugger traces and waveform captures), and `configs/`
+clips and recorded input scripts), `nvram/` (battery-backed clock RAM, CD32 game
+saves and the CDTV's bookmark RAM), `traces/` (debugger traces and waveform captures), and `configs/`
 (configurations saved from the configuration screen). Each folder is created
 on first use, and each can be moved with the `[paths]` section of the
 configuration or the configuration screen's **A/V & Emu -> Paths** page --

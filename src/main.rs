@@ -968,6 +968,9 @@ fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> 
     // The modem's stored profile (AT&W/ATZ) is the frontend's to ask for
     // too, same promise as the synth's battery-backed memory above.
     copperline::modem::profile::set_persistence(!cli.factory);
+    // And the CDTV's default bookmark RAM file: a named `[cd] nvram` is
+    // used either way, the default one only outside `--factory`.
+    copperline::cdtv::set_default_bookmark_file(!cli.factory);
     // With nothing specified, open the configuration screen instead of
     // booting a default machine. Decided before the config is validated --
     // not just before the bundled ROM resolves -- so the launcher opens

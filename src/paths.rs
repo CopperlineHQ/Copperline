@@ -599,6 +599,11 @@ pub fn akiko_nvram_file() -> PathBuf {
     battery_ram("cd32-nvram.bin")
 }
 
+/// The CDTV's bookmark RAM, when `[cd] nvram` does not say otherwise.
+pub fn cdtv_bookmark_file() -> PathBuf {
+    battery_ram("cdtv-bookmark.bin")
+}
+
 /// Coppersynth's battery-backed memory, kept with the machines' other
 /// batteries.
 pub fn coppersynth_nvram_file() -> PathBuf {
