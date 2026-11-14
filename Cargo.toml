@@ -242,7 +242,7 @@ egui = { version = "0.35", optional = true }
 egui-winit = { version = "0.35", optional = true, default-features = false, features = ["clipboard", "wayland", "x11"] }
 egui-wgpu = { version = "0.35", optional = true, default-features = false }
 # The Flyer clip converter window (`flyer-convert`).
-eframe = { version = "0.35", optional = true, default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+eframe = { version = "0.37", optional = true, default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 anyhow = "1"
 log = "0.4"
 env_logger = { version = "0.11", optional = true }
