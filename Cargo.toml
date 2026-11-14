@@ -256,7 +256,7 @@ sha2 = { version = "0.11", default-features = false }
 # (src/debuginfo/): line tables, functions, variable locations, and CFI
 # unwinding. Both pure Rust (MIT OR Apache-2.0).
 gimli = { version = "0.34", default-features = false, features = ["read", "std"], optional = true }
-object = { version = "0.40", default-features = false, features = ["read_core", "elf", "std"], optional = true }
+object = { version = "0.41", default-features = false, features = ["read_core", "elf", "std"], optional = true }
 # Formatting-preserving TOML writer, so the generated config can carry
 # per-setting comments (copperline-import-uae only).
 toml_edit = { version = "0.25", optional = true }
