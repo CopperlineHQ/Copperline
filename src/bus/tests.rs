@@ -9970,6 +9970,107 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 }
 
+/// One lores bitplane row whose second pixel is set, on the framebuffer row
+/// of line $2C, with CLXCON matching bitplane 1 only.
+fn stage_one_plane_collision_row(bus: &mut Bus) {
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0038;
+    bus.denise.bplcon0 = 0x1000;
+    bus.denise.clxcon = 0x0FC1;
+    bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
+    bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
+        nplanes: 1,
+        words_per_row: 1,
+        fetch_origin_cck: None,
+        planes: [
+            vec![0x4000],
+            vec![0],
+            vec![0],
+            vec![0],
+            vec![0],
+            vec![0],
+            Vec::new(),
+            Vec::new(),
+        ],
+    });
+}
+
+#[test]
+fn latched_sprite_collides_in_a_frame_with_no_sprite_register_writes() {
+    let mut bus = empty_bus();
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
+    // Sprite DMA is off. The CPU positions sprite 0 and arms it with an
+    // SPR0DATA write, then leaves the sprite registers alone.
+    assert!(!bus.custom_write(0x140, 2, u64::from(pos)));
+    assert!(!bus.custom_write(0x142, 2, u64::from(ctl)));
+    assert!(!bus.custom_write(0x146, 2, 0x0000));
+    assert!(!bus.custom_write(0x144, 2, 0x8000));
+    assert!(bus.denise.spr_hw_armed[0]);
+
+    // A later frame: no sprite register is written in it, and Denise's
+    // display latch is still armed, so the sprite serializes on every
+    // line and still collides with the playfield.
+    bus.begin_new_beam_frame();
+    assert!(bus.current_frame_collision_sprite_events.is_empty());
+    let _ = bus.custom_read(0x00E, 2);
+    bus.current_frame_visible_start_vpos = 0x2C;
+    stage_one_plane_collision_row(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x38;
+    advance_collision_fixture_observation(&mut bus, 6);
+
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8022);
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
+}
+
+#[test]
+fn sprite_disarmed_by_sprctl_does_not_collide_in_later_frames() {
+    let mut bus = empty_bus();
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
+    assert!(!bus.custom_write(0x140, 2, u64::from(pos)));
+    assert!(!bus.custom_write(0x146, 2, 0x0000));
+    assert!(!bus.custom_write(0x144, 2, 0x8000));
+    // The SPR0CTL write clears the display latch for good.
+    assert!(!bus.custom_write(0x142, 2, u64::from(ctl)));
+    assert!(!bus.denise.spr_hw_armed[0]);
+
+    bus.begin_new_beam_frame();
+    let _ = bus.custom_read(0x00E, 2);
+    bus.current_frame_visible_start_vpos = 0x2C;
+    stage_one_plane_collision_row(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x38;
+    advance_collision_fixture_observation(&mut bus, 6);
+
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
+}
+
+#[test]
+fn latched_sprite_state_is_not_a_collision_source_while_sprite_dma_runs() {
+    let mut bus = empty_bus();
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
+    assert!(!bus.custom_write(0x140, 2, u64::from(pos)));
+    assert!(!bus.custom_write(0x142, 2, u64::from(ctl)));
+    assert!(!bus.custom_write(0x146, 2, 0x0000));
+    assert!(!bus.custom_write(0x144, 2, 0x8000));
+
+    // Once Agnus has fetched sprite data in the frame, the captured DMA
+    // lines are the collision sources and the latch is not replayed on
+    // top of them.
+    bus.begin_new_beam_frame();
+    bus.current_frame_sprite_dma_observed = true;
+    let _ = bus.custom_read(0x00E, 2);
+    bus.current_frame_visible_start_vpos = 0x2C;
+    stage_one_plane_collision_row(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x38;
+    advance_collision_fixture_observation(&mut bus, 6);
+
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
+}
+
 #[test]
 fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
