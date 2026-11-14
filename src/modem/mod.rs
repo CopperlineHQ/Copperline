@@ -1477,13 +1477,18 @@ impl ModemSerialSink {
         }
     }
 
-    /// Drain every wire byte currently available from the transport through
-    /// the telnet layer (if one is engaged), staging decoded data in
-    /// [`Self::telnet_out_to_guest`] and writing negotiation replies
-    /// straight back out. A no-op call when nothing is pending, so callers
-    /// can run it unconditionally before checking the queue.
+    /// Pull wire bytes from the transport through the telnet layer (if one
+    /// is engaged) until a data byte is staged in
+    /// [`Self::telnet_out_to_guest`], writing negotiation replies straight
+    /// back out. A no-op call when nothing is pending, so callers can run
+    /// it unconditionally before checking the queue.
+    ///
+    /// It stops at the first staged byte because the guest takes one byte
+    /// per call: the rest stay in the transport, whose queue is bounded
+    /// and paces the peer. Draining it all here would move a fast peer's
+    /// output into this unbounded staging queue as quickly as it arrives.
     fn pump_telnet_input(&mut self) {
-        while self.transport.has_pending() {
+        while self.telnet_out_to_guest.is_empty() && self.transport.has_pending() {
             let Some(b) = self.transport.read_byte() else {
                 break;
             };
@@ -1979,6 +1984,31 @@ mod tests {
         type_line(&mut sink, "ATE0", 0);
         drain(&mut sink);
         (sink, state)
+    }
+
+    /// The TCP transport holds at most a bounded queue of unread bytes so a
+    /// fast peer is paced by the guest's serial rate. Reading one byte must
+    /// not move the rest of that queue into the sink's own staging buffer,
+    /// which has no bound.
+    #[test]
+    fn reading_a_byte_online_leaves_the_rest_in_the_transport() {
+        let (mut sink, state) = fake_no_echo();
+        type_line(&mut sink, "ATD127.0.0.1:23", 0);
+        drain(&mut sink);
+        state
+            .lock()
+            .unwrap()
+            .to_guest
+            .extend(std::iter::repeat_n(b'x', 1 << 16));
+        assert_eq!(sink.read_byte(), Some(b'x'));
+        assert!(
+            sink.telnet_out_to_guest.len() <= 1,
+            "staged {} bytes",
+            sink.telnet_out_to_guest.len()
+        );
+        assert_eq!(state.lock().unwrap().to_guest.len(), (1 << 16) - 1);
+        // Nothing is lost: the rest still arrives in order.
+        assert_eq!(drain(&mut sink).len(), (1 << 16) - 1);
     }
 
     // ---- 1. Command parsing ------------------------------------------

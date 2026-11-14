@@ -42,6 +42,8 @@ const OPT_TTYPE: u8 = 24;
 const OPT_NAWS: u8 = 31;
 
 const TTYPE_IS: u8 = 0;
+/// Subnegotiation bytes kept; see [`TelnetNvt::push_sb`].
+const SB_LIMIT: usize = 64;
 const TTYPE_SEND: u8 = 1;
 
 /// Fixed terminal type answered to TTYPE SEND, matching the JS default.
@@ -161,7 +163,7 @@ impl TelnetNvt {
                 if b == IAC {
                     self.state = State::SbIac;
                 } else {
-                    self.sb.push(b);
+                    self.push_sb(b);
                 }
             }
             State::SbIac => {
@@ -170,10 +172,20 @@ impl TelnetNvt {
                     self.state = State::Data;
                 } else {
                     // IAC IAC inside a subnegotiation is a literal 0xFF.
-                    self.sb.push(b);
+                    self.push_sb(b);
                     self.state = State::Sb;
                 }
             }
+        }
+    }
+
+    /// Keep one subnegotiation byte. Only the option and its first
+    /// parameter are ever looked at, so anything past [`SB_LIMIT`] is
+    /// dropped: a server that opens a subnegotiation and never ends it
+    /// cannot grow the buffer for as long as it keeps sending.
+    fn push_sb(&mut self, b: u8) {
+        if self.sb.len() < SB_LIMIT {
+            self.sb.push(b);
         }
     }
 
@@ -281,6 +293,23 @@ mod tests {
             nvt.send(b, &mut out);
         }
         out
+    }
+
+    /// A subnegotiation is only ever inspected for its first two bytes; a
+    /// server that never sends IAC SE must not grow the buffer for as long
+    /// as it keeps talking.
+    #[test]
+    fn an_unterminated_subnegotiation_does_not_grow_without_bound() {
+        let mut nvt = TelnetNvt::new(true);
+        let mut bytes = vec![IAC, SB, OPT_TTYPE, TTYPE_SEND];
+        bytes.resize(1 << 16, b'x');
+        feed(&mut nvt, &bytes);
+        assert!(nvt.sb.len() <= 64, "kept {} bytes", nvt.sb.len());
+        // The terminator still ends it, the request is still answered, and
+        // data flows again.
+        let (data, reply) = feed(&mut nvt, &[IAC, SE, b'a']);
+        assert_eq!(data, b"a");
+        assert_eq!(&reply[..4], &[IAC, SB, OPT_TTYPE, TTYPE_IS]);
     }
 
     // ---- Option accept/refuse matrix -----------------------------------
