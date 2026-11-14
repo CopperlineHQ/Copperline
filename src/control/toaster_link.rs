@@ -21,6 +21,11 @@
 //!   through a temporary name);
 //! - host reads `done-ID.txt` and `out-ID.txt` and deletes both.
 //!
+//! A caller that gave up waiting (a timeout after the guest took the job)
+//! never collects its result, so before each job the host also removes
+//! results nobody has collected for [`STALE_RESULT`]: left in place they
+//! pile up, and the guest lists the whole folder on every poll.
+//!
 //! The guest polls five times a second, so a job starts within about
 //! 0.2 s of emulated time. Jobs run side by side, so one that never
 //! returns (a call to a program that does not answer its port) costs the
@@ -286,9 +291,15 @@ fn done_name(id: u64) -> String {
     format!("done-{id}.txt")
 }
 
-/// Hand `script` to the guest as job `id`.
+/// How long a finished job's result may wait to be collected. A caller
+/// still waiting collects within a poll of the guest finishing, so a
+/// result this old belongs to a caller that has given up.
+pub const STALE_RESULT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Hand `script` to the guest as job `id`, first removing stale results.
 pub fn submit(dir: &Path, id: u64, script: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
+    sweep(dir, STALE_RESULT);
     let tmp = dir.join(format!("job-{id}.tmp"));
     // Amiga line ends; the guest reads the script as it is.
     std::fs::write(&tmp, script.replace("\r\n", "\n"))?;
@@ -310,6 +321,54 @@ pub fn collect(dir: &Path, id: u64) -> Option<JobResult> {
         rc: rc_text.trim().parse().unwrap_or(-1),
         output: output.trim_end().to_string(),
     })
+}
+
+/// Remove results no caller collected: `done-ID.txt` older than
+/// `max_age` with its `out-ID.txt`, and an `out-ID.txt` that old whose job
+/// is neither running nor done. Jobs still waiting to be taken or running
+/// are left alone, as is anything younger (another bridge on the same
+/// folder may be about to collect it). Returns the files removed.
+pub fn sweep(dir: &Path, max_age: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let names: Vec<String> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .collect();
+    let old = |name: &str| {
+        std::fs::metadata(dir.join(name))
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= max_age)
+    };
+    let id_of = |name: &str, prefix: &str| -> Option<u64> {
+        name.strip_prefix(prefix)?
+            .strip_suffix(".txt")?
+            .parse()
+            .ok()
+    };
+    let has = |name: String| names.contains(&name);
+    let mut removed = 0;
+    let mut remove = |name: &str| {
+        if std::fs::remove_file(dir.join(name)).is_ok() {
+            removed += 1;
+        }
+    };
+    for name in &names {
+        if let Some(id) = id_of(name, "done-") {
+            if old(name) {
+                remove(name);
+                remove(&out_name(id));
+            }
+        } else if let Some(id) = id_of(name, "out-") {
+            let live = has(format!("run-{id}.rexx")) || has(done_name(id));
+            if !live && old(name) {
+                remove(name);
+            }
+        }
+    }
+    removed
 }
 
 /// Take back a job the guest never picked up (on a timeout), so it does
@@ -424,6 +483,38 @@ mod tests {
         let off = paint.find("call copperline_done").unwrap();
         assert!(off < paint.find("Run >NIL:").unwrap());
         assert!(paint.contains("call remlib('ToasterARexx.port')"));
+    }
+
+    #[test]
+    fn results_nobody_collected_are_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path();
+        for name in [
+            "done-1.txt",
+            "out-1.txt", // finished, never collected
+            "out-2.txt", // orphaned output, no job
+            "run-3.rexx",
+            "out-3.txt",  // still running
+            "job-4.rexx", // not yet taken
+        ] {
+            std::fs::write(link.join(name), "0\n").unwrap();
+        }
+        // Everything is younger than any sensible age: nothing goes.
+        assert_eq!(sweep(link, STALE_RESULT), 0);
+        assert_eq!(sweep(link, std::time::Duration::ZERO), 3);
+        let mut left: Vec<String> = std::fs::read_dir(link)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["job-4.rexx", "out-3.txt", "run-3.rexx"]);
+    }
+
+    #[test]
+    fn the_guest_script_walks_the_listing_by_position() {
+        // PARSE VAR on the remainder is quadratic in the folder's size.
+        assert!(!GUEST_SCRIPT.contains("PARSE VAR files"));
+        assert!(GUEST_SCRIPT.contains("POS('/', files, p)"));
     }
 
     #[test]

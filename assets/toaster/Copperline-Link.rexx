@@ -43,10 +43,20 @@ main:
 SIGNAL ON SYNTAX
 IF ~EXISTS(dir) THEN call MAKEDIR(dir)
 DO FOREVER
+  /* Walk the listing by position: taking the head off with PARSE VAR
+     copies the rest of the list each time, so a folder holding many
+     files would cost the square of their number on every poll. */
   files = SHOWDIR(dir, 'FILE', '/')
-  DO WHILE files ~= ''
-    PARSE VAR files f '/' files
-    IF UPPER(LEFT(f, 4)) = 'JOB-' & UPPER(RIGHT(f, 5)) = '.REXX' THEN call runjob f
+  n = LENGTH(files)
+  p = 1
+  DO WHILE p <= n
+    q = POS('/', files, p)
+    IF q = 0 THEN q = n + 1
+    IF UPPER(SUBSTR(files, p, 4)) = 'JOB-' THEN DO
+      f = SUBSTR(files, p, q - p)
+      IF UPPER(RIGHT(f, 5)) = '.REXX' THEN call runjob f
+    END
+    p = q + 1
   END
   call DELAY(10)
 END
