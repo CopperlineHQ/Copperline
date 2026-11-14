@@ -891,6 +891,7 @@ impl GapStream {
         let mut loop_sample = None;
         let mut loop_disabled = false;
         let mut pending: Option<usize> = None;
+        let mut fixed_cells = 0usize;
         loop {
             let Some((kind, size, next)) = read_sample_header(area, pos)? else {
                 return Ok((
@@ -918,7 +919,22 @@ impl GapStream {
                     );
                     let sample = bits_of(&area[next..end], size);
                     match pending.take() {
-                        Some(length) => fixed.push((length, sample)),
+                        Some(length) => {
+                            // Every fixed sample is laid down in full before
+                            // the gap is cut to size, and no gap is longer
+                            // than a track.
+                            fixed_cells = length
+                                .checked_mul(2)
+                                .and_then(|cells| cells.checked_add(fixed_cells))
+                                .filter(|&cells| cells <= MAX_TRACK_BITS)
+                                .with_context(|| {
+                                    format!(
+                                        "IPF gap samples exceed the \
+                                         {MAX_TRACK_BITS}-bit track limit"
+                                    )
+                                })?;
+                            fixed.push((length, sample));
+                        }
                         None if size == 0 => loop_disabled = true,
                         None => loop_sample = Some(sample),
                     }
@@ -1534,6 +1550,25 @@ pub(crate) mod tests {
         assert_eq!(recovered[..0x140], repeating_data_bits(0x4e, 0, 0x140)[..]);
         assert!(recovered[0x140..].iter().all(|bit| !bit));
         assert_eq!(recovered.len(), 0x140 + 0x60);
+    }
+
+    /// A fixed gap sample's length is read from up to seven bytes of the
+    /// stream. It is laid down in full before being cut to the gap, so one
+    /// longer than any track has to be refused, not built.
+    #[test]
+    fn a_gap_sample_longer_than_a_track_is_refused() {
+        let gap_bits = 832;
+        let mut area = block_descriptor(0, gap_bits, BLOCK_DESCRIPTOR_LEN, BLOCK_FLAG_FWGAP, 0, 0);
+        area.extend_from_slice(&sample(GAP_LENGTH, 4 * MAX_TRACK_BITS, &[]));
+        area.extend_from_slice(&sample(GAP_DATA, 8, &[0x4e]));
+        area.push(0);
+        let track = Track {
+            gap_bits: gap_bits as u32,
+            track_bits: gap_bits as u32,
+            ..Track::default()
+        };
+        let err = decode(&image(track, &area, ENCODER_SPS_TEST, 2)).unwrap_err();
+        assert!(format!("{err:#}").contains("gap"), "{err:#}");
     }
 
     /// The second worked example: loop samples stretch to meet in the middle

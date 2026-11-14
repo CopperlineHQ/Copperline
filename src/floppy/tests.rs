@@ -265,6 +265,118 @@ fn zip_floppy_skips_the_name_and_extra_field_to_reach_stored_data() -> Result<()
     Ok(())
 }
 
+/// How a streamed ZIP entry's data descriptor is laid out.
+#[derive(Clone, Copy)]
+struct ZipDescriptor {
+    /// The optional `PK\x07\x08` signature in front.
+    signature: bool,
+    /// Zip64: eight-byte sizes, as an archiver writes when it cannot know
+    /// in advance that the entry is small (`zip` reading from a pipe).
+    zip64: bool,
+    crc: u32,
+    /// Added to the compressed and uncompressed sizes it states.
+    packed_skew: i64,
+    unpacked_skew: i64,
+}
+
+/// One ADF-sized entry as a streaming archiver writes it (macOS Finder's
+/// Compress, `zip` writing to or reading from a pipe): general-purpose
+/// flag bit 3 set, the CRC and sizes zero in the local header and given
+/// in a data descriptor after the data instead.
+fn zip_with_data_descriptor(adf: &[u8], method: u16, descriptor: ZipDescriptor) -> Vec<u8> {
+    let mut packed = zip_local_header(method, 0, 8, 0);
+    packed[6..8].copy_from_slice(&0x0008u16.to_le_bytes());
+    packed[18..26].fill(0); // compressed and uncompressed size
+    packed.extend_from_slice(b"disk.adf");
+    let data = if method == 8 {
+        let mut deflater =
+            flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+        deflater.write_all(adf).unwrap();
+        deflater.finish().unwrap()
+    } else {
+        adf.to_vec()
+    };
+    packed.extend_from_slice(&data);
+    if descriptor.signature {
+        packed.extend_from_slice(&[0x50, 0x4b, 0x07, 0x08]);
+    }
+    packed.extend_from_slice(&descriptor.crc.to_le_bytes());
+    for size in [
+        data.len() as i64 + descriptor.packed_skew,
+        adf.len() as i64 + descriptor.unpacked_skew,
+    ] {
+        if descriptor.zip64 {
+            packed.extend_from_slice(&(size as u64).to_le_bytes());
+        } else {
+            packed.extend_from_slice(&(size as u32).to_le_bytes());
+        }
+    }
+    packed
+}
+
+#[test]
+fn zip_floppy_with_a_data_descriptor_decodes_and_is_still_checked() -> Result<()> {
+    let adf: Vec<u8> = (0..ADF_SIZE).map(|i| (i * 13 / 512) as u8).collect();
+    let mut crc = flate2::Crc::new();
+    crc.update(&adf);
+    let good = ZipDescriptor {
+        signature: true,
+        zip64: false,
+        crc: crc.sum(),
+        packed_skew: 0,
+        unpacked_skew: 0,
+    };
+    // Deflated and stored, with and without the signature, with 32-bit
+    // and with zip64 sizes.
+    for method in [8, 0] {
+        for signature in [true, false] {
+            for zip64 in [false, true] {
+                let descriptor = ZipDescriptor {
+                    signature,
+                    zip64,
+                    ..good
+                };
+                let packed = zip_with_data_descriptor(&adf, method, descriptor);
+                assert!(
+                    decode_zip_floppy_image(&packed)? == adf,
+                    "method {method} signature {signature} zip64 {zip64}"
+                );
+            }
+        }
+    }
+    let refused = |descriptor: ZipDescriptor| {
+        let packed = zip_with_data_descriptor(&adf, 8, descriptor);
+        format!("{:#}", decode_zip_floppy_image(&packed).unwrap_err())
+    };
+    // The descriptor's CRC is checked like a header's.
+    let err = refused(ZipDescriptor {
+        crc: !crc.sum(),
+        ..good
+    });
+    assert!(err.contains("checksum error"), "{err}");
+    // So are its sizes, against what the entry's data turned out to be.
+    for (packed_skew, unpacked_skew) in [(0, -1), (0, 1), (1, 0), (-1, 0)] {
+        for zip64 in [false, true] {
+            let err = refused(ZipDescriptor {
+                zip64,
+                packed_skew,
+                unpacked_skew,
+                ..good
+            });
+            assert!(err.contains("data descriptor"), "{err}");
+        }
+    }
+    // A descriptor cut short is not a descriptor.
+    let mut packed = zip_with_data_descriptor(&adf, 8, good);
+    packed.truncate(packed.len() - 5);
+    let err = format!("{:#}", decode_zip_floppy_image(&packed).unwrap_err());
+    assert!(err.contains("data descriptor"), "{err}");
+    // An entry that is not an ADF is refused before any of that.
+    let short = zip_with_data_descriptor(&adf[..4096], 8, good);
+    assert!(decode_zip_floppy_image(&short).is_err());
+    Ok(())
+}
+
 #[test]
 fn bounded_memory_insert_preserves_the_disk_when_expansion_is_rejected() -> Result<()> {
     let mut ctrl = FloppyController::default();

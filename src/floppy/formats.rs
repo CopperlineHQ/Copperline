@@ -386,22 +386,28 @@ pub(super) fn decode_zip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {
     let mut u16buf = [0u8; 2];
     let mut u32buf = [0u8; 4];
 
-    // Skip to compression method (at offset 8 in local file header)
-    cursor.set_position(8);
+    // General-purpose flags (offset 6). Bit 3: the entry was written as a
+    // stream, so the CRC and sizes are zero here and follow the data in a
+    // data descriptor instead. macOS Finder's Compress writes this form.
+    cursor.set_position(6);
+    cursor.read_exact(&mut u16buf)?;
+    let has_data_descriptor = u16::from_le_bytes(u16buf) & 0x0008 != 0;
+
+    // Compression method (at offset 8 in local file header)
     cursor.read_exact(&mut u16buf)?;
     let compression = u16::from_le_bytes(u16buf);
 
     // Skip to CRC-32 (at offset 14 in local file header)
     cursor.set_position(14);
     cursor.read_exact(&mut u32buf)?;
-    let expected_crc = u32::from_le_bytes(u32buf);
+    let mut expected_crc = u32::from_le_bytes(u32buf);
 
     // Skip to uncompressed size (at offset 22 in local file header)
     cursor.set_position(22);
     cursor.read_exact(&mut u32buf)?;
     let uncomp_size = u32::from_le_bytes(u32buf);
     ensure!(
-        uncomp_size as usize == ADF_SIZE,
+        has_data_descriptor || uncomp_size as usize == ADF_SIZE,
         "invalid ADF file size in ZIP archive"
     );
 
@@ -416,18 +422,36 @@ pub(super) fn decode_zip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {
     // Both lengths are 16-bit header fields, so their sum with the fixed
     // header can exceed u16; widen before adding. An offset past the end
     // leaves the reader at EOF and the read below reports it.
-    cursor.set_position(30 + u64::from(file_name_length) + u64::from(extra_field_length));
+    let data_start = 30 + u64::from(file_name_length) + u64::from(extra_field_length);
+    cursor.set_position(data_start);
 
     let mut decompressed = vec![0; ADF_SIZE];
 
-    let calculated_crc = match compression {
+    // The entry's data, and how many archive bytes it took: a data
+    // descriptor, when there is one, starts right after them.
+    let (calculated_crc, packed_len) = match compression {
         8 => {
             // Deflate compression
             let mut decode_reader = CrcReader::new(DeflateDecoder::new(cursor));
             decode_reader
                 .read_exact(&mut decompressed)
                 .context("deflating zipped floppy image")?;
-            decode_reader.crc().sum()
+            let crc = decode_reader.crc().sum();
+            let mut inflater = decode_reader.into_inner();
+            if has_data_descriptor {
+                // With no size in the header, the stream's own end is what
+                // says the entry is ADF-sized; reading to it also counts
+                // the stream's last bytes.
+                let mut extra = [0u8; 1];
+                ensure!(
+                    inflater
+                        .read(&mut extra)
+                        .context("deflating zipped floppy image")?
+                        == 0,
+                    "invalid ADF file size in ZIP archive"
+                );
+            }
+            (crc, inflater.total_in())
         }
         0 => {
             // No compression
@@ -435,18 +459,55 @@ pub(super) fn decode_zip_floppy_image(data: &[u8]) -> Result<Vec<u8>> {
             reader
                 .read_exact(&mut decompressed)
                 .context("unarchiving zipped floppy image")?;
-            reader.crc().sum()
+            (reader.crc().sum(), ADF_SIZE as u64)
         }
         n => {
             bail!("Unsupported compression method in zip archive: {n}");
         }
     };
+    if has_data_descriptor {
+        let after = usize::try_from(data_start + packed_len)
+            .ok()
+            .and_then(|at| data.get(at..))
+            .unwrap_or_default();
+        expected_crc = zip_data_descriptor_crc(after, packed_len)
+            .context("zip data descriptor is missing or does not match the entry's data")?;
+    }
     // Verify CRC32
     if calculated_crc != expected_crc {
         bail!("checksum error in zip archive: expected: {expected_crc} != calculated: {calculated_crc}");
     }
 
     Ok(decompressed)
+}
+
+/// The CRC-32 from the data descriptor at the start of `after`, if it
+/// describes an entry of `packed_len` archive bytes that holds one ADF.
+///
+/// A descriptor is a CRC-32, the compressed size and the uncompressed
+/// size, behind an optional signature. The sizes are four bytes each, or
+/// eight when the archiver wrote the entry as zip64, which one reading
+/// from a pipe does because it cannot know the entry is small. Nothing in
+/// the descriptor says which form it is, so each is tried against the
+/// sizes the entry's data turned out to have.
+fn zip_data_descriptor_crc(after: &[u8], packed_len: u64) -> Option<u32> {
+    let signed = after.strip_prefix(&[0x50, 0x4b, 0x07, 0x08]);
+    for descriptor in [signed, Some(after)].into_iter().flatten() {
+        for width in [4usize, 8] {
+            let Some(fields) = descriptor.get(..4 + 2 * width) else {
+                continue;
+            };
+            let size = |at: usize| {
+                let mut raw = [0u8; 8];
+                raw[..width].copy_from_slice(&fields[at..at + width]);
+                u64::from_le_bytes(raw)
+            };
+            if size(4) == packed_len && size(4 + width) == ADF_SIZE as u64 {
+                return Some(u32::from_le_bytes(fields[..4].try_into().unwrap()));
+            }
+        }
+    }
+    None
 }
 
 pub(super) fn decode_uae_extended_adf(data: &[u8]) -> Result<FloppyImageData> {
