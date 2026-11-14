@@ -680,6 +680,12 @@ enum Paint {
 struct Painter {
     tx: mpsc::Sender<Paint>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The painter thread's surface holds the window too. On macOS a
+    /// window dropped off the main thread is handed back to the main
+    /// thread synchronously, and the main thread is the one waiting in
+    /// `Drop` below for the painter to finish: so the thread's reference
+    /// must never be the last. This one goes after the join.
+    _window: Arc<Window>,
 }
 
 impl Painter {
@@ -1475,8 +1481,12 @@ impl CardMonitors {
             let mw = MonitorWindow {
                 output,
                 art: Arc::clone(&art),
+                painter: Painter {
+                    tx,
+                    thread,
+                    _window: Arc::clone(&window),
+                },
                 window,
-                painter: Painter { tx, thread },
                 size: (w, h),
                 settings,
                 held: None,

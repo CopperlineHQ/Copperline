@@ -2703,7 +2703,7 @@ fn is_creatable_name(comp: &str) -> bool {
 /// name. The character checks in `is_creatable_name` are the rules we know
 /// about; this asks the host, so a spelling it treats as a root, a drive
 /// prefix, or a "here"/"up" step is refused even where no rule names it.
-fn is_single_host_component(comp: &str) -> bool {
+pub(crate) fn is_single_host_component(comp: &str) -> bool {
     let mut parts = Path::new(comp).components();
     matches!(
         (parts.next(), parts.next()),
@@ -2717,7 +2717,7 @@ fn is_single_host_component(comp: &str) -> bool {
 /// "x.uaem." is "x.uaem". Only a Windows host applies this (other hosts store
 /// these names as written); the predicate itself is host-independent so every
 /// platform's tests cover it.
-fn is_windows_alias_name(comp: &str) -> bool {
+pub(crate) fn is_windows_alias_name(comp: &str) -> bool {
     if comp.ends_with('.') || comp.ends_with(' ') {
         return true;
     }

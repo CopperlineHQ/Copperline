@@ -943,7 +943,8 @@ subfolders on first use:
   the machine runs. A file plays in emulated time: the machine waits for
   the decoder, so the same files give the same output on a fast or a slow
   host, headless or windowed. Stills (PNG, JPEG, BMP) need nothing
-  else; video files are decoded by ffmpeg, found as `ffmpeg.exe` (or
+  else; video files are decoded by ffmpeg: the program the
+  `COPPERLINE_FFMPEG` environment variable names, else `ffmpeg.exe` (or
   `ffmpeg`) in the folder itself, beside Copperline, or on the `PATH`.
 - `Output`: recordings of the Program output (MP4 or AVI, see below).
 
@@ -1113,7 +1114,11 @@ mounted (copy `NewTek/Programs/System_Support/Devs/DOSDrivers/FA0` into
 and copies like any other. Clips are read-only (they cannot be overwritten,
 extended or deleted from the Amiga, and nothing records into the drives
 yet, though Process Clip below makes new ones from them); other files, such
-as the crouton icons below, are written straight into the folder. Clips put
+as the crouton icons below, are written straight into the folder. A name the
+Amiga gives a new or renamed file or drawer must be one ordinary host file
+name: one that starts with a dot or holds a backslash is refused (as is a DOS
+device name such as `NUL` on a Windows host), so nothing is written outside
+the drive's folder or hidden from its own listing. Clips put
 into the folder while the machine runs show up the next time the Grazer
 lists the drive.
 

@@ -17,7 +17,7 @@
 //!   carries an 8-bit source-quad number on the B and I lines, drawn the
 //!   same way as the read-back labels (I the high nibble, B the low, first
 //!   pixel most significant): output card quad `c` shows framestore
-//!   samples `4·Q(c) .. 4·Q(c)+3`.
+//!   samples `4*Q(c) .. 4*Q(c)+3`.
 //!
 //! Quad codes 0-191 address the line; `$E8`-`$EF` are the card's own
 //! colour quads (borders, the luma-key backgrounds); `$FF` is "no

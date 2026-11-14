@@ -43,6 +43,36 @@ pub fn black() -> u32 {
     u32::from_le_bytes([0, 0, 0, 0xFF])
 }
 
+/// The video side's part of a save state: what decides the next frames'
+/// pictures and sound. The inputs' host files are not in it (they play on
+/// from wherever they are), nor the outputs, which the next frame repaints.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub(super) struct SavedVideo {
+    odd_field: bool,
+    live: bool,
+    noise: u32,
+    audio_carry: f64,
+    /// The last Program frame, RGBA bytes.
+    #[serde(with = "crate::bytes_serde")]
+    last_program: Vec<u8>,
+}
+
+/// The snow generator's seed at power-on.
+const NOISE_SEED: u32 = 0x1234_5678;
+
+/// A picture as bytes, and back, for a save state.
+pub(super) fn picture_bytes(picture: &[u32]) -> Vec<u8> {
+    picture.iter().flat_map(|p| p.to_le_bytes()).collect()
+}
+
+pub(super) fn picture_of_bytes(bytes: &[u8]) -> Vec<u32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
 pub struct Video {
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     inputs: Vec<InputFeed>,
@@ -110,7 +140,7 @@ impl Video {
             pool: Vec::new(),
             last_program: Vec::new(),
             live: false,
-            noise: 0x1234_5678,
+            noise: NOISE_SEED,
         }
     }
 
@@ -120,6 +150,39 @@ impl Video {
 
     pub fn media_root(&self) -> Option<&std::path::Path> {
         self.media_root.as_deref()
+    }
+
+    /// What a save state keeps of the video side.
+    pub(super) fn saved(&self) -> SavedVideo {
+        SavedVideo {
+            odd_field: self.odd_field,
+            live: self.live,
+            noise: self.noise,
+            audio_carry: self.audio_carry,
+            last_program: picture_bytes(&self.last_program),
+        }
+    }
+
+    /// Take a loaded state's video side, or with `None` go back to how
+    /// the card powers on. The pictures decoded from the banks are
+    /// forgotten either way: the banks are the state's now.
+    pub(super) fn restore(&mut self, saved: Option<&SavedVideo>) {
+        let power_on = SavedVideo {
+            noise: NOISE_SEED,
+            ..SavedVideo::default()
+        };
+        let saved = saved.unwrap_or(&power_on);
+        self.odd_field = saved.odd_field;
+        self.live = saved.live;
+        self.noise = saved.noise;
+        // (A fraction of a sample; anything else is not a state of ours.)
+        self.audio_carry = if (0.0..1.0).contains(&saved.audio_carry) {
+            saved.audio_carry
+        } else {
+            0.0
+        };
+        self.last_program = picture_of_bytes(&saved.last_program);
+        self.decoded = [None, None];
     }
 
     /// Start reading the inputs' folders (the switcher is driving the
@@ -386,8 +449,8 @@ impl Key<'_> {
     }
 }
 
-/// One pixel of Program = A·(1−k) + B·k, each gun rounded to nearest:
-/// `(a·(255−k) + b·k + 127) / 255`. The three guns are weighed two at a
+/// One pixel of Program = A*(1-k) + B*k, each gun rounded to nearest:
+/// `(a*(255-k) + b*k + 127) / 255`. The three guns are weighed two at a
 /// time in 16-bit lanes; `(t + (t >> 8)) >> 8` with `t = x + 128` is that
 /// division exactly for every `x` a lane can hold.
 #[inline]
@@ -409,7 +472,7 @@ pub fn blend(pa: u32, pb: u32, k: u8) -> u32 {
     }
 }
 
-/// Program = A·(1−k) + B·k.
+/// Program = A*(1-k) + B*k.
 pub fn mix(a: &[u32], b: &[u32], key: &Key<'_>, out: &mut [u32]) {
     match key {
         Key::Flat(0) => out.copy_from_slice(&a[..out.len()]),
@@ -503,7 +566,7 @@ pub fn amiga_picture(field: &FieldPixels<'_>, x0: i64, out: &mut [u32]) {
 
 /// The per-pixel source codes of a latch effect (`AMWIPE`/`BMWIPE` with
 /// the bus at 7): a pixel whose colour carries the genlock T bit (shown
-/// transparent) sets the source from its low nibbles, b2 + 2·r2 + 4·r1,
+/// transparent) sets the source from its low nibbles, b2 + 2*r2 + 4*r1,
 /// in the muxes' numbering (`LatchLUT`, animfxhandler.a); other pixels
 /// keep the source last set on the line. `None` before the first.
 pub fn latch_codes(field: &FieldPixels<'_>, x0: i64) -> Vec<Option<u8>> {
