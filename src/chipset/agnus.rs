@@ -136,6 +136,24 @@ impl AgnusRevision {
             Self::Ecs8375 | Self::AgaAlice => 0x001F_FFFF,
         }
     }
+
+    /// Address bits Agnus decodes for a CPU access inside the chip-RAM
+    /// window, given the fitted chip RAM. This is the DMA reach except on
+    /// an 8372A board strapped for 512 KiB of chip RAM. The 8372A's A19
+    /// input picks its second 512 KiB DRAM bank, and the motherboard wires
+    /// that pin to CPU A19 only when the second bank is chip RAM (the 1 MiB
+    /// position of JP2 on an A500 rev 6A). In the 512 KiB position the pin
+    /// follows CPU A23 instead, which is what places the second bank at
+    /// $C00000 as trapdoor RAM. A chip-window access then always reaches
+    /// Agnus with A19 low, so the first bank repeats every 512 KiB exactly
+    /// as on an OCS machine.
+    pub fn cpu_chip_decode_mask(self, fitted_chip_ram: usize) -> u32 {
+        const FIRST_BANK: usize = 512 * 1024;
+        match self {
+            Self::Ecs8372Rev4 if fitted_chip_ram <= FIRST_BANK => 0x0007_FFFF,
+            _ => self.dma_addr_capability_mask(),
+        }
+    }
 }
 
 impl VideoStandard {

@@ -10619,7 +10619,11 @@ impl Bus {
         // Agnus. Smaller Agnus revisions ignore their unsupported high
         // address bits, so the fitted image repeats inside that window.
         if u64::from(addr) < CHIP_WINDOW_SIZE {
-            let off = (addr & self.agnus.revision().dma_addr_capability_mask()) as usize;
+            let decode = self
+                .agnus
+                .revision()
+                .cpu_chip_decode_mask(self.mem.chip_ram.len());
+            let off = (addr & decode) as usize;
             if off
                 .checked_add(1)
                 .is_some_and(|last| last < self.mem.chip_ram.len())

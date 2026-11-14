@@ -756,7 +756,12 @@ level 1 handler: six passes, green where the handler ran from inside the
 window, red where 999 windows passed without it; run on the 68000 OCS
 machine and, as `irqprobe-window-aga`, on the 68EC020, where the window is
 shorter than the recognition delay and only arrives because the IPL pins
-trail the mask write as they trail the unmask), `clxprobe` (the CLXDAT collision matrix rendered as
+trail the mask write as they trail the unmask), `memprobe-chipmirror` (the first chip DRAM bank answers
+again at $080000, $100000 and $180000 on a 512K-chip machine, checked by a
+write and a read through each image and painted as six green stripes; run
+on OCS and, as `memprobe-chipmirror-ecs`, on the 8372A whose A19 input is
+strapped to A23 -- the class of loaders that size chip RAM by its alias;
+vAmiga 4.4 renders the same six green stripes on both), `clxprobe` (the CLXDAT collision matrix rendered as
 bit cells for two CLXCON programs, including a plane enabled beyond the
 BPU count; its unsatisfied match clears both PF-PF bit 0 and odd
 sprite-playfield bit 1), `audprobe-en` (the AUD0 interrupt cadence as a
