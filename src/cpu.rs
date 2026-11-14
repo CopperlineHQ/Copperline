@@ -360,6 +360,9 @@ struct MachineRuntimeState {
     sampled_irq_level: Option<u8>,
     #[serde(default)]
     ipl_sample_held: Option<bool>,
+    /// `CpuBus::ipl_latched_level`, live at a boundary like the sample.
+    #[serde(default)]
+    ipl_latched_level: Option<u8>,
 }
 
 /// Same-process rollback restores the interrupt sample alongside the bus
@@ -370,6 +373,8 @@ pub(crate) struct MachineRollbackState {
     bus: crate::bus::RollbackState,
     sampled_irq_level: u8,
     ipl_sample_held: bool,
+    #[serde(default)]
+    ipl_latched_level: u8,
 }
 
 /// The components a state parses into before the machine swaps onto them.
@@ -498,6 +503,9 @@ struct CpuBus {
     /// additional 68000 poll candidates. The Bus helper itself limits early
     /// candidates to the stock two-CPU-clocks-per-CCK path.
     m68000_ipl_poll: bool,
+    /// The CPU has the 68020 family's pending-interrupt latch (see
+    /// `ipl_latched_level`): every model from the 68EC020 up.
+    ipl_latches_requests: bool,
     /// Set by the core's `ipl_hold_sample` poll-point marker: the current
     /// `sampled_irq_level` is the instruction's microcode poll value and
     /// later accesses in the same instruction must not re-latch it (e.g.
@@ -505,6 +513,18 @@ struct CpuBus {
     /// writeback). Cleared when the boundary decision consumes the sample.
     /// File-save transient like `sampled_irq_level`; captured for rollback.
     ipl_sample_held: bool,
+    /// 68020+ pending-interrupt latch (IPEND): the highest level above the
+    /// status-register mask that an access sampled since the last
+    /// instruction boundary. The processor takes a request it has
+    /// recognised at the next boundary even if the IPL pins have dropped
+    /// by then; a 68000 or 68010 only acts on the level it polls. Consumed
+    /// by `refresh_irq_line`; saved like `sampled_irq_level`.
+    ipl_latched_level: u8,
+    /// The status register's interrupt mask at the last instruction
+    /// boundary, which the latch above compares samples against. An
+    /// instruction that lowers the mask (RTE, a move to SR) does so as it
+    /// ends, so its own accesses still see the old mask.
+    sr_ipl_mask: u8,
     /// Start PC of the instruction currently inside the core, used only by
     /// `COPPERLINE_DIAG_CPU_SYNC` to filter internal-cycle trace lines.
     diag_current_pc: u32,
@@ -621,7 +641,10 @@ impl M68kMachine {
                 sampled_irq_level: 0,
                 sampled_operand_irq_level: 0,
                 m68000_ipl_poll: cpu_model == CpuModel::M68000,
+                ipl_latches_requests: !matches!(cpu_model, CpuModel::M68000 | CpuModel::M68010),
                 ipl_sample_held: false,
+                ipl_latched_level: 0,
+                sr_ipl_mask: 7,
                 diag_current_pc: 0,
                 jit_enabled: false,
                 cache_free_window: None,
@@ -1705,6 +1728,7 @@ impl M68kMachine {
             jit_window_bank: self.bus.jit_window_bank,
             sampled_irq_level: Some(self.bus.sampled_irq_level),
             ipl_sample_held: Some(self.bus.ipl_sample_held),
+            ipl_latched_level: Some(self.bus.ipl_latched_level),
         }
     }
 
@@ -1823,6 +1847,7 @@ impl M68kMachine {
             bus: self.bus.bus.rollback_state(),
             sampled_irq_level: self.bus.sampled_irq_level,
             ipl_sample_held: self.bus.ipl_sample_held,
+            ipl_latched_level: self.bus.ipl_latched_level,
         }
     }
 
@@ -1883,10 +1908,12 @@ impl M68kMachine {
         // values for a state that predates the fields.
         self.bus.sampled_irq_level = runtime.sampled_irq_level.unwrap_or(0);
         self.bus.ipl_sample_held = runtime.ipl_sample_held.unwrap_or(false);
+        self.bus.ipl_latched_level = runtime.ipl_latched_level.unwrap_or(0);
         if let Some(rollback) = rollback {
             bus.restore_rollback_state(rollback.bus);
             self.bus.sampled_irq_level = rollback.sampled_irq_level;
             self.bus.ipl_sample_held = rollback.ipl_sample_held;
+            self.bus.ipl_latched_level = rollback.ipl_latched_level;
         } else {
             bus.reset_transient_video_after_state_load();
         }
@@ -1898,6 +1925,8 @@ impl M68kMachine {
         self.bus.cacr_040_layout = cacr_040_layout(cpu.cpu_type);
         self.cpu = cpu;
         self.bus.m68000_ipl_poll = self.cpu.cpu_type == CpuType::M68000;
+        self.bus.ipl_latches_requests =
+            !matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010);
         self.bus.sampled_operand_irq_level = 0;
         self.bus.bus = bus;
         // The cache is silicon, not dynamic state: a CPU that has one keeps it
@@ -3035,10 +3064,15 @@ impl M68kMachine {
         // a JIT machine takes the live level instead (the raw model).
         if self.bus.bus.irq_latency_setting != 0 && !self.cpu.is_stopped() && !self.jit_enabled {
             level = level.min(self.bus.sampled_irq_level);
+            // A 68020+ takes the request it latched during the instruction
+            // even when the pins have dropped since (IPEND).
+            level = level.max(self.bus.ipl_latched_level);
         }
         // The boundary decision consumed the sample: release any poll-point
         // hold so the next instruction's accesses latch normally.
         self.bus.ipl_sample_held = false;
+        self.bus.ipl_latched_level = 0;
+        self.bus.sr_ipl_mask = ((self.cpu.get_sr() >> 8) & 7) as u8;
         self.cpu.set_irq(level);
         level
     }
@@ -3645,10 +3679,16 @@ impl M68kMachine {
         if bus.cartridge_nmi_pending() {
             return 7;
         }
-        if bus.paula.intena & INT_MASTER == 0 {
+        let pulse = bus.cpu_masked_irq_pulse();
+        if bus.paula.intena & INT_MASTER == 0 && pulse == 0 {
             return 0;
         }
-        let pending = bus.paula.intena & bus.cpu_visible_intreq();
+        let enabled = if bus.paula.intena & INT_MASTER != 0 {
+            bus.paula.intena & bus.cpu_visible_intreq()
+        } else {
+            0
+        };
+        let pending = enabled | pulse;
         let level = pending_ipl(pending);
         if level == 0 {
             return 0;
@@ -5007,20 +5047,29 @@ impl CpuBus {
         }
         let qualified_lead = if self.m68000_ipl_poll { 2 } else { 0 };
         let operand_lead = if self.m68000_ipl_poll { 4 } else { 0 };
+        // A source masked again before its unmask reached the pins is still
+        // on its way there (Bus::note_cpu_masked_irq_sources).
+        let pulse = self.bus.cpu_masked_irq_pulse();
         self.sampled_irq_level = if nmi {
             7
         } else if master_enabled {
-            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(qualified_lead))
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(qualified_lead) | pulse)
         } else {
-            0
+            pending_ipl(pulse)
         };
         self.sampled_operand_irq_level = if nmi {
             7
         } else if master_enabled {
-            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(operand_lead))
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(operand_lead) | pulse)
         } else {
-            0
+            pending_ipl(pulse)
         };
+        // 68020+ IPEND: a level above the mask that the processor has
+        // sampled stays pending until the instruction boundary. The 68010
+        // polls like the 68000 and has no such latch.
+        if self.ipl_latches_requests && self.sampled_irq_level > self.sr_ipl_mask {
+            self.ipl_latched_level = self.ipl_latched_level.max(self.sampled_irq_level);
+        }
     }
 
     /// Primary local-RAM window: the bank the batch starts executing in,
@@ -6292,6 +6341,84 @@ mod tests {
         Ok(())
     }
 
+    // A wait loop that keeps a request pending in INTREQ and unmasks it in
+    // INTENA for two instructions at a time: unmask, branch, mask. On a
+    // 68020 the window is about three colour clocks, shorter than the
+    // recognition deadline, so the request only reaches the CPU because
+    // Paula's IPL outputs trail a mask write as they trail an unmask write,
+    // and because the 68020 holds a request it has seen until the next
+    // instruction boundary. Regression example: the CD32 Classic Lotus
+    // Trilogy froze at its race screen waiting for the level 1 handler
+    // that counts frames this way.
+    fn run_unmask_window_wait_loop(model: CpuModel, clocks_per_cck: u32) -> Result<(u16, u32)> {
+        const HANDLER: u32 = 0x0600;
+        const COUNTER: usize = 0x0700;
+        const DONE: u32 = 0x0524;
+        let mut machine = machine_with_program_model(
+            0x0500,
+            &[
+                0x46FC, 0x2000, // move #$2000,sr
+                0x4DF9, 0x00DF, 0xF000, // lea $dff000,a6
+                0x3D7C, 0x0002, 0x009A, // loop: move.w #$0002,$9a(a6)  mask DSKBLK
+                0x3039, 0x0000, 0x0700, // move.w $700.l,d0
+                0xB07C, 0x0001, // cmp.w #1,d0
+                0x6408, // bcc.b done
+                0x3D7C, 0x8002, 0x009A, // move.w #$8002,$9a(a6)  unmask DSKBLK
+                0x60E6, // bra.b loop
+                0x60FE, // done: bra.b done
+            ],
+            model,
+        )?;
+        machine.cpu_clocks_per_cck = clocks_per_cck;
+        machine.bus.bus.set_cpu_clocks_per_cck(clocks_per_cck);
+        {
+            let bus = machine.bus_mut();
+            bus.irq_latency_setting = 6;
+            // Level 1 autovector and a handler that acknowledges and counts.
+            bus.mem.chip_ram[0x64..0x68].copy_from_slice(&HANDLER.to_be_bytes());
+            write_program(
+                bus,
+                HANDLER,
+                &[
+                    0x33FC, 0x0002, 0x00DF, 0xF09C, // move.w #$0002,$dff09c
+                    0x5279, 0x0000, 0x0700, // addq.w #1,$700.l
+                    0x4E73, // rte
+                ],
+            );
+            bus.paula.intena = INT_MASTER;
+            bus.paula.intreq = crate::chipset::paula::INT_DSKBLK;
+        }
+        for _ in 0..2_000 {
+            machine.step_slice(1)?;
+            if machine.pc() == DONE {
+                break;
+            }
+        }
+        let counter = u16::from_be_bytes([
+            machine.bus().mem.chip_ram[COUNTER],
+            machine.bus().mem.chip_ram[COUNTER + 1],
+        ]);
+        Ok((counter, machine.pc()))
+    }
+
+    #[test]
+    fn m68ec020_takes_a_request_unmasked_for_two_instructions() -> Result<()> {
+        let (counter, pc) = run_unmask_window_wait_loop(CpuModel::M68EC020, 4)?;
+        assert_eq!(
+            (counter, pc),
+            (1, 0x0524),
+            "the level 1 handler must run from inside the window"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn m68000_takes_a_request_unmasked_for_two_instructions() -> Result<()> {
+        let (counter, pc) = run_unmask_window_wait_loop(CpuModel::M68000, 2)?;
+        assert_eq!((counter, pc), (1, 0x0524));
+        Ok(())
+    }
+
     fn assert_single_instruction_timing(
         label: &str,
         slice: CpuStepSlice,
@@ -6354,7 +6481,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6394,7 +6524,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6445,7 +6578,10 @@ mod tests {
                 sampled_irq_level: 0,
                 sampled_operand_irq_level: 0,
                 m68000_ipl_poll: false,
+                ipl_latches_requests: false,
                 ipl_sample_held: false,
+                ipl_latched_level: 0,
+                sr_ipl_mask: 7,
                 diag_current_pc: 0,
                 jit_enabled: false,
                 cache_free_window: None,
@@ -6511,7 +6647,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6565,7 +6704,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6615,7 +6757,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6674,7 +6819,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6894,7 +7042,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6964,7 +7115,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7110,7 +7264,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7149,7 +7306,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7220,7 +7380,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,

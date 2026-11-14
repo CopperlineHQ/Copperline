@@ -549,6 +549,11 @@ probe_tests! {
     // CPU byte writes to a custom register latch the mirrored word (the
     // COLOR00 byte-write regression class).
     golden_regprobe_bytemirror => probe("regprobe-bytemirror", "regprobe-bytemirror.bin", 16.0);
+    // A request unmasked in INTENA for two instructions still reaches the
+    // CPU, on the 68000 and on the 68EC020 (the wait-loop class that keeps
+    // a request pending and opens a window for its handler).
+    golden_irqprobe_window => probe("irqprobe-window", "irqprobe-window.bin", 16.0);
+    golden_irqprobe_window_aga => probe_aga("irqprobe-window-aga", "irqprobe-window.bin", 16.0);
     // CLXDAT collision matrix bits rendered as cells (the collision
     // matching/enable regression class).
     golden_clxprobe => probe("clxprobe", "clxprobe.bin", 16.0);

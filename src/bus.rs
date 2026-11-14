@@ -941,6 +941,16 @@ pub struct Bus {
     /// the former unmeasured external-pin path.
     #[serde(default)]
     irq_cia_request_mask: u16,
+    /// Sources a CPU write masked in INTENA while they were still requested
+    /// in INTREQ, on machines outside the measured 68000 poll model. Each
+    /// stays eligible at the IPL inputs from `irq_masked_pulse_from` until
+    /// `irq_masked_pulse_until` (see note_cpu_masked_irq_sources).
+    #[serde(default)]
+    irq_masked_pulse: u16,
+    #[serde(default)]
+    irq_masked_pulse_from: [u64; 16],
+    #[serde(default)]
+    irq_masked_pulse_until: [u64; 16],
     /// Configured IPL-pipe length in cck (from COPPERLINE_IRQ_LATENCY_CCK or the
     /// default); 0 disables the pipe and the cpu.rs boundary-sampling delay. A
     /// field (not a global) so tests can set it per-instance -- mechanism tests
@@ -3796,6 +3806,9 @@ impl Bus {
             irq_latency_visible_at: [0; 16],
             irq_latency_mask: 0,
             irq_latency_last_pending: 0,
+            irq_masked_pulse: 0,
+            irq_masked_pulse_from: [0; 16],
+            irq_masked_pulse_until: [0; 16],
             cia_irq_routes: Default::default(),
             irq_software_request_mask: 0,
             irq_cia_request_mask: 0,
@@ -5486,6 +5499,9 @@ impl Bus {
         self.irq_latency_visible_at = [0; 16];
         self.irq_latency_mask = 0;
         self.irq_latency_last_pending = 0;
+        self.irq_masked_pulse = 0;
+        self.irq_masked_pulse_from = [0; 16];
+        self.irq_masked_pulse_until = [0; 16];
         self.cia_irq_routes = Default::default();
         self.irq_software_request_mask = 0;
         self.irq_cia_request_mask = 0;
@@ -8164,6 +8180,7 @@ impl Bus {
     /// running code. Preserve the unmeasured pin-fed unmask path.
     fn note_cpu_irq_latches_changed(&mut self) {
         if self.cpu_clocks_per_cck != 2 || self.cpu_short_bus_cycle {
+            self.note_cpu_masked_irq_sources();
             self.note_irq_latches_changed();
             return;
         }
@@ -8177,6 +8194,88 @@ impl Bus {
         }
         self.irq_latency_mask &= pending;
         self.irq_latency_last_pending = pending;
+    }
+
+    /// Paula drives the IPL pins from a registered copy of INTREQ & INTENA,
+    /// so a write that masks a source reaches the CPU no sooner than the
+    /// write that unmasked it did. A source that software unmasks for a few
+    /// colour clocks and masks again therefore still appears at the pins,
+    /// as a pulse of the same width, after the mask write has landed. Wait
+    /// loops that open such a window around a pending request depend on it:
+    /// on a 68020 the unmask, a branch and the mask write take about three
+    /// colour clocks, less than the recognition deadline, so without the
+    /// pulse the request is never seen.
+    ///
+    /// Called for a CPU INTENA/INTREQ write, before the latches are noted,
+    /// on machines outside the measured 68000 A500 poll model. A source the
+    /// write masked (still requested in INTREQ, no longer enabled) stays
+    /// eligible until the recognition deadline after the mask write, and
+    /// from the deadline its unmask armed if that has not passed yet. PORTS
+    /// keeps its immediate level path, as on unmask.
+    ///
+    /// TODO: this is one edge of a full IPL delay line. An INTREQ
+    /// acknowledge reaches the pins through the same register and should
+    /// linger the same way, which is what makes clear-then-RTE re-enter a
+    /// handler on fast CPUs; that needs the 68020-path delay measured on
+    /// hardware first, and the 68000 path needs the same check against its
+    /// A500 captures.
+    fn note_cpu_masked_irq_sources(&mut self) {
+        let setting = self.irq_latency_setting;
+        if setting == 0 {
+            self.irq_masked_pulse = 0;
+            return;
+        }
+        let now = self.emulated_cck;
+        let requested = self.paula.intreq & IRQ_SOURCE_BITS;
+        let pending = self.current_enabled_irq_sources();
+        // An acknowledged source drops out at once; an expired pulse is done.
+        let mut live = self.irq_masked_pulse & requested;
+        let mut scan = live;
+        while scan != 0 {
+            let bit = scan.trailing_zeros() as usize;
+            scan &= scan - 1;
+            if now >= self.irq_masked_pulse_until[bit] {
+                live &= !(1u16 << bit);
+            }
+        }
+        let mut masked = self.irq_latency_last_pending & !pending & requested & !INT_PORTS;
+        let until = now.saturating_add(u64::from(setting));
+        while masked != 0 {
+            let bit = masked.trailing_zeros() as usize;
+            masked &= masked - 1;
+            let mask = 1u16 << bit;
+            let mut from = if self.irq_latency_mask & mask != 0 {
+                self.irq_latency_visible_at[bit]
+            } else {
+                now
+            };
+            if live & mask != 0 {
+                // An earlier window is still on its way to the pins.
+                from = from.min(self.irq_masked_pulse_from[bit]);
+            }
+            self.irq_masked_pulse_from[bit] = from;
+            self.irq_masked_pulse_until[bit] = until;
+            live |= mask;
+        }
+        self.irq_masked_pulse = live;
+    }
+
+    /// Sources inside a masked-source pulse at the IPL inputs right now
+    /// (see note_cpu_masked_irq_sources). These are presented to the CPU
+    /// whatever INTENA currently says.
+    pub(crate) fn cpu_masked_irq_pulse(&self) -> u16 {
+        let mut scan = self.irq_masked_pulse & self.paula.intreq;
+        let mut visible = 0;
+        while scan != 0 {
+            let bit = scan.trailing_zeros() as usize;
+            scan &= scan - 1;
+            if self.emulated_cck >= self.irq_masked_pulse_from[bit]
+                && self.emulated_cck < self.irq_masked_pulse_until[bit]
+            {
+                visible |= 1u16 << bit;
+            }
+        }
+        visible
     }
 
     fn note_irq_source_asserted(&mut self) {
