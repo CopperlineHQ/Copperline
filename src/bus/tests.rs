@@ -10830,6 +10830,7 @@ fn aga_wide_sprite_collision_sources_take_every_serialized_word() {
             0x2C,
             0,
             super::RENDER_FRAMEBUFFER_WIDTH,
+            true,
         );
         assert_eq!(sources.len(), 1, "FMODE {fmode:#06X}");
         assert_eq!(sources[0].source.words, [0xA000, 0x0005, 0, 0]);
