@@ -652,20 +652,46 @@ pub fn build(
     _track_stopped_slice_progress: bool,
 ) -> Result<M68kMachine> {
     let mut machine = M68kMachine::new(bus, cpu_model, fpu_enabled)?;
-    machine.cpu.emulate_unimplemented_060 =
-        unimplemented == crate::config::UnimplementedPolicy::Native;
-    if cpu_model.is_68060() && unimplemented == crate::config::UnimplementedPolicy::Trap {
-        log::info!(
-            "68060 unimplemented instructions will trap faithfully: the OS \
-             needs 68060.library (or set [cpu] unimplemented = \"native\")"
-        );
-    }
+    apply_unimplemented_policy(&mut machine.cpu, cpu_model, fpu_enabled, unimplemented);
     machine.cpu_clocks_per_cck = cpu_clocks_per_cck.max(1);
     machine
         .bus
         .bus
         .set_cpu_clocks_per_cck(machine.cpu_clocks_per_cck);
     Ok(machine)
+}
+
+/// Apply `[cpu] unimplemented` to the core. The 68060 dropped integer and
+/// floating-point instructions from silicon for its 68060.library; the
+/// 68040's FPU leaves the transcendental instructions, FMOVECR, packed
+/// decimal and denormalized or unnormalized operands to the M68040FPSP in
+/// 68040.library. "trap" raises their exceptions with the state frames those
+/// packages read; "native" executes them in the core. The 68040 flag acts
+/// only on a 68040 whose FPU is fitted.
+fn apply_unimplemented_policy(
+    cpu: &mut CpuCore,
+    cpu_model: CpuModel,
+    fpu_enabled: bool,
+    unimplemented: crate::config::UnimplementedPolicy,
+) {
+    let native = unimplemented == crate::config::UnimplementedPolicy::Native;
+    cpu.emulate_unimplemented_060 = native;
+    cpu.emulate_unimplemented_040 = native;
+    if native {
+        return;
+    }
+    if cpu_model.is_68060() {
+        log::info!(
+            "68060 unimplemented instructions will trap faithfully: the OS \
+             needs 68060.library (or set [cpu] unimplemented = \"native\")"
+        );
+    } else if cpu_model == CpuModel::M68040 && fpu_enabled {
+        log::info!(
+            "68040 unimplemented floating-point instructions and data types \
+             will trap faithfully: the OS needs 68040.library (or set [cpu] \
+             unimplemented = \"native\")"
+        );
+    }
 }
 
 impl M68kMachine {
@@ -7039,6 +7065,70 @@ mod tests {
             !bus.instruction_fetches_were_cached(),
             "an extension-word miss must select Worst Case even after an opcode hit"
         );
+    }
+
+    #[test]
+    fn unimplemented_policy_sets_the_68040_and_68060_trap_gates() -> Result<()> {
+        use crate::config::UnimplementedPolicy::{Native, Trap};
+        for (model, fpu) in [
+            (CpuModel::M68040, true),
+            (CpuModel::M68040, false),
+            (CpuModel::M68EC040, false),
+            (CpuModel::M68060, true),
+            (CpuModel::M68030, false),
+        ] {
+            let machine = build(test_bus_with_pc(0x100), model, fpu, 2, Trap, false)?;
+            assert!(!machine.cpu.emulate_unimplemented_040, "{model:?} trap");
+            assert!(!machine.cpu.emulate_unimplemented_060, "{model:?} trap");
+            let machine = build(test_bus_with_pc(0x100), model, fpu, 2, Native, false)?;
+            assert!(machine.cpu.emulate_unimplemented_040, "{model:?} native");
+            assert!(machine.cpu.emulate_unimplemented_060, "{model:?} native");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn a_68040_takes_the_fpsp_traps_only_under_the_trap_policy() -> Result<()> {
+        use crate::config::UnimplementedPolicy::{Native, Trap};
+        // $100: FSIN.X FP0,FP1 - an instruction the 68040 FPU leaves to
+        // 68040.library. $200 (Line-F handler): FSAVE -(A7).
+        let boot = |policy| -> Result<M68kMachine> {
+            let mut machine = build(
+                test_bus_with_pc(0x100),
+                CpuModel::M68040,
+                true,
+                2,
+                policy,
+                false,
+            )?;
+            write_program(machine.bus_mut(), 0x100, &[0xF200, 0x008E, 0x4E71]);
+            write_program(machine.bus_mut(), 0x2C, &[0x0000, 0x0200]);
+            write_program(machine.bus_mut(), 0x200, &[0xF327, 0x4E71]);
+            Ok(machine)
+        };
+
+        // Trap: the Line-F vector with the format $2 frame stacking the
+        // next instruction, and the unimplemented-instruction state frame
+        // ($4130, $34 bytes) from the handler's FSAVE.
+        let mut machine = boot(Trap)?;
+        let sp = machine.a(7);
+        let _ = machine.step_slice(1)?;
+        assert_eq!(machine.pc(), 0x200);
+        assert_eq!(machine.a(7), sp - 12);
+        let frame = machine.debug_read_memory(machine.a(7), 8);
+        assert_eq!(&frame[2..8], [0x00, 0x00, 0x01, 0x04, 0x20, 0x2C]);
+        let _ = machine.step_slice(1)?;
+        assert_eq!(machine.a(7), sp - 12 - 0x34);
+        let state = machine.debug_read_memory(machine.a(7), 0x34);
+        assert_eq!(&state[..4], [0x41, 0x30, 0x00, 0x00]);
+        assert_eq!(&state[0x10..0x12], [0x00, 0x8E], "CMDREG1B");
+
+        // Native: the instruction executes.
+        let mut machine = boot(Native)?;
+        let _ = machine.step_slice(1)?;
+        assert_eq!(machine.pc(), 0x104);
+        assert_eq!(machine.a(7), sp);
+        Ok(())
     }
 
     #[test]

@@ -228,7 +228,7 @@ flyerclip = { path = "crates/flyerclip" }
 # conformance fixes awaiting upstream"); return to the published crate once
 # they are released.
 # Keep the conformance runner on this same revision (tools/check-m68k-locks.py).
-m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "19932bde625b073b31916e2649d4e770ec721d8b", features = ["serde"] }
+m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "bcd5fda48c8e98dcd1aedc4658ee19506f2e1828", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "aa54c40c232a826f3d6f117ac8a0b165e7571f32", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.

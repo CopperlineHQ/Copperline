@@ -671,9 +671,9 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
 #                   # interface, so not valid on a 68000/68010/68EC040/
 #                   # 68EC060). The full 68040's and 68060's on-die FPUs
 #                   # are on by default.
-# unimplemented = "trap"  # 68060/68EC060 only: "trap" (faithful; the OS needs
-#                   # 68060.library) or "native" (execute the removed
-#                   # instructions directly)
+# unimplemented = "trap"  # 68040 and 68060 only: "trap" (faithful; the OS
+#                   # needs 68040.library / 68060.library) or "native"
+#                   # (execute the instructions left to software directly)
 # jit = true        # experimental: fast batch/trace-JIT CPU execution
 #                   # (68020+; not cycle-exact)
 # speed = "fastest" # with jit: adapt the JIT clock to the host while the
@@ -711,15 +711,28 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   modelled. The data cache covers expansion RAM/ROM only, since chip and
   slow RAM are DMA-visible and cache-inhibited as on real Amigas. Set
   either key to `false` to opt out.
-- `unimplemented` (68060/68EC060 only) picks what happens on the instructions the
-  68060 dropped from silicon: MOVEP, CHK2/CMP2, CAS2, misaligned CAS,
-  64-bit MUL/DIV, and most of the FPU beyond basic arithmetic
-  (transcendentals, FMOVECR, packed decimal). `"trap"` (the default) is
+- `unimplemented` (68040 and 68060 only) picks what happens on the
+  instructions those chips leave to software. The 68060 dropped MOVEP,
+  CHK2/CMP2, CAS2, misaligned CAS, 64-bit MUL/DIV, and most of the FPU
+  beyond basic arithmetic (transcendentals, FMOVECR, packed decimal) from
+  silicon. `"trap"` (the default) is
   what the chip does -- they raise the unimplemented-instruction exceptions
   and the OS-side `68060.library` emulates them, as on a real CyberStorm or
   Blizzard board, so software using them needs that library installed.
   `"native"` executes them directly for systems without it. Kickstart 3.1
-  itself boots under `"trap"`. The 68060's FPU is not 68040-compatible
+  itself boots under `"trap"`. On a 68040 with its FPU the same key covers
+  what that FPU leaves to Motorola's floating-point software package: the
+  transcendental instructions, FMOD/FREM/FSCALE, FGETEXP/FGETMAN,
+  FINT/FINTRZ, FMOVECR, packed decimal, and any denormalized or
+  unnormalized operand of the instructions it does have. Under `"trap"`
+  they take the Line-F and unsupported-data-type exceptions and
+  `68040.library` (loaded by SetPatch from `LIBS:`) emulates them from the
+  FPU state frames, as on an A4000/040 or A3640; without the library the
+  first such instruction ends in the OS's exception handler, exactly as
+  on the real machine. `"native"` computes them in the emulator instead.
+  Kickstart 3.1 and the bundled AROS ROM boot under either setting; the
+  68EC040 and a 68040 with `fpu = false` have no FPU and are unaffected.
+  The 68060's FPU is not 68040-compatible
   (its FPU state frames are a different size from the ones Kickstart
   builds), so, as a real 060 board's boot ROM does, Copperline disables
   it (PCR.DFP) on every reset and `68060.library` enables it once it has

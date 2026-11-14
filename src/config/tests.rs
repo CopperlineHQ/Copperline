@@ -4595,28 +4595,37 @@ fn fastest_cpu_speed_blocks_run_ahead() -> Result<()> {
 }
 
 #[test]
-fn cpu_unimplemented_policy_parses_and_is_68060_only() -> Result<()> {
-    let cfg = parse_config(
-        r#"
-            [cpu]
-            model = "68060"
-            unimplemented = "native"
-            "#,
-    )?;
-    assert_eq!(cfg.cpu_unimplemented, UnimplementedPolicy::Native);
+fn cpu_unimplemented_policy_parses_and_is_68040_and_68060_only() -> Result<()> {
+    // The 68060 family and the 68040 family both leave instructions to an
+    // OS-side software package; the key defaults to faithful traps.
+    for model in ["68060", "68EC060", "68040", "68EC040"] {
+        let cfg = parse_config(&format!(
+            "[cpu]\nmodel = \"{model}\"\nunimplemented = \"native\""
+        ))?;
+        assert_eq!(
+            cfg.cpu_unimplemented,
+            UnimplementedPolicy::Native,
+            "{model}"
+        );
+        let cfg = parse_config(&format!(
+            "[cpu]\nmodel = \"{model}\"\nunimplemented = \"trap\""
+        ))?;
+        assert_eq!(cfg.cpu_unimplemented, UnimplementedPolicy::Trap, "{model}");
+        let cfg = parse_config(&format!("[cpu]\nmodel = \"{model}\""))?;
+        assert_eq!(cfg.cpu_unimplemented, UnimplementedPolicy::Trap, "{model}");
+    }
 
-    let err = parse_config(
-        r#"
-            [cpu]
-            model = "68040"
-            unimplemented = "native"
-            "#,
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("applies only to the 68060"),
-        "{err}"
-    );
+    for model in ["68000", "68020", "68030", "68EC030"] {
+        let err = parse_config(&format!(
+            "[cpu]\nmodel = \"{model}\"\nunimplemented = \"native\""
+        ))
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("applies only to the 68040 and 68060"),
+            "{model}: {err}"
+        );
+    }
 
     let err = parse_config(
         r#"
