@@ -543,6 +543,10 @@ probe_tests! {
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
     golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 16.0);
+    // VPOSR's V8 steps with VHPOSR's line byte: a read of both never pairs
+    // the low byte of one line with the V8 of another (the false line 0 at
+    // 255 -> 256 and line 256 at the frame wrap).
+    golden_posprobe_v8 => probe("posprobe-v8", "posprobe-v8.bin", 16.0);
     // DMA sprite vertical reuse + attached pair placement (the sprite
     // register-FSM regression class).
     golden_ddfprobe_sprmulti => probe("ddfprobe-sprmulti", "ddfprobe-sprmulti.bin", 16.0);
