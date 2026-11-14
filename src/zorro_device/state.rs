@@ -95,7 +95,7 @@ mod tests {
 
     // The same fixture is read and reproduced in the full and core-only CI
     // builds. It contains no optional board, so those features must not affect it.
-    const COPPERHF: &[u8] = include_bytes!("../../tests/fixtures/copperhf-board-v79.bin");
+    const COPPERHF: &[u8] = include_bytes!("../../tests/fixtures/copperhf-board-v82-abort.bin");
 
     #[test]
     fn board_fixture_is_independent_of_optional_features() {

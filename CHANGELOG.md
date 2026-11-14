@@ -38,6 +38,11 @@ for the earlier release notes.
 
 ### Fixed
 
+- `copperhf.device` implements `AbortIO`. A held `TD_ADDCHANGEINT` is
+  released with `IOERR_ABORTED`, so a task that exits without
+  `TD_REMCHANGEINT` no longer waits forever, and a read or board-answered
+  command still queued on the board is withdrawn. Writes already on their
+  way to the medium complete normally.
 - A ZIP-wrapped floppy image whose file name and extra field together run
   past 64 KiB no longer panics a build with overflow checks enabled; it is
   refused as release builds already refused it.

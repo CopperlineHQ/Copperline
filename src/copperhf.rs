@@ -146,17 +146,20 @@ const CHF_CHANGED_MASK: u32 = 0x4014;
 const CHF_CHANGED_ACK: u32 = 0x4016;
 const CHF_UNIT_MEDIA: u32 = 0x4018;
 const CHF_DOORBELL: u32 = 0x4020;
+const CHF_ABORT: u32 = 0x4024;
 const CHF_COMPLETE_GET: u32 = 0x4028;
 const CHF_COMPLETE_ACK: u32 = 0x402C;
 const CHF_IRQ_STATUS: u32 = 0x4030;
 const CHF_IRQ_ENABLE: u32 = 0x4032;
+const CHF_ABORT_STATUS: u32 = 0x4034;
 
 const CHF_MAGIC_VALUE: u32 = 0x4350_4846; // "CPHF"
-                                          // Version 2 = M4: CHF_CHANGED_MASK/ACK, CHF_UNIT_MEDIA, IRQ_STATUS bit 1,
-                                          // TD64/NSD/HD_SCSICMD command coverage. See guest/copperhf/copperhf_board.h.
-                                          // M5's asynchronous I/O does not change the guest-visible protocol at all,
-                                          // so the version stays 2.
-const CHF_PROTOCOL_VERSION: u16 = 2;
+
+/// Version 2 = M4: CHF_CHANGED_MASK/ACK, CHF_UNIT_MEDIA, IRQ_STATUS bit 1,
+/// TD64/NSD/HD_SCSICMD command coverage. M5's asynchronous I/O did not
+/// change the guest-visible protocol. Version 3 adds CHF_ABORT and
+/// CHF_ABORT_STATUS. See guest/copperhf/copperhf_board.h.
+const CHF_PROTOCOL_VERSION: u16 = 3;
 
 // IOStdReq field offsets, relative to the request pointer.
 const IO_UNIT: u32 = 24;
@@ -191,6 +194,9 @@ const NSCMD_TD_FORMAT64: u16 = 0xC003;
 
 // io_Error values.
 const IOERR_OPENFAIL: i8 = -1;
+/// The request was withdrawn through `CHF_ABORT` before the board delivered
+/// it (exec's `AbortIO` contract).
+const IOERR_ABORTED: i8 = -2;
 const IOERR_NOCMD: i8 = -3;
 const IOERR_BADLENGTH: i8 = -4;
 const IOERR_BADADDRESS: i8 = -5;
@@ -386,6 +392,13 @@ enum PendingRequest {
         header: RequestHeader,
         kind: IoDrainKind,
     },
+    /// A read withdrawn through `CHF_ABORT` after its job went to the
+    /// worker. The job cannot be recalled (and whether the worker has
+    /// reached it yet depends on host speed), so its result is still
+    /// collected at this queue position, keeping the two FIFOs matched,
+    /// and then thrown away: nothing lands in guest memory and the request
+    /// completes with `IOERR_ABORTED`.
+    AbortedRead { ptr: u32, flags: u8 },
 }
 
 /// The worker-thread handle: the job sender (torn down on drop to signal
@@ -665,6 +678,11 @@ pub struct CopperhfBoard {
     /// High half of a `CHF_DOORBELL` write, latched until the low half
     /// commits (or a 32-bit write commits both halves at once).
     doorbell_hi: Option<u16>,
+    /// High half of a `CHF_ABORT` write, latched like [`Self::doorbell_hi`].
+    abort_hi: Option<u16>,
+    /// `CHF_ABORT_STATUS`: whether the last `CHF_ABORT` write withdrew its
+    /// request.
+    abort_status: bool,
     /// Completed request pointers awaiting `CHF_COMPLETE_GET`/`_ACK`.
     completions: VecDeque<u32>,
     /// Snapshot taken by the last `CHF_COMPLETE_GET` high-word read, so the
@@ -702,6 +720,8 @@ impl CopperhfBoard {
             motor: [false; NUM_UNITS],
             select: 0,
             doorbell_hi: None,
+            abort_hi: None,
+            abort_status: false,
             completions: VecDeque::new(),
             complete_get_latch: None,
             unit_blocks_latch: None,
@@ -919,6 +939,7 @@ impl CopperhfBoard {
             CHF_UNIT_MEDIA => self.media_bitmask(),
             CHF_IRQ_STATUS => self.irq_status(),
             CHF_IRQ_ENABLE => u16::from(self.irq_enable),
+            CHF_ABORT_STATUS => u16::from(self.abort_status),
             _ => 0xFFFF,
         }
     }
@@ -946,6 +967,11 @@ impl CopperhfBoard {
                 let ptr = (u32::from(hi) << 16) | u32::from(value);
                 self.dispatch_request(ptr, host);
             }
+            CHF_ABORT => self.abort_hi = Some(value),
+            _ if off == CHF_ABORT + 2 => {
+                let hi = self.abort_hi.take().unwrap_or(0);
+                self.abort_request((u32::from(hi) << 16) | u32::from(value));
+            }
             CHF_COMPLETE_ACK => {
                 self.completions.pop_front();
             }
@@ -958,6 +984,9 @@ impl CopperhfBoard {
         if off == CHF_DOORBELL {
             self.doorbell_hi = None;
             self.dispatch_request(value, host);
+        } else if off == CHF_ABORT {
+            self.abort_hi = None;
+            self.abort_request(value);
         } else {
             self.write_word(off, (value >> 16) as u16, host);
             self.write_word(off + 2, value as u16, host);
@@ -1000,6 +1029,62 @@ impl CopperhfBoard {
             _ => self
                 .in_flight
                 .push_back(PendingRequest::Local { ptr, header }),
+        }
+    }
+
+    /// `CHF_ABORT`: withdraw the request at `ptr` if the board still holds
+    /// it, and latch the outcome in `CHF_ABORT_STATUS`.
+    ///
+    /// A request can be withdrawn from the moment its doorbell rings until
+    /// the board tick that delivers it, and only while nothing it does has
+    /// left the board: a read (its data has not reached guest memory yet)
+    /// and every command the board answers from its own state (their
+    /// effects, `TD_MOTOR`'s latch included, are applied at delivery). It
+    /// then completes in its queue position with `IOERR_ABORTED` and
+    /// `io_Actual` 0, like any other request, so the guest collects it
+    /// through the ordinary completion queue.
+    ///
+    /// A write, format, `CMD_UPDATE`, `TD_EJECT` or `HD_SCSICMD` is on its
+    /// way to the medium as soon as the doorbell rings and cannot be
+    /// recalled; it is left alone and completes with its real result. So is
+    /// a request the board has already delivered (it sits in the completion
+    /// queue with its result written) and a pointer the board does not
+    /// know. The answer depends only on the board's own queue, never on how
+    /// far the worker thread has got, so it is the same on every run (the
+    /// module doc's determinism section).
+    fn abort_request(&mut self, ptr: u32) {
+        self.abort_status = false;
+        for pending in &mut self.in_flight {
+            let flags = match pending {
+                PendingRequest::Precomputed {
+                    ptr: p,
+                    flags,
+                    error,
+                    ..
+                } if *p == ptr && *error != IOERR_ABORTED => *flags,
+                PendingRequest::Local { ptr: p, header } if *p == ptr => header.flags,
+                PendingRequest::Io {
+                    ptr: p,
+                    header,
+                    kind: IoDrainKind::Rw { read: true },
+                } if *p == ptr => {
+                    *pending = PendingRequest::AbortedRead {
+                        ptr,
+                        flags: header.flags,
+                    };
+                    self.abort_status = true;
+                    return;
+                }
+                _ => continue,
+            };
+            *pending = PendingRequest::Precomputed {
+                ptr,
+                flags,
+                error: IOERR_ABORTED,
+                actual: 0,
+            };
+            self.abort_status = true;
+            return;
         }
     }
 
@@ -1405,6 +1490,10 @@ impl CopperhfBoard {
                 let (error, actual) = self.apply_io_result(&header, kind, result, host);
                 self.complete(ptr, header.flags, error, actual, host);
             }
+            PendingRequest::AbortedRead { ptr, flags } => {
+                let _ = self.worker.recv();
+                self.complete(ptr, flags, IOERR_ABORTED, 0, host);
+            }
         }
     }
 
@@ -1524,7 +1613,7 @@ impl CopperhfBoard {
                         self.changed_mask |= 1 << unit;
                     }
                 }
-                PendingRequest::Io { .. } => {
+                PendingRequest::Io { .. } | PendingRequest::AbortedRead { .. } => {
                     let _ = self.worker.recv();
                 }
                 PendingRequest::HeaderFailed { .. } | PendingRequest::Precomputed { .. } => {}
@@ -1555,6 +1644,10 @@ struct CopperhfBoardState {
     motor: [bool; NUM_UNITS],
     select: u16,
     doorbell_hi: Option<u16>,
+    #[serde(default)]
+    abort_hi: Option<u16>,
+    #[serde(default)]
+    abort_status: bool,
     completions: VecDeque<u32>,
     complete_get_latch: Option<u32>,
     unit_blocks_latch: Option<u32>,
@@ -1575,6 +1668,8 @@ struct CopperhfBoardStateRef<'a> {
     motor: &'a [bool; NUM_UNITS],
     select: u16,
     doorbell_hi: Option<u16>,
+    abort_hi: Option<u16>,
+    abort_status: bool,
     completions: &'a VecDeque<u32>,
     complete_get_latch: Option<u32>,
     unit_blocks_latch: Option<u32>,
@@ -1598,6 +1693,8 @@ impl serde::Serialize for CopperhfBoard {
             motor: &self.motor,
             select: self.select,
             doorbell_hi: self.doorbell_hi,
+            abort_hi: self.abort_hi,
+            abort_status: self.abort_status,
             completions: &self.completions,
             complete_get_latch: self.complete_get_latch,
             unit_blocks_latch: self.unit_blocks_latch,
@@ -1630,6 +1727,8 @@ impl<'de> serde::Deserialize<'de> for CopperhfBoard {
             motor: state.motor,
             select: state.select,
             doorbell_hi: state.doorbell_hi,
+            abort_hi: state.abort_hi,
+            abort_status: state.abort_status,
             completions: state.completions,
             complete_get_latch: state.complete_get_latch,
             unit_blocks_latch: state.unit_blocks_latch,
@@ -1914,6 +2013,7 @@ impl ZorroDevice for CopperhfBoard {
             }
             CHF_IRQ_STATUS => Some(self.irq_status()),
             CHF_IRQ_ENABLE => Some(u16::from(self.irq_enable)),
+            CHF_ABORT_STATUS => Some(u16::from(self.abort_status)),
             _ => None,
         }
     }
@@ -1946,6 +2046,8 @@ impl ZorroDevice for CopperhfBoard {
         self.discard_in_flight();
         self.motor = [false; NUM_UNITS];
         self.doorbell_hi = None;
+        self.abort_hi = None;
+        self.abort_status = false;
         self.completions.clear();
         self.complete_get_latch = None;
         self.unit_blocks_latch = None;
@@ -2806,11 +2908,256 @@ mod tests {
     // -- M4: command coverage --------------------------------------------
 
     #[test]
-    fn version_register_reports_2() {
+    fn version_register_reports_3() {
         let mut board = CopperhfBoard::new();
         let mut mem = memory();
         let mut host = DeviceHost::new(&mut mem);
-        assert_eq!(board.read(CHF_VERSION, 2, &mut host), 2);
+        assert_eq!(board.read(CHF_VERSION, 2, &mut host), 3);
+    }
+
+    // -- CHF_ABORT: withdrawing a request the board still holds ----------
+
+    /// `CHF_ABORT` as one 32-bit write, then the outcome from
+    /// `CHF_ABORT_STATUS`.
+    fn abort(board: &mut CopperhfBoard, host: &mut DeviceHost, ptr: u32) -> bool {
+        board.write(CHF_ABORT, 4, ptr, host);
+        board.read(CHF_ABORT_STATUS, 2, host) == 1
+    }
+
+    #[test]
+    fn aborting_a_queued_read_completes_it_aborted_and_leaves_the_buffer_alone() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("abort_read", 4));
+        let mut mem = memory();
+        let (ptr, data) = (0x1000, 0x2000);
+        for i in 0..512 {
+            mem.chip_ram[(data + i) as usize] = 0xEE;
+        }
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, data, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_no_drain(&mut board, &mut host, ptr);
+
+        assert!(abort(&mut board, &mut host, ptr));
+        // Withdrawn, not dropped: it still completes through the queue.
+        assert_eq!(board.read(CHF_COMPLETE_GET, 4, &mut host), 0);
+        ZorroDevice::tick(&mut board, 1, &mut host);
+        assert_eq!(board.read(CHF_COMPLETE_GET, 4, &mut host), ptr);
+        assert_eq!(io_error(&mem, ptr), IOERR_ABORTED);
+        assert_eq!(io_actual(&mem, ptr), 0);
+        for i in 0..512 {
+            assert_eq!(
+                mem.chip_ram[(data + i) as usize],
+                0xEE,
+                "byte {i} of an aborted read"
+            );
+        }
+    }
+
+    #[test]
+    fn aborting_one_of_several_queued_requests_keeps_the_others_and_their_order() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("abort_middle", 4));
+        let mut mem = memory();
+        let ptrs = [0x1000u32, 0x1100, 0x1200];
+        let bufs = [0x2000u32, 0x2400, 0x2800];
+        for sector in 0..3u32 {
+            let ptr = 0x1800;
+            for i in 0..512 {
+                mem.chip_ram[(0x3000 + i) as usize] = 0x10 + sector as u8;
+            }
+            write_request(&mut mem, ptr, 0, CMD_WRITE, 0, 512, 0x3000, sector * 512);
+            let mut host = DeviceHost::new(&mut mem);
+            ring_doorbell_long(&mut board, &mut host, ptr);
+            board.write(CHF_COMPLETE_ACK, 2, 0, &mut host);
+        }
+        for (i, (&ptr, &buf)) in ptrs.iter().zip(&bufs).enumerate() {
+            write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, buf, i as u32 * 512);
+        }
+        let mut host = DeviceHost::new(&mut mem);
+        for &ptr in &ptrs {
+            ring_doorbell_no_drain(&mut board, &mut host, ptr);
+        }
+        assert!(abort(&mut board, &mut host, ptrs[1]));
+        ZorroDevice::tick(&mut board, 1, &mut host);
+
+        for &ptr in &ptrs {
+            assert_eq!(board.read(CHF_COMPLETE_GET, 4, &mut host), ptr);
+            board.write(CHF_COMPLETE_ACK, 2, 0, &mut host);
+        }
+        assert_eq!(board.read(CHF_COMPLETE_GET, 4, &mut host), 0);
+        assert_eq!(io_error(&mem, ptrs[0]), 0);
+        assert_eq!(io_error(&mem, ptrs[1]), IOERR_ABORTED);
+        assert_eq!(io_error(&mem, ptrs[2]), 0);
+        // The reads on either side of the aborted one got their own
+        // sectors: the worker's result for the aborted job was consumed in
+        // its queue position, not handed to the request behind it.
+        assert_eq!(mem.chip_ram[(bufs[0]) as usize], 0x10);
+        assert_eq!(mem.chip_ram[(bufs[1]) as usize], 0);
+        assert_eq!(mem.chip_ram[(bufs[2]) as usize], 0x12);
+    }
+
+    #[test]
+    fn aborting_a_queued_board_answered_command_stops_its_effect() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("abort_motor", 4));
+        let mut mem = memory();
+        let ptr = 0x1000;
+        // TD_MOTOR on: its latch is applied when the request is delivered.
+        write_request(&mut mem, ptr, 0, TD_MOTOR, 0, 1, 0, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_no_drain(&mut board, &mut host, ptr);
+        assert!(abort(&mut board, &mut host, ptr));
+        ZorroDevice::tick(&mut board, 1, &mut host);
+        board.write(CHF_COMPLETE_ACK, 2, 0, &mut host);
+        assert_eq!(io_error(&mem, ptr), IOERR_ABORTED);
+
+        // The motor never turned on: the next TD_MOTOR reports "was off".
+        write_request(&mut mem, ptr, 0, TD_MOTOR, 0, 0, 0, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(io_actual(&mem, ptr), 0);
+    }
+
+    #[test]
+    fn a_queued_write_is_past_recall_and_completes_normally() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("abort_write", 4));
+        let mut mem = memory();
+        let (ptr, data) = (0x1000, 0x2000);
+        for i in 0..512 {
+            mem.chip_ram[(data + i) as usize] = 0x5A;
+        }
+        write_request(&mut mem, ptr, 0, CMD_WRITE, 0, 512, data, 512);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_no_drain(&mut board, &mut host, ptr);
+        assert!(!abort(&mut board, &mut host, ptr));
+        ZorroDevice::tick(&mut board, 1, &mut host);
+        board.write(CHF_COMPLETE_ACK, 2, 0, &mut host);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(io_actual(&mem, ptr), 512);
+
+        // And the sector really is on the medium.
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, 0x3000, 512);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(mem.chip_ram[0x3000], 0x5A);
+        assert_eq!(mem.chip_ram[0x31FF], 0x5A);
+    }
+
+    #[test]
+    fn update_eject_and_scsi_requests_are_not_withdrawn() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("abort_committed", 4));
+        let mut mem = memory();
+        let (update, eject, scsi) = (0x1000, 0x1100, 0x1200);
+        write_request(&mut mem, update, 0, CMD_UPDATE, 0, 0, 0, 0);
+        write_request(&mut mem, eject, 0, TD_EJECT, 0, 1, 0, 0);
+        // TEST UNIT READY.
+        for i in 0..6 {
+            mem.chip_ram[(0x2100 + i) as usize] = 0;
+        }
+        write_scsicmd(&mut mem, 0x2000, 0, 0, 0x2100, 6, 0, 0, 0);
+        write_request(&mut mem, scsi, 0, HD_SCSICMD, 0, 30, 0x2000, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_no_drain(&mut board, &mut host, update);
+        ring_doorbell_no_drain(&mut board, &mut host, scsi);
+        ring_doorbell_no_drain(&mut board, &mut host, eject);
+        assert!(!abort(&mut board, &mut host, update));
+        assert!(!abort(&mut board, &mut host, scsi));
+        assert!(!abort(&mut board, &mut host, eject));
+        ZorroDevice::tick(&mut board, 1, &mut host);
+        assert_eq!(io_error(&mem, update), 0);
+        assert_eq!(io_error(&mem, scsi), 0);
+        assert_eq!(io_error(&mem, eject), 0);
+        // The eject took effect.
+        let mut host = DeviceHost::new(&mut mem);
+        assert_eq!(board.read(CHF_UNIT_MEDIA, 2, &mut host), 0);
+    }
+
+    #[test]
+    fn a_delivered_request_and_an_unknown_pointer_are_not_withdrawn() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("abort_delivered", 4));
+        let mut mem = memory();
+        let (ptr, data) = (0x1000, 0x2000);
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, data, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        // Nothing queued at all.
+        assert!(!abort(&mut board, &mut host, ptr));
+        // Delivered: in the completion queue with its result written.
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert!(!abort(&mut board, &mut host, ptr));
+        assert_eq!(board.read(CHF_COMPLETE_GET, 4, &mut host), ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(io_actual(&mem, ptr), 512);
+    }
+
+    #[test]
+    fn abort_status_reports_only_the_latest_abort_and_a_second_abort_finds_nothing() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("abort_status", 4));
+        let mut mem = memory();
+        let ptr = 0x1000;
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, 0x2000, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_no_drain(&mut board, &mut host, ptr);
+        assert!(abort(&mut board, &mut host, ptr));
+        assert!(!abort(&mut board, &mut host, ptr));
+        assert!(!abort(&mut board, &mut host, 0x4444));
+        ZorroDevice::tick(&mut board, 1, &mut host);
+        // Exactly one completion for the one doorbell.
+        assert_eq!(board.read(CHF_COMPLETE_GET, 4, &mut host), ptr);
+        board.write(CHF_COMPLETE_ACK, 2, 0, &mut host);
+        assert_eq!(board.read(CHF_COMPLETE_GET, 4, &mut host), 0);
+        assert_eq!(io_error(&mem, ptr), IOERR_ABORTED);
+    }
+
+    #[test]
+    fn abort_via_two_word_writes_matches_a_single_long_write() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("abort_words", 4));
+        let mut mem = memory();
+        let ptr = 0x0001_1000;
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, 0x2000, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_no_drain(&mut board, &mut host, ptr);
+        // The high word alone only latches.
+        board.write(CHF_ABORT, 2, ptr >> 16, &mut host);
+        assert_eq!(board.read(CHF_ABORT_STATUS, 2, &mut host), 0);
+        board.write(CHF_ABORT + 2, 2, ptr & 0xFFFF, &mut host);
+        assert_eq!(board.read(CHF_ABORT_STATUS, 2, &mut host), 1);
+        ZorroDevice::tick(&mut board, 1, &mut host);
+        assert_eq!(io_error(&mem, ptr), IOERR_ABORTED);
+    }
+
+    #[test]
+    fn reset_with_an_aborted_read_in_flight_keeps_the_worker_in_step() {
+        let mut board = CopperhfBoard::new();
+        board.attach_unit(0, open_image("abort_reset", 4));
+        let mut mem = memory();
+        let ptr = 0x1000;
+        for i in 0..512 {
+            mem.chip_ram[(0x3000 + i) as usize] = 0x77;
+        }
+        write_request(&mut mem, ptr, 0, CMD_WRITE, 0, 512, 0x3000, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        board.write(CHF_COMPLETE_ACK, 2, 0, &mut host);
+
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, 0x2000, 512);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_no_drain(&mut board, &mut host, ptr);
+        assert!(abort(&mut board, &mut host, ptr));
+        ZorroDevice::reset(&mut board);
+        assert_eq!(board.read(CHF_ABORT_STATUS, 2, &mut host), 0);
+
+        // The next read gets its own result, not the aborted job's.
+        write_request(&mut mem, ptr, 0, CMD_READ, 0, 512, 0x2000, 0);
+        let mut host = DeviceHost::new(&mut mem);
+        ring_doorbell_long(&mut board, &mut host, ptr);
+        assert_eq!(io_error(&mem, ptr), 0);
+        assert_eq!(mem.chip_ram[0x2000], 0x77);
     }
 
     #[test]

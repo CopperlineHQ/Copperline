@@ -41,6 +41,29 @@
 // consistent snapshot of the queue head, even if the queue changes between
 // the two word halves of a split access.
 //
+// Cancellation (version 3). Writing a request pointer to CHF_ABORT asks the
+// board to withdraw that request; CHF_ABORT_STATUS bit 0 then reads 1 if it
+// did. A request can be withdrawn only while the board still holds it
+// undelivered (between its doorbell and the board tick that completes it),
+// and only if nothing it does has left the board yet:
+//
+//   - CMD_READ and the 64-bit reads (the data has not reached guest
+//     memory), and every command the board answers from its own state
+//     (TD_MOTOR, TD_GETGEOMETRY, TD_CHANGENUM/CHANGESTATE/PROTSTATUS,
+//     TD_SEEK64, CMD_CLEAR, unknown commands, and requests that failed
+//     validation) are withdrawn. The request still completes through the
+//     completion queue, in its doorbell-order position, with io_Error =
+//     IOERR_ABORTED and io_Actual = 0; no data is written to io_Data and a
+//     withdrawn TD_MOTOR does not change the motor state.
+//   - CMD_WRITE, TD_FORMAT, the 64-bit writes/formats, CMD_UPDATE,
+//     TD_EJECT and HD_SCSICMD are on their way to the medium from the
+//     doorbell on and cannot be recalled: status reads 0 and the request
+//     completes with its real result.
+//   - A request already in the completion queue, and a pointer the board
+//     does not hold, read status 0 and nothing changes.
+//
+// Every doorbell still produces exactly one completion, withdrawn or not.
+//
 // IOStdReq field offsets this device reads/writes (standard exec.library
 // layout; only the fields copperhf touches are listed):
 //   +24 io_Unit    u32  raw unit number (see above), not a pointer
@@ -65,6 +88,8 @@
 //                         (empty slot or >= CHF_UNITS). OpenDevice on such a
 //                         unit is refused guest-side with TDERR_BadUnitNum
 //                         instead -- see CHF_TDERR_BADUNITNUM below.
+//   IOERR_ABORTED     -2  the request was withdrawn (CHF_ABORT, or the
+//                         guest stub's AbortIO on a held TD_ADDCHANGEINT)
 //   IOERR_NOCMD       -3  unrecognised io_Command
 //   IOERR_BADLENGTH   -4  io_Length/io_Offset not a 512-byte multiple, or the
 //                         requested range runs past the end of the unit
@@ -97,7 +122,7 @@
 
 // Register offsets, window-relative.
 #define CHF_MAGIC        0x4000 // u32 ro: 0x43504846 ("CPHF")
-#define CHF_VERSION      0x4004 // u16 ro: register-protocol version (1)
+#define CHF_VERSION      0x4004 // u16 ro: register-protocol version (3)
 #define CHF_UNITS        0x4006 // u16 ro: number of unit slots (7)
 #define CHF_UNIT_PRESENT 0x4008 // u16 ro: bit n set = unit n attached
 #define CHF_UNIT_RDONLY  0x400A // u16 ro: bit n set = unit n read-only
@@ -130,6 +155,11 @@
                                 //         commits using the latched high
                                 //         half. A single 32-bit write
                                 //         commits immediately.
+#define CHF_ABORT        0x4024 // u32 wo (v3): guest pointer to an IOStdReq
+                                //         to withdraw; the outcome is
+                                //         latched in CHF_ABORT_STATUS. Two
+                                //         word writes latch and commit the
+                                //         same way CHF_DOORBELL's do.
 #define CHF_COMPLETE_GET 0x4028 // u32 ro: guest pointer of the oldest
                                 //         completed request, 0 if the
                                 //         completion queue is empty.
@@ -142,13 +172,17 @@
 #define CHF_IRQ_ENABLE   0x4032 // u16 rw: bit 0 = enable INT2 while
                                 //         CHF_IRQ_STATUS is non-zero (any
                                 //         bit; power-on/reset value: 0)
+#define CHF_ABORT_STATUS 0x4034 // u16 ro (v3): bit 0 = the last CHF_ABORT
+                                //         write withdrew its request
+                                //         (power-on/reset value: 0)
 
 #define CHF_MAGIC_VALUE 0x43504846u // "CPHF"
 // Version 2 = M4: CHF_CHANGED_MASK/ACK, CHF_UNIT_MEDIA, IRQ_STATUS bit 1,
-// TD64/NSD/HD_SCSICMD command coverage. The guest ROM ships in lockstep
+// TD64/NSD/HD_SCSICMD command coverage. Version 3 adds CHF_ABORT and
+// CHF_ABORT_STATUS. The guest ROM ships in lockstep
 // with the host board, so nothing branches on this at runtime -- it exists
 // so a register dump identifies the protocol vintage.
-#define CHF_PROTOCOL_VERSION 2
+#define CHF_PROTOCOL_VERSION 3
 #define CHF_NUM_UNITS 7
 
 // IOStdReq field offsets copperhf reads/writes (see the protocol comment
@@ -211,6 +245,7 @@
 
 // io_Error values.
 #define CHF_IOERR_OPENFAIL   (-1)
+#define CHF_IOERR_ABORTED    (-2)
 #define CHF_IOERR_NOCMD      (-3)
 #define CHF_IOERR_BADLENGTH  (-4)
 #define CHF_IOERR_BADADDRESS (-5)
