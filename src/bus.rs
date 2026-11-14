@@ -5265,7 +5265,7 @@ impl Bus {
         // reset state, then restore the emulator's monotonic time coordinate.
         let emulated_cck = self.emulated_cck;
         let emulated_frames = self.emulated_frames;
-        self.reset_for_keyboard_reset();
+        self.reset_devices(false);
         self.emulated_cck = emulated_cck;
         self.emulated_frames = emulated_frames;
     }
@@ -5437,6 +5437,14 @@ impl Bus {
     }
 
     pub fn reset_for_keyboard_reset(&mut self) {
+        self.reset_devices(true);
+    }
+
+    /// The reset line's effect on every device. `restart_time` says the
+    /// emulated time coordinate really starts again from zero; the CPU
+    /// RESET instruction's caller puts the coordinate back afterwards, and
+    /// the battery clock must not hear of a restart that did not happen.
+    fn reset_devices(&mut self, restart_time: bool) {
         // The serial sink hears about the reset first: an in-process
         // synthesizer releases what the interrupted guest left
         // sounding, exactly as if its line had dropped.
@@ -5452,7 +5460,7 @@ impl Bus {
         self.denise = Denise::new();
         self.blitter = Blitter::new();
         self.configure_chip_dma_masks();
-        self.rtc.reset();
+        self.rtc.reset(self.emulated_seconds());
         if let Some(gayle) = self.gayle.as_mut() {
             gayle.reset();
         }
@@ -5572,6 +5580,9 @@ impl Bus {
         self.slice_bus_tick = AgnusTick::default();
         self.last_chip_bus_owner = ChipBusOwner::Idle;
         self.device_clock.reset();
+        if restart_time {
+            self.rtc.emulated_time_restarted(self.emulated_seconds());
+        }
         self.emulated_cck = 0;
         self.emulated_frames = 0;
         self.cpu_posted_write_debt = 0;

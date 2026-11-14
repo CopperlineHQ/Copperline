@@ -3101,6 +3101,38 @@ fn fat_gary_coldboot_is_set_by_power_on_not_by_the_reset_line() {
 }
 
 #[test]
+fn a_reset_restarts_a_stopped_battery_clock_on_the_emulated_timeline() {
+    const SEED: u64 = 1_111_111_111; // 2005-03-18 01:58:31
+    let stopped_clock_at = |secs: u64| {
+        let mut bus = empty_bus();
+        bus.set_rtc_chip(crate::rtc::RtcChip::Rp5c01);
+        bus.rtc.set_seed(Some(SEED), false);
+        bus.emulated_cck = secs * PAULA_CLOCK_HZ as u64;
+        // The guest clears TIMER EN: the counters stand at seed + secs.
+        let now = bus.emulated_seconds();
+        bus.rtc.write(0xD * 4, 4, 0x0, now);
+        bus
+    };
+
+    // The CPU RESET instruction leaves emulated time running: the clock
+    // starts again there, not at time zero with the session counted in.
+    let mut bus = stopped_clock_at(100);
+    bus.reset_custom_chips_from_cpu_reset();
+    let now = bus.emulated_seconds();
+    assert_eq!(now, 100.0);
+    assert_eq!(bus.rtc.current_unix(now), SEED + 100);
+    assert_eq!(bus.rtc.current_unix(now + 5.0), SEED + 105);
+
+    // A keyboard reset starts emulated time again from zero, and the
+    // clock it restarted counts on from where it stood.
+    let mut bus = stopped_clock_at(100);
+    bus.reset_for_keyboard_reset();
+    assert_eq!(bus.emulated_seconds(), 0.0);
+    assert_eq!(bus.rtc.current_unix(0.0), SEED + 100);
+    assert_eq!(bus.rtc.current_unix(5.0), SEED + 105);
+}
+
+#[test]
 fn cpu_reset_drives_external_floppy_reset_line() {
     let mut bus = empty_bus();
     bus.floppy.set_connected_drives([true, true, false, false]);
