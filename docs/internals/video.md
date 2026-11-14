@@ -103,7 +103,9 @@ super-hi-res playfield four, and the comparison narrows with the word
 cadence, so hi-res ignores nibble bit 3 and super-hi-res bits 2-3 (pinned
 by the `ddfprobe-hscroll` golden probe on the Kickstart 2.05 boot-screen
 constellation, vAmiga-verified). AGA's extended BPLCON1 fields feed the
-same per-plane delays through `aga_bplcon1_scroll_samples`, masked to one
+same per-plane delays through `aga_bplcon1_scroll_samples` (the part below
+one native pixel is `scroll_subsamples`, described with the 35 ns output
+below), masked to one
 fetch-unit width in native samples: 16, 32 or 64 samples for the selected
 FMODE. In hi-res that is 8, 16 or 32 lo-res pixels; in SHRES it is 4, 8 or
 16. Applying a lo-res-sized mask at every resolution left SHRES BPL32 taps
@@ -432,10 +434,39 @@ two, and the lo-res encodings emit four. Standard 15 kHz scans keep the
 classic single-width canvas byte-identical; their SHRES playfield and
 sprite subpixel pairs are blended into each 70 ns pixel. The renderer keeps
 the two playfield colours and priority masks separate until sprite
-composition, while CLXDAT keeps its 70 ns column pitch and combines adjacent
-35 ns sprite samples. Sprite comparator positions remain at hi-res resolution
-on either canvas, as on Lisa; SPRES changes pixel width, not the comparator's
-positional granularity.
+composition. Sprite-to-sprite collisions keep a 70 ns column pitch: two
+35 ns sprite samples that share a column meet.
+
+Lisa positions and scrolls below the hi-res pitch in every display mode.
+SPRxCTL bit 4 moves a sprite by 70 ns and bit 3 by 35 ns whatever the
+resolution of the playfield or of the sprite (SPRES changes the width of a
+sprite pixel, not where the serializer starts); the 35 ns step is half a
+framebuffer pixel on the standard canvas, where it blends, and a whole pixel
+on the 35 ns canvas. ECS Denise has no bit 3, and the model applies its
+bit 4 in super-hi-res only. BPLCON1's H1/H0 bits (9-8 for playfield 1, 13-12
+for playfield 2) delay a lo-res playfield by 35 ns each, and H0 a hi-res one:
+a run with such a remainder is resolved as two 35 ns samples per framebuffer
+pixel, each playfield tapped at its own delay, through the same path a
+super-hi-res pair takes (HAM takes both plane groups' sub-pixel delay from
+playfield 1). A playfield written through BPLxDAT without bitplane DMA keeps
+whole-pixel scroll. The live collision path follows: on Lisa a sprite meets
+a playfield only where both are present in the same 35 ns sample, with the
+scroll decoded from all eight bits of each BPLCON1 field. Two things follow
+the sprite's 35 ns offset. A repositioned sprite's segments (several SPRxPOS
+writes on one line) clip at the offset too, so they join without a half
+pixel between them. And a mid-line BPLCON4 write reaches the sprite colour
+lookup one 35 ns sample into the framebuffer column it is placed at: the
+left half of that column keeps the old bank. SANITY's Roots 2.0 shows both:
+its Copper-coloured sprite screen sets the 35 ns bit on all eight sprites so
+their pixel edges meet the bank switches it makes every 96 pixels, and with
+the switch on a whole column each one left a dark half-pixel line (test
+`aga_sprite_colour_bank_switches_one_35ns_sample_into_its_column`). WinUAE applies the
+same position and scroll bits; neither vAmiga 5 nor a hardware capture was
+available to check the sub-pixel collision pitch, which follows the AGA
+documentation. Tests: `aga_lores_playfield_scrolls_in_quarter_pixel_steps`,
+`aga_hires_playfield_scrolls_in_half_pixel_steps`,
+`aga_sprite_meets_a_quarter_pixel_scrolled_playfield_at_35ns_positions`;
+golden probe `agafine-scroll`.
 
 Three vertical edge cases the replay honours:
 

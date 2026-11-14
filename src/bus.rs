@@ -362,6 +362,9 @@ pub struct CapturedSpriteLine {
     pub sprite: usize,
     pub hstart: i32,
     pub hsub_70ns: bool,
+    /// AGA: SPRxCTL bit 3, a further 35 ns of horizontal position.
+    #[serde(default)]
+    pub hsub_35ns: bool,
     pub beam_y: i32,
     /// First (or only) data/mask word pair; AGA wide fetches carry the
     /// remaining words in the `_ext` arrays.
@@ -689,6 +692,8 @@ impl Default for WideBitplaneHotLine {
 struct DisplaySpriteLineData {
     hstart: i32,
     hsub_70ns: bool,
+    #[serde(default)]
+    hsub_35ns: bool,
     data: u16,
     datb: u16,
     data_ext: [u16; 3],
@@ -11600,8 +11605,48 @@ struct LiveSpriteCollisionSource {
     group: usize,
     hstart: i32,
     hsub_70ns: bool,
+    /// AGA: SPRxCTL bit 3, a further 35 ns of horizontal position.
+    #[serde(default)]
+    hsub_35ns: bool,
     words: [u16; 4],
     requires_odd_enable: bool,
+}
+
+impl LiveSpriteCollisionSource {
+    /// Sprite pixels serialized per line.
+    fn pixel_count(&self) -> i32 {
+        16
+    }
+
+    /// Whether the sprite pixel `index` (0 = first out) is non-transparent
+    /// in this sprite's own planes (`low`) and in the second pair of
+    /// planes carried by `words[2..]` (`high`).
+    fn pixel_presence(&self, index: i32) -> (bool, bool) {
+        if !(0..16).contains(&index) {
+            return (false, false);
+        }
+        let mask = 0x8000u16 >> index;
+        (
+            (self.words[0] | self.words[1]) & mask != 0,
+            (self.words[2] | self.words[3]) & mask != 0,
+        )
+    }
+
+    /// The collision inputs the sprite pixel `index` drives.
+    fn presence(&self, index: i32) -> LiveSpritePixelPresence {
+        let (low, high) = self.pixel_presence(index);
+        if self.requires_odd_enable {
+            LiveSpritePixelPresence {
+                even: false,
+                odd: low,
+            }
+        } else {
+            LiveSpritePixelPresence {
+                even: low,
+                odd: high,
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -11660,6 +11705,7 @@ fn live_sprite_collision_sources_with_odd_policy(
                     group,
                     hstart,
                     hsub_70ns: line.hsub_70ns,
+                    hsub_35ns: line.hsub_35ns,
                     words: [line.data, line.datb, 0, 0],
                     requires_odd_enable,
                 },
@@ -11757,20 +11803,7 @@ fn live_sprite_sprite_collision_bits(
                     continue;
                 };
                 for x in visible_x_start..visible_x_stop {
-                    if !live_sprite_source_collision_matches_with_control(
-                        source,
-                        control,
-                        control.clxcon,
-                        x,
-                    ) {
-                        continue;
-                    }
-                    if !live_sprite_source_collision_matches_with_control(
-                        other,
-                        control,
-                        control.clxcon,
-                        x,
-                    ) {
+                    if !live_sprite_sources_meet(source, other, control_replay, control.clxcon, x) {
                         continue;
                     }
                     clxdat |= clx_bit;
@@ -11786,11 +11819,7 @@ fn live_sprite_sprite_collision_bits(
                 if !live_sprite_pixel_inside_display_window(control, beam_y, x, display_enable_x) {
                     continue;
                 }
-                if !live_sprite_source_collision_matches(source, control_replay, control.clxcon, x)
-                {
-                    continue;
-                }
-                if !live_sprite_source_collision_matches(other, control_replay, control.clxcon, x) {
+                if !live_sprite_sources_meet(source, other, control_replay, control.clxcon, x) {
                     continue;
                 }
                 clxdat |= clx_bit;
@@ -11846,33 +11875,15 @@ fn live_manual_sprite_sprite_collision_bits_in_range(
             return 0;
         };
         for x in visible_x_start..visible_x_stop {
-            let mut occupied_groups = 0u8;
-            for source in &sources {
-                if x < source.x_start || x >= source.x_stop {
-                    continue;
-                }
-                if !live_sprite_source_collision_matches_with_control(
-                    &source.source,
-                    control,
-                    control.clxcon,
-                    x,
-                ) {
-                    continue;
-                }
-                for other_group in 0..4 {
-                    if occupied_groups & (1 << other_group) != 0
-                        && other_group != source.source.group
-                    {
-                        let clx_bit = sprite_sprite_clx_bit(source.source.group, other_group);
-                        if needed_mask & clx_bit != 0 {
-                            clxdat |= clx_bit;
-                        }
-                    }
-                }
-                if clxdat & needed_mask == needed_mask {
-                    return clxdat;
-                }
-                occupied_groups |= 1 << source.source.group;
+            clxdat |= live_manual_sprite_groups_meeting(
+                &sources,
+                control_replay,
+                control.clxcon,
+                x,
+                needed_mask,
+            );
+            if clxdat & needed_mask == needed_mask {
+                return clxdat;
             }
         }
         return clxdat;
@@ -11883,32 +11894,45 @@ fn live_manual_sprite_sprite_collision_bits_in_range(
         if !live_sprite_pixel_inside_display_window(control, beam_y, x, display_enable_x) {
             continue;
         }
-        let mut occupied_groups = 0u8;
-        for source in &sources {
-            if x < source.x_start || x >= source.x_stop {
-                continue;
-            }
-            if !live_sprite_source_collision_matches(
-                &source.source,
-                control_replay,
-                control.clxcon,
-                x,
-            ) {
-                continue;
-            }
-            for other_group in 0..4 {
-                if occupied_groups & (1 << other_group) != 0 && other_group != source.source.group {
-                    let clx_bit = sprite_sprite_clx_bit(source.source.group, other_group);
-                    if needed_mask & clx_bit != 0 {
-                        clxdat |= clx_bit;
-                    }
-                }
-            }
-            if clxdat & needed_mask == needed_mask {
-                return clxdat;
-            }
-            occupied_groups |= 1 << source.source.group;
+        clxdat |= live_manual_sprite_groups_meeting(
+            &sources,
+            control_replay,
+            control.clxcon,
+            x,
+            needed_mask,
+        );
+        if clxdat & needed_mask == needed_mask {
+            return clxdat;
         }
+    }
+    clxdat
+}
+
+/// CLXDAT sprite-sprite bits for the CPU/Copper-written sources that are
+/// present together in framebuffer pixel `x` (a 70 ns column, as for
+/// DMA-fetched sprites).
+fn live_manual_sprite_groups_meeting(
+    sources: &[LiveManualSpriteCollisionSource],
+    control_replay: &LiveCollisionLineReplay,
+    clxcon: u16,
+    x: i32,
+    needed_mask: u16,
+) -> u16 {
+    let mut clxdat = 0u16;
+    let mut occupied_groups = 0u8;
+    for source in sources {
+        if x < source.x_start
+            || x >= source.x_stop
+            || !live_sprite_source_collision_matches(&source.source, control_replay, clxcon, x)
+        {
+            continue;
+        }
+        for other_group in 0..4 {
+            if occupied_groups & (1 << other_group) != 0 && other_group != source.source.group {
+                clxdat |= sprite_sprite_clx_bit(source.source.group, other_group) & needed_mask;
+            }
+        }
+        occupied_groups |= 1 << source.source.group;
     }
     clxdat
 }
@@ -11962,57 +11986,38 @@ fn live_manual_sprite_playfield_collision_bits_in_range(
     };
     for x in x_start..x_stop {
         let control = playfield_control.control_for_x(x);
-        let Some(collision) = live_bitplane_collision_pixel_at(
-            row,
-            control.agnus_revision,
-            control.bplcon0,
-            control.bplcon1,
-            control.clxcon,
-            control.clxcon2,
-            control.diwstrt,
-            control.diwstop,
-            control.diwhigh,
-            control.ddfstrt,
-            control.bpldat,
-            x,
-        ) else {
+        let Some(playfield_halves) = live_playfield_collision_halves(row, control, x) else {
             continue;
         };
         for source in &sources {
             if x < source.x_start || x >= source.x_stop {
                 continue;
             }
-            let sprite_matches = if let Some(sprite_control_at_x) = sprite_constant_control {
-                live_sprite_source_collision_matches_with_control(
-                    &source.source,
-                    sprite_control_at_x,
-                    control.clxcon,
-                    x,
-                )
-            } else {
-                let sprite_control_at_x = sprite_control.control_for_x(x);
-                live_sprite_pixel_inside_display_window(
-                    sprite_control_at_x,
+            let sprite_visible = sprite_constant_control.is_some()
+                || live_sprite_pixel_inside_display_window(
+                    sprite_control.control_for_x(x),
                     beam_y,
                     x,
                     display_enable_x,
-                ) && live_sprite_source_collision_matches(
-                    &source.source,
-                    sprite_control,
-                    control.clxcon,
-                    x,
-                )
-            };
-            if !sprite_matches {
+                );
+            if !sprite_visible {
                 continue;
             }
-            if collision.pf1_match {
+            let sprite_halves = live_sprite_source_collision_halves(
+                &source.source,
+                sprite_control,
+                control.clxcon,
+                x,
+            );
+            let (pf1_match, pf2_match) =
+                live_sprite_playfield_half_matches(sprite_halves, playfield_halves);
+            if pf1_match {
                 let clx_bit = 1 << (source.source.group + 1);
                 if needed_mask & clx_bit != 0 {
                     clxdat |= clx_bit;
                 }
             }
-            if collision.pf2_match {
+            if pf2_match {
                 let clx_bit = 1 << (source.source.group + 5);
                 if needed_mask & clx_bit != 0 {
                     clxdat |= clx_bit;
@@ -12040,6 +12045,10 @@ fn live_manual_sprite_collision_sources(
     let mut spr_armed = frame_base.spr_armed;
     let mut interval_start = [0i32; 8];
     let mut sources = Vec::new();
+    // Lisa applies SPRxCTL's sub-pixel position bits in every mode; on ECS
+    // Denise the 70 ns bit counts in super-hi-res.
+    let aga = matches!(frame_base.agnus_revision, AgnusRevision::AgaAlice);
+    let hsub_70ns_applies = aga || bitplane_shres(frame_base.bplcon0);
 
     let Some(line) = beam_y
         .checked_sub(RENDER_VISIBLE_START_VPOS as i32)
@@ -12080,7 +12089,7 @@ fn live_manual_sprite_collision_sources(
             *event,
             sprpos[sprite],
             sprctl[sprite],
-            bitplane_shres(frame_base.bplcon0),
+            hsub_70ns_applies,
             frame_base.fmode,
             event_x,
             x_stop,
@@ -12093,7 +12102,8 @@ fn live_manual_sprite_collision_sources(
             sprdata[sprite],
             sprdatb[sprite],
             spr_armed[sprite],
-            bitplane_shres(frame_base.bplcon0),
+            hsub_70ns_applies,
+            aga,
             frame_base.fmode,
             beam_y,
             interval_start[sprite].max(x_start),
@@ -12119,7 +12129,8 @@ fn live_manual_sprite_collision_sources(
             sprdata[sprite],
             sprdatb[sprite],
             spr_armed[sprite],
-            bitplane_shres(frame_base.bplcon0),
+            hsub_70ns_applies,
+            aga,
             frame_base.fmode,
             beam_y,
             interval_start[sprite].max(x_start),
@@ -12134,7 +12145,7 @@ fn live_manual_sprite_preserved_source_stop(
     event: BeamRegisterWrite,
     sprpos: u16,
     sprctl: u16,
-    shres: bool,
+    hsub_70ns_applies: bool,
     fmode: u16,
     event_x: i32,
     query_x_stop: i32,
@@ -12145,7 +12156,7 @@ fn live_manual_sprite_preserved_source_stop(
     }
     let hstart = sprite_hstart_for_fmode(sprite_hstart_from_words(sprpos, sprctl), fmode);
     let base_x = (hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
-        + i32::from(shres && sprite_hsub_70ns_from_ctl(sprctl));
+        + i32::from(hsub_70ns_applies && sprite_hsub_70ns_from_ctl(sprctl));
     if event_x >= base_x {
         query_x_stop
     } else {
@@ -12231,7 +12242,8 @@ fn live_sprite_source_has_pixels(source: &LiveSpriteCollisionSource) -> bool {
 fn live_sprite_source_framebuffer_bounds(source: &LiveSpriteCollisionSource) -> (i32, i32) {
     let x_start = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
         + i32::from(source.hsub_70ns);
-    (x_start, x_start + 32)
+    // A 35 ns offset spills half a framebuffer pixel past the end.
+    (x_start, x_start + 32 + i32::from(source.hsub_35ns))
 }
 
 fn live_sprite_source_may_overlap_x_range(
@@ -12360,7 +12372,8 @@ fn push_live_manual_sprite_source(
     sprdata: u16,
     sprdatb: u16,
     spr_armed: bool,
-    shres: bool,
+    hsub_70ns_applies: bool,
+    aga: bool,
     fmode: u16,
     beam_y: i32,
     x_start: i32,
@@ -12379,7 +12392,9 @@ fn push_live_manual_sprite_source(
         source: LiveSpriteCollisionSource {
             group: sprite / 2,
             hstart: sprite_hstart_for_fmode(sprite_hstart_from_words(sprpos, sprctl), fmode),
-            hsub_70ns: shres && sprite_hsub_70ns_from_ctl(sprctl),
+            hsub_70ns: hsub_70ns_applies && sprite_hsub_70ns_from_ctl(sprctl),
+            // SPRxCTL bit 3, Lisa's 35 ns position bit.
+            hsub_35ns: aga && sprctl & 0x0008 != 0,
             words: [sprdata, sprdatb, 0, 0],
             requires_odd_enable: sprite & 1 != 0,
         },
@@ -12394,24 +12409,53 @@ struct LiveSpritePixelPresence {
     odd: bool,
 }
 
+impl LiveSpritePixelPresence {
+    fn merge(&mut self, other: Self) {
+        self.even |= other.even;
+        self.odd |= other.odd;
+    }
+}
+
+/// Where the source's first pixel starts, in 35 ns samples (two per
+/// framebuffer pixel).
+fn live_sprite_source_base_subpixel(source: &LiveSpriteCollisionSource) -> i32 {
+    ((source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
+        + i32::from(source.hsub_70ns))
+        * 2
+        + i32::from(source.hsub_35ns)
+}
+
 fn live_sprite_source_pixel_presence(
     source: &LiveSpriteCollisionSource,
     control_replay: &LiveCollisionLineReplay,
     x: i32,
 ) -> LiveSpritePixelPresence {
+    live_sprite_source_presence_in_subpixels(source, control_replay, x * 2, x * 2 + 2)
+}
+
+/// Presence of the source in the 35 ns samples `target_start..target_stop`.
+fn live_sprite_source_presence_in_subpixels(
+    source: &LiveSpriteCollisionSource,
+    control_replay: &LiveCollisionLineReplay,
+    target_start: i32,
+    target_stop: i32,
+) -> LiveSpritePixelPresence {
     if let Some(control) = control_replay.constant_control() {
-        return live_sprite_source_pixel_presence_with_control(source, control, x);
+        let mut presence = LiveSpritePixelPresence::default();
+        for subpixel in target_start..target_stop {
+            presence.merge(live_sprite_source_presence_at_subpixel(
+                source, control, subpixel,
+            ));
+        }
+        return presence;
     }
 
-    let (sprite_base_x, sprite_stop_x) = live_sprite_source_framebuffer_bounds(source);
-    if x < sprite_base_x || x >= sprite_stop_x {
-        return LiveSpritePixelPresence::default();
-    }
-    let target_start = x * 2;
-    let target_stop = target_start + 2;
-    let mut subpixel_cursor = sprite_base_x * 2;
+    let mut subpixel_cursor = live_sprite_source_base_subpixel(source);
     let mut presence = LiveSpritePixelPresence::default();
-    for bit in (0..16).rev() {
+    if target_stop <= subpixel_cursor {
+        return presence;
+    }
+    for index in 0..source.pixel_count() {
         let sprite_control = control_replay.control_for_x(subpixel_cursor.div_euclid(2));
         let sprite_pixel_repeat = sprite_pixel_repeat_subpixels_for_control(
             sprite_control.agnus_revision,
@@ -12420,14 +12464,7 @@ fn live_sprite_source_pixel_presence(
         );
         let subpixel_stop = subpixel_cursor + sprite_pixel_repeat;
         if subpixel_cursor < target_stop && subpixel_stop > target_start {
-            let low = source.words[0] & (1 << bit) != 0 || source.words[1] & (1 << bit) != 0;
-            let high = source.words[2] & (1 << bit) != 0 || source.words[3] & (1 << bit) != 0;
-            if source.requires_odd_enable {
-                presence.odd |= low;
-            } else {
-                presence.even |= low;
-                presence.odd |= high;
-            }
+            presence.merge(source.presence(index));
         }
         subpixel_cursor = subpixel_stop;
         if subpixel_cursor >= target_stop {
@@ -12437,40 +12474,53 @@ fn live_sprite_source_pixel_presence(
     presence
 }
 
-fn live_sprite_source_pixel_presence_with_control(
+/// Presence of the source in one 35 ns sample, for a line whose sprite
+/// controls do not change.
+fn live_sprite_source_presence_at_subpixel(
     source: &LiveSpriteCollisionSource,
     control: LiveCollisionControl,
-    x: i32,
+    subpixel: i32,
 ) -> LiveSpritePixelPresence {
-    let sprite_base_x = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
-        + i32::from(source.hsub_70ns);
+    let offset = subpixel - live_sprite_source_base_subpixel(source);
+    if offset < 0 {
+        return LiveSpritePixelPresence::default();
+    }
     let sprite_pixel_repeat = sprite_pixel_repeat_subpixels_for_control(
         control.agnus_revision,
         control.bplcon0,
         control.bplcon3,
     );
-    let offset = x * 2 - sprite_base_x * 2;
-    if offset < 0 {
+    let index = offset / sprite_pixel_repeat;
+    if index >= source.pixel_count() {
         return LiveSpritePixelPresence::default();
     }
-    let mut presence = LiveSpritePixelPresence::default();
-    for subpixel in offset..offset + 2 {
-        let bit_offset = subpixel / sprite_pixel_repeat;
-        if !(0..16).contains(&bit_offset) {
-            continue;
-        }
-        let bit = 15 - bit_offset;
-        let mask = 1 << bit;
-        let low = source.words[0] & mask != 0 || source.words[1] & mask != 0;
-        let high = source.words[2] & mask != 0 || source.words[3] & mask != 0;
-        if source.requires_odd_enable {
-            presence.odd |= low;
-        } else {
-            presence.even |= low;
-            presence.odd |= high;
-        }
+    source.presence(index)
+}
+
+/// Whether the source takes part in a collision in each 35 ns half of
+/// framebuffer pixel `x`. Lisa compares at that pitch; on OCS/ECS Denise
+/// the model keeps one answer for the whole 70 ns pixel.
+fn live_sprite_source_collision_halves(
+    source: &LiveSpriteCollisionSource,
+    control_replay: &LiveCollisionLineReplay,
+    clxcon: u16,
+    x: i32,
+) -> [bool; 2] {
+    let takes_part = |presence: LiveSpritePixelPresence| {
+        presence.even || (presence.odd && clxcon & (1 << (12 + source.group)) != 0)
+    };
+    if !control_replay.control_for_x(x).aga() {
+        return [takes_part(live_sprite_source_pixel_presence(source, control_replay, x)); 2];
     }
-    presence
+    std::array::from_fn(|half| {
+        let subpixel = x * 2 + half as i32;
+        takes_part(live_sprite_source_presence_in_subpixels(
+            source,
+            control_replay,
+            subpixel,
+            subpixel + 1,
+        ))
+    })
 }
 
 fn live_sprite_source_collision_matches(
@@ -12480,16 +12530,6 @@ fn live_sprite_source_collision_matches(
     x: i32,
 ) -> bool {
     let presence = live_sprite_source_pixel_presence(source, control_replay, x);
-    presence.even || (presence.odd && clxcon & (1 << (12 + source.group)) != 0)
-}
-
-fn live_sprite_source_collision_matches_with_control(
-    source: &LiveSpriteCollisionSource,
-    control: LiveCollisionControl,
-    clxcon: u16,
-    x: i32,
-) -> bool {
-    let presence = live_sprite_source_pixel_presence_with_control(source, control, x);
     presence.even || (presence.odd && clxcon & (1 << (12 + source.group)) != 0)
 }
 
@@ -12708,6 +12748,8 @@ struct LiveCollisionControl {
     diwhigh: DiwHigh,
     ddfstrt: u16,
     bpldat: [u16; 8],
+    /// FMODE, for the width Lisa's BPLCON1 scroll wraps at.
+    fmode: u16,
 }
 
 impl LiveCollisionControl {
@@ -12736,7 +12778,17 @@ impl LiveCollisionControl {
             diwhigh,
             ddfstrt,
             bpldat,
+            fmode: 0,
         }
+    }
+
+    fn with_fmode(mut self, fmode: u16) -> Self {
+        self.fmode = fmode;
+        self
+    }
+
+    fn aga(&self) -> bool {
+        matches!(self.agnus_revision, AgnusRevision::AgaAlice)
     }
 
     fn from_snapshot(snapshot: RenderRegisterSnapshot) -> Self {
@@ -12752,6 +12804,7 @@ impl LiveCollisionControl {
             diwhigh: snapshot.diwhigh,
             ddfstrt: snapshot.ddfstrt,
             bpldat: snapshot.bpldat,
+            fmode: snapshot.fmode,
         }
     }
 
@@ -12971,48 +13024,33 @@ fn live_sprite_playfield_collision_bits_in_range(
         };
         for x in source_x_start..source_x_stop {
             let control = playfield_control.control_for_x(x);
-            let sprite_matches = if let Some(sprite_control_at_x) = sprite_constant_control {
-                live_sprite_source_collision_matches_with_control(
-                    source,
-                    sprite_control_at_x,
-                    control.clxcon,
-                    x,
-                )
-            } else {
-                let sprite_control_at_x = sprite_control.control_for_x(x);
-                live_sprite_pixel_inside_display_window(
-                    sprite_control_at_x,
+            let sprite_visible = sprite_constant_control.is_some()
+                || live_sprite_pixel_inside_display_window(
+                    sprite_control.control_for_x(x),
                     beam_y,
                     x,
                     display_enable_x,
-                ) && live_sprite_source_collision_matches(source, sprite_control, control.clxcon, x)
-            };
-            if !sprite_matches {
+                );
+            if !sprite_visible {
                 continue;
             }
-            let Some(collision) = live_bitplane_collision_pixel_at(
-                row,
-                control.agnus_revision,
-                control.bplcon0,
-                control.bplcon1,
-                control.clxcon,
-                control.clxcon2,
-                control.diwstrt,
-                control.diwstop,
-                control.diwhigh,
-                control.ddfstrt,
-                control.bpldat,
-                x,
-            ) else {
+            let sprite_halves =
+                live_sprite_source_collision_halves(source, sprite_control, control.clxcon, x);
+            if sprite_halves == [false; 2] {
+                continue;
+            }
+            let Some(playfield_halves) = live_playfield_collision_halves(row, control, x) else {
                 continue;
             };
-            if collision.pf1_match {
+            let (pf1_match, pf2_match) =
+                live_sprite_playfield_half_matches(sprite_halves, playfield_halves);
+            if pf1_match {
                 let clx_bit = 1 << (source.group + 1);
                 if needed_mask & clx_bit != 0 {
                     clxdat |= clx_bit;
                 }
             }
-            if collision.pf2_match {
+            if pf2_match {
                 let clx_bit = 1 << (source.group + 5);
                 if needed_mask & clx_bit != 0 {
                     clxdat |= clx_bit;
@@ -13372,6 +13410,159 @@ fn live_bitplane_collision_pixel_at(
         clxcon2,
         bplcon0 & 0x0400 != 0,
     ))
+}
+
+/// The playfield's collision state in each 35 ns half of framebuffer
+/// pixel `framebuffer_x`.
+///
+/// On OCS/ECS both halves are the pixel's one answer. Lisa compares at the
+/// 35 ns pitch: its BPLCON1 scroll counters have bits below a lo-res and a
+/// hi-res pixel (H1/H0), each playfield has its own, and the two samples of
+/// a super-hi-res pixel are separate.
+fn live_playfield_collision_halves(
+    row: &CapturedBitplaneRow,
+    control: LiveCollisionControl,
+    framebuffer_x: i32,
+) -> Option<[LivePlayfieldCollisionPixel; 2]> {
+    if !control.aga() {
+        return live_bitplane_collision_pixel_at(
+            row,
+            control.agnus_revision,
+            control.bplcon0,
+            control.bplcon1,
+            control.clxcon,
+            control.clxcon2,
+            control.diwstrt,
+            control.diwstop,
+            control.diwhigh,
+            control.ddfstrt,
+            control.bpldat,
+            framebuffer_x,
+        )
+        .map(|pixel| [pixel; 2]);
+    }
+    if framebuffer_x < 0 {
+        return None;
+    }
+    let (window_x_start, window_x_stop) =
+        live_display_window_x(control.diwstrt, control.diwstop, control.diwhigh);
+    if framebuffer_x < window_x_start
+        || (window_x_stop > window_x_start && framebuffer_x >= window_x_stop)
+    {
+        return None;
+    }
+    let samples_per_native = live_scroll_samples_per_native(control.bplcon0) as i64;
+    let position = 2 * i64::from(framebuffer_x - window_x_start);
+    let fetch_start_native_x = live_fetch_start_native_x(
+        control.agnus_revision,
+        control.bplcon0,
+        control.diwstrt,
+        control.diwhigh,
+        control.ddfstrt,
+    ) as i64;
+    if position.div_euclid(samples_per_native) < fetch_start_native_x {
+        return None;
+    }
+    let origin_offset = live_fetch_origin_native_offset(
+        control.agnus_revision,
+        control.bplcon0,
+        control.diwstrt,
+        control.diwhigh,
+        control.ddfstrt,
+    ) as i64;
+    let fetched_pixels = (row.words_per_row * 16) as i64;
+    let mode = BitplaneMode::from_bplcon0(control.bplcon0, true);
+    let nplanes = mode.display_planes().min(row.nplanes);
+    let dma_planes = mode.dma_planes().min(nplanes);
+    let scroll: [i64; 2] = std::array::from_fn(|playfield| {
+        live_aga_scroll_35ns(
+            control.bplcon0,
+            control.bplcon1,
+            control.fmode,
+            playfield == 1,
+        ) as i64
+    });
+    Some(std::array::from_fn(|half| {
+        let mut idx = 0u8;
+        for plane in 0..nplanes {
+            let scroll = scroll[plane & 1];
+            let delay = scroll / samples_per_native;
+            let subsamples = scroll % samples_per_native;
+            let relative = (position + half as i64 - subsamples).div_euclid(samples_per_native)
+                - fetch_start_native_x;
+            let fetch_x = relative + origin_offset - delay;
+            if relative < 0 || fetch_x < 0 || fetch_x >= fetched_pixels {
+                continue;
+            }
+            let fetch_x = fetch_x as usize;
+            let word = if plane < dma_planes {
+                row.planes[plane][fetch_x / 16]
+            } else {
+                control.bpldat[plane]
+            };
+            if word & (0x8000 >> (fetch_x & 0x0F)) != 0 {
+                idx |= 1 << plane;
+            }
+        }
+        live_playfield_collision_pixel(
+            idx,
+            control.clxcon,
+            control.clxcon2,
+            control.bplcon0 & 0x0400 != 0,
+        )
+    }))
+}
+
+/// Whether two sprite sources are both present in framebuffer pixel `x`.
+/// Sprite-sprite collisions keep the 70 ns column pitch on every chipset:
+/// two 35 ns sprite samples that share a column meet.
+fn live_sprite_sources_meet(
+    a: &LiveSpriteCollisionSource,
+    b: &LiveSpriteCollisionSource,
+    control_replay: &LiveCollisionLineReplay,
+    clxcon: u16,
+    x: i32,
+) -> bool {
+    live_sprite_source_collision_matches(a, control_replay, clxcon, x)
+        && live_sprite_source_collision_matches(b, control_replay, clxcon, x)
+}
+
+/// Which playfields a sprite meets in a framebuffer pixel: it must be
+/// present in the same 35 ns half as the playfield match.
+fn live_sprite_playfield_half_matches(
+    sprite: [bool; 2],
+    playfield: [LivePlayfieldCollisionPixel; 2],
+) -> (bool, bool) {
+    let any = |matches: fn(&LivePlayfieldCollisionPixel) -> bool| {
+        (0..2).any(|half| sprite[half] && matches(&playfield[half]))
+    };
+    (any(|pixel| pixel.pf1_match), any(|pixel| pixel.pf2_match))
+}
+
+/// 35 ns samples per native pixel: 4 lo-res, 2 hi-res, 1 super-hi-res.
+fn live_scroll_samples_per_native(bplcon0: u16) -> usize {
+    if bitplane_shres(bplcon0) {
+        1
+    } else if bitplane_hires(bplcon0) {
+        2
+    } else {
+        4
+    }
+}
+
+/// A playfield's BPLCON1 scroll on Lisa, in 35 ns samples: H0..H7 are bits
+/// 8, 9, 0, 1, 2, 3, 10, 11 for playfield 1 and 12, 13, 4, 5, 6, 7, 14, 15
+/// for playfield 2, wrapped to the fetched width (16, 32 or 64 native
+/// pixels by FMODE). The renderer decodes the same value.
+fn live_aga_scroll_35ns(bplcon0: u16, bplcon1: u16, fmode: u16, playfield2: bool) -> usize {
+    let field = if playfield2 { bplcon1 >> 4 } else { bplcon1 };
+    let scroll = ((field >> 8) & 0x0003) | ((field & 0x000F) << 2) | ((field >> 4) & 0x00C0);
+    let fetch_quantum = match fmode & 0x0003 {
+        0 => 1,
+        3 => 4,
+        _ => 2,
+    };
+    usize::from(scroll) & (16 * fetch_quantum * live_scroll_samples_per_native(bplcon0) - 1)
 }
 
 fn live_playfield_collision_pixel(

@@ -812,29 +812,36 @@ fn reg_hstart(output_hstart: i32) -> i32 {
 
 #[test]
 fn fmode_sscan2_aliases_sprite_hstart_high_bit_in_renderer() {
-    let (red_pos, red_ctl) = sprite_control_words_from_parts(42, 74, 357, false, false);
-    let (green_pos, green_ctl) = sprite_control_words_from_parts(42, 74, 128, false, false);
+    let (red_pos, red_ctl) = sprite_control_words_from_parts(42, 74, 357, false, false, false);
+    let (green_pos, green_ctl) = sprite_control_words_from_parts(42, 74, 128, false, false, false);
 
-    let red_without_sscan2 = sprite_nominal_base_framebuffer_x(red_pos, red_ctl, 0, 0);
-    let red_with_sscan2 = sprite_nominal_base_framebuffer_x(red_pos, red_ctl, 0, 0x8000);
-    let green_with_sscan2 = sprite_nominal_base_framebuffer_x(green_pos, green_ctl, 0, 0x8000);
+    let red_without_sscan2 = sprite_nominal_base_framebuffer_x(red_pos, red_ctl, 0, 0, false);
+    let red_with_sscan2 = sprite_nominal_base_framebuffer_x(red_pos, red_ctl, 0, 0x8000, false);
+    let green_with_sscan2 =
+        sprite_nominal_base_framebuffer_x(green_pos, green_ctl, 0, 0x8000, false);
 
     assert_eq!(red_without_sscan2 - red_with_sscan2, 256 * 2);
     assert_eq!(green_with_sscan2 - red_with_sscan2, (128 - 101) * 2);
 }
 
 #[test]
-fn sprite_horizontal_subposition_only_applies_in_shres() {
-    let (base_pos, base_ctl) = sprite_control_words_from_parts(42, 74, 128, false, false);
-    let (sub_pos, sub_ctl) = sprite_control_words_from_parts(42, 74, 128, true, false);
-    let base_x = sprite_nominal_base_framebuffer_x(base_pos, base_ctl, 0, 0x8000);
+fn sprite_horizontal_subposition_applies_in_shres_on_ecs_and_always_on_aga() {
+    let (base_pos, base_ctl) = sprite_control_words_from_parts(42, 74, 128, false, false, false);
+    let (sub_pos, sub_ctl) = sprite_control_words_from_parts(42, 74, 128, true, false, false);
+    let base_x = sprite_nominal_base_framebuffer_x(base_pos, base_ctl, 0, 0x8000, false);
 
+    // ECS Denise: the 70 ns bit counts where sprite pixels are that fine.
     assert_eq!(
-        sprite_nominal_base_framebuffer_x(sub_pos, sub_ctl, 0, 0x8000),
+        sprite_nominal_base_framebuffer_x(sub_pos, sub_ctl, 0, 0x8000, false),
         base_x
     );
     assert_eq!(
-        sprite_nominal_base_framebuffer_x(sub_pos, sub_ctl, BPLCON0_SHRES, 0x8000),
+        sprite_nominal_base_framebuffer_x(sub_pos, sub_ctl, BPLCON0_SHRES, 0x8000, false),
+        base_x + 1
+    );
+    // Lisa: in every display mode.
+    assert_eq!(
+        sprite_nominal_base_framebuffer_x(sub_pos, sub_ctl, 0, 0x8000, true),
         base_x + 1
     );
 }
@@ -843,14 +850,15 @@ fn sprite_horizontal_subposition_only_applies_in_shres() {
 fn manual_sprite_compare_tracks_midline_shres_enable() {
     let mut state = blank_state();
     let beam_y = PAL_VISIBLE_LINE0;
-    let (pos, ctl) = sprite_control_words_from_parts(beam_y, beam_y + 1, 160, true, false);
+    let (pos, ctl) = sprite_control_words_from_parts(beam_y, beam_y + 1, 160, true, false, false);
     state.spr_hw_pos[0] = pos;
     state.spr_hw_ctl[0] = ctl;
     state.spr_hw_data[0] = 0x8000;
     state.spr_hw_armed[0] = true;
 
     let mut regs = BeamSpriteState::from_render_state(&state, &[None; 8], true);
-    let lowres_base_x = sprite_nominal_base_framebuffer_x(pos, ctl, state.bplcon0, state.fmode);
+    let lowres_base_x =
+        sprite_nominal_base_framebuffer_x(pos, ctl, state.bplcon0, state.fmode, false);
     let after_lowres_compare = (lowres_base_x + 1) as usize;
 
     assert!(regs
@@ -1971,6 +1979,133 @@ fn late_lowres_ddf_stop_hold_keeps_left_origin_unadvanced() {
     assert_eq!(fb[first_fetch_x + 1], rgb12_to_rgba8(0x00F0));
 }
 
+/// Render one lo-res or hi-res AGA row of one plane whose only set pixels
+/// are the sixteen of its second word, and return the framebuffer row.
+fn render_aga_edge_row(bplcon0: u16, bplcon1: u16) -> Vec<u32> {
+    let control = ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        dmacon: DMACON_DMAEN | DMACON_BPLEN,
+        bplcon0,
+        bplcon1,
+        diwstrt: ((PAL_VISIBLE_LINE0 as u16) << 8) | STANDARD_DIW_HSTART as u16,
+        diwstop: (((PAL_VISIBLE_LINE0 + 1) as u16) << 8) | STANDARD_DIW_HSTOP as u16,
+        ddfstrt: if bplcon0 & 0x8000 != 0 {
+            0x003C
+        } else {
+            0x0038
+        },
+        ddfstop: 0x00D0,
+        ..ControlState::default()
+    };
+    let words = control.words_per_row(native_frame_width_for_control(control));
+    let mut plane = vec![0; words];
+    plane[1] = 0xFFFF;
+    let planes = vec![plane];
+    let (x_start, x_stop) = control.display_window_x();
+    let plan = DenisePlannedPlayfieldLine::new(0, x_start, x_stop, &planes, words * 16);
+    let mut palette = Palette::new();
+    palette.write_ocs(1, 0x0FFF);
+    let mut fb = vec![0; FB_PIXELS];
+    let mut playfield_mask = vec![0; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let mut clxdat = 0;
+    render_planned_playfield_line(
+        &plan,
+        &mut fb,
+        &mut playfield_mask,
+        &mut collision_pixels,
+        &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
+        &mut clxdat,
+        palette,
+        &[],
+        0,
+        control,
+        &[],
+        0,
+        control.bplcon1,
+        control.bplcon0,
+        0,
+        0,
+        &h_row_for(control),
+        PAL_VISIBLE_LINE0,
+        0.0,
+        0,
+    );
+    fb[..FB_WIDTH].to_vec()
+}
+
+/// Where the lit block of `row` starts and stops, in 35 ns samples: a
+/// fully lit pixel counts two, a half-lit (blended) one counts one on the
+/// side its neighbours say.
+fn lit_span_35ns(row: &[u32]) -> (usize, usize) {
+    let full = rgb12_to_rgba8(0x0FFF);
+    let lit: Vec<usize> = (0..row.len()).filter(|&x| row[x] == full).collect();
+    let (first, last) = (lit[0], *lit.last().unwrap());
+    let background =
+        |pixel: u32| pixel == rgb12_to_rgba8_alpha(0, false) || pixel == rgb12_to_rgba8(0);
+    let half_before = !background(row[first - 1]);
+    let half_after = !background(row[last + 1]);
+    (
+        first * 2 - usize::from(half_before),
+        (last + 1) * 2 + usize::from(half_after),
+    )
+}
+
+#[test]
+fn aga_lores_playfield_scrolls_in_quarter_pixel_steps() {
+    // BPLCON1 bits 9-8 (PF1H1-0) delay a lo-res playfield by 35 ns each:
+    // a quarter of a lo-res pixel, half a framebuffer pixel. Bits 3-0 keep
+    // their whole lo-res pixels on top.
+    let (base_start, base_stop) = lit_span_35ns(&render_aga_edge_row(0x1001, 0x0000));
+    assert_eq!(base_stop - base_start, 16 * 4);
+    for (bplcon1, samples) in [
+        (0x0100, 1),
+        (0x0200, 2),
+        (0x0300, 3),
+        (0x0001, 4),
+        (0x0101, 5),
+        (0x0302, 11),
+        (0x0005, 20),
+    ] {
+        let (start, stop) = lit_span_35ns(&render_aga_edge_row(0x1001, bplcon1));
+        assert_eq!(
+            (start - base_start, stop - base_stop),
+            (samples, samples),
+            "BPLCON1 {bplcon1:#06X}"
+        );
+    }
+}
+
+#[test]
+fn aga_hires_playfield_scrolls_in_half_pixel_steps() {
+    // In hi-res a native pixel is 70 ns, so only PF1H0 is below it.
+    let (base_start, base_stop) = lit_span_35ns(&render_aga_edge_row(0x9001, 0x0000));
+    assert_eq!(base_stop - base_start, 16 * 2);
+    for (bplcon1, samples) in [(0x0100, 1), (0x0200, 2), (0x0300, 3), (0x0001, 4)] {
+        let (start, stop) = lit_span_35ns(&render_aga_edge_row(0x9001, bplcon1));
+        assert_eq!(
+            (start - base_start, stop - base_stop),
+            (samples, samples),
+            "BPLCON1 {bplcon1:#06X}"
+        );
+    }
+}
+
+#[test]
+fn ecs_playfield_ignores_the_bits_above_the_scroll_nibbles() {
+    let ecs = |bplcon1| {
+        let control = ControlState {
+            bplcon0: 0x1000,
+            bplcon1,
+            ..ControlState::default()
+        };
+        (control.pf1_scroll(), control.fine_scroll(2))
+    };
+    assert_eq!(ecs(0x0300), (0, None));
+    assert_eq!(ecs(0x3303), (3, None));
+}
+
 #[test]
 fn late_ddf_bitplane_output_starts_at_first_word_fetch() {
     let standard_ddf = ControlState {
@@ -2561,6 +2696,7 @@ fn display_line_plan_records_words_registers_and_sprite_slots_in_beam_order() {
         sprite: 2,
         hstart: 0x90,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0x4000,
@@ -2684,6 +2820,7 @@ fn captured_sprite_dma_blocks_sprite_seven_when_ddfstrt_uses_early_fetch_slot() 
         sprite: 7,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -2763,6 +2900,7 @@ fn bplcon3_spres_default_uses_ecs_sprite_width_for_hires_playfield() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -2818,6 +2956,7 @@ fn bplcon3_spres_default_upgrades_to_70ns_when_shres_is_set() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -2874,6 +3013,7 @@ fn aga_bplcon3_spres_shres_packs_two_samples_into_one_70ns_pixel() {
             sprite: 0,
             hstart: SPRITE_HSTART_FB0,
             hsub_70ns: false,
+            hsub_35ns: false,
             beam_y: PAL_VISIBLE_LINE0,
             // Two adjacent set samples make the 70 ns canvas comparison
             // unambiguous: HIRES paints two pixels, SHRES packs both halves
@@ -2953,6 +3093,7 @@ fn aga_shres_sprite_priority_and_underlay_are_resolved_per_35ns_half() {
             sprite: 0,
             hstart: SPRITE_HSTART_FB0,
             hsub_70ns: false,
+            hsub_35ns: false,
             beam_y: PAL_VISIBLE_LINE0,
             data: 0xC000,
             datb: 0,
@@ -2966,6 +3107,7 @@ fn aga_shres_sprite_priority_and_underlay_are_resolved_per_35ns_half() {
                 sprite: 1,
                 hstart: SPRITE_HSTART_FB0,
                 hsub_70ns: false,
+                hsub_35ns: false,
                 beam_y: PAL_VISIBLE_LINE0,
                 data: 0,
                 datb: 0,
@@ -3088,6 +3230,7 @@ fn bplcon3_spres_hires_draws_one_framebuffer_pixel_per_sprite_bit() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -3123,6 +3266,152 @@ fn bplcon3_spres_hires_draws_one_framebuffer_pixel_per_sprite_bit() {
 }
 
 #[test]
+fn aga_sprite_position_bits_move_a_lores_sprite_in_35ns_steps() {
+    // A one-pixel lo-res sprite (four 35 ns samples wide) on Lisa, with
+    // SPRxCTL's 70 ns and 35 ns position bits, in a lo-res display.
+    let row = |hsub_70ns: bool, hsub_35ns: bool| {
+        let mut state = RenderState {
+            agnus_revision: AgnusRevision::AgaAlice,
+            dmacon: DMACON_DMAEN | DMACON_SPREN,
+            ..blank_state()
+        };
+        state.palette.write_ocs(17, 0x0F00);
+        let ram = vec![0; 64];
+        let base_palettes = [state.palette; FB_HEIGHT];
+        let palette_segments = vec![Vec::new(); FB_HEIGHT];
+        let base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+        let control_segments = vec![Vec::new(); FB_HEIGHT];
+        let playfield_mask = vec![0u8; FB_PIXELS];
+        let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+        let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
+        let captured = [CapturedSpriteLine {
+            sprite: 0,
+            hstart: SPRITE_HSTART_FB0 + 2,
+            hsub_70ns,
+            hsub_35ns,
+            beam_y: PAL_VISIBLE_LINE0,
+            data: 0x8000,
+            datb: 0,
+            attached: false,
+            data_ext: [0; 3],
+            datb_ext: [0; 3],
+            width_words: 1,
+        }];
+        render_sprites(
+            &state,
+            &ram,
+            &mut fb,
+            SpriteClip {
+                x_start: 0,
+                x_stop: FB_WIDTH,
+                y_start: 0,
+                y_stop: FB_HEIGHT,
+            },
+            &base_palettes,
+            &palette_segments,
+            &base_controls,
+            &control_segments,
+            &playfield_mask,
+            &mut collision_pixels,
+            [false; 8],
+            &captured,
+            true,
+        );
+        fb[..12].to_vec()
+    };
+    let red = rgb12_to_rgba8(0x0F00);
+    let black = rgb12_to_rgba8(0);
+    let lit = |row: &[u32]| -> Vec<usize> { (0..row.len()).filter(|&x| row[x] == red).collect() };
+    let touched =
+        |row: &[u32]| -> Vec<usize> { (0..row.len()).filter(|&x| row[x] != black).collect() };
+
+    // Whole positions: two framebuffer pixels, moved by one for 70 ns.
+    assert_eq!(lit(&row(false, false)), [4, 5]);
+    assert_eq!(lit(&row(true, false)), [5, 6]);
+    // A 35 ns step covers half of the pixel on either side: one fully lit
+    // pixel between two blended ones.
+    assert_eq!(lit(&row(false, true)), [5]);
+    assert_eq!(touched(&row(false, true)), [4, 5, 6]);
+    assert_eq!(lit(&row(true, true)), [6]);
+    assert_eq!(touched(&row(true, true)), [5, 6, 7]);
+}
+
+#[test]
+fn aga_sprite_colour_bank_switches_one_35ns_sample_into_its_column() {
+    // BPLCON4 selects the sprite colour bank. A mid-line write reaches the
+    // sprite colour lookup one 35 ns sample after the framebuffer column it
+    // is placed at, so the left half of that column still shows the old
+    // bank. A sprite two lo-res pixels wide straddles a switch at column 6.
+    let mut state = RenderState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        dmacon: DMACON_DMAEN | DMACON_SPREN,
+        bplcon4: 0x0011,
+        ..blank_state()
+    };
+    state.palette.write_ocs(17, 0x0F00);
+    // Entry 33: the same sprite colour in bank 2 (high and low nibbles).
+    state.palette.write_entry(33, false, 0x00F0);
+    state.palette.write_entry(33, true, 0x00F0);
+    let ram = vec![0; 64];
+    let base_palettes = [state.palette; FB_HEIGHT];
+    let palette_segments = vec![Vec::new(); FB_HEIGHT];
+    let base_control = ControlState::from_render_state(&state);
+    let base_controls = [base_control; FB_HEIGHT];
+    let mut control_segments = vec![Vec::new(); FB_HEIGHT];
+    control_segments[0].push(ControlSegment {
+        x: 6,
+        control: ControlState {
+            bplcon4: 0x0022,
+            ..base_control
+        },
+    });
+    let playfield_mask = vec![0u8; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let mut fb = vec![rgb12_to_rgba8(0); FB_PIXELS];
+    let captured = [CapturedSpriteLine {
+        sprite: 0,
+        hstart: SPRITE_HSTART_FB0 + 2,
+        hsub_70ns: false,
+        hsub_35ns: false,
+        beam_y: PAL_VISIBLE_LINE0,
+        data: 0xC000,
+        datb: 0,
+        attached: false,
+        data_ext: [0; 3],
+        datb_ext: [0; 3],
+        width_words: 1,
+    }];
+    render_sprites(
+        &state,
+        &ram,
+        &mut fb,
+        SpriteClip {
+            x_start: 0,
+            x_stop: FB_WIDTH,
+            y_start: 0,
+            y_stop: FB_HEIGHT,
+        },
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &playfield_mask,
+        &mut collision_pixels,
+        [false; 8],
+        &captured,
+        true,
+    );
+
+    let red = rgb12_to_rgba8(0x0F00);
+    let green = rgb12_to_rgba8(0x00F0);
+    assert_eq!(fb[3], rgb12_to_rgba8(0));
+    assert_eq!(fb[4], red);
+    assert_eq!(fb[5], red);
+    assert_eq!(fb[6], rgba8_blend_halves(red, green));
+    assert_eq!(fb[7], green);
+}
+
+#[test]
 fn bplcon3_spres_hires_applies_to_attached_sprite_pairs() {
     let mut state = RenderState {
         dmacon: DMACON_DMAEN | DMACON_SPREN,
@@ -3143,6 +3432,7 @@ fn bplcon3_spres_hires_applies_to_attached_sprite_pairs() {
             sprite: 0,
             hstart: SPRITE_HSTART_FB0,
             hsub_70ns: false,
+            hsub_35ns: false,
             beam_y: PAL_VISIBLE_LINE0,
             data: 0x8000,
             datb: 0,
@@ -3155,6 +3445,7 @@ fn bplcon3_spres_hires_applies_to_attached_sprite_pairs() {
             sprite: 1,
             hstart: SPRITE_HSTART_FB0,
             hsub_70ns: false,
+            hsub_35ns: false,
             beam_y: PAL_VISIBLE_LINE0,
             data: 0x8000,
             datb: 0,
@@ -3867,6 +4158,7 @@ fn dma_seeded_sprite_reuse_keeps_later_register_data_on_same_line() {
     manual_lines[0].push(SpriteLine {
         hstart: SPRITE_HSTART_FB0 + 96,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y,
         data: 0xFFFF,
         datb: 0,
@@ -3882,6 +4174,7 @@ fn dma_seeded_sprite_reuse_keeps_later_register_data_on_same_line() {
     dma_seeded[0].push(SpriteLine {
         hstart: SPRITE_HSTART_FB0 + 96,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y,
         data: 0x8000,
         datb: 0,
@@ -3930,6 +4223,7 @@ fn held_sprite_after_dma_disable_persists_past_descriptor_vstop() {
             sprite: 0,
             hstart: SPRITE_HSTART_FB0,
             hsub_70ns: false,
+            hsub_35ns: false,
             beam_y: held_vstart,
             data: 0x8000,
             datb: 0,
@@ -3983,6 +4277,7 @@ fn held_sprite_starts_from_dma_loaded_position_and_control() {
             sprite: 1,
             hstart: held_hstart,
             hsub_70ns: true,
+            hsub_35ns: false,
             beam_y: held_vstart,
             data: 0x8000,
             datb: 0,
@@ -4294,9 +4589,13 @@ fn manual_sprite_data_write_before_compare_uses_sprite_compare_domain() {
     let event_hpos = 116;
     let data_x = sprite_data_write_framebuffer_x(event_hpos);
     let colour_output_x = beam_to_framebuffer_x_unclamped(event_hpos) as usize;
-    let base_x =
-        sprite_nominal_base_framebuffer_x(pos, ctl, initial_state.bplcon0, initial_state.fmode)
-            as usize;
+    let base_x = sprite_nominal_base_framebuffer_x(
+        pos,
+        ctl,
+        initial_state.bplcon0,
+        initial_state.fmode,
+        false,
+    ) as usize;
     assert!(data_x < base_x);
     assert!(colour_output_x > base_x);
 
@@ -4341,9 +4640,13 @@ fn attached_manual_sprite_data_write_before_compare_uses_sprite_compare_domain()
     let event_hpos = 116;
     let data_x = sprite_data_write_framebuffer_x(event_hpos);
     let colour_output_x = beam_to_framebuffer_x_unclamped(event_hpos) as usize;
-    let base_x =
-        sprite_nominal_base_framebuffer_x(pos, ctl, initial_state.bplcon0, initial_state.fmode)
-            as usize;
+    let base_x = sprite_nominal_base_framebuffer_x(
+        pos,
+        ctl,
+        initial_state.bplcon0,
+        initial_state.fmode,
+        false,
+    ) as usize;
     assert!(data_x < base_x);
     assert!(colour_output_x > base_x);
 
@@ -4883,6 +5186,7 @@ fn sprites_wait_for_first_bpl1dat_display_enable_on_scanline() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0xFFFF,
         datb: 0,
@@ -4943,6 +5247,7 @@ fn manual_bpl1dat_display_enable_allows_sprites_on_vertically_closed_diw_line() 
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -5025,6 +5330,7 @@ fn brdsprt_bypasses_first_bpl1dat_display_enable_gate() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -5081,6 +5387,7 @@ fn brdrblnk_suppresses_brdsprt_display_enable_bypass() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -5141,6 +5448,7 @@ fn bplcon3_brdsprt_allows_sprites_in_border_when_ecsena_set() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -5198,6 +5506,7 @@ fn bplcon3_brdsprt_requires_ecsena_for_border_sprites() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -5281,6 +5590,7 @@ fn beam_timed_bplcon3_brdsprt_latches_until_ecsena_enables_effect() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0 + 8,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0xFFFF,
         datb: 0,
@@ -5341,6 +5651,7 @@ fn sprites_use_beam_timed_display_window_control() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0xC000,
         datb: 0,
@@ -5394,6 +5705,7 @@ fn captured_sprite_dma_lines_render_without_reparsing_frame_ram() {
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -5451,6 +5763,7 @@ fn sscan2_dma_sprites_match_again_after_their_fetch_slots() {
         },
         hstart,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -5521,6 +5834,7 @@ fn captured_sprite_lines_use_fmode_when_each_line_was_serialized() {
         sprite: 4,
         hstart: 159,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,
@@ -5587,6 +5901,7 @@ fn dma_loaded_sprite_data_rearms_on_same_line_position_write() {
         sprite: 0,
         hstart: i32::from(initial_hstart),
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y,
         data: 0x8000,
         datb: 0,
@@ -5713,12 +6028,13 @@ fn sprite_ctl_write_stops_dma_data_reuse_by_later_position_write() {
     // CTL carries the fetched line's own register-decoded HSTART, so build
     // it from the register parts rather than the output-position helper.
     let (_, ctl) =
-        sprite_control_words_from_parts(beam_y, beam_y + 1, fetched_hstart, false, false);
+        sprite_control_words_from_parts(beam_y, beam_y + 1, fetched_hstart, false, false, false);
     let (reused_pos, _) = sprite_control_words(beam_y as u16, beam_y as u16 + 1, reused_hstart);
     let captured = [CapturedSpriteLine {
         sprite: 0,
         hstart: fetched_hstart,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y,
         // A full opaque word, so any surviving output is unmissable wherever
         // the reposition lands it.
@@ -5779,6 +6095,7 @@ fn dma_loaded_line_with_ctl_write_at(
         sprite: 0,
         hstart: reg_hstart(i32::from(hstart)),
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y,
         data: 0x8000,
         datb: 0,
@@ -5885,6 +6202,7 @@ fn sprite_register_data_write_after_compare_preserves_dma_latch_on_same_beam_lin
         sprite: 0,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0xFFFF,
         datb: 0,
@@ -8971,6 +9289,7 @@ fn sprite_collisions_use_beam_timed_clxcon_control() {
         sprite: 1,
         hstart: SPRITE_HSTART_FB0,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: PAL_VISIBLE_LINE0,
         data: 0x8000,
         datb: 0,

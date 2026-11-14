@@ -11,6 +11,8 @@ use super::*;
 pub(super) struct SpriteLine {
     pub(super) hstart: i32,
     pub(super) hsub_70ns: bool,
+    /// AGA: SPRxCTL bit 3, a further 35 ns of horizontal position.
+    pub(super) hsub_35ns: bool,
     pub(super) beam_y: i32,
     pub(super) data: u16,
     pub(super) datb: u16,
@@ -63,7 +65,9 @@ impl<'a> SpriteLineSampler<'a> {
         let mut bit_stops_subpixels = [0i32; SPRITE_LINE_MAX_BITS + 1];
         let mut bit_values = [0u8; SPRITE_LINE_MAX_BITS];
         let mut bit_count = 0usize;
-        let mut subpixel_cursor = base_x * 2;
+        // SPRxCTL's 35 ns bit (Lisa) moves the whole serializer by one
+        // sample, below the framebuffer pitch.
+        let mut subpixel_cursor = base_x * 2 + i32::from(line.hsub_35ns);
         bit_stops_subpixels[0] = subpixel_cursor;
 
         for w in 0..line.width_words() {
@@ -92,21 +96,35 @@ impl<'a> SpriteLineSampler<'a> {
         }
     }
 
+    /// The span of 35 ns samples this line may paint. A line's clip span
+    /// is where its serializer runs between two of the sprite's reloads,
+    /// so it carries the sprite's own 35 ns offset: when a sprite is
+    /// repositioned along a line, each segment ends in the sample where
+    /// the next one starts, and no half pixel falls between them.
+    fn clip_subpixels(&self) -> (i32, i32) {
+        let offset = i32::from(self.line.hsub_35ns);
+        (
+            self.line.x_start as i32 * 2 + offset,
+            self.line.x_stop as i32 * 2 + offset,
+        )
+    }
+
     pub(super) fn framebuffer_range(&self) -> Option<(i32, i32)> {
+        let (clip_start, clip_stop) = self.clip_subpixels();
         let start = self.bit_stops_subpixels[0]
+            .max(clip_start)
             .div_euclid(2)
-            .max(self.line.x_start as i32)
             .max(0);
-        let stop = (self.bit_stops_subpixels[self.bit_count] + 1)
+        let stop = (self.bit_stops_subpixels[self.bit_count].min(clip_stop) + 1)
             .div_euclid(2)
-            .min(self.line.x_stop as i32)
             .min(FB_WIDTH as i32);
         (start < stop).then_some((start, stop))
     }
 
     pub(super) fn subpixel_bits_at(&self, subpixel: i32) -> u8 {
-        if subpixel < self.line.x_start as i32 * 2
-            || subpixel >= self.line.x_stop as i32 * 2
+        let (clip_start, clip_stop) = self.clip_subpixels();
+        if subpixel < clip_start
+            || subpixel >= clip_stop
             || subpixel < self.bit_stops_subpixels[0]
             || subpixel >= self.bit_stops_subpixels[self.bit_count]
         {
@@ -232,6 +250,7 @@ impl BeamSpriteState {
                     held.vstop,
                     held.line.hstart,
                     held.line.hsub_70ns,
+                    held.line.hsub_35ns,
                     held.line.attached,
                 );
                 sprpos[i] = pos;
@@ -309,7 +328,9 @@ impl BeamSpriteState {
         let held = self.held[sprite];
         let hstart = crate::bus::sprite_hstart_for_fmode(sprite_hstart(pos, ctl), self.fmode);
         let hsub_70ns = sprite_hsub_70ns(ctl);
-        let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, self.bplcon0, self.fmode);
+        let hsub_35ns = self.aga && sprite_hsub_35ns(ctl);
+        let base_x =
+            sprite_nominal_base_framebuffer_x(pos, ctl, self.bplcon0, self.fmode, self.aga);
         // A held sprite was already active when SPREN was cleared. With no
         // sprite DMA slot running, the DMA descriptor's stop comparator cannot
         // retire the latched data; later SPRxPOS writes simply reposition it.
@@ -317,6 +338,7 @@ impl BeamSpriteState {
             return Some(SpriteLine {
                 hstart,
                 hsub_70ns,
+                hsub_35ns,
                 beam_y,
                 data: held.line.data,
                 datb: held.line.datb,
@@ -366,6 +388,7 @@ impl BeamSpriteState {
         Some(SpriteLine {
             hstart,
             hsub_70ns,
+            hsub_35ns,
             beam_y,
             data,
             datb,
@@ -835,7 +858,8 @@ pub(super) fn flush_manual_sprite_lines(
         if mode == ManualSpriteFlushMode::PreserveStartedOutput && beam_y == end_line {
             let pos = regs.sprpos[sprite];
             let ctl = regs.sprctl[sprite];
-            let base_x = sprite_nominal_base_framebuffer_x(pos, ctl, regs.bplcon0, regs.fmode);
+            let base_x =
+                sprite_nominal_base_framebuffer_x(pos, ctl, regs.bplcon0, regs.fmode, regs.aga);
             if x_stop as i32 >= base_x {
                 x_stop = FB_WIDTH;
             }
@@ -1296,21 +1320,25 @@ pub(super) fn render_attached_sprite_pair_lines(
             if sprite_mask & (0b11 << even_sprite) != 0b11 << even_sprite {
                 continue;
             }
-            let resolve = |idx| {
-                let color_idx = sprite_color_entry(control, even_sprite, idx, true);
+            let bank_controls =
+                sprite_bank_controls(base_controls[y], &control_segments[y], x_usize, control);
+            let resolve = |idx, half: usize| {
+                let color_idx = sprite_color_entry(bank_controls[half], even_sprite, idx, true);
                 let entry =
                     palette_entry_at_x(&base_palettes[y], &palette_segments[y], x_usize, color_idx);
                 sprite_pixel_rgba(control, entry)
             };
-            let (left, right) = if left_visible && right_visible && left_idx == right_idx {
-                let pixel = resolve(left_idx);
-                (Some(pixel), Some(pixel))
-            } else {
-                (
-                    left_visible.then(|| resolve(left_idx)),
-                    right_visible.then(|| resolve(right_idx)),
-                )
-            };
+            let same_bank = bank_controls[0].bplcon4 == bank_controls[1].bplcon4;
+            let (left, right) =
+                if left_visible && right_visible && left_idx == right_idx && same_bank {
+                    let pixel = resolve(left_idx, 0);
+                    (Some(pixel), Some(pixel))
+                } else {
+                    (
+                        left_visible.then(|| resolve(left_idx, 0)),
+                        right_visible.then(|| resolve(right_idx, 1)),
+                    )
+                };
             let canvas_scale = super::active_canvas_scale();
             let out_base = y * FB_WIDTH * canvas_scale + x_usize * canvas_scale;
             paint_sprite_subpixel_pair(
@@ -1421,6 +1449,28 @@ pub(super) fn clip_sprite_lines_around_register_lines(
         }
     }
     *lines = clipped;
+}
+
+/// The control state whose BPLCON4 selects the sprite colour bank in each
+/// 35 ns half of framebuffer pixel `x`.
+///
+/// On Lisa a BPLCON4 write reaches the sprite colour lookup one 35 ns
+/// sample after the framebuffer column the write is placed at: the left
+/// half of that column still shows the old bank. Software that switches
+/// the bank mid-line under a sprite sets SPRxCTL's 35 ns position bit so
+/// the sprite's pixel edges fall on the switch (SANITY's Roots 2.0 does on
+/// all eight sprites of its Copper-coloured sprite screen); with the
+/// switch on a whole column, each one left a half-pixel of the wrong bank.
+fn sprite_bank_controls(
+    base_control: ControlState,
+    control_segments: &[ControlSegment],
+    x: usize,
+    control: ControlState,
+) -> [ControlState; 2] {
+    if !control.aga() || control_segments.is_empty() || x == 0 {
+        return [control; 2];
+    }
+    [control_at_x(base_control, control_segments, x - 1), control]
 }
 
 #[inline]
@@ -1543,18 +1593,21 @@ pub(super) fn draw_sprite_line(
         if super::active_debug_sprite_mask() & (1 << sprite) == 0 {
             continue;
         }
-        let resolve = |idx| {
-            let color_idx = sprite_color_entry(control, sprite, idx, false);
+        let bank_controls =
+            sprite_bank_controls(base_controls[y], &control_segments[y], x, control);
+        let resolve = |idx, half: usize| {
+            let color_idx = sprite_color_entry(bank_controls[half], sprite, idx, false);
             let entry = palette_entry_at_x(&base_palettes[y], &palette_segments[y], x, color_idx);
             sprite_pixel_rgba(control, entry)
         };
-        let (left, right) = if left_visible && right_visible && left_idx == right_idx {
-            let pixel = resolve(left_idx);
+        let same_bank = bank_controls[0].bplcon4 == bank_controls[1].bplcon4;
+        let (left, right) = if left_visible && right_visible && left_idx == right_idx && same_bank {
+            let pixel = resolve(left_idx, 0);
             (Some(pixel), Some(pixel))
         } else {
             (
-                left_visible.then(|| resolve(left_idx)),
-                right_visible.then(|| resolve(right_idx)),
+                left_visible.then(|| resolve(left_idx, 0)),
+                right_visible.then(|| resolve(right_idx, 1)),
             )
         };
         let canvas_scale = super::active_canvas_scale();
@@ -1632,6 +1685,7 @@ pub(super) fn collect_sprite_lines_into(
                         .map(|hstart| SpriteLine {
                             hstart,
                             hsub_70ns: line.hsub_70ns,
+                            hsub_35ns: line.hsub_35ns,
                             beam_y: line.beam_y,
                             data: line.data,
                             datb: line.datb,
@@ -1724,7 +1778,14 @@ fn sprite_base_framebuffer_x_resolved(
         * 2;
     let sample_x = base_x.clamp(0, FB_WIDTH.saturating_sub(1) as i32) as usize;
     let control = control_at_x(base_control, control_segments, sample_x);
-    base_x + i32::from(hsub_70ns && control.shres())
+    base_x + i32::from(hsub_70ns && sprite_hsub_70ns_applies(control.aga(), control.shres()))
+}
+
+/// Whether SPRxCTL's 70 ns position bit moves the sprite. Lisa applies it
+/// (and the 35 ns bit below it) in every display mode; on ECS Denise the
+/// model applies it in super-hi-res, where sprite pixels are that fine.
+pub(super) fn sprite_hsub_70ns_applies(aga: bool, shres: bool) -> bool {
+    aga || shres
 }
 
 pub(super) fn sprite_nominal_base_framebuffer_x(
@@ -1732,11 +1793,14 @@ pub(super) fn sprite_nominal_base_framebuffer_x(
     ctl: u16,
     bplcon0: u16,
     fmode: u16,
+    aga: bool,
 ) -> i32 {
     let hstart = crate::bus::sprite_hstart_for_fmode(sprite_hstart(pos, ctl), fmode);
     (hstart + crate::bus::SPRITE_OUTPUT_DELAY_LORES - diw_hstart_fb0() + active_canvas_shift_h())
         * 2
-        + i32::from(sprite_hsub_70ns(ctl) && bplcon0 & BPLCON0_SHRES != 0)
+        + i32::from(
+            sprite_hsub_70ns(ctl) && sprite_hsub_70ns_applies(aga, bplcon0 & BPLCON0_SHRES != 0),
+        )
 }
 
 pub(super) fn sprite_display_enable_x_for_y(
@@ -1887,11 +1951,17 @@ pub(super) fn sprite_hsub_70ns(ctl: u16) -> bool {
     ctl & 0x0010 != 0
 }
 
+/// SPRxCTL bit 3: Lisa's 35 ns horizontal position bit.
+pub(super) fn sprite_hsub_35ns(ctl: u16) -> bool {
+    ctl & 0x0008 != 0
+}
+
 pub(super) fn sprite_control_words_from_parts(
     vstart: i32,
     vstop: i32,
     hstart: i32,
     hsub_70ns: bool,
+    hsub_35ns: bool,
     attached: bool,
 ) -> (u16, u16) {
     let vstart = vstart as u16;
@@ -1904,6 +1974,9 @@ pub(super) fn sprite_control_words_from_parts(
         | (hstart & 0x0001);
     if hsub_70ns {
         ctl |= 0x0010;
+    }
+    if hsub_35ns {
+        ctl |= 0x0008;
     }
     if attached {
         ctl |= 0x0080;
@@ -1968,6 +2041,7 @@ mod performance_tests {
                 let line = SpriteLine {
                     hstart: DIW_HSTART_FB0 - crate::bus::SPRITE_OUTPUT_DELAY_LORES,
                     hsub_70ns: false,
+                    hsub_35ns: false,
                     beam_y: PAL_VISIBLE_LINE0 + row as i32,
                     data: 0xA55A,
                     datb: 0x3333,

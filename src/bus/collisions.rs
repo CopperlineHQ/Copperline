@@ -161,7 +161,8 @@ impl Bus {
             self.effective_diwhigh(),
             self.denise.ddfstrt,
             self.denise.bpldat,
-        );
+        )
+        .with_fmode(self.agnus.fmode());
         let frame_base = self.current_frame_render_base;
         let control_index = self.current_frame_collision_control_index.as_ref().unwrap();
         let control_replay = LiveCollisionLineReplay::from_index(
@@ -253,7 +254,8 @@ impl Bus {
             self.effective_diwhigh(),
             self.denise.ddfstrt,
             self.denise.bpldat,
-        );
+        )
+        .with_fmode(self.agnus.fmode());
         let frame_base = self.current_frame_render_base;
         let control_index = self.current_frame_collision_control_index.as_ref().unwrap();
         let control_replay = LiveCollisionLineReplay::from_index(
@@ -348,7 +350,8 @@ impl Bus {
             self.effective_diwhigh(),
             self.denise.ddfstrt,
             self.denise.bpldat,
-        );
+        )
+        .with_fmode(self.agnus.fmode());
         let frame_base = self.current_frame_render_base;
         self.ensure_current_collision_control_index();
         let control_index = self.current_frame_collision_control_index.as_ref().unwrap();
@@ -439,7 +442,8 @@ impl Bus {
             self.effective_diwhigh(),
             self.denise.ddfstrt,
             self.denise.bpldat,
-        );
+        )
+        .with_fmode(self.agnus.fmode());
         let frame_base = self.current_frame_render_base;
         let control_index = self.current_frame_collision_control_index.as_ref().unwrap();
         let control_replay = LiveCollisionLineReplay::from_index(

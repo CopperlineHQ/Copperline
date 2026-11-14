@@ -533,6 +533,11 @@ probe_tests! {
     // even sprite on unset odd-bank entries). Colours vAmiga-verified
     // bijectively exact per band.
     golden_sprprobe_banks => probe_aga("sprprobe-banks", "sprprobe-banks.bin", 16.0);
+    // Lisa's sub-pixel steps: BPLCON1 H1/H0 delay a lo-res playfield by
+    // 70 and 35 ns, and SPRxCTL bits 4 and 3 move a sprite by the same in
+    // every display mode. No reference emulator models either (see the
+    // probe header).
+    golden_agafine_scroll => probe_aga("agafine-scroll", "agafine-scroll.bin", 16.0);
     // Copper per-band slot budget across the line-end refresh access: the
     // $E2 refresh cycle stalls the CPU/blitter but must not block a Copper
     // fetch, or a saturated per-band MOVE stream loses one fetch per line

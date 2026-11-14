@@ -7579,6 +7579,7 @@ fn same_line_bplcon2_priority_change_reveals_later_sprite_pixels() {
         sprite: 0,
         hstart: RENDER_DIW_HSTART_FB0 + 34 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: RENDER_VISIBLE_START_VPOS as i32,
         data: 0xFFFF,
         datb: 0,
@@ -7617,6 +7618,7 @@ fn same_line_bplcon3_spres_narrows_later_sprite_pixels() {
         sprite: 0,
         hstart: RENDER_DIW_HSTART_FB0 + 34 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: RENDER_VISIBLE_START_VPOS as i32,
         data: 0x0100,
         datb: 0,
@@ -8404,6 +8406,7 @@ fn fmode_sscan2_masks_sprite_horizontal_comparator_high_bit() {
         sprite: 0,
         hstart: 0x165,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: 42,
         data: 0x8000,
         datb: 0,
@@ -8425,6 +8428,7 @@ fn sscan2_dma_matches_use_fmode_at_each_beam_position() {
         sprite: 4,
         hstart: 159,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: 42,
         data: 0x8000,
         datb: 0,
@@ -8476,6 +8480,7 @@ fn sscan2_live_collision_repeat_obeys_same_line_sprite_arming() {
         sprite: 4,
         hstart: 159,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: 42,
         data: 0x8000,
         datb: 0,
@@ -8883,6 +8888,7 @@ fn state_load_resets_transient_video_latches() {
         sprite: 0,
         hstart: 0x80,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: 0x2C,
         data: 0x1111,
         datb: 0x2222,
@@ -8898,6 +8904,7 @@ fn state_load_resets_transient_video_latches() {
         last_line: Some(DisplaySpriteLineData {
             hstart: 0x80,
             hsub_70ns: false,
+            hsub_35ns: false,
             data: 0x1111,
             datb: 0x2222,
             data_ext: [0; 3],
@@ -8955,6 +8962,7 @@ fn state_load_after_display_start_suppresses_partial_render_frame() {
         sprite: 0,
         hstart: 0x80,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: RENDER_VISIBLE_START_VPOS as i32 + 20,
         data: 0x1111,
         datb: 0x2222,
@@ -8984,6 +8992,7 @@ fn state_load_after_display_start_suppresses_partial_render_frame() {
         sprite: 1,
         hstart: 0x90,
         hsub_70ns: false,
+        hsub_35ns: false,
         beam_y: RENDER_VISIBLE_START_VPOS as i32 + 21,
         data: 0x3333,
         datb: 0x4444,
@@ -10062,6 +10071,112 @@ fn bplcon3_spres_hires_narrows_live_sprite_sprite_clxdat() {
 }
 
 #[test]
+fn aga_bplcon1_scroll_decodes_to_35ns_samples_for_collisions() {
+    // PF1 H0..H7 are BPLCON1 bits 8, 9, 0, 1, 2, 3, 10, 11; PF2's are the
+    // same four bits higher. The value wraps at the fetched width.
+    let lores = 0x1000;
+    assert_eq!(super::live_aga_scroll_35ns(lores, 0x0100, 0, false), 1);
+    assert_eq!(super::live_aga_scroll_35ns(lores, 0x0200, 0, false), 2);
+    assert_eq!(super::live_aga_scroll_35ns(lores, 0x0001, 0, false), 4);
+    assert_eq!(super::live_aga_scroll_35ns(lores, 0x0302, 0, false), 11);
+    assert_eq!(super::live_aga_scroll_35ns(lores, 0x3020, 0, true), 11);
+    assert_eq!(super::live_aga_scroll_35ns(lores, 0x0400, 0, false), 0);
+    assert_eq!(super::live_aga_scroll_35ns(lores, 0x0400, 3, false), 64);
+    // Hi-res wraps at 16 hi-res pixels: the old three-bit rule.
+    assert_eq!(super::live_aga_scroll_35ns(0x9000, 0x000F, 0, false), 28);
+}
+
+#[test]
+fn aga_sprite_meets_a_quarter_pixel_scrolled_playfield_at_35ns_positions() {
+    // A one-pixel lo-res sprite stepped across a playfield edge in 35 ns
+    // steps (SPRxPOS/SPRxCTL: 140 ns, bit 4 = 70 ns, bit 3 = 35 ns) first
+    // touches the playfield when its last quarter reaches the edge. The
+    // edge itself moves with BPLCON1 in 35 ns steps: bits 9-8 below a
+    // lo-res pixel, bits 3-0 whole lo-res pixels.
+    let mut planes: [Vec<u16>; 8] = std::array::from_fn(|_| Vec::new());
+    planes[0] = (0..20)
+        .map(|word| if word >= 10 { 0xFFFF } else { 0 })
+        .collect();
+    for plane in planes.iter_mut().skip(1).take(5) {
+        *plane = vec![0; 20];
+    }
+    let row = CapturedBitplaneRow {
+        nplanes: 1,
+        words_per_row: 20,
+        fetch_origin_cck: None,
+        planes,
+    };
+    let first_touch = |revision, bplcon1: u16| {
+        let control = LiveCollisionControl::from_current(
+            revision,
+            0x1000,
+            bplcon1,
+            0,
+            0x0041,
+            0,
+            0x2C81,
+            0x2CC1,
+            DiwHigh::ocs_implicit(),
+            0x0038,
+            [0; 8],
+        );
+        let replay = super::LiveCollisionLineReplay {
+            line_start: control,
+            segments: Vec::new(),
+        };
+        let aga = matches!(revision, AgnusRevision::AgaAlice);
+        (4 * 0x100..4 * 0x140).find(|&position: &i32| {
+            let source = LiveSpriteCollisionSource {
+                group: 0,
+                hstart: position >> 2,
+                hsub_70ns: aga && position & 2 != 0,
+                hsub_35ns: aga && position & 1 != 0,
+                words: [0x8000, 0, 0, 0],
+                requires_odd_enable: false,
+            };
+            let (x_start, x_stop) = super::live_sprite_source_framebuffer_bounds(&source);
+            (x_start..x_stop).any(|x| {
+                let sprite =
+                    super::live_sprite_source_collision_halves(&source, &replay, 0x0041, x);
+                super::live_playfield_collision_halves(&row, control, x).is_some_and(|playfield| {
+                    super::live_sprite_playfield_half_matches(sprite, playfield).0
+                })
+            })
+        })
+    };
+
+    let aga_base = first_touch(AgnusRevision::AgaAlice, 0x0000).expect("sprite reaches the edge");
+    for (bplcon1, samples) in [
+        (0x0100, 1),
+        (0x0200, 2),
+        (0x0300, 3),
+        (0x0001, 4),
+        (0x0101, 5),
+        (0x0302, 11),
+        (0x0005, 20),
+    ] {
+        assert_eq!(
+            first_touch(AgnusRevision::AgaAlice, bplcon1),
+            Some(aga_base + samples),
+            "BPLCON1 {bplcon1:#06X}"
+        );
+    }
+
+    // ECS has neither the sub-pixel scroll bits nor a sprite position below
+    // a lo-res pixel here: the first touch moves in whole lo-res pixels.
+    let ecs_base = first_touch(AgnusRevision::Ecs8372Rev4, 0x0000).expect("sprite reaches");
+    assert_eq!(ecs_base % 4, 0);
+    assert_eq!(
+        first_touch(AgnusRevision::Ecs8372Rev4, 0x0300),
+        Some(ecs_base)
+    );
+    assert_eq!(
+        first_touch(AgnusRevision::Ecs8372Rev4, 0x0001),
+        Some(ecs_base + 4)
+    );
+}
+
+#[test]
 fn aga_spres_shres_combines_adjacent_sprite_samples_for_live_clxdat() {
     let clxdat_after_visible_sprite_pixels = |bplcon3| {
         let mut bus = empty_bus();
@@ -10386,6 +10501,7 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
         group: 0,
         hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
+        hsub_35ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
     };
@@ -10444,6 +10560,7 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
             group: 0,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10451,6 +10568,7 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
             group: 1,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10518,6 +10636,7 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
             group: 0,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10525,6 +10644,7 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
             group: 1,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10532,6 +10652,7 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
             group: 2,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10591,6 +10712,7 @@ fn live_sprite_playfield_clxdat_skips_already_latched_bits() {
         group: 0,
         hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
         hsub_70ns: false,
+        hsub_35ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
     };
@@ -10662,6 +10784,7 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
             group: 0,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10669,6 +10792,7 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
             group: 1,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10712,6 +10836,7 @@ fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
             group: 0,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10719,6 +10844,7 @@ fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
             group: 1,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10762,6 +10888,7 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
             group: 0,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
@@ -10769,6 +10896,7 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
             group: 1,
             hstart: RENDER_DIW_HSTART_FB0 - SPRITE_OUTPUT_DELAY_LORES,
             hsub_70ns: false,
+            hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
         },
