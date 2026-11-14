@@ -2191,6 +2191,15 @@ Images are opened read/write. Both kinds of HDF work directly:
   partition go back to the image file; writes to the synthesized RDB area
   (re-partitioning) live only for the session.
 
+An IDE drive reports the geometry its disk was partitioned with: the heads
+and sectors per track the Rigid Disk Block records for the physical drive
+(for example 16 x 63 for an image prepared in another emulator or on a
+real drive). Every block the partition table describes is then reachable
+by cylinder/head/sector addressing, which is all a Kickstart 2.x/3.x
+`scsi.device` uses. A disk with no RDSK block, or one whose recorded
+geometry an ATA drive cannot present (more than 16 heads, or describing
+more sectors than the image holds), gets 16 heads x 32 sectors per track.
+
 A **gzip-compressed hardfile** attaches too -- the `.hdz` convention, or a
 plainly gzipped `.hdf`. Like the floppy formats it is recognised by content
 and not by name, so the extension is free. Deflate cannot be read a sector
