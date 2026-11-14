@@ -234,42 +234,15 @@ pub fn status_line(out: &mut Vec<u8>, geometry: Geometry, text: &str) {
     out.extend_from_slice(b"\x1b[0m");
 }
 
-const BASE64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
 /// Standard base64 (RFC 4648, padded) of `data`, appended to `out`.
 pub fn base64_encode_into(out: &mut Vec<u8>, data: &[u8]) {
-    out.reserve(data.len().div_ceil(3) * 4);
-    let mut chunks = data.chunks_exact(3);
-    for c in &mut chunks {
-        let n = u32::from(c[0]) << 16 | u32::from(c[1]) << 8 | u32::from(c[2]);
-        out.extend_from_slice(&[
-            BASE64[(n >> 18) as usize & 63],
-            BASE64[(n >> 12) as usize & 63],
-            BASE64[(n >> 6) as usize & 63],
-            BASE64[n as usize & 63],
-        ]);
-    }
-    match *chunks.remainder() {
-        [a] => {
-            let n = u32::from(a) << 16;
-            out.extend_from_slice(&[
-                BASE64[(n >> 18) as usize & 63],
-                BASE64[(n >> 12) as usize & 63],
-                b'=',
-                b'=',
-            ]);
-        }
-        [a, b] => {
-            let n = u32::from(a) << 16 | u32::from(b) << 8;
-            out.extend_from_slice(&[
-                BASE64[(n >> 18) as usize & 63],
-                BASE64[(n >> 12) as usize & 63],
-                BASE64[(n >> 6) as usize & 63],
-                b'=',
-            ]);
-        }
-        _ => {}
-    }
+    use base64::Engine;
+    let start = out.len();
+    out.resize(start + data.len().div_ceil(3) * 4, 0);
+    let written = base64::engine::general_purpose::STANDARD
+        .encode_slice(data, &mut out[start..])
+        .expect("the buffer holds the padded encoding");
+    debug_assert_eq!(start + written, out.len());
 }
 
 #[cfg(test)]
@@ -284,18 +257,10 @@ mod tests {
     }
 
     fn b64_decode(text: &[u8]) -> Vec<u8> {
-        let value = |c: u8| BASE64.iter().position(|&b| b == c).unwrap() as u32;
-        let mut out = Vec::new();
-        for quad in text.chunks(4) {
-            let pad = quad.iter().filter(|&&c| c == b'=').count();
-            let n = quad
-                .iter()
-                .map(|&c| if c == b'=' { 0 } else { value(c) })
-                .fold(0u32, |acc, v| acc << 6 | v);
-            let bytes = [(n >> 16) as u8, (n >> 8) as u8, n as u8];
-            out.extend_from_slice(&bytes[..3 - pad]);
-        }
-        out
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD
+            .decode(text)
+            .unwrap()
     }
 
     #[test]

@@ -153,6 +153,7 @@ frontend = [
     "dep:egui",
     "dep:egui-winit",
     "dep:egui-wgpu",
+    "dep:base64",
 ]
 # The wasmtime host for functional Zorro boards (src/wasmboard.rs). Separate
 # from `frontend` because it is a core-machine feature, but Cranelift cannot
