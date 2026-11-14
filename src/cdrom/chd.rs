@@ -15,7 +15,7 @@
 
 use super::{CdTrack, TrackKind, DATA_SECTOR_BYTES, MODE2_SECTOR_BYTES, RAW_SECTOR_BYTES};
 use anyhow::{anyhow, bail, Context, Result};
-use chd::metadata::{KnownMetadata, Metadata};
+use chd::metadata::KnownMetadata;
 use chd::Chd;
 use std::fs::File;
 use std::io::BufReader;
@@ -234,10 +234,7 @@ impl ChdImage {
             );
         }
 
-        let entries: Vec<Metadata> = chd
-            .metadata_refs()
-            .try_into()
-            .map_err(|e| anyhow!("{}: reading CHD metadata: {e}", path.display()))?;
+        let entries = crate::harddrive::chd::read_metadata(&mut chd, path)?;
         let mut raw_tracks = Vec::new();
         for entry in &entries {
             if entry.metatag == KnownMetadata::CdRomTrack as u32

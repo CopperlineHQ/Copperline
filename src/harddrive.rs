@@ -1098,6 +1098,7 @@ impl HardDriveImage {
         if self.write_protected() {
             return Err(Self::write_protected_error());
         }
+        self.check_range(lba, (buf.len() / SECTOR_SIZE) as u64)?;
         if self.fault.is_empty() {
             return self.write_sectors_real(lba, buf);
         }
@@ -1161,6 +1162,20 @@ impl HardDriveImage {
         }
     }
 
+    /// Refuse a transfer that does not lie wholly inside the drive. The
+    /// controllers range-check a request's first block; one that streams
+    /// further blocks (an SD multi-block write) advances past that check,
+    /// and a raw image file would otherwise simply grow.
+    fn check_range(&self, lba: u64, sectors: u64) -> std::io::Result<()> {
+        match lba.checked_add(sectors) {
+            Some(end) if end <= self.total_sectors => Ok(()),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "transfer runs past the end of the drive",
+            )),
+        }
+    }
+
     fn write_protected_error() -> std::io::Error {
         std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -1191,6 +1206,7 @@ impl HardDriveImage {
     fn write_sectors_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
         debug_assert!(buf.len().is_multiple_of(SECTOR_SIZE));
         let sectors = (buf.len() / SECTOR_SIZE) as u64;
+        self.check_range(lba, sectors)?;
         let overlay = self.overlay_sectors();
         let in_overlay = overlay.saturating_sub(lba).min(sectors) as usize * SECTOR_SIZE;
         let (head, tail) = buf.split_at(in_overlay);
@@ -1225,6 +1241,7 @@ impl HardDriveImage {
         if self.write_protected() {
             return Err(Self::write_protected_error());
         }
+        self.check_range(lba, 1)?;
         if let Some(overlay) = &mut self.rdb_overlay {
             if lba < u64::from(CYL_SECTORS) {
                 if !self.overlay_write_warned {
