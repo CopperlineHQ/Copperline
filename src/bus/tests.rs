@@ -3291,6 +3291,37 @@ fn long_read_samples_intreq_word_in_its_own_bus_slot() {
 }
 
 #[test]
+fn long_read_returns_its_first_word_when_that_word_cycle_completes() {
+    // A 68000 long read of a custom register pair is two word cycles, two
+    // colour clocks apart. The first word is the value a word read of the
+    // same register returns from the same starting position, not the value
+    // at the end of the second cycle.
+    let bus_at = |hpos: u32| {
+        let mut bus = empty_bus();
+        bus.agnus.vpos = 0x40;
+        bus.agnus.hpos = hpos;
+        bus.set_cpu_bus_arbitration_enabled(true);
+        bus
+    };
+
+    let word = bus_at(0x60).custom_read(0x006, 2);
+    assert_eq!(word >> 8, 0x40);
+    let long = bus_at(0x60).custom_read(0x006, 4);
+    assert_eq!(long >> 16, word);
+
+    // The pair of words therefore tears when the counter steps between the
+    // two cycles: the long read's VPOSR half is one word cycle older than
+    // its VHPOSR half.
+    let mut bus = bus_at(0x60);
+    let first = bus.custom_read(0x004, 4);
+    let mut reference = bus_at(0x60);
+    let vposr = reference.custom_read(0x004, 2);
+    let vhposr = reference.custom_read(0x006, 2);
+    assert_eq!(first >> 16, vposr);
+    assert_eq!(first & 0xFFFF, vhposr);
+}
+
+#[test]
 fn clearing_coper_intreq_cancels_pending_cpu_irq_delay() {
     let mut bus = empty_bus();
     assert!(bus.write_custom_word_from(0x09C, 0x8000 | INT_COPER, BeamWriteSource::Copper,));

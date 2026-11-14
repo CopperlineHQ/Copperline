@@ -18,14 +18,14 @@
 ;   rows 56-63:  backward steps as a 16-bit binary word
 ;
 ; With the two halves in step the count is the number of frames the
-; sampling spans (one real wrap each). A 3-cck gap between them adds about
-; one false step per 18 line-255 and frame-end crossings.
+; sampling spans (one real wrap each) plus the tears of the long read
+; itself: a 68000 reads the two words two colour clocks apart, so a sample
+; whose word cycles straddle the counter step pairs the old V8 with the new
+; low byte. A 3-cck gap between the registers adds about one more false
+; step per 18 line-255 and frame-end crossings.
 ;
-; Not a vAmiga or real-hardware reference as it stands: this model samples
-; both words of a long register read in the same colour clock, where a
-; 68000 reads them two colour clocks apart and so tears the pair itself
-; whenever the counter steps in between. Hardware would count those tears
-; on top of the frames.
+; On a Kickstart 1.3 A500 vAmiga 5 counts 109 and this model 110; without
+; the tears of the long read the model counted 102.
 CUST   equ $dff000
 BMP    equ $40000
 CLIST  equ $60000

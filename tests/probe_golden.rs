@@ -547,6 +547,9 @@ probe_tests! {
     // the low byte of one line with the V8 of another (the false line 0 at
     // 255 -> 256 and line 256 at the frame wrap).
     golden_posprobe_v8 => probe("posprobe-v8", "posprobe-v8.bin", 16.0);
+    // A 68000 long read of a custom register pair returns its first word
+    // from that word's own bus cycle, two colour clocks before the second.
+    golden_posprobe_long => probe("posprobe-long", "posprobe-long.bin", 16.0);
     // DMA sprite vertical reuse + attached pair placement (the sprite
     // register-FSM regression class).
     golden_ddfprobe_sprmulti => probe("ddfprobe-sprmulti", "ddfprobe-sprmulti.bin", 16.0);

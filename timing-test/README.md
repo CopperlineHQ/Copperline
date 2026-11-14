@@ -750,10 +750,15 @@ class; the whole-blit fence collapsed the fill/line bars),
 `posprobe-v8` (131072 long reads of VPOSR:VHPOSR at a walking phase; the
 count of samples whose line number runs backwards, as a bar and a binary
 word -- V8 and V7-V0 are one counter, so the count is the number of frames
-spanned; a model that steps V8 three colour clocks after the low byte adds
-about ten false steps; not a vAmiga or hardware reference as it stands,
-because a long register read is sampled in one colour clock here and real
-68000 reads tear the pair on their own),
+spanned plus the tears of the long read's own two word cycles; a model
+that steps V8 three colour clocks after the low byte adds about ten more
+false steps),
+`posprobe-long` (320 pairs of a word read and a long read of VHPOSR with
+all DMA off; one bar per horizontal distance between the word read's
+sample and the long read's first word -- the first word of a 68000 long
+read is returned by its own word cycle, so the long bar is at distance 4;
+a model that samples both words at the end of the second cycle puts it at
+6; vAmiga-verified),
 `ddfprobe-sprmulti` (DMA sprite vertical reuse and an attached 15-colour
 pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render

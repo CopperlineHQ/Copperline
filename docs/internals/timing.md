@@ -18,6 +18,16 @@ CPU clock belong to the next read. Paula INTREQR retains its independently
 calibrated end-of-slot sample. Byte reads select their lane; long reads sample
 each custom-bus word separately. Other registers retain their existing phases.
 
+A 68000 long read is two word cycles on the chips' 16-bit bus. Its first
+word is returned when its own cycle completes, where a word read of that
+register starting at the same position returns it, and its second word two
+colour clocks later. A MOVE.L from VPOSR therefore pairs a V8 that is two
+colour clocks older than the VHPOSR half, and the pair tears when the
+counter steps in between, as on hardware. The 68020+ data-return path and
+the A1200's one-grant longword are unchanged. Test:
+`long_read_returns_its_first_word_when_that_word_cycle_completes`; golden
+probe `posprobe-long` (vAmiga-verified).
+
 Live collision scans use the absolute pixel-comparator conversion
 `x = 4 * H - 2 * DIW_HSTART_FB0`, matching the window and sprite coordinates.
 The render-write anchor is a different domain and must not advance the
@@ -1183,10 +1193,10 @@ the counter and keep the internal frame- and line-wrap timing. Tests:
 `vposr_v8_and_vhposr_line_byte_never_disagree`; golden probe
 `posprobe-v8`.
 
-A long read of VPOSR:VHPOSR samples both words in the same colour clock
-here. A 68000 reads them in two bus cycles two colour clocks apart, so on
-hardware the pair can still tear when the counter steps between them; that
-per-word sampling is not modelled.
+A 68000 long read of VPOSR:VHPOSR is two word cycles two colour clocks
+apart, so that pair can still tear when the counter steps between them
+(see [](#custom-register-read-sampling)); only the three-read idiom above
+is safe.
 
 ## Real-time pacing
 
