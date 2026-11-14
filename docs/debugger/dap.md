@@ -130,16 +130,24 @@ configuration says. Arguments:
 `attach` connects to a running emulator through `controlInfo` (the
 `--control-info` file) or `address` + `token`, and takes `program`,
 `symbolFile`, `sourceMap`, `entryPoint` and `stopOnEntry` the same way
-(`stopOnEntry` defaults to false here). When the program is already
+(`stopOnEntry` defaults to false here). `windowed` (default true) says the
+emulator has a window, so the adapter polls for a pause or resume made
+there; set it to false for a headless `--control` session. When the program is already
 running, its segments are matched against the file and the symbols relocate
 at once; otherwise a `loadseg` break waits for the guest to load it. An
 adapter started with `--info` or `--connect` already has a session, and
-both `launch` and `attach` use it instead of starting an emulator.
+both `launch` and `attach` use it instead of starting an emulator; a
+`launch` served that way is handled as an attach, so `stopOnEntry` defaults
+to false and the launch-only attributes are ignored.
 
 Stopping the session shuts down an emulator the adapter launched and leaves
 an attached one running, unless the client asks for it to be terminated.
 Restart relaunches a launched emulator with the same arguments and
-re-attaches to an attached one.
+re-attaches to an attached one. The session an adapter was started with
+(`--info` or `--connect`) is the exception: restart does not return to it.
+A `launch` request starts a new emulator from its arguments instead, and an
+`attach` request needs `controlInfo`, or `address` and `token`, in its own
+arguments.
 
 Behind a launch, the control server arms a one-shot `loadseg` stop for the
 program before the first frame runs (the same break-at-entry `--gdb` has), so
@@ -239,6 +247,7 @@ second.
   struct/array nesting; optimized code, location lists and DWARF
   expressions render as unsupported.
 - One thread (the CPU) is presented; Exec tasks are not separate threads.
+- The call stack shows at most 16 frames.
 - The `sourceMap` is a prefix replacement; when a recorded path does not
   exist on the host, the adapter also tries the path's tail under the
   program's directory.

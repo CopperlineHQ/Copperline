@@ -30,8 +30,9 @@ interval taken from `COPPERLINE_DBG_RR_BUDGET_MB` and
 The headless server owns the machine, so `--control` cannot be combined with
 `--gdb`/`--gdb-gui`, `--benchmark-until`, the capture flags
 (`--screenshot-after`, `--expect-screenshot`, `--save-state-after`,
-`--dump-frames`, `--gif-after`), scheduled input, scheduled floppy or CD
-inserts, or `--exit-on-return`; use the matching protocol methods instead.
+`--dump-frames`, `--gif-after`), `--profile-live-audio`, scheduled input,
+scheduled floppy or CD changes, or `--exit-on-return`; use the matching
+protocol methods instead.
 `--record-input PATH` is accepted and records the input clients inject.
 
 `--control-gui` can share the window with `--gdb-gui` (see [GDB](gdb.md)):
@@ -94,7 +95,7 @@ The other subcommands work without a session: `state-info` (see
 `profile`, `profile-report` and `size-report` (see
 [Per-frame profiling](profiling.md)), and `exe2adf` (see
 [Direct executable launching](../guide/run.md)). `copperline-ctl --help`
-prints the usage of every mode.
+(or `-h`) prints the usage of every mode.
 
 ## A/B divergence finder
 
@@ -189,7 +190,8 @@ The bridge manages one active session at a time:
 ### Blocking and `wait_ms`
 
 Execution methods (`continue`, `run_until`, `step`, `step_over`, `step_out`,
-`step_copper`, `step_frame`) accept an optional `wait_ms` parameter. If the
+`step_copper`, `step_frame`) accept an optional `wait_ms` parameter (a
+positive integer; 0 is refused). If the
 emulated machine does not halt within this time limit (in host milliseconds),
 the bridge automatically pauses execution and returns the stop event with
 `bridge.paused_after_ms` set. Without `wait_ms`, calls block until a breakpoint
@@ -201,8 +203,8 @@ The bridge queues the server's notifications (see
 [Streaming observability](#streaming-observability)) as they arrive, up to
 1,024; when the queue is full the oldest is dropped. `events_next
 {"timeout_ms"}` returns one event, waiting up to `timeout_ms` (default 1000,
-at most 600000), and `events_drain` returns everything queued. Both report
-the queue depth and the number of events dropped.
+at most 600000) and reporting how many remain queued; `events_drain` returns
+everything queued with its count. Both report the number of events dropped.
 
 ### Screenshots
 
@@ -233,9 +235,12 @@ one request at a time and exits at end of file on stdin.
   without a token is allowed before authentication and reports only
   `proto` (the protocol version, currently 1), `emulator` (the Copperline
   version), and `authed`; any other method before authentication is refused.
-- **Numbers and addresses:** Numeric parameters accept integer values or hex
-  strings with a `0x` or `$` prefix (e.g., `"0xDFF096"`, `"$DFF096"`, or
-  `14676118`).
+- **Numbers and addresses:** Addresses and other unsigned parameters accept
+  integer values or hex strings with a `0x` or `$` prefix (e.g.,
+  `"0xDFF096"`, `"$DFF096"`, or `14676118`). A string is always read as hex,
+  with or without a prefix, so `"100"` is 256. Signed and fractional
+  parameters (mouse deltas, pointer and pen coordinates, `boot_pri`,
+  `advance`, `seconds`, `at_seconds`) take JSON numbers only.
 - **Execution commands:** Commands such as `continue`, `step`, and `run_until`
   block until execution stops, returning a structured stop event.
 
@@ -316,9 +321,10 @@ Subscriptions belong to the connection and add up: each `events.subscribe`
 adds its families to the active set, and `events.unsubscribe` without
 `events` drops them all. `events.list` reports the `active` families, the
 settings, the `mmio` ranges, and the queue `limits`. The server samples
-events at its deterministic command and frame boundaries. Every notification
-carries `dropped_notifications`, the count the connection's bounded outbound
-queue has lost.
+events at its deterministic command and frame boundaries. Every subscribed
+notification carries `dropped_notifications`, the count the connection's
+bounded outbound queue has lost; the unsubscribed `event.warp` and
+`event.stopped` do not.
 
 ### Event types
 
@@ -370,6 +376,11 @@ queue has lost.
   pacing changing, so the list never goes stale. The headless server has no
   holds (it is unpaced end to end), omits `holders`, and reports the guest's
   `warpmode()` request with `paced` always false.
+- **`event.stopped`:** Sent without a subscription, by a windowed session
+  only, when the machine stops for a reason this client did not ask for (a
+  breakpoint set in the debugger window, a pause made there, another
+  client's stop) while it has no resume pending. The payload is the stop
+  event a resume verb would have returned.
 
 ## Command reference summary
 
@@ -515,8 +526,9 @@ fails with code `-32006`.
 - `cartridge.freeze`: Trigger the freezer cartridge NMI (level 7), transferring execution to the monitor.
 - `copper.list {"addr": ..., "resource": ..., "max": ..., "trace": true}`:
   Disassemble up to `max` Copper instructions (default 32, at most 256)
-  starting at `addr` or a registered `resource` (default: current Copper
-  PC). With `trace`, each instruction that ran in the last full Frame
+  starting at `addr` or a registered `resource` (default: four
+  instructions before the current Copper PC, whose entry has `cursor`
+  set). With `trace`, each instruction that ran in the last full Frame
   Analyzer trace carries its exact frame, VPOS and HPOS execution slot.
 - `pc_history`: Return recently executed instruction addresses (`pcs`, newest last).
 - `segments.list`: The hunk segments (`current`: `{start, size}` per hunk, first hunk first) of the program the scheduled process is running, and every program an armed `loadseg` catch has seen loaded (`modules`). At a `loadseg` stop, `current` is the just-loaded program: the addresses to relocate its symbols and debug information by.
@@ -540,7 +552,7 @@ See [profiling limits](profiling.md) for overflow behavior and debugger stepping
 - `fault.list` / `fault.clear`: List or clear active memory bus faults.
 - `disk.fault.set {"target": {...}, "policy": {...}, "seed": ..., "id": "..."}`: Install a deterministic device-level fault policy (dropped/torn/reordered writes, ignored flushes, stale/corrupt reads, media errors, delays, simulated power-cuts) on an image-backed block target -- `{"kind": "copperhf"|"pcmcia"|"ide"|"scsi", "unit": N}`, `{"kind": "floppy", "drive": N}`, or `{"kind": "cd"}`. A separate namespace from `fault.inject`: this is device-medium behaviour, not a guest bus error. Returns the policy's id; with `id` given, replaces that policy in place. See [Device-level fault injection](disk-fault.md) for the full target/rule/action schema, determinism guarantees, and the `id`-requires-`target` rule `disk.fault.clear` enforces below.
 - `disk.fault.clear {"id": "...", "target": {...}}`: Clear by id (`target` required), every policy on a target, or (with neither given) every policy on every target. A `release` policy's held reorder-queue writes land on the image in order; `drop` discards them.
-- `disk.fault.list {"target": {...}}` / `disk.fault.stats {"target": {...}}` / `disk.fault.reset_stats {"target": {...}}`: List installed policies (with each rule's `hits` count), read cumulative per-target fault stats, or zero them.
+- `disk.fault.list {"target": {...}}` / `disk.fault.stats {"target": {...}}` / `disk.fault.reset_stats {"target": {...}}`: List installed policies (with each rule's `hits` count), read cumulative per-target fault stats, or zero them. `target` is optional for `list` and required for the other two. Replies: `set` returns `{"id"}` (`seed` defaults to 0); `clear` returns `{"cleared": [ids]}`; `list` returns `{"faults": [...]}`, each entry with `id`, `target`, `policy` (`on_clear` and `rules`), `seed` and `hits` (one count per rule); `stats` returns `requests`, `reads`, `writes`, `flushes`, `trims`, `dropped`, `torn`, `reordered`, `flush_ignored`, `stale_served`, `corrupted`, `errored`, `delayed_ms` and `cut`; `reset_stats` returns `{}`. A `stats` or `reset_stats` target with no matching device is an invalid-params error.
 - `memory.heatmap {"enabled": ..., "base": ..., "span": ...}`: Enable (the default) or disable the memory heat map over `base` to `base + span` (default: the whole 24-bit, 16 MB space). The map is a 256 by 256 grid of cells, each remembering which engine (CPU read or write, blitter, Copper, disk, bitplane, sprite, or audio DMA) last touched it.
 - `memory.heatmap.report {"path": "..."}`: Report the heat map's window and `census`, the number of recently touched cells per engine; with `path`, also write the grid as a PNG.
 - `debug.resources`: List bitmaps, palettes, and copper lists registered by guest software via the [uaelib trap](../guide/run.md#uaelib-trap).
@@ -561,7 +573,7 @@ See [profiling limits](profiling.md) for overflow behavior and debugger stepping
   - `catch`: the CPU taking exception `vector`.
   - `loadseg`: AmigaDOS loading a program, optionally only one whose `name` matches (case-insensitive).
 - `break.remove {"id": ...}`: Remove breakpoint by ID.
-- `break.list`: List all active breakpoints with their hit counts; points set from the debugger window appear without ids.
+- `break.list`: List all active breakpoints, `pc` breakpoints with their `hits` counts; points set from the debugger window appear without ids.
 - `break.clear`: Remove every breakpoint, watchpoint, beam trap and Copper breakpoint, including those set in the debugger window, not only this connection's. A disconnecting client's own breakpoints are removed automatically; the window's are left alone then.
 
 ### Input injection
@@ -586,7 +598,7 @@ an absolute emulated time; an absent or past time applies the input now.
 - `media.floppy.query`: Query the four floppy drive slots: each entry gives `drive`, `inserted`, and the inserted image's `name`.
 - `media.cd.insert {"path": "..."}`: Swap the CD image in the machine's CD drive (CDTV, CD32, or SCSI CD-ROM).
 - `media.cd.eject`: Eject CD image.
-- `pcmcia.insert {"card": "cf"|"sram", "path": "...", "size": "2M", "read_only": false}`: Push a card into the A600/A1200 PCMCIA slot: a CompactFlash card over the hard-disk image at `path` (the default kind), or an SRAM card of `size` bytes optionally mirrored to `path`. Any card already in the slot is ejected first. Gayle latches the card-detect change, so the guest sees a real insertion (INT6 once card.resource has enabled it). Fails on a machine without the slot.
+- `pcmcia.insert {"card": "cf"|"sram", "path": "...", "size": "2M", "read_only": false}`: Push a card into the A600/A1200 PCMCIA slot: a CompactFlash card over the hard-disk image at `path` (the default kind), or an SRAM card of `size` (a size string such as `"2M"`, not a number) optionally mirrored to `path`. Any card already in the slot is ejected first. Gayle latches the card-detect change, so the guest sees a real insertion (INT6 once card.resource has enabled it). Fails on a machine without the slot.
 - `pcmcia.eject`: Pull the card out of the slot (latches the card-detect change the same way).
 - `pcmcia.query`: Report the slot: `slot` (the machine has one), `enabled` (not disabled by the guest or shadowed by Zorro II fast RAM), `shadowed_by_fast_ram`, `inserted`, `card` (`cf`/`sram`), `description`, `path`, Gayle's sampled `pins`, and its pending `change_latches`. The `media` event stream also reports `{"kind": "pcmcia", "action": "inserted"|"ejected", "name": ...}`.
 - `copperhf.attach {"unit": 0, "path": "...", "volume_name": "...", "boot_pri": 0}`: Hot-attach a `copperhf.device` unit's media (opens `path` exactly like a boot-time `[copperhf]` unit, `volume_name`/`boot_pri` optional). Bumps the unit's change counter and sets its `CHF_CHANGED_MASK` bit. Fails if no `[copperhf]` controller is configured.

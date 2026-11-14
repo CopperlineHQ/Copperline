@@ -673,8 +673,8 @@ state load), so nothing from the previous presentation stream weaves or
 glows into the next one.
 
 The deinterlacer also hosts the optional CRT phosphor-persistence stage
-(`[display] phosphor` / `COPPERLINE_PHOSPHOR`, off by default, clamped to
-0.95): when on, `present_with_phosphor` blends each presented frame over a
+(`[display] phosphor` / `COPPERLINE_PHOSPHOR`, off by default, 0.0 to
+0.95; an out-of-range environment value is ignored with a warning): when on, `present_with_phosphor` blends each presented frame over a
 retained copy of the previous one, keeping the `phosphor` fraction of the
 old value per channel (quantized to 1/256) for an exponential trail. This
 is what fuses field-rate flicker
