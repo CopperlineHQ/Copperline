@@ -725,6 +725,17 @@ fn rtc_time_cli_override_matches_the_config_field() -> Result<()> {
 }
 
 #[test]
+fn parse_size_refuses_a_size_too_large_to_count_in_bytes() {
+    // (2^44 + 8) MiB is 2^64 + 8 MiB: the byte count does not fit, and a
+    // wrapped product would read as a plausible 8 MiB.
+    for text in ["17592186044424M", "18014398509481985K", "17179869185G"] {
+        let err = parse_size(text, "test").unwrap_err();
+        assert!(err.to_string().contains("too large"), "{text}: {err}");
+    }
+    assert_eq!(parse_size("8M", "test").unwrap(), 8 * 1024 * 1024);
+}
+
+#[test]
 fn format_size_inverts_parse_size() {
     for (bytes, text) in [
         (0usize, "0"),

@@ -2299,13 +2299,18 @@ pub(crate) fn parse_size(s: &str, what: &str) -> Result<usize> {
         .parse()
         .with_context(|| format!("{} size {:?}: bad number", what, s))?;
     let unit = unit_str.trim().to_ascii_uppercase().replace("IB", "B");
-    let bytes = match unit.as_str() {
-        "" | "B" => n,
-        "K" | "KB" => n * 1024,
-        "M" | "MB" => n * 1024 * 1024,
-        "G" | "GB" => n * 1024 * 1024 * 1024,
+    let shift = match unit.as_str() {
+        "" | "B" => 0,
+        "K" | "KB" => 10,
+        "M" | "MB" => 20,
+        "G" | "GB" => 30,
         _ => bail!("{} size {:?}: unknown unit {:?}", what, s, unit_str),
     };
+    // A product that wrapped would pass every later check as a small size.
+    let bytes = n
+        .checked_mul(1 << shift)
+        .filter(|&bytes| usize::try_from(bytes).is_ok())
+        .with_context(|| format!("{} size {:?} is too large", what, s))?;
     if bytes % 4096 != 0 {
         bail!("{} size {} bytes must be a multiple of 4 KiB", what, bytes);
     }
