@@ -1792,6 +1792,11 @@ fn launcher_requested(cli: &CliArgs) -> bool {
         && cli.pen_after.is_empty()
         && cli.freeze_after.is_empty()
         && cli.disk_change_after.is_empty()
+        && cli.cd_insert_after.is_empty()
+        && cli.waveform.is_none()
+        && !cli.warp_boot
+        && cli.warp_until.is_none()
+        && cli.live_audio_profile_secs.is_none()
         && cli.record_input.is_none()
         && cli.audio_wav.is_none()
         && cli.audio_live
@@ -2323,6 +2328,21 @@ mod tests {
         ));
         assert!(!launcher_requested(&parse(&["--noaudio"]).unwrap()));
         assert!(!launcher_requested(&parse(&["--run", "hello"]).unwrap()));
+        // Options that are only read once a machine is running count too:
+        // behind the launcher they would be dropped without a word.
+        let specified: [&[&str]; 8] = [
+            &["--insert-cd-after", "5", "game.cue"],
+            &["--waveform", "out.vcd"],
+            &["--warp-boot"],
+            &["--warp-until", "10"],
+            &["--profile-live-audio", "1"],
+            &["--serial-device", "/dev/ttyUSB0"],
+            &["--pcmcia-cf", "card.hdf"],
+            &["--pcmcia-sram", "2M"],
+        ];
+        for args in specified {
+            assert!(!launcher_requested(&parse(args).unwrap()), "{args:?}");
+        }
     }
 
     #[test]
@@ -2865,6 +2885,15 @@ mod tests {
         assert_eq!(args.expect_screenshot[0].tolerance, Tolerance::Exact);
         assert!(!args.audio_live);
         assert!(parse(&["--expect-screenshot", "1"]).is_err());
+        // A number that is no tolerance is reported, not taken as the ROM.
+        for bad in ["1.5", "2.0", "1e3"] {
+            let err = parse(&["--expect-screenshot", "1", "x.png", bad])
+                .expect_err("an out-of-range tolerance is refused");
+            assert!(err.to_string().contains("TOLERANCE"), "{bad}: {err:#}");
+        }
+        // A ROM whose name merely starts with a digit is still a ROM.
+        let args = parse(&["--expect-screenshot", "1", "x.png", "31.rom"])?;
+        assert_eq!(args.rom_path.as_deref(), Some(Path::new("31.rom")));
 
         // The script directive spells the same flag.
         let path = temp_script("expect", "expect-screenshot 2 \"/tmp/a b.png\" 3\n");

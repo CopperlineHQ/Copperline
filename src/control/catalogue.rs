@@ -754,12 +754,16 @@ fn build() -> Vec<ToolDef> {
         entry(
             "copper.list",
             "Disassemble up to `max` Copper instructions (default 32, at most 256) from \
-             `addr` (default: the Copper's current program counter): MOVE, WAIT, SKIP, \
-             with register names and beam positions decoded. `trace` annotates instructions \
+             `addr` (default: four instructions before the Copper's current program \
+             counter, whose entry has `cursor` set): MOVE, WAIT, SKIP, with register \
+             names and beam positions decoded. `trace` annotates instructions \
              with the exact execution slot in the last full Frame Analyzer trace.",
             object(
                 vec![
-                    ("addr", addr("Copper list address (default: current Copper PC)")),
+                    (
+                        "addr",
+                        addr("Copper list address (default: four instructions before the Copper PC)"),
+                    ),
                     ("resource", string("Registered Copperlist resource name")),
                     ("max", uint("Instructions to list", Some(1), Some(256))),
                     ("trace", boolean("Include last-frame execution positions")),
@@ -1818,6 +1822,20 @@ mod tests {
             .filter(|m| find_method(m).is_none())
             .collect();
         assert!(missing.is_empty(), "methods without a tool: {missing:?}");
+    }
+
+    #[test]
+    fn copper_list_describes_where_the_default_listing_starts() {
+        // The listing backs up four instructions from the Copper PC and
+        // flags the current one; a client told it starts at the PC would
+        // take the first entry for the instruction about to run.
+        let def = find_method("copper.list").expect("copper.list is catalogued");
+        assert!(def.description.contains("four instructions before"));
+        assert!(def.description.contains("`cursor`"));
+        let addr = def.schema["properties"]["addr"]["description"]
+            .as_str()
+            .expect("addr has a description");
+        assert!(addr.contains("four instructions before"), "{addr}");
     }
 
     #[test]

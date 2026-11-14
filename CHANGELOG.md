@@ -71,6 +71,21 @@ for the earlier release notes.
   existing installations, and preserve settings and saves on uninstall.
 - The manual identifies its package version and source revision, and includes
   troubleshooting, known limits and compatibility notes.
+- A control-protocol breakpoint condition that names `d0`-`d7` or `a0`-`a7`
+  tests that register. The names were read as the hex constants `$D0`-`$A7`,
+  so a conditional breakpoint set from an IDE through the debug adapter
+  compared a constant.
+- `--pcmcia-cf`, `--pcmcia-sram`, `--serial-device`, `--insert-cd-after`,
+  `--waveform`, `--warp-boot`, `--warp-until` and `--profile-live-audio` start
+  the machine when given on their own. They opened the launcher, which
+  dropped them.
+- In the Debug layout, `Cmd+Shift+G` / `Alt+Shift+G` saves a GIF clip instead
+  of toggling input ownership, and `Cmd+Shift+V` / `Alt+Shift+V` pastes as
+  keystrokes.
+- `[machine] mem_controller` ignores case and surrounding spaces, the
+  `[chipset] agnus` error lists `8372B`, the rewind-is-off notice names the
+  *Emulation Settings* menu, and the MCP description of `copper.list` gives
+  its real default start.
 
 ### Compatibility
 
@@ -79,6 +94,13 @@ for the earlier release notes.
   reads 1.1.0 states. Compatibility is one-way: 1.1.0 cannot read states saved
   after the external-drive ID fix, because its floppy decoder requires the
   `external_id_mode` field that newer states no longer write.
+- Three inputs that silently did the wrong thing now do what the manual
+  says. A scripted key written as `0` (`--press-after 5 0`) is the zero key;
+  it was read as raw key code 0, the backtick key, which is still available
+  as `0x00`, the form recorded input scripts use. `copperline-ctl --repl`
+  given a method reports an error; the method was never sent. A number after
+  `--expect-screenshot SECS PATH` that is not a valid tolerance, such as
+  `1.5`, is an error; it was taken as the ROM path.
 
 ## 1.1.0 - 2026-10-31
 

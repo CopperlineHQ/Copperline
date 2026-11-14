@@ -73,6 +73,10 @@ fn usage() -> &'static str {
 }
 
 fn parse_options() -> Result<Options, String> {
+    parse_options_from(std::env::args().skip(1))
+}
+
+fn parse_options_from(args: impl IntoIterator<Item = String>) -> Result<Options, String> {
     let mut connect = None;
     let mut token = None;
     let mut repl = false;
@@ -81,7 +85,7 @@ fn parse_options() -> Result<Options, String> {
     let mut dap_listen = None;
     let mut method = None;
     let mut params = Value::Null;
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--connect" => {
@@ -139,6 +143,11 @@ fn parse_options() -> Result<Options, String> {
         }
         if !repl && method.is_none() {
             return Err(format!("no method\n{}", usage()));
+        }
+        // The REPL reads its requests from standard input; a method on the
+        // command line would be dropped without a word.
+        if repl && method.is_some() {
+            return Err(format!("--repl takes no method\n{}", usage()));
         }
     }
     Ok(Options {
@@ -1130,6 +1139,20 @@ mod tests {
         assert!(encode_amiga_name("snowman-\u{2603}").is_err());
         assert!(encode_amiga_name("").is_err());
         assert!(encode_amiga_name(&"x".repeat(31)).is_err());
+    }
+
+    #[test]
+    fn repl_refuses_a_method_it_would_not_run() {
+        let parse = |args: &[&str]| parse_options_from(args.iter().map(|s| s.to_string()));
+        let repl = parse(&["--connect", "127.0.0.1:1", "--repl"]).expect("--repl alone parses");
+        assert!(repl.repl && repl.method.is_none());
+        let one_shot =
+            parse(&["--connect", "127.0.0.1:1", "status"]).expect("a one-shot method parses");
+        assert_eq!(one_shot.method.as_deref(), Some("status"));
+        let err = parse(&["--connect", "127.0.0.1:1", "--repl", "status"])
+            .err()
+            .expect("--repl with a method is refused");
+        assert!(err.contains("--repl takes no method"), "{err}");
     }
 
     #[test]
