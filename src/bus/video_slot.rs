@@ -107,6 +107,11 @@ impl Bus {
     /// Frame-wrap hook: hand the just-completed field to the video-slot
     /// card. Called after `begin_new_beam_frame` promoted the capture, so
     /// the `frame_*` accessors describe that field.
+    ///
+    /// Kept out of line: its only caller is the beam advance, which runs
+    /// every few colour clocks, while this runs once a field and builds a
+    /// whole render input on the stack when a card is fitted.
+    #[inline(never)]
     pub(super) fn notify_video_slot_field_complete(&mut self) {
         let Some(mut device) = self.video_slot.take() else {
             return;

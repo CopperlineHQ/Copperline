@@ -561,6 +561,39 @@ fn fitting_a_card_captures_from_the_first_sprite_line() {
     assert_eq!(bus.frame_visible_start_vpos(), 0x1C);
 }
 
+/// The display start the beam advance works from clamps a display window
+/// opened above the capture at the capture's first line: the fixed
+/// deep-overscan line with the slot empty, the first sprite DMA line of the
+/// video standard with a card fitted.
+#[test]
+fn display_start_clamps_at_the_capture_start_with_and_without_a_card() {
+    let mut bus = empty_bus();
+    // A display window opening at line $10, above every capture start.
+    assert!(!bus.custom_write(0x08E, 2, 0x1081));
+    assert!(!bus.custom_write(0x090, 2, 0x2CC1));
+    assert_eq!(bus.display_start_vpos_for_current_control(), 0x1C);
+
+    let rows = Arc::new(Mutex::new(Vec::new()));
+    bus.attach_video_slot(Box::new(RowGrab {
+        rows: Arc::clone(&rows),
+        vpos: 0x1A,
+    }));
+    bus.set_video_standard(crate::chipset::agnus::VideoStandard::Pal);
+    assert_eq!(bus.display_start_vpos_for_current_control(), 0x19);
+    bus.set_video_standard(crate::chipset::agnus::VideoStandard::Ntsc);
+    assert_eq!(bus.display_start_vpos_for_current_control(), 0x14);
+
+    // A window opening inside the capture starts the display on its own
+    // line either way.
+    assert!(!bus.custom_write(0x08E, 2, 0x2481));
+    assert_eq!(bus.display_start_vpos_for_current_control(), 0x24);
+    bus.detach_video_slot();
+    assert_eq!(bus.display_start_vpos_for_current_control(), 0x24);
+
+    assert!(!bus.custom_write(0x08E, 2, 0x1081));
+    assert_eq!(bus.display_start_vpos_for_current_control(), 0x1C);
+}
+
 /// A card answering a parallel read sees the beam's own line of the field
 /// in progress, rendered on its own: the line header sprite and a colour
 /// written earlier on that line are there, as in a completed field.

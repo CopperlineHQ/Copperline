@@ -8229,6 +8229,17 @@ impl Bus {
         if self.current_frame_geometry.programmable {
             return self.current_frame_geometry.visible_start_vpos;
         }
+        // This runs on every beam advance. With no card in the video slot
+        // the capture starts at a fixed line, so keep that path on the
+        // constant bound: the clamp then needs no run-time lower bound.
+        if self.video_slot.is_none() {
+            return visible_start_vpos_for_diw(
+                self.denise.diwstrt,
+                self.denise.diwstop,
+                self.effective_diwhigh(),
+                RENDER_MIN_OVERSCAN_START_VPOS,
+            );
+        }
         visible_start_vpos_for_diw(
             self.denise.diwstrt,
             self.denise.diwstop,
