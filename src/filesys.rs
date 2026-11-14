@@ -334,6 +334,28 @@ fn with_ascii_lower<R>(s: &str, f: impl FnOnce(&str) -> R) -> R {
 struct DirCache {
     exact: HashMap<String, Option<std::sync::Arc<std::ffi::OsString>>>,
     folded: HashMap<String, Option<std::sync::Arc<std::ffi::OsString>>>,
+    /// The directory's modification time when the misses in `exact` were
+    /// recorded. They hold only while it still reads the same: the host
+    /// can add a file at any time, and that moves it.
+    misses_as_of: Option<std::time::SystemTime>,
+}
+
+/// How long a directory must have been left alone before a miss in it is
+/// remembered. A change shows as a new modification time only if it lands
+/// in a later tick of the filesystem's clock than the last one, and the
+/// coarsest in use (FAT) ticks every two seconds.
+const MISS_SETTLE: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn dir_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(dir).ok()?.modified().ok()
+}
+
+/// The directory's modification time, when it is far enough in the past
+/// that any later change is certain to move it.
+fn settled_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+    let mtime = dir_mtime(dir)?;
+    let age = std::time::SystemTime::now().duration_since(mtime).ok()?;
+    (age >= MISS_SETTLE).then_some(mtime)
 }
 
 #[derive(Default)]
@@ -391,6 +413,31 @@ impl LruPathCache {
                 }
             }
         }
+    }
+
+    /// Remember that `comp` is not in `dir`, as of the modification time
+    /// `as_of` the directory had before it was scanned. Misses recorded
+    /// under another time are from a directory that has changed since.
+    fn insert_miss(&mut self, dir: &Path, comp: &str, as_of: std::time::SystemTime) {
+        self.insert(dir, comp, None);
+        if let Some(dir_cache) = self.dirs.get_mut(dir) {
+            if dir_cache.misses_as_of != Some(as_of) {
+                dir_cache
+                    .exact
+                    .retain(|name, hit| hit.is_some() || name == comp);
+                dir_cache.misses_as_of = Some(as_of);
+            }
+        }
+    }
+
+    /// Whether the misses remembered for `dir` are still good: the
+    /// directory reads the same modification time as when they were
+    /// recorded.
+    fn misses_hold(&self, dir: &Path) -> bool {
+        self.dirs
+            .get(dir)
+            .and_then(|dir_cache| dir_cache.misses_as_of)
+            .is_some_and(|as_of| dir_mtime(dir) == Some(as_of))
     }
 
     fn invalidate_dir(&mut self, dir: &Path) {
@@ -478,11 +525,26 @@ impl FilesysUnit {
             return None;
         }
         let mut cache = self.path_cache.borrow_mut();
-        if let Some(cached) = cache.get(dir, comp) {
-            return cached.map(|arc| (*arc).clone());
+        match cache.get(dir, comp) {
+            Some(Some(name)) => return Some((*name).clone()),
+            // The cache is dropped when the guest changes a directory, but
+            // the host can add a file at any time, and a remembered miss
+            // would hide it from then on. So a miss is believed only while
+            // the directory's modification time stands.
+            Some(None) if cache.misses_hold(dir) => return None,
+            Some(None) => cache.invalidate_dir(dir),
+            None => {}
         }
+        // Read before the scan: a file added during it then moves the time
+        // away from the one the miss is recorded under.
+        let settled = settled_mtime(dir);
         let res = match_component_uncached(dir, comp);
-        cache.insert(dir, comp, res.clone());
+        match (&res, settled) {
+            (Some(_), _) => cache.insert(dir, comp, res.clone()),
+            (None, Some(as_of)) => cache.insert_miss(dir, comp, as_of),
+            // Changed too recently for a later change to be told apart.
+            (None, None) => {}
+        }
         res
     }
 
@@ -1693,6 +1755,9 @@ impl FilesysUnit {
                 let Some(rec) = self.resolve_for_create(arg(bus, 1), &name) else {
                     return (DOSFALSE, ERROR_OBJECT_NOT_FOUND);
                 };
+                if let Some(err) = Self::host_config_refusal(&rec) {
+                    return (DOSFALSE, err);
+                }
                 let path = self.lock_path(&rec);
                 if path.exists() {
                     return (DOSFALSE, ERROR_OBJECT_EXISTS);
@@ -2513,9 +2578,12 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 /// any directory of any mount.
 const IMPLICIT_CONFIG_NAME: &str = "copperline.toml";
 
-fn names_implicit_config(rel: &Path) -> bool {
+pub(crate) fn names_implicit_config(rel: &Path) -> bool {
     rel.file_name()
         .and_then(|name| name.to_str())
+        // Windows drops trailing dots and spaces from a name, so those
+        // spellings reach the same file.
+        .map(|name| name.trim_end_matches(['.', ' ']))
         .is_some_and(|name| name.eq_ignore_ascii_case(IMPLICIT_CONFIG_NAME))
 }
 
@@ -2611,7 +2679,11 @@ fn parse_uaem(data: &[u8]) -> Option<UaemInfo> {
 /// Converted directly from the civil date (no timezone round trip): the
 /// sidecar records the guest's original DateStamp rendered as text.
 fn parse_uaem_date(s: &[u8]) -> Option<(DateStamp, &[u8])> {
-    let t = std::str::from_utf8(s.get(..22)?).ok()?;
+    // The fields are sliced by byte position, so every byte has to be a
+    // whole character.
+    let t = std::str::from_utf8(s.get(..22)?)
+        .ok()
+        .filter(|t| t.is_ascii())?;
     let b = t.as_bytes();
     if !(b[4] == b'-' && b[7] == b'-' && b[10] == b' ' && b[13] == b':') {
         return None;
@@ -3545,6 +3617,24 @@ mod tests {
         assert_eq!(std::fs::read(fs.root.join("source.txt")).unwrap(), b"data");
     }
 
+    /// A directory of the implicitly loaded name is no configuration, but
+    /// the next run started there finds the name and fails to load it.
+    #[test]
+    fn the_implicitly_loaded_config_name_cannot_be_made_as_a_directory() {
+        let mut fs = FsTester::mounted("implicit-config-dir");
+        fs.set_name(b"Copperline.TOML");
+        assert_eq!(
+            fs.send(ACTION_CREATE_DIR, [0, FsTester::NAME >> 2, 0]),
+            (DOSFALSE, ERROR_WRITE_PROTECTED)
+        );
+        assert_eq!(std::fs::read_dir(&fs.root).unwrap().count(), 0);
+        fs.set_name(b"other.toml");
+        assert_ne!(
+            fs.send(ACTION_CREATE_DIR, [0, FsTester::NAME >> 2, 0]).0,
+            DOSFALSE
+        );
+    }
+
     /// A later run loads `copperline.toml` from its working directory without
     /// being asked, so a guest that could write one into a mount would pick
     /// the next machine's host access. It may read the file, nothing else.
@@ -4196,6 +4286,16 @@ mod tests {
         assert_eq!(info.date, None);
     }
 
+    /// The date is picked apart by byte position. A sidecar is host data
+    /// (and a guest can write one), so a multi-byte character straddling a
+    /// field boundary must read as "no date", not split a character.
+    #[test]
+    fn uaem_sidecar_with_a_multibyte_character_in_the_date_has_no_date() {
+        let info = parse_uaem(b"----rwed 2020-01-01 00:0\xC3\xA9:00.00").unwrap();
+        assert_eq!(info.protection, 0);
+        assert_eq!(info.date, None);
+    }
+
     /// write_uaem produces exactly the byte format amiberry reads, round-trips
     /// through parse_uaem, and deletes the sidecar when attributes go default.
     #[test]
@@ -4295,6 +4395,104 @@ mod tests {
         assert_eq!(rec4.rel, Path::new("SubDir").join("File.txt"));
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A mount is live: a name the guest looked up before the host created
+    /// it has to be found afterwards. A remembered miss is only dropped
+    /// when the guest itself changes the directory, so it must not be
+    /// remembered at all.
+    #[test]
+    fn a_file_the_host_creates_after_a_failed_lookup_is_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let unit = FilesysUnit::new(
+            0,
+            MountSpec {
+                path: root.clone(),
+                volume: "Test".into(),
+                boot_pri: -128,
+                readonly: false,
+            },
+            0x3000,
+            0x4000,
+        );
+        assert!(unit.resolve(0, b"late").is_none());
+        std::fs::write(root.join("late"), b"built").unwrap();
+        let found = unit.resolve(0, b"late").expect("the new file is visible");
+        assert_eq!(found.rel, Path::new("late"));
+        // The same for a different spelling of a name that then appears.
+        assert!(unit.resolve(0, b"LATER").is_none());
+        std::fs::write(root.join("later"), b"built").unwrap();
+        assert!(unit.resolve(0, b"LATER").is_some());
+    }
+
+    /// A miss is remembered against the directory's modification time: it
+    /// is served from memory while that stands, and looked up afresh once
+    /// it moves. A directory changed moments ago is not remembered at all,
+    /// since a second change within the clock's resolution would not show.
+    #[cfg(unix)]
+    #[test]
+    fn a_remembered_miss_lasts_only_while_the_directory_is_unchanged() {
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let mtime = || std::fs::metadata(&root).unwrap().modified().unwrap();
+        let set_mtime = |time| {
+            std::fs::File::open(&root)
+                .unwrap()
+                .set_modified(time)
+                .unwrap()
+        };
+        let unit = FilesysUnit::new(
+            0,
+            MountSpec {
+                path: root.clone(),
+                volume: "Test".into(),
+                boot_pri: -128,
+                readonly: false,
+            },
+            0x3000,
+            0x4000,
+        );
+
+        // Changed just now: the miss is not kept, whatever the time says
+        // afterwards.
+        let fresh = mtime();
+        assert!(unit.resolve(0, b"early").is_none());
+        std::fs::write(root.join("early"), b"x").unwrap();
+        set_mtime(fresh);
+        assert!(unit.resolve(0, b"early").is_some());
+
+        // Settled: the miss is kept, and holds for as long as the
+        // directory looks unchanged ...
+        let settled = SystemTime::now() - Duration::from_secs(3600);
+        set_mtime(settled);
+        assert!(unit.resolve(0, b"late").is_none());
+        std::fs::write(root.join("late"), b"x").unwrap();
+        set_mtime(settled);
+        assert!(
+            unit.resolve(0, b"late").is_none(),
+            "an unchanged directory was scanned again"
+        );
+        // ... and no longer.
+        set_mtime(settled + Duration::from_secs(60));
+        assert!(unit.resolve(0, b"late").is_some());
+    }
+
+    /// Windows drops trailing dots and spaces from a name, so those
+    /// spellings reach the same file.
+    #[test]
+    fn the_implicit_config_name_is_recognised_with_trailing_dots_and_spaces() {
+        for name in ["copperline.toml", "Copperline.TOML.", "copperline.toml . ."] {
+            assert!(names_implicit_config(Path::new(name)), "{name:?}");
+            assert!(
+                names_implicit_config(&Path::new("Sub").join(name)),
+                "{name:?}"
+            );
+        }
+        for name in ["copperline.toml.bak", "other.toml", "copperline"] {
+            assert!(!names_implicit_config(Path::new(name)), "{name:?}");
+        }
     }
 
     #[test]

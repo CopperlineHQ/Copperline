@@ -960,6 +960,12 @@ impl UaeLib {
         let Some(relative) = self.debug_file_name(mem, name_ptr, address_mask) else {
             return;
         };
+        // The same rule the host filesystem applies to the same directory:
+        // a guest does not write the file a later run loads unasked.
+        if crate::filesys::names_implicit_config(&relative) {
+            log::debug!("uaelib: refused to write {}", relative.display());
+            return;
+        }
         // A speculative run-ahead frame will be replayed on the committed
         // timeline. Delay its irreversible host write until that replay.
         if self.speculative_host_quiet {
@@ -2107,6 +2113,48 @@ mod tests {
         );
         drop(lib);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The file root is the directory `--run` mounts, which is usually the
+    /// one Copperline is started from, and a later run loads a
+    /// `copperline.toml` found there without being asked. The host
+    /// filesystem refuses to let a guest write that name; `debug_save` has
+    /// to refuse it too, in any directory and any case.
+    #[test]
+    fn debug_save_refuses_the_implicitly_loaded_config_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let mut lib = UaeLib::new();
+        lib.set_file_root(Some(root.clone())).unwrap();
+        let mut mem = memory();
+        put(&mut mem, 0x1_1000, b"[[filesys]]");
+        for name in ["copperline.toml", "data/Copperline.TOML"] {
+            put_str(&mut mem, 0x2100, name);
+            lib.call(
+                FN_DEBUG_CMD,
+                [CMD_SAVE, 0x1_1000, 11, 0x2100, 0],
+                &mut mem,
+                MASK24,
+                0,
+                0,
+            );
+            assert!(!root.join(name).exists(), "{name} was written");
+        }
+        // Any other name still saves.
+        put_str(&mut mem, 0x2100, "data/other.toml");
+        lib.call(
+            FN_DEBUG_CMD,
+            [CMD_SAVE, 0x1_1000, 11, 0x2100, 0],
+            &mut mem,
+            MASK24,
+            0,
+            0,
+        );
+        assert_eq!(
+            std::fs::read(root.join("data/other.toml")).unwrap(),
+            b"[[filesys]]"
+        );
     }
 
     #[test]
