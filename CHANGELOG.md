@@ -10,6 +10,9 @@ for the earlier release notes.
 
 ### Fixed
 
+- The Windows uninstaller removes its Start Menu and desktop shortcuts even
+  when another program has one of them open at that moment. It used to leave
+  such a shortcut behind.
 - On 68020 and faster machines, an interrupt that a program leaves pending
   in INTREQ and unmasks in INTENA for only a few colour clocks is now
   taken. The CD32 Classic Lotus Trilogy froze at the Lotus 1 race screen,
