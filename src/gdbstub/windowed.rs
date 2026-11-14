@@ -16,7 +16,7 @@
 //! extra client waits in the listener backlog until the current one
 //! detaches.
 
-use super::core::{checksum, hex_encode, parse_hex_byte, MAX_PACKET_PAYLOAD_BYTES};
+use super::core::{checksum, frame_packet, hex_encode, MAX_PACKET_PAYLOAD_BYTES};
 use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -287,7 +287,7 @@ fn read_connection(
     // read, since the drain always answers it with OK.
     let mut no_ack = false;
     let mut byte = [0u8; 1];
-    'connection: loop {
+    loop {
         // Hunt for a packet start, surfacing interrupts along the way.
         loop {
             match stream.read(&mut byte) {
@@ -325,21 +325,15 @@ fn read_connection(
         if stream.read_exact(&mut sum_bytes).is_err() {
             return;
         }
-        let Ok(expected) = parse_hex_byte(sum_bytes[0], sum_bytes[1]) else {
-            continue 'connection;
-        };
-        if expected != checksum(&payload) {
+        let Some(text) = frame_packet(&payload, sum_bytes) else {
             if !no_ack {
                 let _ = frame_tx.try_send("-".to_string());
             }
             continue;
-        }
+        };
         if !no_ack {
             let _ = frame_tx.try_send("+".to_string());
         }
-        let Ok(text) = String::from_utf8(payload) else {
-            continue;
-        };
         if text == "QStartNoAckMode" {
             no_ack = true;
         }
@@ -403,6 +397,26 @@ mod tests {
         drop(client);
         assert!(matches!(recv(&handle), GdbMsg::Disconnected));
         assert!(!handle.connected());
+    }
+
+    /// A frame the reader cannot use still gets the answer the protocol
+    /// owes it, or a client with acknowledgements on waits out a timeout:
+    /// checksum digits that are not hex are a checksum that does not
+    /// match, and an acknowledged packet that is not UTF-8 goes on to be
+    /// answered as unknown.
+    #[test]
+    fn reader_nacks_bad_checksum_digits_and_forwards_a_non_utf8_packet() {
+        let (handle, addr) = started_handle();
+        let mut client = GdbClient::connect(addr);
+        client.set_read_timeout(std::time::Duration::from_secs(5));
+        assert!(matches!(recv(&handle), GdbMsg::Connected));
+        client.raw(b"$qC#zz");
+        assert_eq!(client.read_bytes(1), b"-");
+        client.raw(b"$\xff#ff");
+        assert_eq!(client.read_bytes(1), b"+");
+        assert!(matches!(recv(&handle), GdbMsg::Packet(p) if p == "\u{FFFD}"));
+        drop(client);
+        assert!(matches!(recv(&handle), GdbMsg::Disconnected));
     }
 
     #[test]

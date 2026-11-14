@@ -10,7 +10,7 @@
 use super::core::*;
 use crate::debugger::normalize_listen_addr;
 use crate::emulator::Emulator;
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 
@@ -77,7 +77,17 @@ fn serve_dialect(
         // absorbs an already-running program so nothing fires spuriously.
         let mut session = Session::new(emu, stream, stop_on_load.clone());
         session.core.bartman = bartman;
-        let end = session.run()?;
+        let end = match session.run() {
+            Ok(end) => end,
+            // The connection failed under the session (reset, a reply the
+            // client was no longer there to take). That is the client's
+            // end of things: the machine stays paused for the next one.
+            Err(error) if is_connection_error(&error) => {
+                log::warn!("gdb: connection lost: {error:#}");
+                SessionEnd::Detached
+            }
+            Err(error) => return Err(error),
+        };
         session.clear_debug_hardware();
         emu = session.emu;
         match end {
@@ -93,6 +103,24 @@ fn serve_dialect(
             }
         }
     }
+}
+
+/// Marks a session error as a failure of the client's connection. It is
+/// attached where the session reads from, writes to or polls its socket,
+/// and nowhere else, so an I/O error from the machine's side of a step is
+/// not mistaken for the client going away.
+#[derive(Debug)]
+struct ClientConnection;
+
+impl std::fmt::Display for ClientConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("GDB client connection failed")
+    }
+}
+
+/// Whether a session error came from its socket rather than the machine.
+fn is_connection_error(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<ClientConnection>().is_some()
 }
 
 /// How a [`Session`] ended: a detach/EOF keeps serving, `k` shuts down.
@@ -262,7 +290,11 @@ impl Session {
                 match self.stream.read_exact(&mut byte) {
                     Ok(()) => {}
                     Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-                    Err(e) => return Err(e).context("reading GDB packet"),
+                    Err(e) => {
+                        return Err(e)
+                            .context("reading GDB packet")
+                            .context(ClientConnection)
+                    }
                 }
                 match byte[0] {
                     b'+' | b'-' => continue,
@@ -275,46 +307,61 @@ impl Session {
                 }
             }
 
+            // A client that goes away part way through a packet has
+            // detached, the same as one that goes away between packets.
+            let gone = |e: &std::io::Error| e.kind() == std::io::ErrorKind::UnexpectedEof;
             let mut payload = Vec::new();
             loop {
-                self.stream
-                    .read_exact(&mut byte)
-                    .context("reading GDB packet payload")?;
+                match self.stream.read_exact(&mut byte) {
+                    Ok(()) => {}
+                    Err(e) if gone(&e) => return Ok(None),
+                    Err(e) => {
+                        return Err(e)
+                            .context("reading GDB packet payload")
+                            .context(ClientConnection)
+                    }
+                }
                 if byte[0] == b'#' {
                     break;
                 }
                 payload.push(byte[0]);
                 if payload.len() > MAX_PACKET_PAYLOAD_BYTES {
-                    bail!(
-                        "GDB packet exceeds {}-byte limit without a '#' terminator",
-                        MAX_PACKET_PAYLOAD_BYTES
+                    // Not a debugger: drop the client, keep the machine.
+                    log::warn!(
+                        "gdb: packet exceeds {MAX_PACKET_PAYLOAD_BYTES}-byte limit without a \
+                         '#' terminator; dropping the client"
                     );
+                    return Ok(None);
                 }
             }
             let mut sum_bytes = [0u8; 2];
-            self.stream
-                .read_exact(&mut sum_bytes)
-                .context("reading GDB packet checksum")?;
-            let expected = parse_hex_byte(sum_bytes[0], sum_bytes[1])?;
-            let actual = checksum(&payload);
-            if expected != actual {
+            match self.stream.read_exact(&mut sum_bytes) {
+                Ok(()) => {}
+                Err(e) if gone(&e) => return Ok(None),
+                Err(e) => {
+                    return Err(e)
+                        .context("reading GDB packet checksum")
+                        .context(ClientConnection)
+                }
+            }
+            let Some(packet) = frame_packet(&payload, sum_bytes) else {
                 if !self.no_ack {
                     self.stream.write_all(b"-").ok();
                 }
                 continue;
-            }
+            };
             if !self.no_ack {
                 self.stream.write_all(b"+").ok();
             }
-            return String::from_utf8(payload)
-                .map(Some)
-                .context("GDB packet is not UTF-8");
+            return Ok(Some(packet));
         }
     }
 
     fn send_packet(&mut self, payload: &str) -> Result<()> {
         let sum = checksum(payload.as_bytes());
-        write!(self.stream, "${payload}#{sum:02x}").context("sending GDB packet")?;
+        write!(self.stream, "${payload}#{sum:02x}")
+            .context("sending GDB packet")
+            .context(ClientConnection)?;
         self.stream.flush().ok();
         Ok(())
     }
@@ -348,24 +395,53 @@ impl Session {
         }
     }
 
+    /// Look, without waiting, for an interrupt from the client while the
+    /// machine runs. An error is the connection's: the client is gone.
     fn poll_interrupt(&mut self) -> Result<bool> {
-        self.stream
-            .set_nonblocking(true)
-            .context("setting GDB stream nonblocking")?;
+        self.look_for_interrupt()
+            .context("polling GDB interrupt")
+            .context(ClientConnection)
+    }
+
+    fn look_for_interrupt(&mut self) -> std::io::Result<bool> {
+        self.stream.set_nonblocking(true)?;
         let mut byte = [0u8; 1];
-        let result = match self.stream.peek(&mut byte) {
-            Ok(1) if byte[0] == 0x03 => {
-                let _ = self.stream.read(&mut byte);
-                Ok(true)
-            }
-            Ok(_) => Ok(false),
+        // Bounded so that a client sending without pause cannot hold the
+        // machine here; what is left is looked at on the next poll.
+        let mut seen = Ok(false);
+        for _ in 0..64 {
+            seen = match self.stream.peek(&mut byte) {
+                // Readable with nothing to read: the client closed.
+                // Without this the machine runs on with nobody to stop
+                // it, and the server never returns to accept another
+                // client.
+                Ok(0) => Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "GDB client disconnected while the machine was running",
+                )),
+                Ok(_) if byte[0] == 0x03 => self.stream.read(&mut byte).map(|_| true),
+                // The start of a packet is the packet reader's, and stays
+                // where it is until the machine stops.
+                Ok(_) if byte[0] == b'$' => Ok(false),
+                // Anything else is what the packet reader skips between
+                // packets too: an acknowledgement (of console output sent
+                // during the continue, say) or noise. Left at the head of
+                // the socket it would hide an interrupt, or the client's
+                // disconnect, behind it for good.
+                Ok(_) => match self.stream.read(&mut byte) {
+                    Ok(_) => continue,
+                    Err(e) => Err(e),
+                },
+                Err(e) => Err(e),
+            };
+            break;
+        }
+        let seen = match seen {
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
-            Err(e) => Err(e).context("polling GDB interrupt"),
+            seen => seen,
         };
-        self.stream
-            .set_nonblocking(false)
-            .context("restoring GDB stream blocking mode")?;
-        result
+        self.stream.set_nonblocking(false)?;
+        seen
     }
 }
 
@@ -505,6 +581,109 @@ mod tests {
         });
         serve(listener, emulator_with_loadseg_program(), None).unwrap();
         thread.join().unwrap();
+    }
+
+    /// What a client sends is its own business: bytes that are not a
+    /// packet, or a connection dropped part way through one, end at most
+    /// that client's session. The machine stays, and the next client is
+    /// served.
+    #[test]
+    fn a_malformed_packet_or_a_dropped_client_does_not_end_the_server() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let thread = std::thread::spawn(move || {
+            let mut first = GdbClient::connect(addr);
+            first.raw(b"$\xff#ff"); // a valid checksum over a byte that is not UTF-8
+            assert_eq!(
+                first.read_reply(),
+                "",
+                "an unknown packet is answered empty"
+            );
+            first.raw(b"$qC#zz"); // checksum digits that are not hex
+            assert_eq!(first.request("qC"), "QC1");
+            first.raw(b"$qC"); // gone before the packet ends
+            drop(first);
+            let mut second = GdbClient::connect(addr);
+            assert_eq!(second.request("qC"), "QC1");
+            second.send("k");
+        });
+        serve(listener, emulator_with_loadseg_program(), None).unwrap();
+        thread.join().unwrap();
+    }
+
+    /// A client that goes away while the machine is running has to be
+    /// noticed, or the continue never ends and nobody can attach again.
+    #[test]
+    fn a_client_that_vanishes_during_continue_frees_the_server_for_the_next() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            // A program that never stops by itself: BRA to itself, in
+            // ROM so that nothing the machine does can change it.
+            let mut emu = emulator_with_loadseg_program();
+            emu.bus_mut().mem.rom[0x1000..0x1002].copy_from_slice(&[0x60, 0xfe]);
+            emu.machine.debug_set_register(17, 0x00f8_1000);
+            serve(listener, emu, None)
+        });
+        let mut first = GdbClient::connect(addr);
+        // As gdb does. With acknowledgements on, the "+" written for the
+        // continue packet draws a reset from the closed peer, and the
+        // next poll reports that; without them nothing is written until
+        // the machine stops, and the poll sees only an orderly end.
+        assert_eq!(first.request("QStartNoAckMode"), "OK");
+        first.send("c");
+        drop(first);
+        let mut second = GdbClient::connect(addr);
+        second.set_read_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(second.request("qC"), "QC1");
+        second.send("k");
+        server.join().unwrap().unwrap();
+    }
+
+    /// What a client sends during a continue other than the interrupt (an
+    /// acknowledgement, say, for console output it was sent) must not sit
+    /// at the head of the socket hiding an interrupt, or a disconnect,
+    /// behind it.
+    #[test]
+    fn a_stray_byte_during_continue_hides_neither_an_interrupt_nor_a_disconnect() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut emu = emulator_with_loadseg_program();
+            emu.bus_mut().mem.rom[0x1000..0x1002].copy_from_slice(&[0x60, 0xfe]);
+            emu.machine.debug_set_register(17, 0x00f8_1000);
+            serve(listener, emu, None)
+        });
+        let mut first = GdbClient::connect(addr);
+        first.set_read_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(first.request("QStartNoAckMode"), "OK");
+        first.send("c");
+        first.raw(b"+");
+        first.raw(&[0x03]);
+        assert!(first.read_reply().starts_with(['S', 'T']), "a stop reply");
+        first.send("c");
+        first.raw(b"+");
+        drop(first);
+        let mut second = GdbClient::connect(addr);
+        second.set_read_timeout(std::time::Duration::from_secs(10));
+        assert_eq!(second.request("qC"), "QC1");
+        second.send("k");
+        server.join().unwrap().unwrap();
+    }
+
+    /// Only a failure of the client's own connection ends a session as a
+    /// detach. An I/O error from anywhere else is the machine's, and is
+    /// reported.
+    #[test]
+    fn only_an_error_from_the_client_socket_counts_as_the_client_going_away() {
+        let disk = || std::io::Error::other("a host file under the machine failed");
+        let machine = anyhow::Error::new(disk()).context("stepping");
+        assert!(!is_connection_error(&machine));
+        let socket = anyhow::Error::new(disk())
+            .context("sending GDB packet")
+            .context(ClientConnection)
+            .context("serving a client");
+        assert!(is_connection_error(&socket));
     }
 
     #[test]
