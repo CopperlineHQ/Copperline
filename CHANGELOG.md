@@ -22,6 +22,10 @@ for the earlier release notes.
   images that stored it: a CloneCD-style `.sub` file beside the image, a cue
   sheet `CDG` track, or a CHD with raw subcode. The CDTV drive now delivers
   subcode bytes at all, behind SCOR, while a disc plays.
+- `[[tape]]` puts a SCSI tape drive on the `[scsi]` controller. The
+  cartridge is a host directory with one file per tape file, or a single
+  host file; the files hold only the data, so `tar` archives are tape files
+  as they stand (see docs/guide/configuration.md).
 
 ### Changed
 

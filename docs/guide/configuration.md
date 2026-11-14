@@ -2766,6 +2766,9 @@ form that overrides a directory mount's volume name, filesystem, and the
 synthesized partition's boot priority. The HDD activity LED covers SCSI
 traffic too.
 
+A SCSI ID can also hold a tape drive; those are configured with
+[`[[tape]]`](#tape-drives) entries rather than a `unitN` path.
+
 A `unitN` path ending in `.cue`, `.iso`, `.nrg`, or a `.chd` holding a CD
 (a hard-disk CHD attaches as a hard disk; the metadata decides) attaches a
 **SCSI CD-ROM drive** at that ID instead of a hard disk: a read-only removable
@@ -3129,6 +3132,106 @@ whatever is written here, and no RDB is synthesised over a disk that has
 none. Opening a real disk asks for permission the first time, and the host's
 volumes on it are unmounted while the machine has it. Attach read-only the
 first time: [](host-disks.md) covers the whole of it.
+
+(tape-drives)=
+
+## `[[tape]]` -- SCSI tape drives
+
+```toml
+[scsi]
+controller = "a2091"
+
+[[tape]]
+unit = 4                  # SCSI ID 0-6 on the [scsi] controller
+path = "backups"          # a directory, or a single file
+# kind = "file"           # "directory" or "file"; default: what path is
+# capacity = "150M"       # how much data the tape holds; default: no end
+# write_protect = true    # the cartridge's write-protect tab
+```
+
+Each `[[tape]]` entry puts a **SCSI tape drive** on the `[scsi]` controller
+at SCSI ID `unit`: a SCSI-2 sequential-access device (INQUIRY device type
+1) with a cartridge in it. It needs a SCSI controller, so the machine must
+have one: a `[[tape]]` entry by itself fits the default controller with its
+bundled ROM, exactly as a `[scsi] unitN` would (an A2091 on most machines,
+the motherboard controller on an A3000), and a `[scsi]` section chooses
+another. A SCSI ID holds one device: a `[[tape]]` on an ID that a
+`[scsi] unitN` or a `[[host_disk]]` already uses is an error. The guest
+reaches the drive through the controller's `scsi.device` and the unit
+number, with whatever tape software it would use on real hardware.
+
+`path` is the cartridge, used as written (relative paths are relative to
+the directory Copperline is started from), and what it is on the host
+decides what kind. A path with nothing at it yet is made a directory;
+`kind = "file"` asks for a blank single-file tape instead, and a `kind`
+that contradicts what is at the path is an error when the machine starts:
+
+- **A directory** is a tape with one host file per tape file, in name
+  order. Put `tar` archives in it and the guest finds them as tape files 0,
+  1, 2... separated by filemarks; what the guest writes appears as new
+  files named `00000.tape`, `00001.tape`... When a file already in the
+  directory would sort after such a name, the new files are named
+  `~00001.tape`, `~00002.tape`... instead, so that they still come last. A
+  directory holds up to 10000 tape files; past that the tape is full.
+  Hidden files (a leading `.`) and subdirectories are not part of the tape;
+  a symbolic link to a file is a tape file like any other, and the guest's
+  writes go through it. The directory is read when the machine starts and
+  again at every LOAD, so files added from the host show up after the guest
+  unloads and reloads the tape.
+- **A file** is a tape holding exactly one tape file: the host file
+  itself. The file is a tape file whenever it exists, even empty, and a
+  blank tape when it does not; writing creates it and a long erase from the
+  beginning of the tape removes it. There is no room on it for a second
+  tape file, so data written after the first filemark fails as the end of
+  the tape would (VOLUME OVERFLOW, with the end-of-medium bit). Further
+  filemarks are accepted, so software that closes a backup with two of them
+  finishes cleanly.
+
+`capacity` gives the tape an end: a size such as `"150M"` or `"2G"`,
+counting the data in all its tape files. Near the end (the last 1/32nd of
+the tape, at most 1 MiB) a write is still carried out but reports
+end-of-medium, which is the early warning backup software uses to close the
+tape; at the end, a write stops with VOLUME OVERFLOW and the number of
+blocks it could not place. Without `capacity` the tape has no end and a
+guest can write until the host disk is full.
+
+Either way the host files hold nothing but the data: a tape file the guest
+writes with `tar` is a `tar` archive on the host, and the other way round.
+
+That also means the cartridge does not record how the data was blocked.
+The drive's block length decides: with a fixed block length (512 bytes at
+power-on, changed with MODE SELECT) a tape file is read as blocks of that
+length, and a last block that is shorter is reported as an incorrect-length
+block; in variable-block mode (block length 0) each read takes as many
+bytes as it asks for, up to the end of the tape file. Every tape file ends
+in a filemark, whether or not the guest wrote one after its data, and
+writing anywhere on the tape discards everything from there to the end, as
+on a real tape.
+
+A save state holds the drive -- where the head is, the block length, which
+cartridge -- but not the cartridge's contents, which stay in the host files
+whatever state is loaded. Loading a state reads the cartridge again as it is
+now; if it no longer matches what the state was saved with (a tape file
+missing, added, or shorter than the head position), Copperline logs a
+warning and puts the head at the nearest position the tape still has. A
+state whose cartridge path this session has not opened is reported like any
+other state that reaches for a new host file.
+
+`write_protect = true` slides the cartridge's write-protect tab: writes,
+filemarks and erases fail with a DATA PROTECT error and MODE SENSE reports
+the tape as protected.
+
+The drive implements TEST UNIT READY, REWIND, REQUEST SENSE, READ BLOCK
+LIMITS, READ(6), WRITE(6), WRITE FILEMARKS, SPACE (blocks, filemarks and
+end-of-data, in both directions), INQUIRY, MODE SENSE(6) and MODE SELECT(6)
+(the block descriptor and the device configuration page), RESERVE/RELEASE,
+ERASE, LOAD/UNLOAD, SEND DIAGNOSTIC and PREVENT/ALLOW MEDIUM REMOVAL.
+Setmarks, partitions, READ POSITION and LOCATE are not implemented. The
+transport takes no emulated time: there is no tape-motion model, so a
+rewind or a space across the whole tape completes at once.
+
+Netplay sessions have no tape drives: a cartridge is a writable host file,
+which two machines cannot share.
 
 (filesys-mounts)=
 
