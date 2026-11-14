@@ -131,7 +131,8 @@ machine with no sound device, pass `--noaudio`.
 
 - Unix (macOS and Linux) only.
 - The terminal display cannot be combined with `--control`, `--control-gui`,
-  `--gdb`, `--gdb-gui`, `--benchmark-until` or netplay.
+  `--gdb`, `--gdb-gui`, `--benchmark-until`, `--profile-live-audio` or
+  netplay.
 - A capture flag such as `--screenshot-after` runs the machine unthrottled
   and ends the session when the capture is written, as a windowless capture
   run does; the terminal shows the run as it goes.

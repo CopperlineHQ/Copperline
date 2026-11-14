@@ -36,8 +36,8 @@
 //! The DSP: each channel has a volume (`$FFFF` = full) and a pan (the API's
 //! signed word, `-$8000` left to `$7FFF` right, which the firmware turns
 //! into 0..`$FFFF` by flipping the top bit), and a ramp: a change reaches
-//! its target linearly over `rate` fields. A channel adds `s·v·(1-p)` to
-//! the left and `s·v·p` to the right output. The sample rate is 735 per
+//! its target linearly over `rate` fields. A channel adds `s*v*(1-p)` to
+//! the left and `s*v*p` to the right output. The sample rate is 735 per
 //! field, 44,055.94 Hz, locked to the video; the Toaster stretches each
 //! frame's sound to the mixer's 44.1 kHz.
 
@@ -680,11 +680,12 @@ impl Player {
         {
             return Err(err::BADPARAM);
         }
+        // (Only the start of a part being played was checked above.)
         if r.vid_count == 0 {
-            r.vid_count = clip.fields - r.vid_start;
+            r.vid_count = clip.fields.saturating_sub(r.vid_start);
         }
         if r.aud_count == 0 {
-            r.aud_count = clip.fields - r.aud_start;
+            r.aud_count = clip.fields.saturating_sub(r.aud_start);
         }
         // The channel's current user: stolen, or an error if asked.
         if r.video() {
@@ -1331,6 +1332,12 @@ impl Player {
         for p in self.plays.iter_mut().filter(|p| p.paused) {
             p.start = p.start.wrapping_add(1);
         }
+        // The queue is kept in time order and the scan below stops at the
+        // first change not yet due, so the slipped ones go back in line
+        // behind what is now ahead of them.
+        if self.plays.iter().any(|p| p.paused) {
+            self.dsp_queue.sort_by_key(|e| e.time);
+        }
         // DSP changes due.
         let due = self
             .dsp_queue
@@ -1579,7 +1586,7 @@ fn add_dsp_event(list: &mut Vec<DspEvent>, mut e: DspEvent) {
             }
         }
         if same && this.rate == 0 && e.rate > 0 {
-            e.time += 1;
+            e.time = e.time.wrapping_add(1);
             e.rate -= 1;
         }
         i += 1;
@@ -1677,7 +1684,7 @@ mod tests {
                 Shown::Clip(r.path.clone(), k),
                 "field {k}"
             );
-            // Left carries 100·n hard left, right −100·n hard right.
+            // Left carries 100*n hard left, right -100*n hard right.
             let want = 100.0 * k as f32 / 32768.0;
             assert!((sound[300].0 - want).abs() < 1e-3, "{k}: {:?}", sound[300]);
             assert!((sound[300].1 + want).abs() < 1e-3);
@@ -1689,6 +1696,82 @@ mod tests {
         r.field(128);
         assert_eq!(r.player.shown[1], Shown::Black);
         assert_eq!(r.player.dsp_queue.len(), 0);
+    }
+
+    /// Only the start a request uses is range-checked, so the count a
+    /// zero defaults to must not be worked out from the other one by a
+    /// bare subtraction: the guest can leave anything there.
+    #[test]
+    fn an_unused_start_past_the_clip_does_not_underflow_its_default_count() {
+        let mut r = rig();
+        let mut req = request(caf::AUDIOL, 0);
+        req.vid_start = u32::MAX;
+        req.vid_count = 0;
+        let clip = info(&r.path);
+        r.player
+            .play_clip(Slot(1), req, clip, 0, &mut r.sram, Some(&r.link))
+            .unwrap();
+        let mut r = rig();
+        let mut req = request(caf::VIDEO, 0);
+        req.aud_start = u32::MAX;
+        req.aud_count = 0;
+        let clip = info(&r.path);
+        r.player
+            .play_clip(Slot(1), req, clip, 0, &mut r.sram, Some(&r.link))
+            .unwrap();
+    }
+
+    /// A ramp queued behind an immediate change on the same channel
+    /// starts a field later; at the last field number that wraps, as the
+    /// field clock itself does.
+    #[test]
+    fn a_ramp_behind_an_immediate_change_wraps_with_the_field_clock() {
+        let event = |rate| DspEvent {
+            time: u32::MAX,
+            chan: 1,
+            volume: 0x4000,
+            pan: 0,
+            rate,
+            owner: Owner::Play(1),
+        };
+        let mut list = Vec::new();
+        add_dsp_event(&mut list, event(0));
+        add_dsp_event(&mut list, event(4));
+        assert_eq!(list.len(), 2);
+        assert_eq!((list[1].time, list[1].rate), (0, 3));
+    }
+
+    /// A paused play's level changes slip a field at a time. The changes
+    /// of everything else, queued behind them, still happen when due.
+    #[test]
+    fn a_paused_plays_level_changes_do_not_hold_back_others() {
+        let mut r = rig();
+        let slot = Slot(1);
+        let req = request(caf::AUDIOL | caf::AUDIOR, 0);
+        let clip = info(&r.path);
+        r.player
+            .play_clip(slot, req, clip, 101, &mut r.sram, Some(&r.link))
+            .unwrap();
+        // The play's own changes are due from field 120; this one, on a
+        // channel the play does not use, sits behind them in the queue.
+        insert_dsp(
+            &mut r.player.dsp_queue,
+            DspEvent {
+                time: 125,
+                chan: 5,
+                volume: 0xFFFF,
+                pan: 0,
+                rate: 0,
+                owner: Owner::Sequence,
+            },
+        );
+        assert!(r
+            .player
+            .cont_written(slot, 0xFF, &mut r.sram, Some(&r.link)));
+        for clock in 110..=125 {
+            r.field(clock);
+        }
+        assert_eq!(r.player.dsp[4].volume, 1.0);
     }
 
     #[test]

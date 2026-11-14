@@ -19,9 +19,16 @@ pub fn arguments(args: impl IntoIterator<Item = String>) -> (bool, Vec<String>) 
 /// builds for "Open With": it names no session mode that could be headless,
 /// and its mistakes are the user's selection (two CD images, an archive
 /// with a disk), not syntax. Any option leaves the error on stderr, since
-/// the mode it asked for is unknown until the line parses.
+/// the mode it asked for is unknown until the line parses. A leading `--`
+/// is no option: it ends them, and is how macOS document opens pass their
+/// files (`open_macos_documents`), so what follows it is paths whatever
+/// they look like.
 pub fn file_open_launch(desktop: bool, args: &[String]) -> bool {
-    desktop && !args.is_empty() && args.iter().all(|arg| !arg.starts_with('-'))
+    let (files, only_paths) = match args.split_first() {
+        Some((first, rest)) if first == "--" => (rest, true),
+        _ => (args, false),
+    };
+    desktop && !files.is_empty() && (only_paths || files.iter().all(|arg| !arg.starts_with('-')))
 }
 
 pub fn error_dialog_allowed(desktop: bool, cli: &CliArgs) -> bool {
@@ -90,6 +97,17 @@ mod tests {
             &args(&["--screenshot-after", "1", "a.iso", "b.iso"])
         ));
         assert!(!file_open_launch(true, &args(&["--bogus"])));
+        // macOS hands a document selection over behind "--", which ends
+        // the options: everything after it is a path, whatever its name.
+        let behind = args(&["--", "first.iso", "second.iso"]);
+        assert!(parse_args_from(behind.clone()).is_err());
+        assert!(file_open_launch(true, &behind));
+        assert!(file_open_launch(true, &args(&["--", "-odd name-.adf"])));
+        assert!(!file_open_launch(true, &args(&["--"])));
+        assert!(!file_open_launch(
+            true,
+            &args(&["--noaudio", "--", "a.iso", "b.iso"])
+        ));
     }
 
     #[test]

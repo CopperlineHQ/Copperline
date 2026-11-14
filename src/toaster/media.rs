@@ -223,7 +223,7 @@ pub fn find_ffmpeg(media_root: &Path) -> Option<PathBuf> {
     } else {
         "ffmpeg"
     };
-    if let Some(p) = std::env::var_os("COPPERLINE_FFMPEG").map(PathBuf::from) {
+    if let Some(p) = crate::envcfg::var_os("COPPERLINE_FFMPEG").map(PathBuf::from) {
         if p.is_file() {
             return Some(p);
         }

@@ -17,7 +17,7 @@
 //! Drive `n` is `bus * 8 + target`: `FA0` (bus A, target 0) is drive 0,
 //! `FB0` drive 8, `FC0` drive 16. Each lives in a folder of that name under
 //! the Toaster's `Flyer` folder. Files are the clips' bytes verbatim, as
-//! FlyerFileSystem copies them (`crates/flyerclip/FORMAT.md` §2).
+//! FlyerFileSystem copies them (`crates/flyerclip/FORMAT.md` section 2).
 
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -149,13 +149,16 @@ impl HostDrive {
             .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
             .filter(|name| valid_name(name))
             .unwrap_or_else(|| default_volume_name(self.number));
+        let was: Vec<bool> = self.objects.iter().map(|o| o.present).collect();
         for obj in &mut self.objects[1..] {
             obj.present = false;
         }
-        self.scan_dir(0);
+        self.scan_dir(0, &was);
     }
 
-    fn scan_dir(&mut self, dir: usize) {
+    /// List `dir` from the host. `was` is which objects were there before
+    /// this scan.
+    fn scan_dir(&mut self, dir: usize, was: &[bool]) {
         let path = self.folder.join(&self.objects[dir].rel);
         let mut entries: Vec<(String, std::fs::Metadata)> = match std::fs::read_dir(&path) {
             Ok(read) => read
@@ -181,15 +184,22 @@ impl HostDrive {
                     false
                 }
         });
-        entries.sort_by_key(|(name, _)| name.to_ascii_uppercase());
+        entries.sort_by(|(a, _), (b, _)| listing_order(a, b));
         let mut children = Vec::with_capacity(entries.len());
         for (name, meta) in entries {
             let rel = self.objects[dir].rel.join(&name);
             let kind = if meta.is_dir() { TYPE_DIR } else { TYPE_FILE };
+            // A deleted object stays in the table under its path, so that
+            // a file put back keeps its blocks. A live object renamed onto
+            // such a path shares it: the one that was there before this
+            // scan is the one the host entry stands for.
+            let free = |o: &Object| o.rel == rel && o.kind == kind && !o.present;
             let known = self
                 .objects
                 .iter()
-                .position(|o| o.rel == rel && o.kind == kind && !o.present);
+                .zip(was)
+                .position(|(o, &was)| was && free(o))
+                .or_else(|| self.objects.iter().position(free));
             let index = match known {
                 Some(i) => i,
                 None => {
@@ -224,7 +234,7 @@ impl HostDrive {
             }
             children.push(index);
             if kind == TYPE_DIR {
-                self.scan_dir(index);
+                self.scan_dir(index, was);
             }
         }
         self.objects[dir].children = children;
@@ -374,7 +384,7 @@ impl HostDrive {
     /// Create file `name` in directory `dir`, or empty it if it is there;
     /// its index.
     pub fn create_file(&mut self, dir: usize, name: &str) -> std::io::Result<usize> {
-        if !valid_name(name) {
+        if !creatable_name(name) {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
         let path = match self.child(dir, name) {
@@ -392,7 +402,7 @@ impl HostDrive {
 
     /// Create directory `name` in `dir`; its index.
     pub fn create_dir(&mut self, dir: usize, name: &str) -> std::io::Result<usize> {
-        if !valid_name(name) {
+        if !creatable_name(name) {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
         if self.child(dir, name).is_some() {
@@ -418,7 +428,7 @@ impl HostDrive {
 
     /// Move an object to `name` in directory `dir`.
     pub fn rename(&mut self, index: usize, dir: usize, name: &str) -> std::io::Result<()> {
-        if !valid_name(name) || index == 0 {
+        if !creatable_name(name) || index == 0 {
             return Err(std::io::ErrorKind::InvalidInput.into());
         }
         if self.child(dir, name).is_some_and(|c| c != index) {
@@ -467,7 +477,8 @@ impl HostDrive {
 
     /// Write bytes into a file at `offset`, growing it as needed.
     pub fn write_file(&mut self, index: usize, offset: u64, data: &[u8]) -> std::io::Result<()> {
-        let end = offset + data.len() as u64;
+        // The offset is the guest's (a grip's position lies in its SRAM).
+        let end = offset.saturating_add(data.len() as u64);
         if end > self.objects[index].bytes {
             self.set_len(index, end)?;
         }
@@ -532,6 +543,32 @@ pub fn valid_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| (c as u32) < 0x100 && c >= ' ' && c != '/' && c != ':')
+}
+
+/// A name the guest may give a new or renamed object. It is joined onto
+/// the drive's host folder, so beyond the Flyer's own rules it must be one
+/// ordinary host path component: no backslash (a separator on a Windows
+/// host), no "." or "..", nothing the host's own parser reads as a root, a
+/// prefix or a device. A leading dot is refused too: the scan keeps such
+/// names to itself (hidden files, and `.flyervol`, the volume's name), so
+/// the guest could make one but never see it again.
+pub fn creatable_name(name: &str) -> bool {
+    valid_name(name)
+        && !name.starts_with('.')
+        && !name.contains('\\')
+        && crate::filesys::is_single_host_component(name)
+        && !(cfg!(windows) && crate::filesys::is_windows_alias_name(name))
+}
+
+/// The order a directory lists in: by name without regard to case, as the
+/// firmware compares names, and between names that differ only in case (a
+/// case-sensitive host can hold both) by the names themselves. The host's
+/// own listing order, which varies from one filesystem to the next, never
+/// decides: it would otherwise pick the objects' block numbers.
+fn listing_order(a: &str, b: &str) -> std::cmp::Ordering {
+    a.to_ascii_uppercase()
+        .cmp(&b.to_ascii_uppercase())
+        .then_with(|| a.cmp(b))
 }
 
 /// The firmware's `CompareStrings`: equal ignoring ASCII case.
@@ -628,6 +665,65 @@ mod tests {
         assert!(drive.rename(projects, old, "Loop").is_err());
     }
 
+    /// A name the guest gives a new or renamed object is joined onto the
+    /// drive's host folder, so it must be one ordinary host path component:
+    /// a backslash is a separator on a Windows host, "." and ".." are path
+    /// steps everywhere, and a leading dot names what the scan keeps to
+    /// itself (hidden files, and the `.flyervol` volume name).
+    #[test]
+    fn a_created_or_renamed_name_is_one_ordinary_host_component() {
+        let dir = folder();
+        let mut drive = HostDrive::open(dir.path(), 0).unwrap();
+        let clip = drive.lookup(0, "Clip One").unwrap();
+        let listing = |root: &Path| {
+            let mut names: Vec<_> = std::fs::read_dir(root)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+        let before = listing(&dir.path().join("FA0"));
+        let outside = listing(dir.path());
+        for name in ["..\\x", "a\\b", ".", "..", ".x", ".flyervol"] {
+            assert!(drive.create_file(0, name).is_err(), "create_file {name:?}");
+            assert!(drive.create_dir(0, name).is_err(), "create_dir {name:?}");
+            assert!(drive.rename(clip, 0, name).is_err(), "rename {name:?}");
+        }
+        assert_eq!(listing(&dir.path().join("FA0")), before);
+        assert_eq!(listing(dir.path()), outside);
+        assert_eq!(drive.volume, default_volume_name(0));
+        assert_eq!(drive.lookup(0, "Clip One"), Some(clip));
+        // Ordinary names, dots inside them included, still work.
+        assert!(drive.create_file(0, "Take 1.b").is_ok());
+        assert!(creatable_name("Clip 1"));
+        assert_eq!(creatable_name("NUL"), !cfg!(windows));
+        assert_eq!(creatable_name("com1.clip"), !cfg!(windows));
+    }
+
+    /// A deleted object stays in the table under its old path. Renaming a
+    /// live object onto that path must leave the live one in place: an
+    /// open grip names it by header block.
+    #[test]
+    fn a_rename_onto_a_deleted_objects_path_keeps_the_live_object() {
+        let dir = folder();
+        let mut drive = HostDrive::open(dir.path(), 0).unwrap();
+        let b = drive.create_file(0, "B").unwrap();
+        drive.delete(b).unwrap();
+        let a = drive.create_file(0, "A").unwrap();
+        assert_ne!(a, b);
+        drive.write_file(a, 0, b"live").unwrap();
+        let (header, start) = (drive.header_block(a), drive.object(a).unwrap().start);
+        drive.rename(a, 0, "B").unwrap();
+        assert_eq!(drive.lookup(0, "B"), Some(a));
+        assert_eq!(drive.object_at_header(header), Some(a));
+        assert_eq!(drive.object(a).unwrap().start, start);
+        assert!(drive.object(b).is_none(), "the deleted object stays gone");
+        let mut data = [0u8; 4];
+        assert_eq!(drive.read_file(a, 0, &mut data).unwrap(), 4);
+        assert_eq!(&data, b"live");
+    }
+
     #[test]
     fn drive_names_follow_bus_and_target() {
         assert_eq!(drive_name(0), "FA0");
@@ -717,6 +813,16 @@ mod tests {
         .unwrap();
         drive.scan();
         assert_ne!(drive.object(clip).unwrap().start, start);
+    }
+
+    /// Two names that differ only in case sort the same way whichever
+    /// the host lists first.
+    #[test]
+    fn names_differing_only_in_case_list_in_a_fixed_order() {
+        for mut names in [["clip", "Take", "CLIP"], ["CLIP", "clip", "Take"]] {
+            names.sort_by(|a, b| listing_order(a, b));
+            assert_eq!(names, ["CLIP", "clip", "Take"]);
+        }
     }
 
     #[test]

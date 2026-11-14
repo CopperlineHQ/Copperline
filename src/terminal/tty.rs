@@ -1102,10 +1102,15 @@ fn writer(tty: File, shared: &Shared, min_interval: Option<Duration>) {
             // one's interval (meanwhile newer frames replace it unsent). The
             // wait is on the mailbox, so stopping ends it at once.
             if let Some(interval) = min_interval {
-                let until = started + interval;
+                // An interval too long to add to the clock has no end: only
+                // stopping ends the wait, an hour's sleep at a time.
+                let until = started.checked_add(interval);
                 let mut mailbox = shared.mailbox.lock().unwrap_or_else(|e| e.into_inner());
                 while !mailbox.closed {
-                    let left = until.saturating_duration_since(Instant::now());
+                    let left = match until {
+                        Some(until) => until.saturating_duration_since(Instant::now()),
+                        None => Duration::from_secs(3600),
+                    };
                     if left.is_zero() {
                         break;
                     }
@@ -1379,6 +1384,33 @@ mod tests {
         );
         drain.join().unwrap();
     }
+    /// The longest frame interval (what a `--terminal-fps` close to
+    /// nothing asks for) cannot be added to the clock. It is a wait that
+    /// only stopping ends, not an overflow that ends the writer.
+    #[test]
+    fn the_longest_frame_interval_does_not_end_the_writer() {
+        let (mut read, write) = pipe();
+        let drain = std::thread::spawn(move || {
+            let mut sink = Vec::new();
+            let _ = read.read_to_end(&mut sink);
+        });
+        let output = Output::start(write, PANE, Some(Duration::MAX)).unwrap();
+        output.post_frame(&noisy_frame(64, 40, 3), 64, 40);
+        wait_for("the first frame", || {
+            output.stats().frames.load(Ordering::Relaxed) == 1
+        });
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(!output.stopped(), "the writer ended in its frame-rate wait");
+        let started = Instant::now();
+        output.finish();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "stop took {:?}",
+            started.elapsed()
+        );
+        drain.join().unwrap();
+    }
+
     fn nonblocking(file: &File) {
         let fd = file.as_raw_fd();
         // SAFETY: fcntl on a descriptor the caller owns.

@@ -50,6 +50,13 @@ Deliberately excluded, with the mechanism in parentheses:
   drive-speed setting. It first reattaches any A2065 network backend and
   reacquires saved host disks, so a failure there leaves the running
   machine untouched.
+- **The video-slot card as an object**: the session's card (its compose
+  thread, outputs and input files) stays with the session, like the
+  parallel peripheral. What the card holds is not excluded: the bus
+  writes `VideoSlotDevice::save_state` in the card's place and the same
+  call hands a loaded state's bytes to the live card (`load_state`), or
+  resets it to power-on when the state carries none. See
+  [the video-slot tap](video.md).
 - **Host preferences**: Paula's output volume, channel mode, stereo
   separation, and filter override (`#[serde(skip)]`; volume and
   separation default to full scale, so a Paula decoded on its own is

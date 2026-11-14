@@ -362,6 +362,34 @@ fn command(ffmpeg: &Path) -> Command {
     cmd
 }
 
+/// The most of ffmpeg's error output kept for a message.
+const STDERR_KEPT: usize = 64 * 1024;
+
+/// Read a child's error output on a thread of its own, from the start. A
+/// pipe nobody reads fills up, and a child with a lot to say (a decoder
+/// on a damaged file) then stops in its write for good while this side
+/// waits on its other pipe. The thread ends when the child closes its end
+/// and gives back the first [`STDERR_KEPT`] bytes.
+fn drain_stderr(child: &mut std::process::Child) -> std::thread::JoinHandle<String> {
+    let stderr = child.stderr.take();
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut buf = [0u8; 8192];
+        if let Some(mut stderr) = stderr {
+            loop {
+                match stderr.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let room = STDERR_KEPT - kept.len();
+                        kept.extend_from_slice(&buf[..n.min(room)]);
+                    }
+                }
+            }
+        }
+        String::from_utf8_lossy(&kept).into_owned()
+    })
+}
+
 /// The source's sound as interleaved stereo at the Flyer's rate; empty
 /// when it has none.
 fn read_audio(ffmpeg: &Path, input: &Input, options: &ImportOptions) -> Result<Vec<i16>> {
@@ -498,6 +526,7 @@ pub fn import_input(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("starting ffmpeg")?;
+    let errors = drain_stderr(&mut child);
     let mut stdout = child.stdout.take().context("ffmpeg's output")?;
 
     let mut writer = ClipWriter::new(options.grade, channels);
@@ -583,11 +612,8 @@ pub fn import_input(
         bail!("stopped");
     }
     let status = child.wait()?;
+    let err = errors.join().unwrap_or_default();
     if report.frames == 0 {
-        let mut err = String::new();
-        if let Some(mut e) = child.stderr.take() {
-            let _ = e.read_to_string(&mut err);
-        }
         bail!(
             "ffmpeg read no video from {} ({status}): {}",
             input.path().display(),
@@ -1043,23 +1069,25 @@ pub fn export(
         Clip::read(&bytes).map_err(|e| anyhow!("{}: not a Flyer clip: {e:?}", input.display()))?;
     let fields = clip.field_count();
     if fields == 0 {
-        bail!("{} has no video", input.display());
+        bail!("{} has no fields", input.display());
     }
     let (channels, audio) = clip.audio();
 
     // The sound goes through a temporary file: ffmpeg reads two inputs.
+    // A new file of its own name, removed when this function returns,
+    // however it does.
     let audio_file = if channels > 0 && !audio.is_empty() {
-        let path = std::env::temp_dir().join(format!(
-            "flyerclip-{}-{}.pcm",
-            std::process::id(),
-            crate::timestamp::compact_now()
-        ));
         let mut raw = Vec::with_capacity(audio.len() * 2);
         for s in &audio {
             raw.extend_from_slice(&s.to_le_bytes());
         }
-        std::fs::write(&path, raw)?;
-        Some(path)
+        let mut file = tempfile::Builder::new()
+            .prefix("flyerclip-")
+            .suffix(".pcm")
+            .tempfile()
+            .context("a temporary file for the sound")?;
+        file.write_all(&raw)?;
+        Some(file.into_temp_path())
     } else {
         None
     };
@@ -1078,7 +1106,7 @@ pub fn export(
     if let Some(path) = &audio_file {
         cmd.args(["-f", "s16le", "-ar", &AUDIO_RATE.to_string()])
             .args(["-ac", &channels.to_string(), "-i"])
-            .arg(path);
+            .arg(path.as_os_str());
     }
     cmd.args(["-vf", "scale=640:480,setsar=1"]);
     let is_mp4 = output
@@ -1096,7 +1124,12 @@ pub fn export(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("starting ffmpeg")?;
-    let mut stdin = child.stdin.take().context("ffmpeg's input")?;
+    let errors = drain_stderr(&mut child);
+    let Some(mut stdin) = child.stdin.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        bail!("ffmpeg has no input to write to");
+    };
 
     let mut report = Report {
         audio_channels: channels,
@@ -1106,12 +1139,19 @@ pub fn export(
     let mut picture = vec![u32::from_le_bytes([0, 0, 0, 0xFF]); W * H];
     let mut bytes_out = vec![0u8; W * H * 4];
     let mut write_err = None;
+    let mut decode_err = None;
     for n in 0..fields {
-        let lines = clip
-            .decode_field(n)
-            .map_err(|e| anyhow!("field {n}: {e:?}"))?;
         let f = (n % 4) as usize;
-        decode_field_rows(&lines, f, &mut picture);
+        match clip.decode_field(n) {
+            Ok(lines) => decode_field_rows(&lines, f, &mut picture),
+            // A field of sound alone (an audio clip, a dropped field):
+            // the picture stays as it was, black to begin with.
+            Err(flyerclip::Error::NoVideo(_)) => {}
+            Err(e) => {
+                decode_err = Some(anyhow!("field {n}: {e:?}"));
+                break;
+            }
+        }
         // Fields II and IV complete a picture.
         if f & 1 == 1 || n + 1 == fields {
             for (o, p) in bytes_out.chunks_exact_mut(4).zip(&picture) {
@@ -1125,14 +1165,17 @@ pub fn export(
             progress(report.frames);
         }
     }
+    // Whatever stopped the loop, ffmpeg is told its input is over and is
+    // waited for, so no child is left behind.
     drop(stdin);
-    let mut err = String::new();
-    if let Some(mut e) = child.stderr.take() {
-        let _ = e.read_to_string(&mut err);
-    }
     let status = child.wait()?;
-    if let Some(path) = audio_file {
-        let _ = std::fs::remove_file(path);
+    let err = errors.join().unwrap_or_default();
+    drop(audio_file);
+    if let Some(e) = decode_err {
+        // ffmpeg finished what it was given: a file that stops where the
+        // clip could no longer be read. It is not the export asked for.
+        let _ = std::fs::remove_file(output);
+        return Err(e);
     }
     if !status.success() || write_err.is_some() {
         bail!(
@@ -1233,6 +1276,21 @@ pub fn batch_clip_paths(dir: &Path, names: &[&str], replace: bool) -> Vec<PathBu
     taken
 }
 
+/// Copy a clip file as it is (a clip added to a batch needs no
+/// conversion).
+///
+/// A clip already at `to` (it was added from the drive's own folder, and
+/// replacing is on) is left as it is: `std::fs::copy` opens its target
+/// for writing first, which would empty the file it is about to read.
+pub fn copy_clip(from: &Path, to: &Path) -> std::io::Result<()> {
+    if let (Ok(a), Ok(b)) = (std::fs::canonicalize(from), std::fs::canonicalize(to)) {
+        if a == b {
+            return Ok(());
+        }
+    }
+    std::fs::copy(from, to).map(|_| ())
+}
+
 /// `path`, or when that exists `name (2).ext`, `name (3).ext`...: a
 /// default output never replaces a file.
 pub fn unused_path(path: &Path) -> PathBuf {
@@ -1314,6 +1372,132 @@ mod tests {
             fits(&unused_clip_path(dir.path(), "  ", "", &[], false)),
             "Clip"
         );
+    }
+
+    /// A stand-in for ffmpeg: a shell script in `dir`.
+    #[cfg(unix)]
+    fn fake_ffmpeg(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("ffmpeg");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// ffmpeg reports a damaged source on its error output, line after
+    /// line. Nobody reads that pipe while the pictures are coming, so it
+    /// must not be able to fill up and stop the decoder for good.
+    #[cfg(unix)]
+    #[test]
+    fn an_import_does_not_stall_on_a_decoder_with_a_lot_to_say() {
+        let dir = tempfile::tempdir().unwrap();
+        // A megabyte of complaints, then two colour frames of black.
+        let ffmpeg = fake_ffmpeg(
+            dir.path(),
+            &format!(
+                "head -c 1048576 /dev/zero | tr '\\0' 'e' >&2\nhead -c {} /dev/zero",
+                W * H * 4 * 8
+            ),
+        );
+        let out = dir.path().join("Clip");
+        let (source, target) = (dir.path().join("source.mp4"), out.clone());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let options = ImportOptions {
+                audio: false,
+                icon: false,
+                ..ImportOptions::default()
+            };
+            let done = import_input(&ffmpeg, &Input::Video(source), &target, &options, |_| {});
+            let _ = tx.send(done.map(|report| report.frames).map_err(|e| e.to_string()));
+        });
+        let frames = rx
+            .recv_timeout(std::time::Duration::from_secs(60))
+            .expect("the import finished");
+        assert_eq!(frames, Ok(2));
+        assert!(out.is_file());
+    }
+
+    /// A clip of sound alone (a cutting-room sub-clip, an audio import)
+    /// exports: its fields have no picture, so the video stays black.
+    #[cfg(unix)]
+    #[test]
+    fn a_clip_with_no_picture_exports_its_sound_over_black() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = flyerclip::ClipWriter::audio_only(2);
+        let sound: Vec<i16> = (0..4 * PER_FIELD * 2).map(|k| k as i16).collect();
+        writer.push_frame(None, Some(&sound));
+        writer.push_frame(None, Some(&sound));
+        let clip = dir.path().join("Sound");
+        std::fs::write(&clip, writer.finish()).unwrap();
+        // Takes the pictures in and counts their bytes.
+        let count = dir.path().join("bytes");
+        let ffmpeg = fake_ffmpeg(dir.path(), &format!("wc -c > '{}'", count.display()));
+        let report = export(&ffmpeg, &clip, &dir.path().join("out.mp4"), |_| {}).unwrap();
+        assert_eq!(
+            (report.fields, report.frames, report.audio_channels),
+            (8, 4, 2)
+        );
+        let piped: usize = std::fs::read_to_string(&count)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert_eq!(piped, 4 * W * H * 4);
+    }
+
+    /// The exported sound goes through a temporary file. It is gone again
+    /// when the export gives up part-way, here on a clip cut off inside its
+    /// first frame's picture.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_export_leaves_no_temporary_sound_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = flyerclip::ClipWriter::new(Grade::Std, 2);
+        let field = vec![vec![40u8; W]; 242];
+        let video = [field.clone(), field.clone(), field.clone(), field];
+        let sound: Vec<i16> = vec![7; 4 * PER_FIELD * 2];
+        writer.push_frame(Some(&video), Some(&sound));
+        let mut bytes = writer.finish();
+        let frame = Clip::read(&bytes).unwrap().frames[0].block as usize;
+        // The frame's header and its sound (two channels of four fields).
+        bytes.truncate((frame + 1 + 2 * 4 * flyerclip::audio::BLOCKS_PER_FIELD) * 512);
+        let clip = dir.path().join("Cut off");
+        std::fs::write(&clip, bytes).unwrap();
+        // Says where its second input (the sound) is, starts its output
+        // file (the last argument) and takes the rest.
+        let seen = dir.path().join("seen");
+        let ffmpeg = fake_ffmpeg(
+            dir.path(),
+            &format!(
+                "for a in \"$@\"; do case \"$a\" in *.pcm) echo \"$a\" > '{}';; esac; done\n\
+                 for a in \"$@\"; do out=\"$a\"; done\necho partial > \"$out\"\n\
+                 cat > /dev/null",
+                seen.display()
+            ),
+        );
+        let out = dir.path().join("out.mp4");
+        assert!(export(&ffmpeg, &clip, &out, |_| {}).is_err());
+        let pcm = std::fs::read_to_string(&seen).unwrap();
+        assert!(!Path::new(pcm.trim()).exists(), "{pcm}");
+        assert!(!out.exists(), "a partial output was left behind");
+    }
+
+    /// Copying a clip that is already where it is going must not open it
+    /// for writing: that would empty it before a byte was read.
+    #[test]
+    fn copying_a_clip_onto_itself_leaves_it_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = dir.path().join("Intro");
+        std::fs::write(&clip, b"the clip").unwrap();
+        copy_clip(&clip, &clip).unwrap();
+        assert_eq!(std::fs::read(&clip).unwrap(), b"the clip");
+        // By another spelling of the same file too.
+        copy_clip(&clip, &dir.path().join(".").join("Intro")).unwrap();
+        assert_eq!(std::fs::read(&clip).unwrap(), b"the clip");
+        let other = dir.path().join("Copy");
+        copy_clip(&clip, &other).unwrap();
+        assert_eq!(std::fs::read(&other).unwrap(), b"the clip");
     }
 
     #[test]

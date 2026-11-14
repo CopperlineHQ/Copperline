@@ -1703,6 +1703,75 @@ mod tests {
     const FIXTURE_V81: &str = "tests/fixtures/state-v81-no-meta.clstate";
     const FIXTURE_WITH_META: &str = "tests/fixtures/state-v82-meta.clstate";
 
+    /// A video-slot card with one byte of emulated state.
+    struct ByteCard(u8);
+
+    impl crate::videoslot::VideoSlotDevice for ByteCard {
+        fn name(&self) -> &'static str {
+            "byte card"
+        }
+        fn wants_completed_fields(&self) -> bool {
+            false
+        }
+        fn save_state(&self) -> Option<Vec<u8>> {
+            Some(vec![self.0])
+        }
+        fn load_state(&mut self, state: Option<&[u8]>) {
+            self.0 = state.map_or(0, |s| s[0]);
+        }
+        fn control_status(&mut self) -> serde_json::Value {
+            serde_json::json!(self.0)
+        }
+    }
+
+    /// The fitted card's state goes through the real writers and readers:
+    /// the chunked state file (the bus split into its chunks, the card in
+    /// the rest chunk) and the in-memory snapshot. A state written before
+    /// cards were saved has no such field at all, and puts the session's
+    /// card back as it powers on.
+    #[test]
+    fn a_video_slot_cards_state_travels_in_state_files_and_snapshots() {
+        let machine_with = |card: Option<u8>| {
+            let mut machine = test_machine();
+            if let Some(byte) = card {
+                machine
+                    .bus_mut()
+                    .attach_video_slot(Box::new(ByteCard(byte)));
+            }
+            machine
+        };
+        let byte = |machine: &mut M68kMachine| {
+            machine
+                .bus_mut()
+                .video_slot_mut()
+                .map(|card| card.control_status())
+        };
+        let saved = machine_with(Some(0x5A));
+        let mut file = Vec::new();
+        save_to_writer(&saved, &MachineDescriptor::default(), None, &mut file).unwrap();
+        let mut snapshot = Vec::new();
+        saved.write_state(&mut snapshot).unwrap();
+
+        // Into a session whose card has moved on, and one with no card.
+        let mut live = machine_with(Some(0xC3));
+        load_from_reader(&mut live, &file[..]).unwrap();
+        assert_eq!(byte(&mut live), Some(serde_json::json!(0x5A)));
+        let mut live = machine_with(Some(0xC3));
+        live.apply_state(&mut &snapshot[..]).unwrap();
+        assert_eq!(byte(&mut live), Some(serde_json::json!(0x5A)));
+        let mut bare = machine_with(None);
+        load_from_reader(&mut bare, &file[..]).unwrap();
+        assert_eq!(byte(&mut bare), None);
+
+        // The committed fixtures predate the field.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for fixture in [FIXTURE_V81, FIXTURE_WITH_META] {
+            let mut live = machine_with(Some(0xC3));
+            load(&mut live, &root.join(fixture)).unwrap();
+            assert_eq!(byte(&mut live), Some(serde_json::json!(0)), "{fixture}");
+        }
+    }
+
     /// Both containers load and peek: the version-81 layout, whose zlib
     /// stream starts right after `DESC`, and the current one with the
     /// metadata chunk in between. `COPPERLINE_BLESS_STATE_FIXTURES=1`

@@ -32,8 +32,12 @@ pub fn chunk_offset(aud_ver: u8, audio_length: u8, chans: u8, chan: u8, fld: u8)
     }
 }
 
+/// The most channels a clip's sound has: a Flyer records mono or stereo.
+pub const MAX_CHANNELS: u8 = 2;
+
 pub(crate) fn extract(clip: &Clip) -> (u8, Vec<i16>) {
-    let chans = clip.header.audio_chans;
+    // The count is a header byte; every field is read for each channel.
+    let chans = clip.header.audio_chans.min(MAX_CHANNELS);
     let mut out: Vec<[i16; SAMPLES_PER_FIELD]> = Vec::new();
     if chans == 0 {
         return (0, Vec::new());
@@ -79,4 +83,28 @@ pub fn chunk_bytes(samples: &[i16]) -> [u8; BLOCKS_PER_FIELD * BLOCK] {
         b[2 * i..2 * i + 2].copy_from_slice(&s.to_be_bytes());
     }
     b
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::clip::Clip;
+    use crate::writer::{ClipWriter, Grade};
+
+    /// The channel count is a header byte. A Flyer clip is mono or stereo;
+    /// a header saying more is read as stereo, not as a request for that
+    /// many channels of every field.
+    #[test]
+    fn a_header_claiming_more_channels_than_a_flyer_has_is_read_as_stereo() {
+        let mut w = ClipWriter::new(Grade::Std, 2);
+        let sound: Vec<i16> = (0..4 * 735 * 2).map(|k| k as i16).collect();
+        let field = vec![vec![40u8; 752]; 242];
+        let video = [field.clone(), field.clone(), field.clone(), field];
+        w.push_frame(Some(&video), Some(&sound));
+        let bytes = w.finish();
+        let mut clip = Clip::read(&bytes).unwrap();
+        let (chans, stereo) = clip.audio();
+        assert_eq!((chans, stereo.len()), (2, 4 * 735 * 2));
+        clip.header.audio_chans = 255;
+        assert_eq!(clip.audio(), (2, stereo));
+    }
 }

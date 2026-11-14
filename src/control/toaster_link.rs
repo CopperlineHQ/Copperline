@@ -43,19 +43,16 @@ pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// An argument for a Toaster function: integers stay bare, anything
-/// else is a quoted string.
+/// An argument for a Toaster function: integers (digits, with at most
+/// one leading minus) stay bare, anything else is a quoted string.
 pub fn arg(value: &serde_json::Value) -> String {
+    let is_integer = |s: &str| {
+        let digits = s.strip_prefix('-').unwrap_or(s);
+        !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+    };
     match value {
         serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::String(s)
-            if !s.is_empty()
-                && s.trim_start_matches('-')
-                    .chars()
-                    .all(|c| c.is_ascii_digit()) =>
-        {
-            s.clone()
-        }
+        serde_json::Value::String(s) if is_integer(s) => s.clone(),
         serde_json::Value::String(s) => quote(s),
         serde_json::Value::Bool(b) => u8::from(*b).to_string(),
         other => quote(&other.to_string()),
@@ -344,6 +341,11 @@ mod tests {
     fn arguments_are_quoted_unless_numbers() {
         assert_eq!(arg(&json!(256)), "256");
         assert_eq!(arg(&json!("-3")), "-3");
+        // A string of dashes, or more than one before the digits, is a
+        // string: bare, ARexx would read it as an expression.
+        assert_eq!(arg(&json!("-")), "'-'");
+        assert_eq!(arg(&json!("--")), "'--'");
+        assert_eq!(arg(&json!("--5")), "'--5'");
         assert_eq!(arg(&json!("TAKE")), "'TAKE'");
         assert_eq!(arg(&json!("it's")), "'it''s'");
         let body = call_body("Switcher", &[json!("TBAR"), json!(256)]);

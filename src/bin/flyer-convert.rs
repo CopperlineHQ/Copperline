@@ -558,8 +558,8 @@ impl App {
                 let _ = tx.send(Event::Started(i));
                 ctx.request_repaint();
                 let result = if kind == Kind::Clip {
-                    std::fs::copy(input.path(), &out)
-                        .map(|_| format!("copied to {}", out.display()))
+                    fc::copy_clip(input.path(), &out)
+                        .map(|()| format!("copied to {}", out.display()))
                         .map_err(|e| e.to_string())
                 } else {
                     let mut last = Instant::now();

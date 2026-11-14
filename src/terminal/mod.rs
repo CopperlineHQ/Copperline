@@ -56,10 +56,40 @@ impl Options {
         }
     }
 
-    /// The writer thread's minimum spacing between frames.
+    /// The writer thread's minimum spacing between frames. A rate too
+    /// small for its interval to fit a `Duration` gets the longest one.
     pub fn min_frame_interval(&self) -> Option<std::time::Duration> {
+        use std::time::Duration;
         self.max_fps
             .filter(|fps| fps.is_finite() && *fps > 0.0)
-            .map(|fps| std::time::Duration::from_secs_f64(1.0 / f64::from(fps)))
+            .map(|fps| Duration::try_from_secs_f64(1.0 / f64::from(fps)).unwrap_or(Duration::MAX))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--terminal-fps` takes any positive number; one too small for its
+    /// frame interval to fit a `Duration` means "as slowly as can be said".
+    #[test]
+    fn a_tiny_frame_rate_is_a_very_long_interval() {
+        let fps = |max_fps| Options {
+            max_fps: Some(max_fps),
+            log_path: None,
+        };
+        assert_eq!(
+            fps(25.0).min_frame_interval(),
+            Some(std::time::Duration::from_millis(40))
+        );
+        assert_eq!(
+            fps(1e-20).min_frame_interval(),
+            Some(std::time::Duration::MAX)
+        );
+        assert_eq!(
+            fps(f32::MIN_POSITIVE).min_frame_interval(),
+            Some(std::time::Duration::MAX)
+        );
+        assert_eq!(Options::default().min_frame_interval(), None);
     }
 }
