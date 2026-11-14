@@ -354,7 +354,60 @@ extensions it depends on:
 lets a host decline it for a batch) and
 [PR #223](https://github.com/benletchford/m68k-rs/pull/223) the extra
 physical RAM/ROM regions (`FastMemRegion`). Every Cargo workspace resolves
-that same published release (see the lockfile check above).
+the same `m68k` source (see the lockfile check above).
+
+### CPU-core conformance fixes awaiting upstream
+
+Copperline currently pins `m68k` to a revision of the
+[CopperlineHQ/m68k-rs](https://github.com/CopperlineHQ/m68k-rs) fork
+(branch `copperline/amitorture-fixes`): the published 0.16.0 plus
+conformance fixes found with a bare-metal CPU test suite, one fix per
+commit so each can go upstream on its own. Copperline returns to the
+published crate once they are released.
+
+- **Integer core and exceptions.** DIVU/DIVS clear C on overflow and before
+  a zero-divide exception. CAS and CAS2 set the flags of `<ea> - Dc`. An
+  instruction that takes a non-trap exception (illegal, line A/F,
+  privilege violation) is not traced, and the 68040/68060 do not report a
+  trace pending with TRAP, TRAPV, CHK or a zero divide. CALLM and RTM are
+  illegal instructions on the 68030 and later. RTE accepts each model's
+  own frame formats ($3 on the 68040/68060, $4 on the 68LC040/68EC040, $9
+  on the 68020/68030; no throwaway frame on the 68060).
+- **Address-error frames.** The 68000 stacks its seven-word group 0 frame
+  in hardware order (status word lowest, PC highest), with I/N clear
+  during instruction processing, the full 32-bit access address, program
+  space for a PC-relative operand, and the prefetch address as the stacked
+  PC; the layout and PC are checked against the SingleStepTests hardware
+  traces. The 68010 frame carries the special status word and the fault
+  address. The 68020/68030 stack the format $B bus fault frame for an odd
+  instruction fetch, the 68060 the format $2 frame the 68040 already had.
+- **FPU.** Enabled exceptions (BSUN, SNAN, OPERR, OVFL, UNFL, DZ, INEX)
+  are taken through vectors 48-54. A signalling NaN raises SNAN alone.
+  FPCR and FPSR read their unused bits as zero. FRESTORE validates the
+  frame and takes a format error for one the FPU does not accept; the
+  68040 idle FSAVE frame is the four-byte one. The 68040 rounded opmodes
+  (FSADD, FDMUL, FSSQRT and friends) take the F-line exception on a
+  6888x. FMOVECR rounds per FPCR and reports INEX2; packed-decimal
+  conversions report their inexact results; the IEEE-nonaware predicates
+  set BSUN on an unordered condition.
+- **MMU.** Table searches write the used and modified bits back into the
+  descriptors on the 68030, 68040 and 68060 (an ATC entry loaded by a read
+  is re-walked by the first write to set M). 68040 PTEST reports the page
+  descriptor's fields in MMUSR. A fault on the later part of a page-split
+  access sets the misaligned-access bit of the 68040 SSW / 68060 FSLW. A
+  write through a write-protected 68040/68060 transparent-translation
+  register faults, and the 68060's TTRs are matched at all. The 68030 TT
+  registers are decoded at their documented bit positions, the root
+  pointer and long-descriptor limits are enforced, and PTEST level 0
+  searches the ATC.
+
+Known gaps that remain in the fork: an enabled FPU exception is taken at
+the end of the instruction that raised it rather than held pending until
+the next FPU instruction, FSAVE never produces a busy or exception frame,
+and the 68040/68060 do not yet trap enabled exceptions on FMOVE to memory;
+PMOVE never raises the MMU configuration exception; a locked
+read-modify-write cycle (TAS against a 68030 TT register with RWM clear)
+is matched one bus cycle at a time.
 
 The boundary callback is a no-op for ordinary embedders; Copperline uses
 it to keep hardware accesses ordered without calling the host from every
