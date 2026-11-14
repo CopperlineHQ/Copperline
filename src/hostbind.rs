@@ -28,6 +28,9 @@ pub(crate) enum Kind {
     Floppy,
     /// A CD image or one of the files a cue sheet names; read only.
     Cd,
+    /// A tape cartridge: a host file, or a host directory of tape files,
+    /// that the guest can write, cut short and erase.
+    Tape,
     /// A `[[filesys]]` host directory the guest can only read.
     DirectoryReadOnly,
     /// A `[[filesys]]` host directory the guest can change.
@@ -45,6 +48,7 @@ impl Kind {
             Self::HardDrive => "hard-drive image (read/write)",
             Self::Floppy => "floppy image (read/write)",
             Self::Cd => "CD image",
+            Self::Tape => "tape cartridge (read/write)",
             Self::DirectoryReadOnly => "host directory (read-only)",
             Self::DirectoryReadWrite => "host directory (read/write)",
             Self::Plugin => "plugin module",

@@ -123,6 +123,31 @@ fn carried_keys_follow_the_edits_they_depend_on() {
     MachineSetup::from_raw(&out).expect("the edited machine still validates");
 }
 
+/// `[[tape]]` drives have no rows on the config screen: they survive a
+/// round trip untouched, and go when the edit takes their SCSI ID or the
+/// controller away.
+#[test]
+fn tape_drives_ride_through_the_config_screen() {
+    let raw: RawConfig = toml::from_str(
+        "[scsi]\ncontroller = \"a2091\"\n\n\
+         [[tape]]\nunit = 4\npath = \"backups\"\nwrite_protect = true\n\n\
+         [[tape]]\nunit = 5\npath = \"one.tar\"\n",
+    )
+    .unwrap();
+    let mut setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.to_raw().tape, raw.tape);
+
+    // A disk put on ID 4 displaces the tape there; the other stays.
+    setup.scsi_units[4] = Some(std::path::PathBuf::from("disk.hdf"));
+    let out = setup.to_raw();
+    assert_eq!(out.tape.len(), 1);
+    assert_eq!(out.tape[0].unit, 5);
+
+    // Without the controller there is nothing for a tape to sit on.
+    setup.scsi_controller = None;
+    assert!(setup.to_raw().tape.is_empty());
+}
+
 #[test]
 fn run_ahead_frames_survives_the_config_screen_round_trip() {
     let raw: RawConfig = toml::from_str("[emulation]\nrun_ahead_frames = 2\n").unwrap();

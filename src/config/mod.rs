@@ -1513,6 +1513,9 @@ pub struct ScsiConfig {
     pub timing: DriveTiming,
     /// Model the power-on spin-up of timed drives.
     pub spin_up: bool,
+    /// Tape drives by SCSI ID (`[[tape]]`). An ID holds a tape drive or a
+    /// `units` drive, never both.
+    pub tapes: [Option<TapeCartridge>; 7],
 }
 
 impl ScsiConfig {
@@ -1520,8 +1523,23 @@ impl ScsiConfig {
     /// `controller` with no ROM or drives fits nothing -- except an A2091 or
     /// A4091, which validation gives a bundled ROM, so `rom` is then set.
     pub fn enabled(&self) -> bool {
-        self.rom.is_some() || self.units.iter().any(Option::is_some)
+        self.rom.is_some()
+            || self.units.iter().any(Option::is_some)
+            || self.tapes.iter().any(Option::is_some)
     }
+}
+
+/// The cartridge in a `[[tape]]` drive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TapeCartridge {
+    /// A host directory (one file per tape file) or a single host file.
+    pub path: PathBuf,
+    /// The write-protect tab.
+    pub write_protect: bool,
+    /// What the cartridge is; `None` goes by what is at `path`.
+    pub kind: Option<crate::scsi::tape::Cartridge>,
+    /// Bytes of data the tape holds; `None` is a tape with no end.
+    pub capacity: Option<u64>,
 }
 
 /// `[copperhf]`: Copperline's own virtual hardfile controller

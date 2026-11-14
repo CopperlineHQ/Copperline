@@ -312,6 +312,95 @@ the register map, the ISTR bits, and a 32-bit DMA address counter
 Kickstart's built-in `scsi.device` drives the pair directly, so there is
 no boot ROM to configure.
 
+### Tape drive (`scsi/tape.rs`)
+
+A `[[tape]]` entry attaches `ScsiTarget::Tape`, a SCSI-2 sequential-access
+target (peripheral type 1) that all three controllers drive like any other
+target: the host adapters only see a CDB turn into a data phase and a
+status.
+
+The tape is a row of *tape files*, each closed by a filemark, followed by
+end-of-data. The cartridge is a host directory with one host file per tape
+file in name order (regular files and links to them; hidden files and
+subdirectories are not part of the tape), or a single host file, which is a
+tape holding exactly one tape file when the file exists and a blank tape
+when it does not. A path with nothing at it is created as a directory
+unless the configuration says `kind = "file"`. The host files hold only
+data, so a `tar` archive is a tape file as it stands. The position is a
+tape file number and a byte offset; the tape file after the last is
+end-of-data.
+
+The drive keeps its tape files as names inside the cartridge, never as
+paths, and makes the host path of each from the configured cartridge
+(`ScsiTape::file_path`). Files the guest writes are named `NNNNN.tape`, or
+`~NNNNN.tape` and its like when a file already there would outrank that
+(`new_file_name`): always after the last existing name, and no longer for
+the thousandth file than for the first. Three things bound what a guest can
+make the host do: a directory holds at most `MAX_TAPE_FILES` tape files, a
+configured `capacity` bounds the data, and a single-file cartridge has room
+for one tape file -- data for a second fails with VOLUME OVERFLOW and the
+EOM bit as the physical end of a tape does, while further filemarks, which
+only mark the end of the data again, are accepted.
+
+Two consequences of storing bare data are part of the model rather than
+accidents of it. Host files carry no record marks, so the drive's block
+length decides how a tape file is blocked: a fixed block length (512 at
+power-on, set by MODE SELECT) reads it as blocks of that length, and a
+shorter last block is an incorrect-length block; variable-block mode
+(length 0) gives each READ the bytes it asks for up to the end of the tape
+file, and SPACE over blocks there counts in units of the last block moved.
+And every tape file ends in a filemark whether or not the initiator wrote
+one, so WRITE FILEMARKS steps to the next tape file and each further
+filemark makes an empty one. Writing anywhere cuts the tape there, as
+sequential-access writing does.
+
+Exception conditions are reported as CHECK CONDITION with fixed-format
+sense, the valid bit set and the residue in the information field
+(requested minus done, in blocks for a fixed-block command and bytes for a
+variable one, negative when a block was longer than the buffer or the
+motion was backward): FILEMARK when a read or space ran into the end of a
+tape file (the head ends past the filemark going forward, on its
+beginning-of-tape side going backward); EOM at beginning-of-tape and on
+the overflowing write; ILI for a block that is not the length asked for
+(SILI suppresses the report for a short block in variable mode); and BLANK
+CHECK, end-of-data detected, at EOD. UNLOAD leaves the cartridge in the
+drive but not ready (LOGICAL UNIT NOT READY, INITIALIZING COMMAND
+REQUIRED) until LOAD, which rewinds and re-reads the directory.
+
+A tape with a `capacity` has an early-warning zone, its last 1/32nd (at
+most 1 MiB): a write or filemark that leaves the head inside it is carried
+out and reported with NO SENSE, EOM and a zero residue. A write that
+reaches the end places the whole blocks that fit (a variable block is
+placed whole or not at all) and reports VOLUME OVERFLOW with the residue; a
+write none of which fits gets no data phase. A data phase that ends short
+of the command's count is reported as ABORTED COMMAND with the residue,
+after the whole blocks that did arrive are written.
+
+The command set is TEST UNIT READY, REWIND, REQUEST SENSE, READ BLOCK
+LIMITS, READ(6), WRITE(6), WRITE FILEMARKS, SPACE (blocks, filemarks,
+end-of-data), INQUIRY, MODE SENSE(6)/MODE SELECT(6) with the block
+descriptor and the device configuration page, RESERVE/RELEASE, ERASE,
+LOAD/UNLOAD, SEND DIAGNOSTIC and PREVENT/ALLOW MEDIUM REMOVAL. Not
+modelled: setmarks, partitions, READ POSITION and LOCATE, an early-warning
+zone or a capacity limit on a directory cartridge, and tape motion --
+every command completes at once, like a disk target without drive
+mechanics.
+
+Save states: the state holds the drive (cartridge path and kind, head
+position, mode parameters, sense) and the names its tape files had, never
+paths to them. `ScsiTape`'s `Deserialize` registers the cartridge with
+`hostbind` (as `opened` does when the configuration attaches it), reads the
+cartridge again, and reconciles: if the names differ from the saved ones or
+the saved head position is not on the tape any more, it warns and moves the
+head to the nearest position there is (the end of a shortened tape file,
+or end-of-data); a cartridge that cannot be read at all leaves the drive
+unloaded. So a changed cartridge shows at load time, not as a medium error
+later, and nothing in a state can make the drive touch a file outside its
+cartridge. The cartridge's contents are not part of the state, and host
+writes are not undone by loading one, as with a hard-disk image.
+`guest/tape-test` drives the target through
+`scsi.device` end to end (`tests/scsi_tape.rs`).
+
 ### Shared drive backend
 
 All IDE (Gayle, A4000, lide, PCMCIA CompactFlash), SCSI, copperhf, and

@@ -3775,6 +3775,30 @@ fn attach_lide_host_disks(
     }
 }
 
+/// Put every `[[tape]]` drive on its SCSI ID. A cartridge that cannot be
+/// opened (a directory that cannot be read) is an error: the configuration
+/// asked for a drive with that tape in it.
+fn attach_scsi_tapes(
+    cfg: &Config,
+    mut attach: impl FnMut(usize, crate::scsi::ScsiTarget),
+) -> Result<usize> {
+    let mut attached = 0;
+    for (unit, tape) in cfg.scsi.tapes.iter().enumerate() {
+        let Some(tape) = tape else { continue };
+        let drive =
+            crate::scsi::ScsiTape::open(&tape.path, tape.kind, tape.write_protect, tape.capacity)
+                .with_context(|| format!("opening tape {}", tape.path.display()))?;
+        info!(
+            "scsi: unit {unit} tape drive, {} ({})",
+            tape.path.display(),
+            drive.describe()
+        );
+        attach(unit, drive.into());
+        attached += 1;
+    }
+    Ok(attached)
+}
+
 /// Attach every real host disk the config puts on a SCSI unit.
 ///
 /// A configuration outlives the disk it names, so one that is not here is
@@ -4144,6 +4168,7 @@ fn build_machine_inner(
                 attach_scsi_host_disks(cfg, |unit, target| {
                     board.attach_drive(unit, timed_scsi(target, cfg, unit))
                 });
+                attach_scsi_tapes(cfg, |unit, target| board.attach_drive(unit, target))?;
                 zorro.add_board(crate::zorro::BoardSpec::a2091(slot))?;
                 info!(
                     "scsi: A2091 controller on the Zorro chain (slot {slot}), ROM {}",
@@ -4177,6 +4202,7 @@ fn build_machine_inner(
                 attach_scsi_host_disks(cfg, |unit, target| {
                     board.attach_drive(unit, timed_scsi(target, cfg, unit))
                 });
+                attach_scsi_tapes(cfg, |unit, target| board.attach_drive(unit, target))?;
                 zorro.add_board(crate::zorro::BoardSpec::a4091(slot))?;
                 info!(
                     "scsi: A4091 controller on the Zorro chain (slot {slot}), ROM {}",
@@ -4807,6 +4833,7 @@ fn build_machine_inner(
                     sdmac.attach_drive(unit, timed_scsi(target, cfg, unit))
                 });
             }
+            drives += attach_scsi_tapes(cfg, |unit, target| sdmac.attach_drive(unit, target))?;
         }
         bus.attach_sdmac(sdmac);
         match drives {

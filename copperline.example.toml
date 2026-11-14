@@ -1247,6 +1247,23 @@ floppy_sounds_volume = 100
 # Attach read-only first; the "Real hard disks" chapter of the guide says
 # why, and what a correct read-only attach looks like.
 #
+# A SCSI tape drive on the [scsi] controller (a [[tape]] entry alone fits
+# the default controller, as a unit does). The cartridge is a host
+# directory -- one host file per tape file, in name order, so tar archives
+# dropped in it are tape files 0, 1, 2... and what the guest writes appears
+# as 00000.tape, 00001.tape... -- or a single host file, which is a tape
+# holding exactly one tape file. The files hold only the data, no tape
+# container format.
+# A path with nothing at it yet becomes a directory unless kind = "file".
+# capacity gives the tape an end (with an early-warning zone before it);
+# without it the guest can write until the host disk is full.
+# [[tape]]
+# unit = 4                 # SCSI ID 0-6
+# path = "backups"         # a directory, or a single file
+# kind = "directory"       # or "file"; default: whatever path is
+# capacity = "150M"        # default: no end
+# write_protect = true     # the cartridge's write-protect tab
+#
 # [[host_disk]]
 # device = "sdb"                 # the name --list-disks prints
 # fingerprint = "v1-..."        # launcher-generated; do not copy between disks

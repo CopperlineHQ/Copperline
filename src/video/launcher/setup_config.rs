@@ -44,6 +44,8 @@ pub(super) fn carry_unowned_keys(src: &RawConfig, dst: &mut RawConfig) {
     dst.lide.timing = src.lide.timing.clone();
     dst.lide.spin_up = src.lide.spin_up;
     dst.drive_profile = src.drive_profile.clone();
+    // `[[tape]]` drives have no launcher rows; they ride along as written.
+    dst.tape = src.tape.clone();
     carry_drive_timing(src, dst, false);
 }
 
@@ -597,6 +599,34 @@ impl MachineSetup {
             raw.machine.rtc_time = None;
             raw.machine.rtc_frozen = None;
             raw.machine.battmem = None;
+        }
+        // A tape drive needs the SCSI controller (a tape left behind would
+        // fit one again by itself) and a SCSI ID of its own.
+        if self.scsi_controller.is_none() {
+            raw.tape.clear();
+        } else {
+            let units = [
+                &raw.scsi.unit0,
+                &raw.scsi.unit1,
+                &raw.scsi.unit2,
+                &raw.scsi.unit3,
+                &raw.scsi.unit4,
+                &raw.scsi.unit5,
+                &raw.scsi.unit6,
+            ]
+            .map(Option::is_some);
+            let host_disks: Vec<String> = raw
+                .host_disk
+                .iter()
+                .filter_map(|disk| disk.attach.clone())
+                .collect();
+            raw.tape.retain(|tape| {
+                let id = usize::from(tape.unit);
+                !units.get(id).copied().unwrap_or(false)
+                    && !host_disks
+                        .iter()
+                        .any(|attach| *attach == format!("scsi{id}"))
+            });
         }
     }
 

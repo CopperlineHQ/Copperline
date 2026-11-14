@@ -183,6 +183,20 @@ need no local assets; the 1.3 and 3.1 cases use the same Kickstart lookup as the
 cargo test --release --test a2091_dma -- --ignored --nocapture
 ```
 
+`tests/scsi_tape.rs` runs the committed `guest/tape-test/` probe against a
+`[[tape]]` drive: the guest opens `scsi.device` unit 4 and drives it with
+SCSI Direct (fixed- and variable-block reads and writes, filemarks, SPACE,
+LOAD/UNLOAD, ERASE), checking each status and its autosense data, and the
+test then reads the tape files left in the cartridge directory. The A2091
+case needs no assets (bundled AROS and A2091 ROMs) and runs in the
+optimized suite. The A3000 case repeats it through Commodore's own
+`scsi.device` and needs `kicka3000.rom` in the asset directory:
+
+```sh
+cargo test --release --test scsi_tape
+cargo test --release --test scsi_tape -- --ignored --nocapture
+```
+
 `tests/hd_timing.rs` runs the committed `guest/hdbench/` benchmark (sequential
 reads at 512 B to 256 KiB, random 4 KiB reads, a 256 KiB write, all timed with
 the E-clock) through the machine's own disk driver on a private 16 MiB disk,
