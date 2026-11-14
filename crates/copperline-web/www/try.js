@@ -15,6 +15,20 @@ import {
   resetRenderStrideState,
   updateRenderStrideState,
 } from './render-stride.js';
+import { audioGateMaxFrames, newAudioGate, rafStarved } from './audio-gate.js';
+import {
+  EMPTY_PAD,
+  joyKeyMap,
+  keyboardPortState,
+  orPortState,
+  readPad,
+} from './input-map.js';
+import {
+  canvasDeviceSize as canvasDeviceSizeOf,
+  cssToEmuScale,
+  drawPresentLayout,
+  layoutFromArray,
+} from './present-2d.js';
 import { TelnetSession } from './serial-telnet.js';
 import { mountNetplayPanel } from './netplay.js';
 
@@ -818,7 +832,7 @@ async function buildAudioStack(suspendForPause) {
   // new stack had already stuttered.
   queuedMs = 0;
   audioUnderruns = 0;
-  audioGateClosed = false;
+  audioGate.closed = false;
   node.port.onmessage = (e) => {
     lastAudioReportMs = performance.now();
     if (typeof e.data?.queuedMs === 'number') queuedMs = e.data.queuedMs;
@@ -840,9 +854,7 @@ async function buildAudioStack(suspendForPause) {
       const nowMs = performance.now();
       if (
         keepRunningHidden ||
-        (!document.hidden &&
-          nowMs - lastRafMs > RAF_STARVED_MS &&
-          renderStride.avgStepMs < STEP_OVERLOAD_MS)
+        (!document.hidden && rafStarved(nowMs, lastRafMs, renderStride.avgStepMs))
       ) {
         stepMachine(nowMs, true);
       }
@@ -1024,17 +1036,13 @@ async function boot(request = null) {
 // frames at once and blits only the last, dropping the rest from the
 // output while the fps counter (which counts stepped frames) still reads
 // full rate.
-const AUDIO_GATE_CLOSE_MS = 150;
-const AUDIO_GATE_OPEN_MS = 90;
-let audioGateClosed = false;
+// The thresholds and the gate itself live in audio-gate.js, shared with
+// the web player kit.
+const audioGate = newAudioGate();
 
-// The starved-rAF fallback's threshold: how stale the last animation
-// frame may be before a worklet queue report steps the machine itself.
-// Above the ~33 ms gap of a merely halved (30 Hz) cadence, which the
-// normal tick absorbs by stepping twice; well under the ~100 ms deficit
-// the pacer forgives, past which lost wall time becomes lost emulated
-// time (the slow motion and underruns a starved window shows today).
-const RAF_STARVED_MS = 50;
+// When the last animation frame landed, for the starved-rAF fallback: a
+// worklet queue report steps the machine itself once this goes stale (the
+// rule and its thresholds are rafStarved in audio-gate.js).
 let lastRafMs = 0;
 
 // Adaptive render stride for hosts that cannot afford a frame render on
@@ -1051,17 +1059,6 @@ let lastRafMs = 0;
 // audio; a catch-up burst no longer leaves it stuck there. Old bundles
 // without run_hidden render every step regardless, preserving their
 // existing behaviour.
-// The starved-rAF fallback exists for a THROTTLED host: animation frames
-// withheld from a machine that is cheap to step. On an OVERLOADED host -
-// the machine itself eating more than the worklet's ~29 ms report
-// interval per step - stepping on every report leaves the main thread no
-// idle at all: the page (input, the stat line, devtools) freezes solid
-// while emulated time barely gains, because the wall-paced core cannot
-// exceed the host's throughput however often it is called. Past this
-// step cost the fallback stands down and rAF alone drives the machine,
-// keeping the page usable through the worst stretches (a 68020 decrunch
-// on a slow host) at whatever rate the host can actually sustain.
-const STEP_OVERLOAD_MS = 25;
 // Raw whole-call cost remains the correct signal for the starved-rAF
 // fallback: it decides whether another call right now would monopolise the
 // main thread, not whether one emulated pacing slice is affordable.
@@ -1082,16 +1079,11 @@ function updateRenderStrideController(nowMs, stepElapsed, stepped, rendered) {
 }
 
 function maxFramesForQueue() {
-  const limit = audioGateClosed ? AUDIO_GATE_OPEN_MS : AUDIO_GATE_CLOSE_MS;
-  audioGateClosed = queuedMs > limit;
-  if (audioGateClosed) {
-    emu.resync_clock?.();
-    return 0;
-  }
-  // Step freely to the wall clock - the burst cap only bounds a single
-  // tick's catch-up work after rAF throttling (the pacer forgives
-  // deficits past 100 ms).
-  return 5;
+  // An open gate steps freely to the wall clock, up to the burst cap; a
+  // closed one re-anchors the pacer so the pause is forgiven, not owed.
+  const max = audioGateMaxFrames(audioGate, queuedMs);
+  if (max === 0) emu.resync_clock?.();
+  return max;
 }
 
 // Blit whatever the core last rendered onto the canvas. Called once per
@@ -1151,11 +1143,7 @@ function presentFrame(force = false) {
 // monitor path and a 2D layout draw give the canvas: the whole-number
 // factors of integer scaling are real device pixels only then.
 function canvasDeviceSize() {
-  const dpr = window.devicePixelRatio || 1;
-  return [
-    Math.max(1, Math.round(canvas.clientWidth * dpr)),
-    Math.max(1, Math.round(canvas.clientHeight * dpr)),
-  ];
+  return canvasDeviceSizeOf(canvas, window.devicePixelRatio);
 }
 
 // The 2D fallback's draw of a layout. putImageData cannot scale, so the
@@ -1170,30 +1158,7 @@ function presentFrame2dLayout(view, width, rows, w, h, lay) {
     const canvas = document.createElement('canvas');
     stage2d = { canvas, ctx: canvas.getContext('2d') };
   }
-  if (stage2d.canvas.width !== width || stage2d.canvas.height !== rows) {
-    stage2d.canvas.width = width;
-    stage2d.canvas.height = rows;
-  }
-  stage2d.ctx.putImageData(new ImageData(view, width, rows), 0, 0);
-  if (canvas.width !== w || canvas.height !== h) {
-    canvas.width = w;
-    canvas.height = h;
-  }
-  ctx2d.fillStyle = '#000';
-  ctx2d.fillRect(0, 0, w, h);
-  ctx2d.imageSmoothingEnabled = !lay.factors;
-  ctx2d.imageSmoothingQuality = 'high';
-  ctx2d.drawImage(
-    stage2d.canvas,
-    lay.sx,
-    lay.sy,
-    lay.sw,
-    lay.sh,
-    lay.dx,
-    lay.dy,
-    lay.dw,
-    lay.dh,
-  );
+  drawPresentLayout({ canvas, ctx: ctx2d }, stage2d, view, width, rows, w, h, lay);
 }
 
 // Advance the machine to nowMs and ship what it produced (audio, serial):
@@ -1717,27 +1682,8 @@ function pumpSerial() {
 // toggle, or the config file's "joy") and ?joy=off|keys|cd32|touch
 // overrides per link.
 
-const JOY_KEYS_TWO_BUTTON = {
-  ArrowUp: 'up',
-  ArrowDown: 'down',
-  ArrowLeft: 'left',
-  ArrowRight: 'right',
-  ControlRight: 'fireCtrl',
-  AltRight: 'fireAlt',
-  ControlLeft: 'fireLCtrl',
-  AltLeft: 'blueLAlt',
-};
-const JOY_KEYS_CD32 = {
-  ...JOY_KEYS_TWO_BUTTON,
-  KeyC: 'red',
-  KeyX: 'blue',
-  KeyD: 'green',
-  KeyS: 'yellow',
-  Enter: 'play',
-  NumpadEnter: 'play',
-  KeyZ: 'rwd',
-  KeyA: 'ffw',
-};
+// The key tables and the port-state merge live in input-map.js, shared
+// with the web player kit.
 const JOY_MODES = hasTouch ? ['off', 'keys', 'cd32', 'touch'] : ['off', 'keys', 'cd32'];
 let joyMode = 'off';
 const joyHeld = {};
@@ -1747,19 +1693,6 @@ const joyHeld = {};
 // port 2 first and port 1 second (see the gamepad section). Sources on the
 // same port are OR-ed rather than one silencing the other, so a pad and
 // the keyboard can both be live without either going dead mid-game.
-const EMPTY_PAD = {
-  up: false,
-  down: false,
-  left: false,
-  right: false,
-  fire: false,
-  button2: false,
-  play: false,
-  rwd: false,
-  ffw: false,
-  green: false,
-  yellow: false,
-};
 const padPort = { 1: null, 2: null }; // gamepad-sourced state per Amiga port
 
 // The touch pad's stick and fire button, when the canvas is in pad mode.
@@ -1777,31 +1710,6 @@ function touchPortState() {
   };
 }
 
-function keyboardPortState() {
-  const h = joyHeld;
-  return {
-    up: !!h.up,
-    down: !!h.down,
-    left: !!h.left,
-    right: !!h.right,
-    fire: !!(h.fireCtrl || h.fireAlt || h.fireLCtrl || h.red),
-    button2: !!(h.blue || h.blueLAlt),
-    play: !!h.play,
-    rwd: !!h.rwd,
-    ffw: !!h.ffw,
-    green: !!h.green,
-    yellow: !!h.yellow,
-  };
-}
-
-function orPortState(a, b) {
-  if (!a) return b ?? EMPTY_PAD;
-  if (!b) return a;
-  const out = {};
-  for (const k of Object.keys(EMPTY_PAD)) out[k] = a[k] || b[k];
-  return out;
-}
-
 // Push both ports' merged state into the machine. Port 1 is only touched
 // while a gamepad holds it, so a mouse-only session never has its port 1
 // switched away from the mouse.
@@ -1811,7 +1719,7 @@ function applyJoystick() {
     emu.netplay_release_input?.();
     return;
   }
-  const port2 = orPortState(orPortState(keyboardPortState(), touchPortState()), padPort[2]);
+  const port2 = orPortState(orPortState(keyboardPortState(joyHeld), touchPortState()), padPort[2]);
   emu.set_joystick_port(2, port2.up, port2.down, port2.left, port2.right, port2.fire, port2.button2);
   emu.set_cd32_buttons_port(2, port2.play, port2.rwd, port2.ffw, port2.green, port2.yellow);
   const port1 = padPort[1];
@@ -1832,13 +1740,7 @@ function applyJoystick() {
 // Returns true when the key was captured for the joystick.
 function joystickKey(code, pressed) {
   if (netplayMouse()) return false;
-  const map =
-    joyMode === 'keys'
-      ? JOY_KEYS_TWO_BUTTON
-      : joyMode === 'cd32'
-        ? JOY_KEYS_CD32
-        : null;
-  const control = map?.[code];
+  const control = joyKeyMap(joyMode)?.[code];
   if (!control) return false;
   joyHeld[control] = pressed;
   applyJoystick();
@@ -1882,7 +1784,6 @@ $('joy').addEventListener('click', cycleJoyMode);
 // joystick guest only ever sees fire and button 2; the rest exist for
 // CD32 titles and cost nothing when unused.
 
-const PAD_AXIS_THRESHOLD = 0.5; // analogue stick deflection that counts
 const padAssignments = new Map(); // gamepad index -> Amiga port (2 first)
 
 // A port only reports the CD32 pad's extra buttons while a CD32 pad is
@@ -1894,29 +1795,6 @@ const padAssignments = new Map(); // gamepad index -> Amiga port (2 first)
 // the extras (a gamepad, or the keyboard's cd32 mapping) fits one.
 function fitCd32Pad(port) {
   if (!netplayBusy()) emu?.set_port_device(port, 'cd32');
-}
-
-function padPressed(pad, index) {
-  const b = pad.buttons[index];
-  if (!b) return false;
-  return typeof b === 'object' ? b.pressed || b.value > 0.5 : b > 0.5;
-}
-
-function readPad(pad) {
-  const axis = (i) => (typeof pad.axes[i] === 'number' ? pad.axes[i] : 0);
-  return {
-    up: padPressed(pad, 12) || axis(1) <= -PAD_AXIS_THRESHOLD,
-    down: padPressed(pad, 13) || axis(1) >= PAD_AXIS_THRESHOLD,
-    left: padPressed(pad, 14) || axis(0) <= -PAD_AXIS_THRESHOLD,
-    right: padPressed(pad, 15) || axis(0) >= PAD_AXIS_THRESHOLD,
-    fire: padPressed(pad, 0),
-    button2: padPressed(pad, 1),
-    green: padPressed(pad, 2),
-    yellow: padPressed(pad, 3),
-    rwd: padPressed(pad, 4),
-    ffw: padPressed(pad, 5),
-    play: padPressed(pad, 9),
-  };
 }
 
 // Assign connected pads to ports and drop assignments for pads that went
@@ -2065,23 +1943,14 @@ let lastPos = null;
 // under the monitor path the backing store is display-resolution, and
 // with the bezel on the picture fills only the frame's opening, so a CSS
 // pixel of the element covers proportionally more of the picture.
-const cssToEmu = () => {
-  if (lastLayout) {
-    // A layout draw: the picture's sub-rect occupies its destination
-    // rect of the backing store, in device pixels, and a CSS pixel is a
-    // device-pixel-ratio's worth of those.
-    const dpr = window.devicePixelRatio || 1;
-    return {
-      x: lastLayout.sw / (lastLayout.dw / dpr),
-      y: lastLayout.sh / (lastLayout.dh / dpr),
-    };
-  }
-  const scale = monitorPictureScale();
-  return {
-    x: (presentSize.width || canvas.width) / (canvas.clientWidth * scale),
-    y: (presentSize.rows || canvas.height) / (canvas.clientHeight * scale),
-  };
-};
+const cssToEmu = () =>
+  cssToEmuScale(
+    lastLayout,
+    presentSize,
+    canvas,
+    window.devicePixelRatio,
+    lastLayout ? 1 : monitorPictureScale(),
+  );
 
 canvas.addEventListener('mousedown', (e) => {
   if (!emu || !running) return;
@@ -5243,19 +5112,7 @@ function subRectModeActive() {
 // line) of an integer draw, or null for a smooth fit. Null with no frame
 // to place.
 function presentLayoutFor(w, h) {
-  const l = emu?.present_layout?.(w, h);
-  if (!l || l.length < 10) return null;
-  return {
-    sx: l[0],
-    sy: l[1],
-    sw: l[2],
-    sh: l[3],
-    dx: l[4],
-    dy: l[5],
-    dw: l[6],
-    dh: l[7],
-    factors: l[8] > 0 ? [l[8], l[9]] : null,
-  };
+  return layoutFromArray(emu?.present_layout?.(w, h));
 }
 
 // Motion-adaptive deinterlacing and phosphor decay both retain and process

@@ -121,7 +121,15 @@ The browser implementation consists of the following components:
   host disk changes on confirmed frame boundaries, and `www/netplay-watch.js` serves
   and receives the spectator feed. `try.js` owns the session lifecycle and locks
   controls that change the machine.
+- **Shared page modules:** `www/input-map.js` (keyboard-joystick and gamepad
+  mapping), `www/audio-gate.js` (audio-clock pacing) and `www/present-2d.js`
+  (Canvas 2D placement and pointer scale) hold the parts `try.js` shares with
+  the web player kit's shell (`www/kit-player.js`).
 
+To ship one title as a single self-contained page instead of hosting this
+bundle, see the [web player kit](#web-player-kit).
+
+(building-the-web-bundle)=
 ## Building the WebAssembly package locally
 
 ### Prerequisites

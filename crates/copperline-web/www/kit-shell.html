@@ -1,0 +1,161 @@
+<!doctype html>
+<!--
+  Copperline web player kit page shell (SPDX-License-Identifier:
+  GPL-3.0-or-later). tools/publish-web fills in the %%...%% slots and writes
+  one self-contained file: nothing here, and nothing it adds, may reference
+  another URL. kit-player.js drives the elements below by id.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="generator" content="Copperline web player kit">
+<title>%%TITLE%%</title>
+<link rel="icon" href="%%FAVICON%%">
+<style>
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; background: #0b0c10; color: #d7dae0;
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+/* The picture is the largest 4:3 box that fits what the control bar leaves
+   of the viewport, whatever height the bar wraps to: the stage is a size
+   container and the view is measured in its units. */
+#cl-app { height: 100vh; height: 100dvh; display: flex; flex-direction: column;
+  background: #0b0c10; }
+#cl-app.cl-pinned { position: fixed; inset: 0; z-index: 10; }
+#cl-stage { position: relative; flex: 1 1 0; min-height: 0; container-type: size;
+  display: flex; align-items: center; justify-content: center; }
+#cl-view { position: relative; aspect-ratio: 4 / 3; background: #000;
+  width: min(100cqw, calc(100cqh * 4 / 3)); }
+#cl-screen { display: block; width: 100%; height: 100%; outline: none;
+  touch-action: none; -webkit-user-select: none; user-select: none; }
+#cl-overlay { position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 1rem; padding: 1rem;
+  text-align: center; background: rgba(0, 0, 0, 0.82); }
+#cl-overlay[hidden], #cl-touch[hidden] { display: none; }
+#cl-title { margin: 0; font-size: clamp(1.4rem, 5vw, 2.6rem); font-weight: 600; }
+#cl-status { margin: 0; min-height: 1.4em; color: #9aa0ab; }
+button, select { font: inherit; color: inherit; background: #1b1e26;
+  border: 1px solid #343946; border-radius: 6px; padding: 0.3rem 0.7rem; cursor: pointer; }
+button:hover:not(:disabled) { background: #262a35; }
+button:disabled { opacity: 0.5; cursor: default; }
+button[hidden], label[hidden] { display: none; }
+#cl-boot { font-size: 1.2rem; padding: 0.6rem 2.2rem; background: #2b5fd9; border-color: #2b5fd9;
+  color: #fff; }
+#cl-boot:hover:not(:disabled) { background: #3a6ee8; }
+#cl-bar { flex: none; width: 100%; display: flex; flex-wrap: wrap; gap: 0.4rem;
+  align-items: center; justify-content: center; padding: 0.35rem 0.6rem; }
+#cl-bar label { display: inline-flex; align-items: center; gap: 0.35rem; }
+#cl-bar label[hidden] { display: none; }
+#cl-volume { width: 6rem; }
+#cl-led { width: 0.7rem; height: 0.7rem; border-radius: 50%; background: #2a2d36; }
+#cl-led.cl-on { background: #4be36a; box-shadow: 0 0 6px #4be36a; }
+#cl-note { color: #9aa0ab; font-size: 0.85rem; }
+#cl-note:empty { display: none; }
+/* The touch pad lies over the stage, not the picture: beside a landscape
+   picture and below a portrait one wherever the stage has room to spare. */
+#cl-touch { position: absolute; inset: 0; pointer-events: none; }
+#cl-stick, #cl-fires button { pointer-events: auto; touch-action: none;
+  -webkit-user-select: none; user-select: none; }
+#cl-stick { position: absolute; left: 3%; bottom: 5%; width: min(26%, 9rem); aspect-ratio: 1;
+  border-radius: 50%; background: rgba(255, 255, 255, 0.14); border: 2px solid rgba(255, 255, 255, 0.3); }
+#cl-fires { position: absolute; right: 3%; bottom: 7%; display: flex; gap: 0.8rem; }
+#cl-fires button { width: 3.6rem; height: 3.6rem; border-radius: 50%; font-weight: 700;
+  background: rgba(255, 255, 255, 0.14); border: 2px solid rgba(255, 255, 255, 0.3); }
+#cl-fires button.cl-on { background: rgba(255, 255, 255, 0.4); }
+dialog { max-width: min(46rem, 94vw); max-height: 90vh; overflow: auto; color: #d7dae0;
+  background: #14161c; border: 1px solid #343946; border-radius: 8px; }
+dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+dialog h2 { margin-top: 0; }
+#cl-notices { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.6rem 0; }
+#cl-license-text { white-space: pre-wrap; font: 12px/1.35 ui-monospace, Menlo, Consolas, monospace;
+  max-height: 40vh; overflow: auto; padding: 0.6rem; background: #0b0c10; border-radius: 6px; }
+#cl-license-text[hidden] { display: none; }
+.cl-row { display: flex; gap: 0.5rem; justify-content: flex-end; margin-top: 0.8rem; }
+</style>
+</head>
+<body>
+<div id="cl-app">
+  <div id="cl-stage"><div id="cl-view">
+    <canvas id="cl-screen" width="668" height="540" tabindex="0"
+      aria-label="Amiga screen. Keys typed here go to the Amiga; Shift+Escape moves to the controls."></canvas>
+    <div id="cl-overlay">
+      <h1 id="cl-title">%%TITLE%%</h1>
+      <button id="cl-boot" type="button" disabled>Start</button>
+      <p id="cl-status">loading...</p>
+      <noscript><p>This page needs JavaScript to run.</p></noscript>
+    </div>
+  </div>
+    <div id="cl-touch" hidden>
+      <div id="cl-stick"></div>
+      <div id="cl-fires">
+        <button id="cl-fire2" type="button">2</button>
+        <button id="cl-fire1" type="button">1</button>
+      </div>
+    </div>
+  </div>
+  <div id="cl-bar">
+    <span id="cl-led" title="Disk activity"></span>
+    <button id="cl-pause" type="button">Pause</button>
+    <button id="cl-reset" type="button">Reset</button>
+    <button id="cl-joy" type="button">Joystick: keys</button>
+    <label hidden>DF0 <select id="cl-disk"></select></label>
+    <button id="cl-state-save" type="button" hidden>Save state</button>
+    <button id="cl-state-load" type="button" hidden>Load state</button>
+    <button id="cl-export" type="button">Export disk</button>
+    <button id="cl-import" type="button">Import disk</button>
+    <input id="cl-import-file" type="file" hidden>
+    <button id="cl-shot" type="button">Screenshot</button>
+    <label>Volume <input id="cl-volume" type="range" min="0" max="100" value="100"></label>
+    <button id="cl-touchpad" type="button" hidden>Show pad</button>
+    <button id="cl-fs" type="button">Fullscreen</button>
+    <button id="cl-about-open" type="button">About</button>
+    <span id="cl-note" role="status"></span>
+  </div>
+  <dialog id="cl-about">
+    <h2 id="cl-about-title"></h2>
+    <p>
+      This page is a self-contained player: the emulator, its boot ROM and
+      the title are all inside this one file, and it loads nothing else.
+    </p>
+    <p>
+      It runs on <strong id="cl-about-engine"></strong>, a cycle-driven
+      Amiga emulator. Copperline is free software, licensed under the GNU
+      General Public License, version 3 or (at your option) any later
+      version, and comes with no warranty. Its complete source code is
+      available at <span id="cl-about-source"></span>.
+    </p>
+    <p>Boot ROM: <span id="cl-about-rom"></span>.</p>
+    <div id="cl-notices"></div>
+    <pre id="cl-license-text" hidden></pre>
+    <div class="cl-row">
+      <button id="cl-erase" type="button">Erase saves</button>
+      <button id="cl-about-close" type="button">Close</button>
+    </div>
+  </dialog>
+</div>
+<script id="cl-compat">
+// Kept to what every scripting browser parses (no arrow functions, no
+// let or const, nothing newer): the loader below uses syntax an old
+// browser rejects outright, and a script that fails to parse runs no
+// check of its own. Until the loader has run, any script error on the
+// page is taken to be that, and the visitor is told instead of being
+// left on "loading...".
+(function () {
+  window.addEventListener('error', function () {
+    if (window.CopperlineKit) return;
+    var el = document.getElementById('cl-status');
+    if (el) {
+      el.textContent =
+        'This browser is too old to run this page. Try a current Chrome, Edge, Firefox or Safari.';
+    }
+  });
+})();
+</script>
+%%CONFIG%%
+%%ASSETS%%
+<script>
+%%LOADER%%
+</script>
+</body>
+</html>
