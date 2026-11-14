@@ -140,13 +140,6 @@ impl CopperWait {
             let target_v = ((target >> 8) & 0x00FF) as u32;
             let target_h = (target & 0x00FE) as u32;
             let vlow = vpos & 0x00FF;
-            // Near the end of line 255, low-half full-mask waits can
-            // target the short post-rollover tail of the field by
-            // waiting for V[7:0] to wrap back through zero. High-half
-            // targets have already been reached and remain satisfied.
-            if vpos == 0x00FF && target_v < 0x80 {
-                return false;
-            }
             return vlow > target_v || (vlow == target_v && hpos >= target_h);
         }
 
@@ -924,18 +917,20 @@ mod tests {
     }
 
     #[test]
-    fn full_mask_wait_after_line_255_waits_for_vertical_low_byte_rollover() {
+    fn full_mask_wait_compares_eight_vertical_bits_across_line_255() {
         let wait = CopperWait::new(0x1B01, 0xFFFE);
 
-        assert!(!wait.is_satisfied(0xFF, 0xDF));
+        // On line 255 the vertical low byte is $FF, past every other line:
+        // the wait is satisfied wherever on that line it is evaluated.
+        assert!(wait.is_satisfied(0xFE, 0x08));
+        assert!(wait.is_satisfied(0xFF, 0x08));
+        assert!(wait.is_satisfied(0xFF, 0xDF));
+        // Once the low byte has wrapped it waits for line 256 + $1B.
         assert!(!wait.is_satisfied(0x100, 0));
         assert!(!wait.is_satisfied(0x11A, COLORCLOCKS_PER_LINE - 1));
         assert!(wait.is_satisfied(0x11B, 0));
         assert!(wait.is_satisfied(0x11C, 0));
-        assert_eq!(
-            wait.cck_until_satisfied(0xFF, 0xDF),
-            Some((COLORCLOCKS_PER_LINE - 0xDF) + 0x1B * COLORCLOCKS_PER_LINE)
-        );
+        assert_eq!(wait.cck_until_satisfied(0xFF, 0x08), Some(0));
         assert_eq!(
             wait.cck_until_satisfied(0x100, 0),
             Some(0x1B * COLORCLOCKS_PER_LINE)

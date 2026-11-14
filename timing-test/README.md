@@ -866,7 +866,13 @@ length by one, and marker columns lock only while the $E2 cycle stays
 fetchable -- it stalls the CPU and blitter, never a Copper fetch. Losing
 $E2 flips the $A5 zone into a staircase and steepens the rest -- the
 Nexus 7 plasma-zoom streak class; vAmiga is NOT a valid reference here,
-see the probe header).
+see the probe header), and
+`copprobe-wait255` (the Copper compares eight vertical bits: `WAIT $FF07`
+then `WAIT $0801` is evaluated on line 255, where `$FF >= $08`, and turns
+the background red part way along line 255, while `WAIT $FFDF` then
+`WAIT $1001` is evaluated after the wrap and turns it green on line $110;
+a model that holds the first form until the low byte wraps starts red on
+line $108 and never reaches green; vAmiga-verified band lines).
 Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not
