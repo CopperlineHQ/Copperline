@@ -658,4 +658,9 @@ probe_tests! {
     // for line 256+N. vAmiga-verified: red from line 255, green from
     // line $110.
     golden_copprobe_wait255 => probe("copprobe-wait255", "copprobe-wait255.bin", 16.0);
+    // CLR.W COPJMP1 strobes on its read and on its write cycle. The Copper
+    // requests the bus for a cycle before fetching, so the second strobe
+    // restarts a list whose first MOVE rewrites COP1LC instead of jumping
+    // through the rewritten value. vAmiga-verified: both stripes green.
+    golden_copprobe_clrjmp => probe("copprobe-clrjmp", "copprobe-clrjmp.bin", 16.0);
 }

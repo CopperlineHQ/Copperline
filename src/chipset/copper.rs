@@ -338,6 +338,11 @@ pub struct Copper {
     /// past the line wrap by the copper bus lockout therefore sees the next
     /// line's vertical phase.
     skip_eval: Option<CopperWait>,
+    /// A CPU access to COPJMP1/COPJMP2 has reloaded the program counter and
+    /// the Copper still owes the bus-request cycle that precedes its first
+    /// fetch from the new list (see [`Copper::cpu_strobe`]).
+    #[serde(default)]
+    strobe_request_pending: bool,
     /// Monotonic count of completed instructions (a MOVE applied or
     /// skipped, a WAIT/SKIP/COPJMP started). Debugger-only bookkeeping
     /// for copper single-stepping; transient, never serialized.
@@ -359,6 +364,7 @@ impl Copper {
             pending_first: None,
             skip_next_move: false,
             skip_eval: None,
+            strobe_request_pending: false,
             instructions_retired: 0,
         }
     }
@@ -378,13 +384,33 @@ impl Copper {
         self.pending_first = None;
         self.skip_next_move = false;
         self.skip_eval = None;
+        self.strobe_request_pending = false;
         self.state = CopperState::Running;
+    }
+
+    /// A CPU bus access to COPJMP1/COPJMP2 (read or write). The program
+    /// counter reloads at once, but the Copper was not fetching: it first
+    /// spends one access-parity cycle requesting the bus, with no memory
+    /// cycle, and fetches the first word of the new list on the Copper
+    /// cycle after that (vAmiga's COP_REQ_DMA before COP_FETCH).
+    ///
+    /// The cycle matters when the strobe comes twice. A read-modify-write
+    /// instruction on the strobe address (CLR, or any instruction whose
+    /// write is preceded by a read) accesses it in two bus cycles four
+    /// colour clocks apart. The second strobe has to arrive before the
+    /// first MOVE of the new list takes effect, or a list that begins by
+    /// rewriting its own location register is restarted from a half
+    /// written address.
+    pub fn cpu_strobe(&mut self, address: u32) {
+        self.jump(address);
+        self.strobe_request_pending = true;
     }
 
     pub fn stop(&mut self) {
         self.pending_first = None;
         self.skip_next_move = false;
         self.skip_eval = None;
+        self.strobe_request_pending = false;
         self.state = CopperState::Stopped;
     }
 
@@ -738,6 +764,12 @@ impl Copper {
                 // color clock; the odd ones are its mandatory idle halves. A
                 // forced owner (a granted CPU access) likewise blocks the fetch.
                 if !allow_fetch || !Self::hpos_is_access_cycle(hpos) {
+                    return CopperSlotAction::Idle;
+                }
+                if self.strobe_request_pending {
+                    // The bus-request cycle after a CPU strobe: the slot is
+                    // the Copper's to use, but no word is fetched in it.
+                    self.strobe_request_pending = false;
                     return CopperSlotAction::Idle;
                 }
                 // A pending SKIP decision samples the comparator on the

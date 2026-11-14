@@ -446,7 +446,20 @@ wait for the blitter to go idle.
 
 - A CPU write to COPJMP1/COPJMP2 loads the Copper program counter
   immediately, but the target list has no visible effect until the Copper
-  gets DMA slots to fetch it.
+  gets DMA slots to fetch it. The Copper first spends one access-parity
+  cycle requesting the bus, with no memory cycle (vAmiga's COP_REQ_DMA),
+  and fetches the first word on the Copper cycle after that, so the first
+  MOVE of the new list lands five or six colour clocks after the strobe.
+  That latency is what makes a read-modify-write of the strobe safe:
+  `clr.w COPJMP1` on a 68000 strobes on its read cycle and again on its
+  write cycle four colour clocks later, and the second strobe has to
+  arrive before the first MOVE takes effect. A list that begins by
+  rewriting its own COP1LC would otherwise be restarted from the
+  half-written address (new high word, old low word) whenever the two
+  lists sit in different 64K pages. Tests:
+  `cpu_copjmp1_strobe_spends_a_request_cycle_before_the_first_fetch`,
+  `double_copjmp1_strobe_restarts_a_list_that_rewrites_cop1lc`; golden
+  probe: `timing-test/copprobe-clrjmp.asm` (vAmiga-verified).
 - A CPU *read* of COPJMP1/COPJMP2 fires the same strobe: the register
   decode acts on the address alone (reading a write-only register performs
   a bus write of the floating data-bus residue into it -- the UAE/vAmiga

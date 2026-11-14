@@ -161,12 +161,14 @@ impl Bus {
 
     /// COPJMP1/COPJMP2 strobe: reload the Copper program counter from
     /// COP1LC/COP2LC now. Fired by any bus access to the strobe address,
-    /// read or write, since the decode acts on the address alone.
+    /// read or write, since the decode acts on the address alone. The
+    /// Copper requests the bus for one cycle before its first fetch from
+    /// the new list (`Copper::cpu_strobe`).
     fn copjmp_strobe(&mut self, list: u8) {
         self.invalidate_copper_wake_bound();
         self.pending_copper_frame_start = None;
         self.copper_current_list = list;
-        self.copper.jump(match list {
+        self.copper.cpu_strobe(match list {
             1 => self.agnus.cop1lc,
             _ => self.agnus.cop2lc,
         });
