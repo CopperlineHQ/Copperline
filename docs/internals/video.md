@@ -355,8 +355,14 @@ SPRxDATA arm must redisplay the DMA-written words, not the last manual
 pattern (Hamazing's scene switch writes SPRxDATA=$0000 after a DMA sprite
 scene and expects invisible sprites; the stale write-shadow pattern would
 paint full-height bars). The live collision path takes its sources from the
-same hardware-true view in a frame that has no sprite register writes and
-no sprite DMA, so a sprite the latch redisplays also collides. Only the
+same hardware-true view in every frame without sprite DMA, so a sprite the
+latch redisplays also collides. In such a frame neither path applies the
+control words' VSTART/VSTOP to an armed sprite, in the frame it was armed in
+or in any later one: those bits only steer Agnus's sprite DMA, and a sprite
+armed with VSTART equal to VSTOP is displayed, and collides, on every line.
+While sprite DMA fetches, the CPU/Copper write shadow is not the whole
+register history, and a latch seeded from it is kept to its vertical
+window. Only the
 authoritative sprite-DMA pass for a line
 writes the hardware view through: pre-display lines are computed twice, and
 the pre-display replay at the display start owns them (`sprprobe-latch` in

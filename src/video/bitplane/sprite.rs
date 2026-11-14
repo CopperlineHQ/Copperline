@@ -194,6 +194,10 @@ pub(super) struct BeamSpriteState {
     /// DMA has already made the channel active; once SPREN is off, the DMA
     /// descriptor's later VSTOP no longer clears that latched display data.
     pub(super) held: [Option<HeldSpriteLine>; 8],
+    /// The registers came from the hardware-true latch view: sprite DMA is
+    /// idle this frame, so they are exactly what Denise holds and an armed
+    /// sprite serializes on every line (Denise has no vertical comparator).
+    pub(super) hardware_latch: bool,
 }
 
 impl BeamSpriteState {
@@ -250,6 +254,7 @@ impl BeamSpriteState {
             bplcon0: state.bplcon0,
             fmode: state.fmode,
             held: *held,
+            hardware_latch: use_hardware_latch,
         }
     }
 
@@ -335,7 +340,10 @@ impl BeamSpriteState {
         if x_start as i32 > base_x {
             return None;
         }
-        if !self.direct_data_armed[sprite] {
+        // The write-shadow view does not carry what sprite DMA did to the
+        // latch, so a latch seeded there is kept to the control words'
+        // vertical window. The hardware-true view needs no such limit.
+        if !self.direct_data_armed[sprite] && !self.hardware_latch {
             let vstart = sprite_vstart(pos, ctl);
             let vstop = sprite_vstop(ctl);
             // Normal pair: [vstart, vstop). Equal start/stop is an empty window;

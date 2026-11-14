@@ -573,6 +573,10 @@ probe_tests! {
     // SPRxDATA arm redisplays the DMA-written words (the Hamazing
     // scene-switch stale-bar regression class).
     golden_sprprobe_latch => probe("sprprobe-latch", "sprprobe-latch.bin", 16.0);
+    // An armed sprite has no vertical window in Denise: with sprite DMA off
+    // it is serialized on every line whatever VSTART/VSTOP its control
+    // words hold (empty, sixteen lines, inverted).
+    golden_sprprobe_armline => probe("sprprobe-armline", "sprprobe-armline.bin", 16.0);
     // A SPRxCTL write between a DMA fetch slot and that channel's HSTART
     // disarms Denise before the serializer loads, cancelling the fetched
     // line; a write past HSTART cannot recall it (the Hybris panel

@@ -3371,7 +3371,10 @@ fn armed_sprite_latch_keeps_serializing_in_frames_without_sprite_writes() {
 }
 
 #[test]
-fn latched_sprite_vstart_equal_vstop_is_empty() {
+fn latched_sprite_serializes_on_every_line_with_sprite_dma_idle() {
+    // A sprite armed in an earlier frame whose control words describe an
+    // empty window (VSTART = VSTOP). Denise has no vertical comparator, so
+    // with sprite DMA idle the latch still emits on every line.
     let mut initial_state = blank_state();
     let beam_y = PAL_VISIBLE_LINE0;
     let (pos, ctl) = sprite_control_words(beam_y as u16, beam_y as u16, DIW_HSTART_FB0 as u16);
@@ -3391,6 +3394,43 @@ fn latched_sprite_vstart_equal_vstop_is_empty() {
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
         true,
+        false,
+    );
+
+    assert_eq!(manual_sprite_lines[0].len(), FB_HEIGHT);
+    assert!(manual_sprite_lines[0]
+        .iter()
+        .enumerate()
+        .all(|(row, line)| line.beam_y == PAL_VISIBLE_LINE0 + row as i32 && line.data == 0xFFFF));
+    assert!(manual_sprite_lines[1].is_empty());
+}
+
+#[test]
+fn seeded_sprite_latch_keeps_its_vertical_window_while_sprite_dma_runs() {
+    // With sprite DMA fetching in the frame, a SPRxDATA write before the
+    // visible area only seeds the latch: the replay does not see what the
+    // DMA fetches do to it, so the seed is kept to the control words'
+    // window, and an empty window (VSTART = VSTOP) emits nothing.
+    let initial_state = blank_state();
+    let (pos, ctl) = sprite_control_words(
+        PAL_VISIBLE_LINE0 as u16,
+        PAL_VISIBLE_LINE0 as u16,
+        DIW_HSTART_FB0 as u16,
+    );
+    let pre_visible = (PAL_VISIBLE_LINE0 - 4) as u32;
+    let events = [
+        cpu_event(pre_visible, COPPER_WAIT_HPOS_FB0 as u32, 0x140, pos),
+        cpu_event(pre_visible, COPPER_WAIT_HPOS_FB0 as u32 + 4, 0x142, ctl),
+        cpu_event(pre_visible, COPPER_WAIT_HPOS_FB0 as u32 + 8, 0x144, 0xFFFF),
+    ];
+
+    let manual_sprite_lines = manual_sprite_lines_from_events_with_visible_line0(
+        &initial_state,
+        &events,
+        &[None; 8],
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+        false,
         true,
     );
 
