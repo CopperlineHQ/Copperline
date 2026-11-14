@@ -11499,6 +11499,49 @@ struct LiveSpriteCollisionSource {
     hsub_70ns: bool,
     words: [u16; 4],
     requires_odd_enable: bool,
+    /// AGA FMODE wide sprites: pixel presence (DATA | DATB) of the words
+    /// after the first, in output order.
+    #[serde(default)]
+    wide_presence: [u16; 3],
+    /// 16-bit words the sprite serializes per line: 1 (16 pixels), 2 or 4
+    /// (FMODE SPR32/SPAGEM). 0, from a state saved before the field
+    /// existed, counts as 1.
+    #[serde(default)]
+    width_words: u8,
+}
+
+impl LiveSpriteCollisionSource {
+    /// Sprite pixels serialized per line.
+    fn pixel_count(&self) -> i32 {
+        16 * i32::from(self.width_words.clamp(1, 4))
+    }
+
+    /// Whether the sprite pixel `index` (0 = first out) is non-transparent
+    /// in this sprite's own planes (`low`) and in the second pair of
+    /// planes carried by `words[2..]` (`high`).
+    fn pixel_presence(&self, index: i32) -> (bool, bool) {
+        let mask = 0x8000u16 >> (index & 15);
+        match index >> 4 {
+            0 => (
+                (self.words[0] | self.words[1]) & mask != 0,
+                (self.words[2] | self.words[3]) & mask != 0,
+            ),
+            word @ 1..=3 => (self.wide_presence[word as usize - 1] & mask != 0, false),
+            _ => (false, false),
+        }
+    }
+}
+
+/// Pixel presence of an AGA wide sprite line's extension words, limited to
+/// the words its width uses.
+fn live_sprite_wide_presence(data_ext: [u16; 3], datb_ext: [u16; 3], width_words: u8) -> [u16; 3] {
+    let mut presence = [0u16; 3];
+    for (word, slot) in presence.iter_mut().enumerate() {
+        if word + 1 < usize::from(width_words) {
+            *slot = data_ext[word] | datb_ext[word];
+        }
+    }
+    presence
 }
 
 #[derive(Clone, Copy)]
@@ -11559,6 +11602,12 @@ fn live_sprite_collision_sources_with_odd_policy(
                     hsub_70ns: line.hsub_70ns,
                     words: [line.data, line.datb, 0, 0],
                     requires_odd_enable,
+                    wide_presence: live_sprite_wide_presence(
+                        line.data_ext,
+                        line.datb_ext,
+                        line.width_words,
+                    ),
+                    width_words: line.width_words,
                 },
             );
         }
@@ -12122,13 +12171,15 @@ fn push_live_manual_collision_source_if_visible(
 }
 
 fn live_sprite_source_has_pixels(source: &LiveSpriteCollisionSource) -> bool {
-    source.words.iter().any(|&word| word != 0)
+    source.words.iter().any(|&word| word != 0) || source.wide_presence.iter().any(|&word| word != 0)
 }
 
 fn live_sprite_source_framebuffer_bounds(source: &LiveSpriteCollisionSource) -> (i32, i32) {
     let x_start = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
         + i32::from(source.hsub_70ns);
-    (x_start, x_start + 32)
+    // Two framebuffer pixels per lores sprite pixel, the widest a sprite
+    // pixel gets.
+    (x_start, x_start + 2 * source.pixel_count())
 }
 
 fn live_sprite_source_may_overlap_x_range(
@@ -12271,6 +12322,7 @@ fn push_live_manual_sprite_source(
     if beam_y < vstart || beam_y >= vstop {
         return;
     }
+    let width_words = sprite_fetch_quantum(fmode) as u8;
     sources.push(LiveManualSpriteCollisionSource {
         sprite,
         source: LiveSpriteCollisionSource {
@@ -12279,6 +12331,11 @@ fn push_live_manual_sprite_source(
             hsub_70ns: shres && sprite_hsub_70ns_from_ctl(sprctl),
             words: [sprdata, sprdatb, 0, 0],
             requires_odd_enable: sprite & 1 != 0,
+            // A manually written data word repeats across a wide sprite's
+            // serializer, as the renderer draws it. FMODE reads zero off
+            // AGA, so the width stays one word there.
+            wide_presence: live_sprite_wide_presence([sprdata; 3], [sprdatb; 3], width_words),
+            width_words,
         },
         x_start,
         x_stop,
@@ -12308,7 +12365,7 @@ fn live_sprite_source_pixel_presence(
     let target_stop = target_start + 2;
     let mut subpixel_cursor = sprite_base_x * 2;
     let mut presence = LiveSpritePixelPresence::default();
-    for bit in (0..16).rev() {
+    for index in 0..source.pixel_count() {
         let sprite_control = control_replay.control_for_x(subpixel_cursor.div_euclid(2));
         let sprite_pixel_repeat = sprite_pixel_repeat_subpixels_for_control(
             sprite_control.agnus_revision,
@@ -12317,8 +12374,7 @@ fn live_sprite_source_pixel_presence(
         );
         let subpixel_stop = subpixel_cursor + sprite_pixel_repeat;
         if subpixel_cursor < target_stop && subpixel_stop > target_start {
-            let low = source.words[0] & (1 << bit) != 0 || source.words[1] & (1 << bit) != 0;
-            let high = source.words[2] & (1 << bit) != 0 || source.words[3] & (1 << bit) != 0;
+            let (low, high) = source.pixel_presence(index);
             if source.requires_odd_enable {
                 presence.odd |= low;
             } else {
@@ -12352,14 +12408,11 @@ fn live_sprite_source_pixel_presence_with_control(
     }
     let mut presence = LiveSpritePixelPresence::default();
     for subpixel in offset..offset + 2 {
-        let bit_offset = subpixel / sprite_pixel_repeat;
-        if !(0..16).contains(&bit_offset) {
+        let index = subpixel / sprite_pixel_repeat;
+        if !(0..source.pixel_count()).contains(&index) {
             continue;
         }
-        let bit = 15 - bit_offset;
-        let mask = 1 << bit;
-        let low = source.words[0] & mask != 0 || source.words[1] & mask != 0;
-        let high = source.words[2] & mask != 0 || source.words[3] & mask != 0;
+        let (low, high) = source.pixel_presence(index);
         if source.requires_odd_enable {
             presence.odd |= low;
         } else {

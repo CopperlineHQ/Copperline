@@ -10,7 +10,9 @@ use super::{
     framebuffer_x_for_live_collision_hpos, live_bitplane_collision_bits,
     live_bitplane_collision_pixel_at, live_display_window_x, live_manual_sprite_collision_sources,
     live_playfield_collision_pixel, live_sprite_playfield_collision_bits_in_range,
-    live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
+    live_sprite_source_framebuffer_bounds, live_sprite_source_has_pixels,
+    live_sprite_source_pixel_presence_with_control, live_sprite_sprite_collision_bits,
+    live_sprite_wide_presence, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
     BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus, BusSlotRecord,
     CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuTraceSlot,
     CpuWaitClass, CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData,
@@ -10552,6 +10554,8 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
         hsub_70ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
+        wide_presence: [0; 3],
+        width_words: 1,
     };
 
     assert_eq!(
@@ -10585,6 +10589,156 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
 }
 
 #[test]
+fn aga_wide_sprite_collision_source_covers_32_and_64_pixels() {
+    // FMODE SPR32/SPAGEM make a sprite 32 or 64 pixels wide. Its collision
+    // source carries every word the serializer shifts out, not only the
+    // first sixteen pixels.
+    let control = LiveCollisionControl::from_current(
+        AgnusRevision::AgaAlice,
+        0x1000,
+        0,
+        0,
+        0,
+        0,
+        0x2C81,
+        0x2DC1,
+        DiwHigh::ocs_implicit(),
+        0x0038,
+        [0; 8],
+    );
+    for (width_words, pixels) in [(1u8, 16), (2, 32), (4, 64)] {
+        let source = LiveSpriteCollisionSource {
+            group: 0,
+            hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
+            hsub_70ns: false,
+            words: [0xFFFF, 0, 0, 0],
+            requires_odd_enable: false,
+            wide_presence: live_sprite_wide_presence([0xFFFF; 3], [0; 3], width_words),
+            width_words,
+        };
+        let (start, stop) = live_sprite_source_framebuffer_bounds(&source);
+        assert_eq!(stop - start, 2 * pixels, "{width_words} words");
+        // Two framebuffer pixels per lores sprite pixel.
+        for pixel in 0..80 {
+            let presence =
+                live_sprite_source_pixel_presence_with_control(&source, control, start + 2 * pixel);
+            assert_eq!(
+                presence.even,
+                pixel < pixels,
+                "{width_words} words, sprite pixel {pixel}"
+            );
+        }
+    }
+}
+
+#[test]
+fn aga_wide_sprite_collision_source_reads_each_word_in_output_order() {
+    // A 64-pixel sprite whose only set pixels are the last pixel of the
+    // second word (DATB) and the first pixel of the fourth word (DATA).
+    let control = LiveCollisionControl::from_current(
+        AgnusRevision::AgaAlice,
+        0x1000,
+        0,
+        0,
+        0,
+        0,
+        0x2C81,
+        0x2DC1,
+        DiwHigh::ocs_implicit(),
+        0x0038,
+        [0; 8],
+    );
+    let source = LiveSpriteCollisionSource {
+        group: 0,
+        hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
+        hsub_70ns: false,
+        words: [0, 0, 0, 0],
+        requires_odd_enable: false,
+        wide_presence: live_sprite_wide_presence([0, 0, 0x8000], [0x0001, 0, 0], 4),
+        width_words: 4,
+    };
+    assert!(live_sprite_source_has_pixels(&source));
+    let (start, _) = live_sprite_source_framebuffer_bounds(&source);
+    let lit: Vec<i32> = (0..64)
+        .filter(|&pixel| {
+            live_sprite_source_pixel_presence_with_control(&source, control, start + 2 * pixel).even
+        })
+        .collect();
+    assert_eq!(lit, [31, 48]);
+
+    // A narrower mode ignores the words it does not shift out.
+    assert_eq!(
+        live_sprite_wide_presence([0x1111, 0x2222, 0x3333], [0; 3], 2),
+        [0x1111, 0, 0]
+    );
+    assert_eq!(
+        live_sprite_wide_presence([0x1111, 0x2222, 0x3333], [0; 3], 1),
+        [0; 3]
+    );
+}
+
+#[test]
+fn aga_wide_sprite_collision_sources_take_every_serialized_word() {
+    // A DMA-fetched 64-pixel line whose first word is empty still collides:
+    // the source is built from all four words the fetch delivered.
+    let line = CapturedSpriteLine {
+        sprite: 2,
+        hstart: 0x90,
+        hsub_70ns: false,
+        beam_y: 42,
+        data: 0,
+        datb: 0,
+        data_ext: [0, 0x0100, 0],
+        datb_ext: [0, 0, 0x0001],
+        width_words: 4,
+        attached: false,
+    };
+    let timeline = super::SpriteDmaMatchTimeline::new(0x000C, std::iter::empty());
+    let sources = super::live_sprite_collision_sources_with_beam_gated_odd(&[line], 42, &timeline);
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].width_words, 4);
+    assert_eq!(sources[0].wide_presence, [0, 0x0100, 0x0001]);
+
+    // A CPU-written SPRxDATA/SPRxDATB pair repeats across the width FMODE
+    // selects; with FMODE clear the sprite stays 16 pixels wide.
+    for (fmode, width_words, wide_presence) in [
+        (0x0000, 1, [0; 3]),
+        (0x0004, 2, [0xA005, 0, 0]),
+        (0x0008, 2, [0xA005, 0, 0]),
+        (0x000C, 4, [0xA005; 3]),
+    ] {
+        let mut bus = empty_bus();
+        bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+        bus.agnus.write_fmode(fmode);
+        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+        bus.denise.sprpos[0] = pos;
+        bus.denise.sprctl[0] = ctl;
+        bus.denise.sprdata[0] = 0xA000;
+        bus.denise.sprdatb[0] = 0x0005;
+        bus.denise.spr_armed[0] = true;
+        let frame_base = bus.capture_render_snapshot();
+        let event_index = BeamEventIndex::from_register_writes(&[]);
+        let sources = live_manual_sprite_collision_sources(
+            frame_base,
+            &event_index,
+            0x2C,
+            0,
+            super::RENDER_FRAMEBUFFER_WIDTH,
+        );
+        assert_eq!(sources.len(), 1, "FMODE {fmode:#06X}");
+        assert_eq!(sources[0].source.words, [0xA000, 0x0005, 0, 0]);
+        assert_eq!(
+            sources[0].source.width_words, width_words,
+            "FMODE {fmode:#06X}"
+        );
+        assert_eq!(
+            sources[0].source.wide_presence, wide_presence,
+            "FMODE {fmode:#06X}"
+        );
+    }
+}
+
+#[test]
 fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
     let control = LiveCollisionControl::from_current(
         AgnusRevision::Ocs,
@@ -10610,6 +10764,8 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10617,6 +10773,8 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 
@@ -10684,6 +10842,8 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10691,6 +10851,8 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 2,
@@ -10698,6 +10860,8 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 
@@ -10757,6 +10921,8 @@ fn live_sprite_playfield_clxdat_skips_already_latched_bits() {
         hsub_70ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
+        wide_presence: [0; 3],
+        width_words: 1,
     };
 
     let clxdat = live_sprite_playfield_collision_bits_in_range(
@@ -10828,6 +10994,8 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10835,6 +11003,8 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 
@@ -10878,6 +11048,8 @@ fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10885,6 +11057,8 @@ fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 
@@ -10928,6 +11102,8 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10935,6 +11111,8 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
             hsub_70ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 

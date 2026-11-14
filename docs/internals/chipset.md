@@ -91,7 +91,10 @@ match occurred after the DMA fetch. Each match uses FMODE and the sprite's
 armed latch at that beam position: a same-line FMODE change can add or remove
 the second match, and a SPRxCTL write between matches suppresses it until
 SPRxDATA arms the channel again. The renderer and live collision path use
-these same beam-timed decisions.
+these same beam-timed decisions. A sprite widened by FMODE's SPR32/SPAGEM
+bits collides over every word its serializer shifts out, 32 or 64 sprite
+pixels, the same pixels the renderer draws; a manually written SPRxDATA
+word repeats across that width in both paths.
 
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as
