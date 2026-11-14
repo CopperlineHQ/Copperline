@@ -6739,6 +6739,11 @@ impl Bus {
     /// Frame-wrap hook: hand the just-completed field to the video-slot
     /// card. Called after `begin_new_beam_frame` promoted the capture, so
     /// the `frame_*` accessors describe that field.
+    ///
+    /// Kept out of line: its only caller is the beam advance, which runs
+    /// every few colour clocks, while this runs once a field and builds a
+    /// whole render input on the stack when a card is fitted.
+    #[inline(never)]
     pub(super) fn notify_video_slot_field_complete(&mut self) {
         let Some(mut device) = self.video_slot.take() else {
             return;
@@ -8402,6 +8407,17 @@ impl Bus {
         // only makes sense for the fixed 15 kHz field.
         if self.current_frame_geometry.programmable {
             return self.current_frame_geometry.visible_start_vpos;
+        }
+        // This runs on every beam advance. With no card in the video slot
+        // the capture starts at a fixed line, so keep that path on the
+        // constant bound: the clamp then needs no run-time lower bound.
+        if self.video_slot.is_none() {
+            return visible_start_vpos_for_diw(
+                self.denise.diwstrt,
+                self.denise.diwstop,
+                self.effective_diwhigh(),
+                RENDER_MIN_OVERSCAN_START_VPOS,
+            );
         }
         visible_start_vpos_for_diw(
             self.denise.diwstrt,
