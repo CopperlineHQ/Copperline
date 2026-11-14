@@ -28,10 +28,26 @@
 //! fast RAM when a board is fitted).
 //!
 //! CD audio streams into the shared host mixer ring like the CD32's
-//! Akiko. Subcode payload delivery (CD+G) is not implemented: SCOR
-//! pulses with the motor on, but SBCP never presents data.
+//! Akiko.
+//!
+//! The drive's subcode output is wired to the 6525: SCOR marks the start
+//! of each subcode frame and SBCP clocks its bytes into port A. While a
+//! sector plays, its 96-byte frame (`CdImage::subcode_frame`: the
+//! position in Q, and R-W when the image stored them, which is what CD+G
+//! is made of) follows SCOR one byte per subcode symbol period -- 98
+//! symbols to the 1/75 s frame, so 7350 a second. SBCP rises with each
+//! byte and falls when port A is read; a byte nobody read is replaced by
+//! the next, as the shift register would. Port A presents the symbol
+//! bit-reversed (P in bit 0 ... W in bit 7), per the reference. With
+//! nothing playing SCOR still pulses at 75 Hz and SBCP stays quiet.
+//!
+//! Not verified against hardware or a real CD+G disc: the port A bit
+//! order, the symbol-per-byte layout of stored subcode, and what a paused
+//! drive does with SCOR (see `reset_subcode`). A frame is produced only
+//! for a sector that actually plays, so while the host mixer's ring is
+//! full and the play is held back, subcode is held back with it.
 
-use crate::cdrom::{to_bcd, CdImage, LEADIN_SECTORS, RAW_SECTOR_BYTES};
+use crate::cdrom::{to_bcd, CdImage, LEADIN_SECTORS, RAW_SECTOR_BYTES, SUBCODE_FRAME_BYTES};
 use crate::chipset::paula::CdAudioRing;
 use crate::memory::Memory;
 
@@ -61,6 +77,10 @@ const AUDIO_STATUS_NO_STATUS: u8 = 0x15;
 const CCK_PER_LINE: u32 = 227;
 /// Colour clocks per 1/75th second (one single-speed CD frame).
 const CCK_PER_CD_FRAME: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 75;
+
+/// Colour clocks per subcode symbol: a sector's 98 symbols (two sync
+/// patterns and 96 data bytes) span one CD frame.
+const CCK_PER_SUBCODE_SYMBOL: u32 = CCK_PER_CD_FRAME / 98;
 
 fn lsn_to_msf(lsn: u32) -> u32 {
     let msf = lsn + LEADIN_SECTORS;
@@ -115,6 +135,21 @@ pub struct CdtvController {
     scor: i8,
     sbcp: i8,
     activate_stch: bool,
+
+    // Subcode output.
+    /// The frame of the sector that just played, still being clocked out
+    /// (96 symbols); empty when no frame is in transit.
+    #[serde(default)]
+    sub_frame: Vec<u8>,
+    /// The next symbol of `sub_frame` to reach the shift register.
+    #[serde(default)]
+    sub_index: u8,
+    /// Colour clocks until that symbol has been assembled.
+    #[serde(default)]
+    sub_symbol_cck: i32,
+    /// The symbol last assembled: what port A reads.
+    #[serde(default)]
+    sub_latch: u8,
 
     // Drive command channel.
     command_in: [u8; 16],
@@ -194,6 +229,10 @@ impl CdtvController {
             scor: 0,
             sbcp: 0,
             activate_stch: false,
+            sub_frame: Vec::new(),
+            sub_index: 0,
+            sub_symbol_cck: 0,
+            sub_latch: 0,
             command_in: [0; 16],
             command_cnt_in: 0,
             command_out: [0; 16],
@@ -614,8 +653,12 @@ impl CdtvController {
 
     fn tp_read(&mut self, reg: u32) -> u8 {
         let v = match reg {
-            // Port A: subcode byte input; no payload modelled.
-            0 => 0,
+            // Port A: the subcode byte the last SBCP clocked in. Reading
+            // it is what takes SBCP away again.
+            0 => {
+                self.sbcp = 0;
+                self.sub_latch.reverse_bits()
+            }
             1 => self.tp_b,
             2 => {
                 if self.tp_cr & 1 != 0 {
@@ -881,6 +924,9 @@ impl CdtvController {
             0x8B => {
                 let pause = input[1] == 0x00;
                 if self.cd_playing {
+                    if pause {
+                        self.reset_subcode();
+                    }
                     self.cd_paused = pause;
                     self.audio_status = if pause {
                         AUDIO_STATUS_PAUSED
@@ -933,6 +979,7 @@ impl CdtvController {
         self.audio_status = AUDIO_STATUS_IN_PROGRESS;
         self.activate_stch = true;
         self.flush_cd_audio = true;
+        self.reset_subcode();
     }
 
     fn track_range(&self, track_start: u8, track_end: u8) -> (Option<u32>, u32) {
@@ -967,6 +1014,7 @@ impl CdtvController {
         }
         self.cd_playing = false;
         self.cd_paused = false;
+        self.reset_subcode();
     }
 
     fn subq_response(&mut self, msf: bool) -> i32 {
@@ -1175,6 +1223,16 @@ impl CdtvController {
             }
         }
 
+        // Subcode symbols of the frame in transit. Before the audio step,
+        // so a frame's last symbol is out before the next frame loads.
+        if !self.sub_frame.is_empty() {
+            self.sub_symbol_cck -= cck as i32;
+            while self.sub_symbol_cck <= 0 && !self.sub_frame.is_empty() {
+                self.sub_symbol_cck += CCK_PER_SUBCODE_SYMBOL as i32;
+                self.subcode_symbol();
+            }
+        }
+
         // CD audio: stream one sector per CD frame at single speed.
         self.audio_counter_cck -= cck as i32;
         if self.audio_counter_cck <= 0 {
@@ -1227,6 +1285,84 @@ impl CdtvController {
         }
     }
 
+    /// A sector just passed under the pickup: its subcode frame starts.
+    /// SCOR marks the frame; the 96 symbols follow, one per symbol
+    /// period. A frame still in transit is cut short, as a new frame
+    /// sync cuts the old frame short on the wire.
+    fn start_subcode_frame(&mut self, frame: &[u8]) {
+        self.sub_frame.clear();
+        self.sub_frame.extend_from_slice(frame);
+        self.sub_index = 0;
+        self.sub_symbol_cck = CCK_PER_SUBCODE_SYMBOL as i32;
+        self.sbcp = 0;
+        self.scor = 1;
+        self.tp_check_interrupts();
+    }
+
+    /// One subcode symbol has been shifted in: it is on port A and SBCP
+    /// says so. An earlier symbol that was never read is gone.
+    fn subcode_symbol(&mut self) {
+        // The frame pulse is over by the first symbol.
+        if self.scor < 0 {
+            self.scor = 0;
+        }
+        // The frame and the index come out of a save state as well as from
+        // `start_subcode_frame`, so neither is trusted: an index past the
+        // frame ends it, and a frame is never longer than a sector's 96
+        // symbols.
+        let index = usize::from(self.sub_index);
+        let end = self.sub_frame.len().min(SUBCODE_FRAME_BYTES);
+        if index >= end {
+            self.sub_frame.clear();
+            self.sub_index = 0;
+            return;
+        }
+        self.sub_latch = self.sub_frame[index];
+        if index + 1 >= end {
+            self.sub_frame.clear();
+            self.sub_index = 0;
+        } else {
+            self.sub_index = (index + 1) as u8;
+        }
+        self.sbcp = 1;
+        self.tp_check_interrupts();
+    }
+
+    /// Colour clocks until the drive next does something on its own that
+    /// the guest can be waiting for: the next subcode symbol of a frame in
+    /// transit, or the next sector of a play (its SCOR). A CPU halted in
+    /// STOP must not sleep past either -- it would wake to find the bytes
+    /// it was waiting for already replaced.
+    pub fn next_event_cck(&self) -> Option<u32> {
+        // Nothing runs until the board is configured.
+        self.configured_base?;
+        let symbol = (!self.sub_frame.is_empty()).then_some(self.sub_symbol_cck);
+        let sector = (self.cd_playing && !self.cd_paused).then_some(self.audio_counter_cck);
+        symbol
+            .into_iter()
+            .chain(sector)
+            .min()
+            .map(|cck| cck.max(1) as u32)
+    }
+
+    /// The pickup stopped following a track (play started over, paused or
+    /// stopped): whatever frame was in transit is abandoned and both
+    /// subcode lines go quiet.
+    ///
+    /// UNVERIFIED for pause: a paused drive here raises no SCOR at all --
+    /// no frames, because no sector plays, and none of the idle 75 Hz
+    /// pulses either, because those are held off while a play is in
+    /// progress and a paused play still is. That is what the reference
+    /// (WinUAE's cdtv.cpp) does. A real drive holding its position in
+    /// pause may well keep decoding subcode there and keep pulsing SCOR;
+    /// nothing at hand says which, so the reference's behaviour stands.
+    fn reset_subcode(&mut self) {
+        self.sub_frame.clear();
+        self.sub_index = 0;
+        self.sbcp = 0;
+        self.scor = 0;
+    }
+
     fn do_stch(&mut self) {
         if self.tp_cr & 1 != 0 && self.tp_air & (1 << 2) == 0 {
             self.stch = 1;
@@ -1257,8 +1393,11 @@ impl CdtvController {
                 cd_audio.push_sector(&raw);
             }
         }
+        // The pickup reads the sector's subcode with it.
+        let frame = disc.subcode_frame(sector);
         self.play_position += 1;
         self.last_play_pos = self.play_position;
+        self.start_subcode_frame(&frame);
     }
 }
 
@@ -1591,5 +1730,253 @@ mod tests {
         let (left, right) = ring.next_sample();
         assert!((left - 0x1000 as f32 / 32768.0).abs() < 1e-4);
         assert!((right - 0x2000 as f32 / 32768.0).abs() < 1e-4);
+    }
+
+    // ----- subcode ---------------------------------------------------------
+
+    /// The Q channel out of 96 symbols read from port A (bit-reversed: P
+    /// in bit 0, Q in bit 1).
+    fn q_from_port_a(symbols: &[u8]) -> [u8; 12] {
+        let mut q = [0u8; 12];
+        for (i, symbol) in symbols.iter().enumerate() {
+            if symbol & 0x02 != 0 {
+                q[i / 8] |= 0x80 >> (i % 8);
+            }
+        }
+        q
+    }
+
+    /// Step in single colour clocks until SBCP is asserted; returns how
+    /// many it took, or `None` if it never came within `limit`.
+    fn wait_for_sbcp(cdtv: &mut CdtvController, ring: &mut CdAudioRing, limit: u32) -> Option<u32> {
+        for waited in 1..=limit {
+            cdtv.tick(1, ring);
+            if cdtv.sbcp != 0 {
+                return Some(waited);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_played_sector_clocks_its_subcode_frame_out_behind_scor() {
+        let mut mem = test_mem(4096);
+        let mut cdtv = configured_controller();
+        let mut ring = CdAudioRing::default();
+        // 6525 in interrupt mode (CR, register 6) with SCOR and SBCP
+        // unmasked (register 5); the registers sit two bytes apart.
+        cdtv.write(0xB0 + 2 * 6, 1, 0x01, &mut mem);
+        cdtv.write(0xB0 + 2 * 5, 1, 0x03, &mut mem);
+
+        // PLAY LSN 4, length 2 (the test disc's audio track).
+        let _ = command(&mut cdtv, &mut mem, &[0x09, 0, 0, 4, 0, 0, 2]);
+        assert_eq!(cdtv.sbcp, 0);
+        // Run to the frame: the first sector plays and SCOR is latched.
+        let mut waited = 0;
+        while cdtv.sub_frame.is_empty() {
+            cdtv.tick(1, &mut ring);
+            waited += 1;
+            assert!(waited <= 2 * CCK_PER_CD_FRAME, "no sector played");
+        }
+        assert_ne!(cdtv.scor, 0, "SCOR marks the frame");
+        assert_ne!(
+            (cdtv.tp_ilatch | cdtv.tp_ilatch2) & 0x02,
+            0,
+            "SCOR reached the 6525's interrupt latch"
+        );
+        assert!(cdtv.int2_line());
+        assert_eq!(cdtv.sbcp, 0, "no byte yet");
+
+        // 96 bytes follow, one per symbol period, each raising SBCP until
+        // port A is read.
+        let mut symbols = Vec::new();
+        for n in 0..96 {
+            let waited = wait_for_sbcp(&mut cdtv, &mut ring, 2 * CCK_PER_SUBCODE_SYMBOL)
+                .unwrap_or_else(|| panic!("byte {n} never arrived"));
+            assert_eq!(waited, CCK_PER_SUBCODE_SYMBOL, "byte {n} spacing");
+            assert_eq!(
+                cdtv.get_tp_c() & 0x01,
+                0,
+                "SBCP is low (asserted) on port C"
+            );
+            symbols.push(cdtv.read(0xB0, 1) as u8);
+            assert_eq!(cdtv.sbcp, 0, "reading port A takes SBCP away");
+            assert_eq!(cdtv.get_tp_c() & 0x01, 0x01);
+        }
+        assert!(cdtv.sub_frame.is_empty(), "the frame is 96 bytes long");
+        // The frame is sector 4's: track 2, index 1, at its first sector.
+        let q = q_from_port_a(&symbols);
+        assert_eq!(
+            &q[..10],
+            &[0x01, 0x02, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x04]
+        );
+        // No stored subcode on this disc: nothing but Q.
+        assert!(symbols.iter().all(|&s| s & !0x02 == 0));
+
+        // The next sector's frame follows at the next CD frame.
+        let mut waited = 0;
+        while cdtv.sub_frame.is_empty() {
+            cdtv.tick(1, &mut ring);
+            waited += 1;
+            assert!(waited <= CCK_PER_CD_FRAME, "second frame missing");
+        }
+        wait_for_sbcp(&mut cdtv, &mut ring, 2 * CCK_PER_SUBCODE_SYMBOL).unwrap();
+        // Its first symbol is Q bit 0 of control/ADR $01: clear.
+        assert_eq!(cdtv.read(0xB0, 1) & 0x02, 0);
+    }
+
+    #[test]
+    fn an_unread_subcode_byte_is_replaced_by_the_next() {
+        let mut mem = test_mem(4096);
+        let mut cdtv = configured_controller();
+        let mut ring = CdAudioRing::default();
+        let _ = command(&mut cdtv, &mut mem, &[0x09, 0, 0, 4, 0, 0, 2]);
+        while cdtv.sub_frame.is_empty() {
+            cdtv.tick(1, &mut ring);
+        }
+        // Sector 4's Q packet starts 0000 0001 (control/ADR $01): the
+        // eighth symbol is the first with its Q bit set. Let seven go by
+        // unread; port A then holds the eighth, not the first.
+        while cdtv.sub_index < 8 {
+            cdtv.tick(1, &mut ring);
+        }
+        assert_ne!(cdtv.sbcp, 0, "SBCP stays up while nobody reads port A");
+        assert_eq!(cdtv.read(0xB0, 1) as u8, 0x02);
+        assert_eq!(cdtv.sbcp, 0);
+    }
+
+    #[test]
+    fn a_malformed_restored_subcode_frame_ends_instead_of_panicking() {
+        let mut cdtv = configured_controller();
+        let mut ring = CdAudioRing::default();
+        // An index past the frame: the frame just ends.
+        cdtv.sub_frame = vec![0x40; 10];
+        cdtv.sub_index = 200;
+        cdtv.sub_symbol_cck = 1;
+        cdtv.tick(2, &mut ring);
+        assert!(cdtv.sub_frame.is_empty());
+        assert_eq!((cdtv.sub_index, cdtv.sbcp), (0, 0));
+
+        // A frame longer than a sector's 96 symbols is clocked out for 96
+        // and no further, however far behind the clock is.
+        cdtv.sub_frame = vec![0x40; 1000];
+        cdtv.sub_index = 0;
+        cdtv.sub_symbol_cck = i32::MIN / 2;
+        cdtv.tick(1, &mut ring);
+        assert!(cdtv.sub_frame.is_empty());
+        assert_eq!(cdtv.sub_index, 0);
+        assert_eq!(cdtv.read(0xB0, 1) as u8, 0x02);
+    }
+
+    #[test]
+    fn the_drive_reports_its_next_subcode_symbol_and_sector_as_events() {
+        let mut mem = test_mem(4096);
+        let mut cdtv = configured_controller();
+        let mut ring = CdAudioRing::default();
+        // Idle: nothing a sleeping CPU needs waking for.
+        assert_eq!(cdtv.next_event_cck(), None);
+        let _ = command(&mut cdtv, &mut mem, &[0x09, 0, 0, 4, 0, 0, 2]);
+        while cdtv.sub_frame.is_empty() {
+            cdtv.tick(1, &mut ring);
+        }
+        // A frame in transit: the next symbol is one period away, sooner
+        // than the next sector, and each tick brings it closer.
+        assert_eq!(cdtv.next_event_cck(), Some(CCK_PER_SUBCODE_SYMBOL));
+        cdtv.tick(100, &mut ring);
+        assert_eq!(cdtv.next_event_cck(), Some(CCK_PER_SUBCODE_SYMBOL - 100));
+        // Sleeping exactly that long lands on the symbol.
+        cdtv.tick(CCK_PER_SUBCODE_SYMBOL - 100, &mut ring);
+        assert_ne!(cdtv.sbcp, 0);
+        // Paused: no frames and no sectors are coming.
+        let _ = command(&mut cdtv, &mut mem, &[0x8B, 0x00, 0, 0, 0, 0, 0]);
+        assert_eq!(cdtv.next_event_cck(), None);
+    }
+
+    #[test]
+    fn pausing_or_stopping_quiets_the_subcode_lines() {
+        let mut mem = test_mem(4096);
+        let mut cdtv = configured_controller();
+        let mut ring = CdAudioRing::default();
+        let _ = command(&mut cdtv, &mut mem, &[0x09, 0, 0, 4, 0, 0, 2]);
+        while cdtv.sub_frame.is_empty() {
+            cdtv.tick(1, &mut ring);
+        }
+        wait_for_sbcp(&mut cdtv, &mut ring, 2 * CCK_PER_SUBCODE_SYMBOL).unwrap();
+        // Pause: the frame in transit is abandoned.
+        let _ = command(&mut cdtv, &mut mem, &[0x8B, 0x00, 0, 0, 0, 0, 0]);
+        assert!(cdtv.cd_paused);
+        assert_eq!(cdtv.sbcp, 0);
+        assert!(wait_for_sbcp(&mut cdtv, &mut ring, 2 * CCK_PER_CD_FRAME).is_none());
+        // Resume: frames come again.
+        let _ = command(&mut cdtv, &mut mem, &[0x8B, 0x80, 0, 0, 0, 0, 0]);
+        assert!(wait_for_sbcp(&mut cdtv, &mut ring, 2 * CCK_PER_CD_FRAME).is_some());
+        cdtv.stop_audio();
+        assert_eq!(cdtv.sbcp, 0);
+        assert!(wait_for_sbcp(&mut cdtv, &mut ring, 2 * CCK_PER_CD_FRAME).is_none());
+    }
+
+    #[test]
+    fn an_idle_drive_pulses_scor_without_any_subcode_bytes() {
+        let mut mem = test_mem(4096);
+        let mut cdtv = configured_controller();
+        let mut ring = CdAudioRing::default();
+        cdtv.write(0xB0 + 2 * 6, 1, 0x01, &mut mem);
+        cdtv.write(0xB0 + 2 * 5, 1, 0x03, &mut mem);
+        let mut scor_seen = false;
+        for _ in 0..3 * CCK_PER_CD_FRAME / CCK_PER_LINE {
+            cdtv.tick(CCK_PER_LINE, &mut ring);
+            assert_eq!(cdtv.sbcp, 0);
+            scor_seen |= (cdtv.tp_ilatch | cdtv.tp_ilatch2) & 0x02 != 0;
+        }
+        assert!(scor_seen);
+        assert_eq!(cdtv.read(0xB0, 1), 0, "port A holds nothing");
+    }
+
+    #[test]
+    fn stored_r_to_w_subcode_reaches_port_a() {
+        // The test disc again, with a .sub file beside its image: every
+        // sector's R-W symbols are 0x2A (R, T and V set).
+        let dir = std::env::temp_dir();
+        let stem = format!("copperline-cdtv-sub-{}", std::process::id());
+        let cue = dir.join(format!("{stem}.cue"));
+        let bin = dir.join(format!("{stem}.bin"));
+        let sub = dir.join(format!("{stem}.sub"));
+        let sectors = 6;
+        std::fs::write(&bin, vec![0u8; sectors * RAW_SECTOR_BYTES]).unwrap();
+        let mut stored = Vec::new();
+        for _ in 0..sectors {
+            stored.extend_from_slice(&[0u8; 24]);
+            for channel in 2..8 {
+                stored.extend_from_slice(&[if channel % 2 == 0 { 0xFF } else { 0x00 }; 12]);
+            }
+        }
+        std::fs::write(&sub, &stored).unwrap();
+        std::fs::write(
+            &cue,
+            format!("FILE \"{stem}.bin\" BINARY\n  TRACK 01 AUDIO\n    INDEX 01 00:00:00\n"),
+        )
+        .unwrap();
+        let mut mem = test_mem(4096);
+        let mut cdtv = CdtvController::new();
+        cdtv.insert_disc(CdImage::load(&cue).unwrap());
+        cdtv.config_write(0x48, 1, 0xE9);
+        let mut ring = CdAudioRing::default();
+        let _ = command(&mut cdtv, &mut mem, &[0x09, 0, 0, 1, 0, 0, 2]);
+        while cdtv.sub_frame.is_empty() {
+            cdtv.tick(1, &mut ring);
+        }
+        let mut symbols = Vec::new();
+        for _ in 0..96 {
+            wait_for_sbcp(&mut cdtv, &mut ring, 2 * CCK_PER_SUBCODE_SYMBOL).unwrap();
+            symbols.push(cdtv.read(0xB0, 1) as u8);
+        }
+        // R, T, V are bits 5, 3, 1 on the disc and 2, 4, 6 on port A.
+        assert!(symbols.iter().all(|&s| s & 0xFC == 0x54), "{symbols:02X?}");
+        let q = q_from_port_a(&symbols);
+        assert_eq!(&q[..3], &[0x01, 0x01, 0x01]);
+        drop(cdtv);
+        let _ = std::fs::remove_file(&cue);
+        let _ = std::fs::remove_file(&bin);
+        let _ = std::fs::remove_file(&sub);
     }
 }

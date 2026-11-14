@@ -32,7 +32,8 @@
 //! CD-DA sectors into the host mixer ring (44.1 kHz, the mixer's native
 //! rate) and sends the drive's start/end notification packets.
 
-use crate::cdrom::{to_bcd, CdImage, CdTrack, LEADIN_SECTORS, RAW_SECTOR_BYTES};
+use crate::cdrom::subcode::q_channel_position;
+use crate::cdrom::{to_bcd, CdImage, LEADIN_SECTORS, RAW_SECTOR_BYTES, SUBCODE_FRAME_BYTES};
 use crate::cdtrace::{CdCommandKind, CdOutcome, CdStream, CdTrace};
 use crate::chipset::paula::CdAudioRing;
 
@@ -79,9 +80,6 @@ const TOC_REPEAT: u32 = 3;
 
 /// Colour clocks per 1/75th second (one single-speed CD frame).
 const CCK_PER_CD_FRAME: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 75;
-/// One subcode frame per sector: 98 bytes of P-W symbols less the two
-/// sync patterns, as the drive hands them to Akiko.
-const SUBCODE_FRAME_BYTES: usize = 96;
 
 /// The drive firmware returns its cached TOC over the command channel,
 /// independently of the 75-sector/s optical data path. A single-track TOC
@@ -1868,14 +1866,14 @@ impl Akiko {
     /// alternating between its two 128-byte halves, appends the $FFFF
     /// $0000 end marker, advances the offset register by 100, and raises
     /// the subcode interrupt -- WinUAE's akiko.cpp delivery sequence.
-    /// Only the Q channel carries anything: image formats store no
-    /// subchannel data, so it is regenerated from the TOC.
+    /// The frame is the image's (`CdImage::subcode_frame`): the position
+    /// in Q always, and R-W (CD+G) when the image stored them.
     fn deliver_subcode(&mut self, mem: &mut (impl DmaSpace + ?Sized), sector: u32) {
         if self.flags & CDFLAG_SUBCODE == 0 {
             return;
         }
-        let frame = match self.disc.as_ref() {
-            Some(disc) => subcode_frame(disc.tracks(), sector),
+        let frame = match self.disc.as_mut() {
+            Some(disc) => disc.subcode_frame(sector),
             None => [0u8; SUBCODE_FRAME_BYTES],
         };
         self.subcodeoffset = if self.subcodeoffset >= 128 { 0 } else { 128 };
@@ -2106,82 +2104,10 @@ fn sector_in_data_track(toc: &[TocEntry], sector: u32) -> bool {
     false
 }
 
-/// The Q-channel CRC: CRC-16-CCITT (x^16 + x^12 + x^5 + 1, zero seed)
-/// over the ten payload bytes, transmitted inverted (Red Book).
-fn q_channel_crc(payload: &[u8]) -> u16 {
-    let mut crc: u16 = 0;
-    for &byte in payload {
-        crc ^= u16::from(byte) << 8;
-        for _ in 0..8 {
-            crc = if crc & 0x8000 != 0 {
-                (crc << 1) ^ 0x1021
-            } else {
-                crc << 1
-            };
-        }
-    }
-    !crc
-}
-
-fn write_bcd_msf(out: &mut [u8], frames: u32) {
-    out[0] = to_bcd((frames / (60 * 75)) as u8);
-    out[1] = to_bcd(((frames / 75) % 60) as u8);
-    out[2] = to_bcd((frames % 75) as u8);
-}
-
-/// The twelve Q-channel bytes of the subcode frame at disc sector
-/// `sector`: an ADR 1 position packet (control nibble, track, index,
-/// track-relative MSF, zero, absolute MSF, CRC), all BCD. A sector in
-/// the gap before a track's INDEX 01 belongs to that track as index 0
-/// with the relative time counting down, as the pickup sees it.
-fn q_channel_position(tracks: &[CdTrack], sector: u32) -> [u8; 12] {
-    let mut q = [0u8; 12];
-    let (control, number, index, relative) =
-        match tracks.iter().rposition(|t| sector >= t.start_sector) {
-            Some(i) => {
-                let track = &tracks[i];
-                let next = tracks.get(i + 1);
-                match next {
-                    Some(next) if sector >= track.start_sector + track.sector_count => {
-                        (next.kind, next.number, 0, next.start_sector - sector)
-                    }
-                    _ => (track.kind, track.number, 1, sector - track.start_sector),
-                }
-            }
-            // Lead-in side of the first track: its pregap, counting down.
-            None => match tracks.first() {
-                Some(first) => (first.kind, first.number, 0, first.start_sector - sector),
-                None => return q,
-            },
-        };
-    q[0] = if control.is_data() { 0x41 } else { 0x01 };
-    q[1] = to_bcd(number);
-    q[2] = to_bcd(index);
-    write_bcd_msf(&mut q[3..6], relative);
-    write_bcd_msf(&mut q[7..10], sector + LEADIN_SECTORS);
-    let crc = q_channel_crc(&q[..10]);
-    q[10] = (crc >> 8) as u8;
-    q[11] = crc as u8;
-    q
-}
-
-/// One subcode frame as the drive delivers it: bit-interleaved, byte i
-/// carrying bit i of every channel with P in bit 7 and Q in bit 6. P
-/// and R-W stay blank; Q is the position packet.
-fn subcode_frame(tracks: &[CdTrack], sector: u32) -> [u8; SUBCODE_FRAME_BYTES] {
-    let q = q_channel_position(tracks, sector);
-    let mut frame = [0u8; SUBCODE_FRAME_BYTES];
-    for (i, byte) in frame.iter_mut().enumerate() {
-        if q[i / 8] & (0x80 >> (i % 8)) != 0 {
-            *byte |= 0x40;
-        }
-    }
-    frame
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cdrom::subcode::q_channel_crc;
     use crate::cdrom::DATA_SECTOR_BYTES;
     use std::io::Write;
     use std::path::PathBuf;
@@ -2647,13 +2573,6 @@ mod tests {
             }
         }
         q
-    }
-
-    #[test]
-    fn q_channel_crc_is_inverted_crc16_ccitt() {
-        // CRC-16/XMODEM's check value for "123456789" is $31C3; the Q
-        // channel transmits the complement.
-        assert_eq!(q_channel_crc(b"123456789"), !0x31C3);
     }
 
     #[test]

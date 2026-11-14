@@ -18,6 +18,10 @@ for the earlier release notes.
   session ends, including on SIGTERM, SIGHUP, SIGINT and SIGQUIT (exit status
   128 plus the signal number), and the default log file is always a new,
   owner-only file.
+- CD subcode R-W data (CD+G graphics) reaches the CD32 and the CDTV from
+  images that stored it: a CloneCD-style `.sub` file beside the image, a cue
+  sheet `CDG` track, or a CHD with raw subcode. The CDTV drive now delivers
+  subcode bytes at all, behind SCOR, while a disc plays.
 
 ### Changed
 

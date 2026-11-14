@@ -123,6 +123,8 @@ pub(super) fn load(path: &Path) -> Result<CdImage> {
         backend: super::Backend::Bin(BinBackend {
             sources: vec![source],
             extents,
+            // Nero images with stored subchannel data are refused above.
+            subcode: None,
         }),
         fault: Box::new(crate::diskfault::FaultPolicySet::default()),
     })

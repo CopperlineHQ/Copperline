@@ -8175,12 +8175,18 @@ impl Bus {
             .as_ref()
             .and_then(|ide| ide.next_drive_event_cck());
         let sdmac = self.sdmac.as_ref().and_then(|s| s.next_event_cck());
+        // The CDTV drive's subcode clock and play cadence: a guest asleep
+        // between subcode bytes is woken by each one.
+        let cdtv = self
+            .cdtv
+            .as_ref()
+            .and_then(crate::cdtv::CdtvController::next_event_cck);
         let boards = self
             .devices
             .iter()
             .filter_map(ZorroDevice::next_event_cck)
             .min();
-        [gayle, ide_a4000, sdmac, boards]
+        [gayle, ide_a4000, sdmac, cdtv, boards]
             .into_iter()
             .flatten()
             .min()
