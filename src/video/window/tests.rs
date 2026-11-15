@@ -279,6 +279,56 @@ fn aggregate_modifier_release_clears_held_amiga_qualifiers() {
 }
 
 #[test]
+fn focus_loss_releases_every_held_host_key() {
+    // macOS sends no key releases when the window loses the focus, only a
+    // ModifiersChanged with nothing held. Cmd-Tab presses Cmd (Left Amiga)
+    // here and releases it in the app switcher, so the machine was left
+    // holding Left Amiga, and Intuition took every later click as a screen
+    // drag.
+    use crate::bus::PortDevice;
+    let mut app = test_app();
+    app.main_window_focused = true;
+    let held = [KeyCode::SuperLeft, KeyCode::ControlLeft, KeyCode::KeyA]
+        .map(|code| host_to_amiga_rawkey(code).expect("the key has an Amiga rawkey"));
+    for rawkey in held {
+        app.handle_live_amiga_key_event(rawkey, true);
+        assert!(app.emu.bus().keyboard.is_held(rawkey));
+    }
+    app.update_host_modifiers(ModifiersState::empty());
+    assert!(
+        app.emu.bus().keyboard.is_held(held[0]),
+        "an empty ModifiersChanged alone leaves Left Amiga down"
+    );
+
+    // A keyboard-joystick control held across the switch is stuck the
+    // same way.
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(0, PortDevice::Joystick);
+    app.emu
+        .bus_mut()
+        .input
+        .set_port_device(1, PortDevice::Joystick);
+    app.joystick_input_mode = JoystickInputMode::Gamepad;
+    app.keyboard_joy_held[0].set(KeyCode::ArrowDown, true);
+    app.pump_joystick_input();
+    assert!(app.emu.bus().input.ports[1].down);
+
+    app.release_host_keys_on_focus_loss();
+    for rawkey in held {
+        assert!(!app.amiga_rawkey_held(rawkey), "rawkey {rawkey:#04x} held");
+        assert!(
+            !app.emu.bus().keyboard.is_held(rawkey),
+            "keyboard matrix still holds rawkey {rawkey:#04x}"
+        );
+    }
+    assert!(!app.live_input_held());
+    assert!(!app.keyboard_joy_held[0].any_held());
+    assert!(!app.emu.bus().input.ports[1].down);
+}
+
+#[test]
 fn raw_device_alt_hold_blocks_altgr_aggregate_cleanup() {
     let mut app = test_app();
     app.main_window_focused = true;

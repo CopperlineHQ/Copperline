@@ -10,6 +10,11 @@ for the earlier release notes.
 
 ### Fixed
 
+- On macOS, switching away with Cmd-Tab no longer leaves the Amiga holding
+  Left Amiga. Mouse clicks stopped working after switching back (Intuition
+  read each one as a screen drag) until Cmd was pressed again in the
+  window. Any key or keyboard-joystick control held while the window loses
+  the focus is now released.
 - The Windows uninstaller removes its Start Menu and desktop shortcuts even
   when another program has one of them open at that moment. It used to leave
   such a shortcut behind.

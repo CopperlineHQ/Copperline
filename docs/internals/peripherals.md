@@ -1368,7 +1368,12 @@ cross-checked against real-hardware-validated replacement keyboard
 firmware. Only transitions made while the window has the focus count:
 a key already down when it gains the focus (typically the shortcut that
 switched to it, whose release the window manager keeps) reaches the
-machine only once it is pressed again. Mouse deltas
+machine only once it is pressed again. Losing the focus releases every
+key and keyboard-joystick control the host keyboard still holds, since
+their releases will go to another window. X11 and Windows report those
+releases themselves; macOS does not, and without this a Cmd-Tab away
+left Left Amiga (Cmd) held, so Intuition treated later clicks as screen
+drags. Mouse deltas
 feed the mouse port's JOYxDAT quadrature counters (JOY0DAT for the usual
 port 1). Gamepads are read through `gilrs`
 with its bundled SDL controller database enabled: a recognised pad
