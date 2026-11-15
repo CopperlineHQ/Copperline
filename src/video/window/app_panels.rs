@@ -24,6 +24,9 @@ impl App {
         crate::video::set_mt32_panel_shown(shown);
         if self.resync_canvas_height() {
             self.follow_canvas_change(was_canvas_sized, canvas_before);
+            if !shown {
+                self.capture_if_display_left_bare();
+            }
         } else {
             crate::video::set_mt32_panel_shown(!shown);
             let _ = self.resync_canvas_height();
@@ -43,6 +46,9 @@ impl App {
         crate::video::set_csynth_panel_shown(shown);
         if self.resync_canvas_height() {
             self.follow_canvas_change(was_canvas_sized, canvas_before);
+            if !shown {
+                self.capture_if_display_left_bare();
+            }
         } else {
             crate::video::set_csynth_panel_shown(!shown);
             let _ = self.resync_canvas_height();
@@ -71,6 +77,9 @@ impl App {
         crate::video::set_keyboard_panel_shown(shown);
         if self.resync_canvas_height() {
             self.follow_canvas_change(was_canvas_sized, canvas_before);
+            if !shown {
+                self.capture_if_display_left_bare();
+            }
         } else {
             crate::video::set_keyboard_panel_shown(!shown);
             let _ = self.resync_canvas_height();
@@ -1101,8 +1110,9 @@ impl App {
         // two panels open, closing one leaves the other still wanting the
         // cursor, and the check inside declines until that one goes too.
         self.restore_mouse_capture_after_ui();
-        // In auto mode the grab is owed to the machine regardless of
-        // whether this panel is the one that borrowed it.
+        // In auto mode (or click mode on a bare fullscreen display) the
+        // grab is owed to the machine regardless of whether this panel is
+        // the one that borrowed it.
         self.apply_auto_mouse_capture();
         self.request_redraw();
     }

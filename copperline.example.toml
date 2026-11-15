@@ -1026,7 +1026,9 @@ floppy_sounds_volume = 100
 # When the host mouse is grabbed (pointer confined to the window, host cursor
 # hidden, so the Amiga pointer is the only one on screen):
 #   "click"  (default) clicking the display grabs it; that click is a window
-#            action and is not passed to the Amiga
+#            action and is not passed to the Amiga. Fullscreen with the
+#            status bar hidden there is nothing else to click, so it grabs
+#            as "auto" does
 #   "auto"   grab whenever the window has the focus, and on entering
 #            fullscreen -- no host cursor is ever loose over the display
 #   "manual" only Cmd+G / Alt+G grabs; clicks go straight to the Amiga

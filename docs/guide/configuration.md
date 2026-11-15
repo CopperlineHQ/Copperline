@@ -2135,7 +2135,11 @@ decides when that grab is taken:
 
 - `click` (the default) -- clicking the display grabs it. That click is a
   window action and is not passed to the Amiga, so the first click the guest
-  sees is the first one aimed at it.
+  sees is the first one aimed at it. In a fullscreen window with the status
+  bar hidden and no keyboard, MT-32 or Coppersynth strip under the display,
+  every click would land on the display, so there the grab is taken as in
+  `auto`: on focus, on entering fullscreen or hiding the status bar there,
+  and when a menu or panel closes or a machine starts.
 - `auto` -- grab as soon as the window has the focus, and again whenever it
   regains it, so no host cursor is ever loose over the display. Entering
   fullscreen grabs too. This suits a mouse-driven game or a fullscreen

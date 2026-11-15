@@ -365,18 +365,6 @@ impl App {
             self.request_redraw();
             return true;
         }
-        // Noted before the press, since a machine that starts takes the
-        // launcher down with it and the focus with that. A game chosen
-        // from the list starts one as surely as Run does.
-        #[cfg(feature = "game-library")]
-        let from_list = self.nav_focus_in_library();
-        #[cfg(not(feature = "game-library"))]
-        let from_list = false;
-        let starts_machine = from_list
-            || matches!(
-                focus,
-                crate::video::nav::NavTarget::Ui(UiControl::LauncherRun)
-            );
         if crate::video::nav::is_stepper(focus) {
             self.nav.toggle_open();
         } else {
@@ -405,16 +393,6 @@ impl App {
                 if crate::video::nav::find(&items, row).is_some() {
                     self.nav.show(Some(row));
                 }
-            }
-            // Starting a machine is the moment Auto capture would have
-            // taken the mouse, had a panel not been covering the display
-            // when the window last took focus. It is asked again here so
-            // that starting from a pad or the keyboard ends up in the
-            // same state as starting with a click. Click and Manual are
-            // left alone: each says when the grab is taken, and a Run
-            // pressed without a mouse in hand is not that moment.
-            if starts_machine && self.ui.panel.is_none() {
-                self.apply_auto_mouse_capture();
             }
             // A button that opened a page has gone with the page it
             // opened. The focus belongs on the new page, not back at the

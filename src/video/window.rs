@@ -5448,9 +5448,11 @@ impl ApplicationHandler for App {
                     self.restore_mouse_capture_after_ui();
                     // In auto mode the grab follows the focus, so the
                     // window that has the keyboard also has the pointer and
-                    // no host cursor is ever loose over the display. This is
-                    // also the start-up grab: the first Focused(true) is the
-                    // one that arrives when the window opens.
+                    // no host cursor is ever loose over the display; click
+                    // mode does the same in a fullscreen window that shows
+                    // only the display. This is also the start-up grab: the
+                    // first Focused(true) is the one that arrives when the
+                    // window opens.
                     self.apply_auto_mouse_capture();
                 } else {
                     self.volume_dragging = false;

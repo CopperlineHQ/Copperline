@@ -1746,6 +1746,43 @@ fn middle_click_releases_capture_and_held_guest_buttons_in_every_mode() {
 }
 
 #[test]
+fn click_capture_grabs_unasked_only_when_fullscreen_shows_just_the_display() {
+    // Click mode waits for a click because the status bar and the strips
+    // under the display are clickable too. Fullscreen with none of them,
+    // every click lands on the display and the first would only take the
+    // grab, so the mode grabs as auto does instead.
+    use super::app_input::grabs_without_a_click;
+    use crate::config::MouseCapture;
+    for bare in [false, true] {
+        assert!(grabs_without_a_click(MouseCapture::Auto, bare));
+        assert!(!grabs_without_a_click(MouseCapture::Manual, bare));
+        assert_eq!(grabs_without_a_click(MouseCapture::Click, bare), bare);
+    }
+}
+
+#[test]
+fn click_capture_waits_for_a_click_outside_fullscreen() {
+    // The fixture has no window, so it is never fullscreen: asking for the
+    // grab at one of auto mode's moments leaves a click-mode session
+    // uncaptured and owing nothing.
+    let mut app = test_app();
+    app.mouse_capture = crate::config::MouseCapture::Click;
+    app.main_window_focused = true;
+    assert!(
+        app.mouse_port().is_some(),
+        "the fixture has a mouse on port 1"
+    );
+    assert!(!app.fullscreen_display_is_bare());
+    app.apply_auto_mouse_capture();
+    app.capture_if_display_left_bare();
+    assert!(!app.mouse_captured);
+    assert!(
+        !app.auto_capture_hint_shown,
+        "no grab, so no hint about releasing one"
+    );
+}
+
+#[test]
 fn middle_click_reaches_normal_dispatch_by_default() {
     use winit::event::MouseButton;
     let mut app = test_app();
