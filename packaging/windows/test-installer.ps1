@@ -192,7 +192,31 @@ function Test-InstallMode([string]$InstallMode) {
         }
 
         Write-Host "==> [$InstallMode] Uninstalling and checking removal and preserved user files"
-        Invoke-Installer $layout.Uninstaller ($silent + "/LOG=`"$WorkDir\$InstallMode-uninstall.log`"")
+        # Something else can have a shortcut open when the uninstaller reaches
+        # it (Explorer, a scanner), and an uninstall leaves a file it cannot
+        # delete: now and then a run ended with the desktop shortcut still
+        # there. Hold it open here, without delete sharing, for the first
+        # four seconds, so that every run depends on the uninstaller's later
+        # attempts instead of the occasional one.
+        $held = $null
+        foreach ($attempt in 1..50) {
+            try {
+                $held = [IO.File]::Open($layout.DesktopShortcut, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                break
+            } catch [IO.IOException] {
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        if ($null -eq $held) { throw "Could not open $($layout.DesktopShortcut) to hold it" }
+        $release = Start-ThreadJob -ArgumentList $held -ScriptBlock { param($file) Start-Sleep -Seconds 4; $file.Dispose() }
+        try {
+            Invoke-Installer $layout.Uninstaller ($silent + "/LOG=`"$WorkDir\$InstallMode-uninstall.log`"")
+        } finally {
+            $release | Receive-Job -Wait -AutoRemoveJob
+            $held.Dispose()
+        }
+        $metHeld = (Get-Content -LiteralPath "$WorkDir\$InstallMode-uninstall.log" -Raw) -match "it may be in use"
+        Write-Host "    the uninstaller met the held shortcut: $metHeld"
         Assert-Associations $layout $extensionDefaults $false
         foreach ($file in $files) {
             $relative = [IO.Path]::GetRelativePath($payload, $file.FullName)

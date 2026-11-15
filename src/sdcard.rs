@@ -726,6 +726,45 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// CMD25 range-checks only its starting block; the block counter then
+    /// advances by itself. A stream that runs off the end of the card must
+    /// be refused with a write-error data response rather than appended to
+    /// the host image.
+    #[test]
+    fn multi_block_write_past_the_last_sector_is_refused_and_leaves_the_image_size() {
+        let (mut card, path) = card(2048);
+        send_cmd(&mut card, 0, 0, 0x95, 1);
+        send_cmd(&mut card, 55, 0, 0, 1);
+        send_cmd(&mut card, 41, 1 << 30, 0, 1);
+        let size = std::fs::metadata(&path).unwrap().len();
+        let last = card.image.total_sectors() - 1;
+
+        let r1 = send_cmd(&mut card, 25, last as u32, 0, 1);
+        assert_eq!(r1, [0x00]);
+        let block = |card: &mut SdCard| {
+            card.clock_byte(0xFC);
+            for _ in 0..512 {
+                card.clock_byte(0xA5);
+            }
+            card.clock_byte(0x00);
+            card.clock_byte(0x00);
+            let token = card.clock_byte(0xFF) & 0x1F;
+            while card.clock_byte(0xFF) != 0xFF {}
+            token
+        };
+        assert_eq!(block(&mut card), 0x05, "the last sector is writable");
+        assert_eq!(
+            block(&mut card),
+            0x0D,
+            "the block after it is a write error"
+        );
+        card.clock_byte(0xFD);
+        card.clock_byte(0xFF);
+
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+        std::fs::remove_file(&path).ok();
+    }
+
     /// A filesystem doing bulk I/O (PFS3 in particular issues large
     /// `HD_SCSICMD` READ_10/WRITE_10 transfers, up to 65535 sectors in one
     /// call per `spisd2`'s `scsidirect.c`) exercises far more blocks per

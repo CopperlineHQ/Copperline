@@ -20,7 +20,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Pinned: ubuntu-latest is moving to Ubuntu 26.04, whose RetroArch
+          # 1.22.2 exits with a segmentation fault as it creates its window
+          # in the rollback netplay step below, before a frame has run.
+          # 24.04 has RetroArch 1.18, which that step was written against.
+          - os: ubuntu-24.04
             library: libcopperline_libretro.so
             installed: copperline_libretro.so
           - os: macos-latest

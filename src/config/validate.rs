@@ -1334,14 +1334,22 @@ impl TryFrom<RawConfig> for Config {
             Some(s) => parse_denise_revision(s)?,
         };
 
-        let mem_controller = match raw.machine.mem_controller.as_deref() {
+        // Trimmed and case-folded like the section's other named values.
+        let mem_controller = match raw
+            .machine
+            .mem_controller
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
             None => defaults.mem_controller,
             Some("none") => MemController::None,
             Some("ramsey-04") => MemController::Ramsey4,
             Some("ramsey-07") => MemController::Ramsey7,
-            Some(other) => anyhow::bail!(
-                "[machine] mem_controller {other:?} is not one of \
-                 none, ramsey-04, ramsey-07"
+            Some(_) => anyhow::bail!(
+                "[machine] mem_controller {:?} is not one of \
+                 none, ramsey-04, ramsey-07",
+                raw.machine.mem_controller.as_deref().unwrap_or_default()
             ),
         };
 
@@ -2277,7 +2285,7 @@ fn parse_agnus_revision(s: &str) -> Result<AgnusRevision> {
         "8375" | "8372B" => Ok(AgnusRevision::Ecs8375),
         "8374" | "ALICE" => Ok(AgnusRevision::AgaAlice),
         _ => Err(anyhow!(
-            "unknown chipset agnus {:?}: expected OCS / 8370 / 8371 / 8372 / 8372A / 8375 / 8374 / ALICE",
+            "unknown chipset agnus {:?}: expected OCS / 8370 / 8371 / 8372 / 8372A / 8372B / 8375 / 8374 / ALICE",
             s
         )),
     }
@@ -2406,13 +2414,18 @@ pub(crate) fn parse_size(s: &str, what: &str) -> Result<usize> {
         .parse()
         .with_context(|| format!("{} size {:?}: bad number", what, s))?;
     let unit = unit_str.trim().to_ascii_uppercase().replace("IB", "B");
-    let bytes = match unit.as_str() {
-        "" | "B" => n,
-        "K" | "KB" => n * 1024,
-        "M" | "MB" => n * 1024 * 1024,
-        "G" | "GB" => n * 1024 * 1024 * 1024,
+    let shift = match unit.as_str() {
+        "" | "B" => 0,
+        "K" | "KB" => 10,
+        "M" | "MB" => 20,
+        "G" | "GB" => 30,
         _ => bail!("{} size {:?}: unknown unit {:?}", what, s, unit_str),
     };
+    // A product that wrapped would pass every later check as a small size.
+    let bytes = n
+        .checked_mul(1 << shift)
+        .filter(|&bytes| usize::try_from(bytes).is_ok())
+        .with_context(|| format!("{} size {:?} is too large", what, s))?;
     if bytes % 4096 != 0 {
         bail!("{} size {} bytes must be a multiple of 4 KiB", what, bytes);
     }

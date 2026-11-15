@@ -61,6 +61,18 @@ for the earlier release notes.
   `TD_REMCHANGEINT` no longer waits forever, and a read or board-answered
   command still queued on the board is withdrawn. Writes already on their
   way to the medium complete normally.
+- The Windows uninstaller removes its Start Menu and desktop shortcuts even
+  when another program has one of them open at that moment. It used to leave
+  such a shortcut behind.
+- On 68020 and faster machines, an interrupt that a program leaves pending
+  in INTREQ and unmasks in INTENA for only a few colour clocks is now
+  taken. The CD32 Classic Lotus Trilogy froze at the Lotus 1 race screen,
+  with only the HUD drawn, waiting for a handler that never ran.
+- An ECS Agnus 8372A machine with 512K of chip RAM mirrors that RAM at
+  `$080000`, `$100000` and `$180000`, as an OCS machine does. Loaders that
+  size chip RAM by looking for the alias no longer take the default
+  512K + 512K ECS A500 for a 1M-chip machine; a cracked Cannon Fodder ended
+  in a Guru there.
 - A ZIP-wrapped floppy image whose file name and extra field together run
   past 64 KiB no longer panics a build with overflow checks enabled; it is
   refused as release builds already refused it.
@@ -117,6 +129,21 @@ for the earlier release notes.
   existing installations, and preserve settings and saves on uninstall.
 - The manual identifies its package version and source revision, and includes
   troubleshooting, known limits and compatibility notes.
+- A control-protocol breakpoint condition that names `d0`-`d7` or `a0`-`a7`
+  tests that register. The names were read as the hex constants `$D0`-`$A7`,
+  so a conditional breakpoint set from an IDE through the debug adapter
+  compared a constant.
+- `--pcmcia-cf`, `--pcmcia-sram`, `--serial-device`, `--insert-cd-after`,
+  `--waveform`, `--warp-boot`, `--warp-until` and `--profile-live-audio` start
+  the machine when given on their own. They opened the launcher, which
+  dropped them.
+- In the Debug layout, `Cmd+Shift+G` / `Alt+Shift+G` saves a GIF clip instead
+  of toggling input ownership, and `Cmd+Shift+V` / `Alt+Shift+V` pastes as
+  keystrokes.
+- `[machine] mem_controller` ignores case and surrounding spaces, the
+  `[chipset] agnus` error lists `8372B`, the rewind-is-off notice names the
+  *Emulation Settings* menu, and the MCP description of `copper.list` gives
+  its real default start.
 
 ### Compatibility
 
@@ -125,6 +152,13 @@ for the earlier release notes.
   reads 1.1.0 states. Compatibility is one-way: 1.1.0 cannot read states saved
   after the external-drive ID fix, because its floppy decoder requires the
   `external_id_mode` field that newer states no longer write.
+- Three inputs that silently did the wrong thing now do what the manual
+  says. A scripted key written as `0` (`--press-after 5 0`) is the zero key;
+  it was read as raw key code 0, the backtick key, which is still available
+  as `0x00`, the form recorded input scripts use. `copperline-ctl --repl`
+  given a method reports an error; the method was never sent. A number after
+  `--expect-screenshot SECS PATH` that is not a valid tolerance, such as
+  `1.5`, is an error; it was taken as the ROM path.
 
 ## 1.1.0 - 2026-10-31
 

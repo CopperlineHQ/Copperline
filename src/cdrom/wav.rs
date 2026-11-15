@@ -37,6 +37,12 @@ impl std::fmt::Debug for WavPcm {
     }
 }
 
+/// The highest sample rate accepted. A sector read gathers the source
+/// frames it resamples from, in proportion to the rate, so the rate in a
+/// file's header must not be left to size that; 768 kHz is the highest
+/// rate PCM audio is produced at.
+const MAX_SAMPLE_RATE: u32 = 768_000;
+
 impl WavPcm {
     pub(super) fn open(path: &Path) -> Result<Self> {
         let reader = hound::WavReader::open(path)
@@ -50,7 +56,7 @@ impl WavPcm {
                 path.display()
             ),
         }
-        if spec.channels == 0 || spec.sample_rate == 0 {
+        if spec.channels == 0 || spec.sample_rate == 0 || spec.sample_rate > MAX_SAMPLE_RATE {
             bail!(
                 "{}: WAVE header claims {} channels at {} Hz",
                 path.display(),

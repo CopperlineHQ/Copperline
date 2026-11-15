@@ -15,6 +15,12 @@ use anyhow::{anyhow, Context, Result};
 const MONITOR_STEP_BUDGET: usize = 5_000_000;
 /// Machine word watches installed per one GDB connection.
 pub(crate) const GDB_WATCH_WORD_CAP: usize = 8;
+/// The longest watchpoint, in bytes, and how many there may be. A write
+/// watchpoint's bytes are kept and read back after every instruction to
+/// see whether they changed, so both are bounded: together they put a
+/// ceiling on what a step costs and on what the stub holds.
+const MAX_WATCH_BYTES: usize = 4096;
+const MAX_WATCHPOINTS: usize = 32;
 
 pub(crate) const TARGET_XML: &str = r#"<?xml version="1.0"?>
 <target>
@@ -438,13 +444,22 @@ impl GdbCore {
         let access = watch_access_from_packet(packet)?;
         let addr = addr & emu.machine.ui_addr_mask();
         let len = len.max(1);
-        let last = emu.machine.debug_read_memory(addr, len);
-        if let Some(existing) = self
+        // The watched bytes are read here and again after every step:
+        // "Z2,0,ffffffff" would otherwise cost a 4 GiB read per
+        // instruction.
+        if len > MAX_WATCH_BYTES {
+            return Ok("E01".to_string());
+        }
+        let existing = self
             .watchpoints
-            .iter_mut()
-            .find(|w| w.addr == addr && w.len == len && w.access == access)
-        {
-            existing.last = last;
+            .iter()
+            .position(|w| w.addr == addr && w.len == len && w.access == access);
+        if existing.is_none() && self.watchpoints.len() == MAX_WATCHPOINTS {
+            return Ok("E01".to_string());
+        }
+        let last = emu.machine.debug_read_memory(addr, len);
+        if let Some(existing) = existing {
+            self.watchpoints[existing].last = last;
         } else {
             self.watchpoints.push(Watchpoint {
                 addr,
@@ -1116,13 +1131,33 @@ pub(crate) fn xml_chunk_reply(xml: &str, range: &str) -> Result<String> {
     if offset >= bytes.len() {
         return Ok("l".to_string());
     }
-    let end = offset.saturating_add(len).min(bytes.len());
+    // qXfer data is binary: the bytes that frame a packet ('$', '#'),
+    // start a run-length repeat ('*') or escape ('}') go out as '}' and
+    // the byte XOR 0x20. The offset counts unescaped bytes; the length
+    // bounds what is sent, so an escaped chunk never outgrows the packet
+    // the client sized its request for.
+    let mut chunk = Vec::with_capacity(len.min(bytes.len() - offset));
+    let mut end = offset;
+    while let Some(&byte) = bytes.get(end) {
+        let escaped = matches!(byte, b'$' | b'#' | b'*' | b'}');
+        let cost = if escaped { 2 } else { 1 };
+        // Always make progress, even for a length too small to be useful.
+        if chunk.len() + cost > len && end > offset {
+            break;
+        }
+        if escaped {
+            chunk.extend([b'}', byte ^ 0x20]);
+        } else {
+            chunk.push(byte);
+        }
+        end += 1;
+    }
     let prefix = if end == bytes.len() { 'l' } else { 'm' };
     // The XML is pure ASCII today, so any offset/len is a valid char
     // boundary, but both come straight from the peer: don't let a future
     // non-ASCII addition (or a boundary that happens to split a
     // multi-byte char) turn into a panic instead of a clean error.
-    let chunk = std::str::from_utf8(&bytes[offset..end])
+    let chunk = String::from_utf8(chunk)
         .map_err(|_| anyhow!("qXfer XML slice landed on a non-UTF-8 boundary"))?;
     Ok(format!("{prefix}{chunk}"))
 }
@@ -1273,6 +1308,20 @@ pub(crate) fn checksum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |sum, byte| sum.wrapping_add(*byte))
 }
 
+/// The packet a received frame carries, given the bytes between `$` and
+/// `#` and the two checksum digits after it. `None` is a frame to answer
+/// with `-`: its checksum does not match, which includes digits that are
+/// not hex.
+///
+/// A frame that passes is acknowledged and then owed a reply. No packet
+/// this stub knows carries bytes that are not UTF-8, so one that does is
+/// passed on with those bytes replaced, in a form the core answers as an
+/// unknown packet, instead of being dropped with the client left waiting.
+pub(crate) fn frame_packet(payload: &[u8], checksum_digits: [u8; 2]) -> Option<String> {
+    let expected = parse_hex_byte(checksum_digits[0], checksum_digits[1]).ok()?;
+    (expected == checksum(payload)).then(|| String::from_utf8_lossy(payload).into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1376,6 +1425,105 @@ mod tests {
         let output = core.handle_monitor(&mut emu, "who F80010")?;
         assert!(output.contains("$00F80010"), "{output}");
         assert!(monitor_help().contains("who ADDR"));
+        Ok(())
+    }
+
+    /// qXfer data is binary-escaped: a program name from guest memory can
+    /// hold the bytes that frame a packet or start a run-length repeat.
+    #[test]
+    fn qxfer_chunks_escape_the_bytes_that_frame_a_packet() -> Result<()> {
+        let xml = build_library_list_xml(&[crate::amigaos::TrackedModule {
+            seglist: 0,
+            task: 0,
+            name: "a$b#c}d*e".into(),
+            segments: Vec::new(),
+        }]);
+        fn unescape(data: &str) -> String {
+            let mut out = Vec::new();
+            let mut bytes = data.bytes();
+            while let Some(b) = bytes.next() {
+                out.push(if b == b'}' {
+                    bytes.next().unwrap() ^ 0x20
+                } else {
+                    b
+                });
+            }
+            String::from_utf8(out).unwrap()
+        }
+        // Read it back in small pieces, as a client with a small packet
+        // size would: offsets count unescaped bytes.
+        let mut read = String::new();
+        loop {
+            let reply = xml_chunk_reply(&xml, &format!("{:x},7", read.len()))?;
+            let (kind, data) = reply.split_at(1);
+            assert!(data.len() <= 7, "{data:?} is longer than was asked for");
+            for (i, b) in data.bytes().enumerate() {
+                let escaped = i > 0 && data.as_bytes()[i - 1] == b'}';
+                assert!(
+                    escaped || !matches!(b, b'$' | b'#' | b'*'),
+                    "raw {:?} in {data:?}",
+                    b as char
+                );
+            }
+            read.push_str(&unescape(data));
+            if kind == "l" {
+                break;
+            }
+            assert!(
+                !data.is_empty(),
+                "a chunk that is not the last makes progress"
+            );
+        }
+        assert_eq!(read, xml);
+        Ok(())
+    }
+
+    #[test]
+    fn frame_packet_checks_the_sum_and_keeps_every_packet_answerable() {
+        assert_eq!(frame_packet(b"qC", *b"b4").as_deref(), Some("qC"));
+        assert_eq!(frame_packet(b"qC", *b"B4").as_deref(), Some("qC"));
+        assert_eq!(
+            frame_packet(b"qC", *b"00"),
+            None,
+            "a sum that does not match"
+        );
+        assert_eq!(frame_packet(b"qC", *b"zz"), None, "digits that are not hex");
+        assert_eq!(frame_packet(b"\xff", *b"ff").as_deref(), Some("\u{FFFD}"));
+    }
+
+    /// A write watchpoint's bytes are read back after every instruction to
+    /// see whether they changed, so neither one watchpoint's length nor
+    /// the number of them is the client's to choose without limit.
+    #[test]
+    fn watchpoints_are_bounded_in_length_and_in_number() -> Result<()> {
+        let mut emu = crate::gdbstub::testkit::emulator_with_loadseg_program();
+        let mut core = GdbCore::new(&emu, None);
+        let mut reply = |core: &mut GdbCore, packet: String| -> Result<String> {
+            match core.handle_packet(&mut emu, &packet)? {
+                CoreReply::Packet(reply) => Ok(reply),
+                _ => anyhow::bail!("{packet} was not answered with a packet"),
+            }
+        };
+        // The longest watchpoint is a page.
+        assert_eq!(reply(&mut core, "Z2,1000,1001".into())?, "E01");
+        assert_eq!(reply(&mut core, "Z2,1000,100000".into())?, "E01");
+        assert!(core.watchpoints.is_empty());
+        assert_eq!(reply(&mut core, "Z2,1000,1000".into())?, "OK");
+        // Thirty-two of them at most.
+        for n in 1..32 {
+            assert_eq!(
+                reply(&mut core, format!("Z2,{:x},2", 0x4000 + n * 2))?,
+                "OK"
+            );
+        }
+        assert_eq!(core.watchpoints.len(), 32);
+        assert_eq!(reply(&mut core, "Z2,5000,2".into())?, "E01");
+        assert_eq!(core.watchpoints.len(), 32);
+        // Setting one that is already there is not a new one.
+        assert_eq!(reply(&mut core, "Z2,1000,1000".into())?, "OK");
+        // Removing one makes room again.
+        assert_eq!(reply(&mut core, "z2,1000,1000".into())?, "OK");
+        assert_eq!(reply(&mut core, "Z2,5000,2".into())?, "OK");
         Ok(())
     }
 

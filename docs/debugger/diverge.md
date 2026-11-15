@@ -13,10 +13,10 @@ the two sides, never host jitter, and a second run reproduces it
 byte-for-byte.
 
 ```sh
-# Two builds, same machine and inputs.
+# Two builds, same machine and starting point.
 copperline-ctl diverge --a ./old/copperline --b ./new/copperline \
     --until 30 -- --factory --model A500 --noaudio \
-    --load-state before-scene.clstate --script inputs.clscript
+    --load-state before-scene.clstate
 
 # One build, two configs.
 copperline-ctl diverge --config-a jit-off.toml --config-b jit-on.toml \
@@ -24,8 +24,12 @@ copperline-ctl diverge --config-a jit-off.toml --config-b jit-on.toml \
 ```
 
 Everything after `--` is passed to both emulators unchanged, so the sides
-start from the same snapshot (`--load-state`), receive the same scheduled
-input (`--script`, `--press-after` and friends) and boot the same machine.
+start from the same snapshot (`--load-state`) and boot the same machine.
+Both sides run under `--control`, which refuses scheduled input
+(`--script`, `--press-after` and friends), scheduled disk or CD changes and
+the capture flags, as listed in the [control protocol](control.md) chapter:
+an emulator given one fails to launch and the run ends with status 2. Save
+the state late enough that the difference appears without further input.
 Pass `--factory` (or explicit configs) so a saved default configuration
 cannot leak into either side. Each side may also take its own additions:
 `--config-a`/`--config-b` name a TOML file for that side, and `--arg-a`/

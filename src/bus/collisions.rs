@@ -352,7 +352,14 @@ impl Bus {
             self.denise.bpldat,
         )
         .with_fmode(self.agnus.fmode());
-        let frame_base = self.current_frame_render_base;
+        // With sprite DMA idle the CPU/Copper sprite sources start from the
+        // hardware-true latch view, the one the renderer redisplays from.
+        let sprite_dma_idle = !self.current_frame_sprite_dma_observed;
+        let frame_base = if sprite_dma_idle {
+            self.current_frame_render_base.with_hardware_sprite_latch()
+        } else {
+            self.current_frame_render_base
+        };
         self.ensure_current_collision_control_index();
         let control_index = self.current_frame_collision_control_index.as_ref().unwrap();
         let control_replay = LiveCollisionLineReplay::from_index(
@@ -389,6 +396,7 @@ impl Bus {
             x_stop,
             vertical_open,
             sprite_display_enable_x,
+            sprite_dma_idle,
         );
         self.denise.or_clxdat(clxdat);
         self.record_live_collision_timing(
@@ -406,8 +414,15 @@ impl Bus {
         new_hpos: u32,
     ) {
         let visible_start_vpos = self.current_frame_visible_start_vpos;
+        // Denise has no vertical comparator and no frame reset for the
+        // sprite display latch: a sprite armed by an SPRxDATA write stays
+        // armed, and serializes on every line, until SPRxCTL is written.
+        // In a frame with no sprite register writes at all and no sprite
+        // DMA, the latch itself is therefore the only collision source.
+        let latched_only = self.current_frame_collision_sprite_events.is_empty();
+        let sprite_dma_idle = !self.current_frame_sprite_dma_observed;
         if new_hpos <= RENDER_COPPER_WAIT_HPOS_FB0
-            || self.current_frame_collision_sprite_events.is_empty()
+            || (latched_only && (!sprite_dma_idle || !self.denise.spr_hw_armed.contains(&true)))
         {
             return;
         }
@@ -444,7 +459,21 @@ impl Bus {
             self.denise.bpldat,
         )
         .with_fmode(self.agnus.fmode());
-        let frame_base = self.current_frame_render_base;
+        let mut frame_base = self.current_frame_render_base;
+        if latched_only {
+            // With no writes to replay, the sources are the registers as the
+            // hardware holds them now (the view the renderer redisplays a
+            // latched sprite from when sprite DMA is idle).
+            frame_base.sprpos = self.denise.spr_hw_pos;
+            frame_base.sprctl = self.denise.spr_hw_ctl;
+            frame_base.sprdata = self.denise.spr_hw_data;
+            frame_base.sprdatb = self.denise.spr_hw_datb;
+            frame_base.spr_armed = self.denise.spr_hw_armed;
+        } else if sprite_dma_idle {
+            // The frame's writes replay on top of the latches as the
+            // hardware held them when the frame started.
+            frame_base = frame_base.with_hardware_sprite_latch();
+        }
         let control_index = self.current_frame_collision_control_index.as_ref().unwrap();
         let control_replay = LiveCollisionLineReplay::from_index(
             current_control,
@@ -464,6 +493,7 @@ impl Bus {
             x_stop,
             sprite_display_enable_x,
             self.denise.clxdat,
+            sprite_dma_idle,
         );
         if let Some(row) = row {
             clxdat |= live_manual_sprite_playfield_collision_bits_in_range(
@@ -477,6 +507,7 @@ impl Bus {
                 x_stop,
                 sprite_display_enable_x,
                 self.denise.clxdat | clxdat,
+                sprite_dma_idle,
             );
         }
         self.denise.or_clxdat(clxdat);

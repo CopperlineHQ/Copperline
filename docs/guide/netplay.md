@@ -292,7 +292,8 @@ OSD reports the catch-up. From then on the spectator follows a few frames
 behind the players, verifying the same checkpoints and applying the host's
 floppy changes at the same frames. Spectators own no controller port: keys,
 mice and gamepads never reach the shared machine, the disk controls are
-disabled, and only the Quit, Fullscreen and **F11** shortcuts apply. A
+disabled, and only the Quit, Fullscreen, mouse-capture (`Cmd+G` / `Alt+G`)
+and **F11** shortcuts apply. A
 spectator leaving or failing never interrupts the players; the host drops a
 spectator that stops responding for ten seconds. A game that has been running
 for a long time takes correspondingly long to replay, and the host stops

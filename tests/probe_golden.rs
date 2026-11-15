@@ -548,12 +548,33 @@ probe_tests! {
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
     golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 16.0);
+    // 68020 chip writes under an all-channel BLTPRI-clear blit: a posted
+    // write gets the blitter's three-miss yield (the write loop must not
+    // stall for the whole blit).
+    golden_bltprobe_post => probe_aga("bltprobe-post", "bltprobe-post.bin", 16.0);
+    // VPOSR's V8 steps with VHPOSR's line byte: a read of both never pairs
+    // the low byte of one line with the V8 of another (the false line 0 at
+    // 255 -> 256 and line 256 at the frame wrap).
+    golden_posprobe_v8 => probe("posprobe-v8", "posprobe-v8.bin", 16.0);
+    // A 68000 long read of a custom register pair returns its first word
+    // from that word's own bus cycle, two colour clocks before the second.
+    golden_posprobe_long => probe("posprobe-long", "posprobe-long.bin", 16.0);
     // DMA sprite vertical reuse + attached pair placement (the sprite
     // register-FSM regression class).
     golden_ddfprobe_sprmulti => probe("ddfprobe-sprmulti", "ddfprobe-sprmulti.bin", 16.0);
     // CPU byte writes to a custom register latch the mirrored word (the
     // COLOR00 byte-write regression class).
     golden_regprobe_bytemirror => probe("regprobe-bytemirror", "regprobe-bytemirror.bin", 16.0);
+    // A request unmasked in INTENA for two instructions still reaches the
+    // CPU, on the 68000 and on the 68EC020 (the wait-loop class that keeps
+    // a request pending and opens a window for its handler).
+    golden_irqprobe_window => probe("irqprobe-window", "irqprobe-window.bin", 16.0);
+    golden_irqprobe_window_aga => probe_aga("irqprobe-window-aga", "irqprobe-window.bin", 16.0);
+    // The first DRAM bank repeats through the CPU's chip window on a
+    // 512K-chip machine, on OCS and on an 8372A strapped for trapdoor RAM
+    // alike (the class of loaders that size chip RAM by its alias).
+    golden_memprobe_chipmirror => probe("memprobe-chipmirror", "memprobe-chipmirror.bin", 16.0);
+    golden_memprobe_chipmirror_ecs => probe_ecs("memprobe-chipmirror-ecs", "memprobe-chipmirror.bin", 16.0);
     // CLXDAT collision matrix bits rendered as cells (the collision
     // matching/enable regression class).
     golden_clxprobe => probe("clxprobe", "clxprobe.bin", 16.0);
@@ -573,6 +594,10 @@ probe_tests! {
     // SPRxDATA arm redisplays the DMA-written words (the Hamazing
     // scene-switch stale-bar regression class).
     golden_sprprobe_latch => probe("sprprobe-latch", "sprprobe-latch.bin", 16.0);
+    // An armed sprite has no vertical window in Denise: with sprite DMA off
+    // it is serialized on every line whatever VSTART/VSTOP its control
+    // words hold (empty, sixteen lines, inverted).
+    golden_sprprobe_armline => probe("sprprobe-armline", "sprprobe-armline.bin", 16.0);
     // A SPRxCTL write between a DMA fetch slot and that channel's HSTART
     // disarms Denise before the serializer loads, cancelling the fetched
     // line; a write past HSTART cannot recall it (the Hybris panel
@@ -648,4 +673,15 @@ probe_tests! {
     // CD32 double-buffer flip regression class). vAmiga-verified: the
     // stripe reads green (read strobed), not red (read inert).
     golden_copprobe_jmpread => probe("copprobe-jmpread", "copprobe-jmpread.bin", 16.0);
+    // The Copper compares eight vertical bits: a WAIT for line $08 that
+    // is evaluated on line 255 ($FF >= $08) releases at once, while the
+    // same WAIT behind WAIT $FFDF is evaluated after the wrap and waits
+    // for line 256+N. vAmiga-verified: red from line 255, green from
+    // line $110.
+    golden_copprobe_wait255 => probe("copprobe-wait255", "copprobe-wait255.bin", 16.0);
+    // CLR.W COPJMP1 strobes on its read and on its write cycle. The Copper
+    // requests the bus for a cycle before fetching, so the second strobe
+    // restarts a list whose first MOVE rewrites COP1LC instead of jumping
+    // through the rewritten value. vAmiga-verified: both stripes green.
+    golden_copprobe_clrjmp => probe("copprobe-clrjmp", "copprobe-clrjmp.bin", 16.0);
 }

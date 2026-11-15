@@ -2644,7 +2644,10 @@ impl FloppyController {
                     } else {
                         encode_uae_extended_adf(tracks)
                     }?;
-                    std::fs::write(&path, encoded).context("writing extended ADF image")
+                    // Every track write re-encodes the whole image, so
+                    // the file is replaced, never truncated and refilled.
+                    crate::paths::write_replacing(&path, &encoded)
+                        .context("writing extended ADF image")
                 }
                 FloppyImageBacking::Memory => Ok(()),
             }),

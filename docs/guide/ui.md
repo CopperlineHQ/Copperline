@@ -108,8 +108,8 @@ Everything the mouse can reach in the launcher, the menu, the status bar
 and the overlay panels can be reached with the arrow keys or a
 controller.
 
-The arrows move the focus, which lights the control it is on. Return (or
-the pad's fire button) works it; `Esc` (or the pad's second button) steps
+The arrows move the focus, which lights the control it is on. Return or
+Space (or the pad's fire button) works it; `Esc` (or the pad's second button) steps
 back out -- out of an open setting, then the page, then the surface.
 Left and right move along the row, up and down to the row above or below;
 at the edge of a surface the focus stays where it is. Controls that
@@ -189,6 +189,10 @@ left to right it holds:
   CD-ROM unit): a CD button that loads (or swaps) a CD image
   (`.cue`/`.iso`/`.nrg`/`.chd`) with the proper media-change notification, and a
   CD eject button. These do not appear on machines without a CD drive.
+- **CCP tag** (left of the keyboard toggle): the letters `CCP` show while a
+  [control-protocol](../debugger/control.md) or [GDB](../debugger/gdb.md)
+  client is connected, so a machine that pauses or steps by itself is
+  explained.
 - **Keyboard toggle** (just left of the joystick toggle): a small keyboard
   icon, lit while the on-screen Amiga keyboard is up. Click it to show or
   hide it (see [](#on-screen-keyboard)).
@@ -484,18 +488,18 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
 ### Video Settings
 
 - **Menu Size**: 1x or 2x, described above.
-- **Framing**: **TV** keeps the fixed monitor aperture (the default);
-  **Smart** corrects small horizontal display offsets after the hardware
-  envelope stays stable, with at most eight lo-res pixels of automatic
-  adjustment; **Full overscan** shows the entire captured raster. Blank
-  frames hold the previous Smart position. Manual centring adds a trim.
-  Screenshots and frame dumps follow the selected framing.
 - **Pixel Aspect**: **TV (4:3)**, the CRT pixel aspect (the default; PAL
   lo-res pixels slightly wider than tall, as a real TV shows them), or
   **Square** (a 320x256 screen is an exact 640x512, handy for pixel-exact
   comparison with square-pixel emulators). The window and its backing
   texture resize with the mode. The start-up mode comes from
   `[display] pixel_aspect` (see [Configuration](configuration.md)).
+- **Framing**: **TV** keeps the fixed monitor aperture (the default);
+  **Smart** corrects small horizontal display offsets after the hardware
+  envelope stays stable, with at most eight lo-res pixels of automatic
+  adjustment; **Full overscan** shows the entire captured raster. Blank
+  frames hold the previous Smart position. Manual centring adds a trim.
+  Screenshots and frame dumps follow the selected framing.
 - **Scaling**: how the display canvas is mapped to the window:
   - **Smooth** (default): fits the display canvas to the window while
     preserving the aspect ratio, using linear interpolation.
@@ -720,6 +724,8 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
 - **Save Clip as GIF** (also `Cmd+Shift+G` / `Alt+Shift+G`): writes the
   last `[recording] clip_seconds` (ten by default) of the display as an
   animated GIF. See [Saving a GIF clip](#saving-a-gif-clip).
+- **Save Native Screenshot (1:1)** (also `Cmd+Option+S` / `Ctrl+Alt+S`):
+  saves a native screenshot at the original pixel size.
 
 ### Save State
 
@@ -1282,7 +1288,7 @@ headless `--record-input` variant are described in
 ## Save states
 
 `Cmd+Shift+S` on macOS or `Alt+Shift+S` on Linux/Windows (or the menu's
-"Save State") writes a snapshot of the whole emulated machine to
+*Save State -> Save State...*) writes a snapshot of the whole emulated machine to
 `copperline-state-<YYYYMMDDHHmmSS>.clstate` in the [states folder](#where-files-go): CPU,
 chip/slow/fast RAM, ROM, the full chipset and CIA state, floppy images
 (including unsaved in-memory changes), expansion boards, and CD/NVRAM
@@ -1381,10 +1387,10 @@ still be found and deleted from here.
 
 Clicking a row loads it and closes the browser. With the keyboard, up
 and down move the selection (Page Up/Down and Home/End move faster),
-Return loads the selected state, and Delete asks before removing its
-file -- the question comes up with **Cancel** under the focus, so a
-second Return keeps the file and Delete again (or left, then Return)
-removes it. Down off the foot of the list reaches the button row, where
+Return (or Space) loads the selected state, and Delete (or Backspace) asks
+before removing its file -- the question comes up with **Cancel** under the
+focus, so a second Return keeps the file and Delete again (or left, then
+Return) removes it. Down off the foot of the list reaches the button row, where
 left and right pick **Load**, **Delete**, or **Browse...**; Esc closes
 the browser (or withdraws the question first). A controller walks the
 same list with its d-pad, fire, and second button, as
@@ -1718,7 +1724,9 @@ whatever is up, as described under
 above. While the menu or a panel is open the pad stops driving the
 emulated port, just as the keyboard does. On the default database layout
 Select/Back and the guide button carry it; a calibration can put it
-anywhere (or skip it). Held, it doubles as the Quit hotkey, as above.
+anywhere (or skip it). Held, it doubles as the Quit hotkey, as above --
+except the default layout's guide button, which only opens the menu:
+holding it is often the controller's or the platform's own gesture.
 
 Once every step is captured, pushing a control tests its binding and
 holding one hands the panel's Save and Cancel buttons to the pad, so a

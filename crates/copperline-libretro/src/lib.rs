@@ -63,7 +63,7 @@ fn report(error: impl std::fmt::Display) {
     eprintln!("{text}");
     if let Ok(text) = CString::new(text) {
         env(
-            6,
+            ENVIRONMENT_SET_MESSAGE,
             &mut Message {
                 msg: text.as_ptr(),
                 frames: 300,
@@ -126,7 +126,7 @@ fn announce_memory_map(force: bool) -> Result<()> {
     )?;
     if let Some((descriptors, num_descriptors)) = map {
         env(
-            36,
+            ENVIRONMENT_SET_MEMORY_MAPS,
             &mut MemoryMap {
                 descriptors,
                 num_descriptors,
@@ -177,7 +177,7 @@ fn variable(key: &'static CStr, default: &str) -> String {
         key: key.as_ptr(),
         value: std::ptr::null(),
     };
-    if env(15, &mut variable) && !variable.value.is_null() {
+    if env(ENVIRONMENT_GET_VARIABLE, &mut variable) && !variable.value.is_null() {
         unsafe { CStr::from_ptr(variable.value) }
             .to_string_lossy()
             .into_owned()
@@ -334,14 +334,26 @@ fn register_environment() {
         // The ABI accepts const descriptor tables through void*. The frontend
         // may read these tables but must not modify them.
         unsafe {
-            callback(16, OPTIONS.as_ptr().cast_mut().cast());
-            callback(35, PORTS.as_ptr().cast_mut().cast());
-            callback(11, INPUTS.as_ptr().cast_mut().cast());
-            callback(13, std::ptr::from_ref(&DISKS).cast_mut().cast());
+            callback(
+                ENVIRONMENT_SET_VARIABLES,
+                OPTIONS.as_ptr().cast_mut().cast(),
+            );
+            callback(
+                ENVIRONMENT_SET_CONTROLLER_INFO,
+                PORTS.as_ptr().cast_mut().cast(),
+            );
+            callback(
+                ENVIRONMENT_SET_INPUT_DESCRIPTORS,
+                INPUTS.as_ptr().cast_mut().cast(),
+            );
+            callback(
+                ENVIRONMENT_SET_DISK_CONTROL_INTERFACE,
+                std::ptr::from_ref(&DISKS).cast_mut().cast(),
+            );
         }
-        env(18, &mut true);
+        env(ENVIRONMENT_SET_SUPPORT_NO_GAME, &mut true);
         let mut logger = LogCallback { log: None };
-        if env(27, &mut logger) {
+        if env(ENVIRONMENT_GET_LOG_INTERFACE, &mut logger) {
             let mut callbacks = CALLBACKS.get();
             callbacks.log = logger.log;
             CALLBACKS.set(callbacks);
@@ -453,8 +465,9 @@ unsafe fn content_path(info: *const GameInfo) -> Result<Option<PathBuf>> {
 pub unsafe extern "C" fn retro_load_game(info: *const GameInfo) -> bool {
     boundary(|| {
         let path = unsafe { content_path(info) }?;
-        let system = directory(9).unwrap_or_else(|| PathBuf::from("."));
-        let save = directory(31)
+        let system =
+            directory(ENVIRONMENT_GET_SYSTEM_DIRECTORY).unwrap_or_else(|| PathBuf::from("."));
+        let save = directory(ENVIRONMENT_GET_SAVE_DIRECTORY)
             .or_else(|| {
                 path.as_ref()
                     .and_then(|path| path.parent().map(Path::to_path_buf))
@@ -484,7 +497,10 @@ pub unsafe extern "C" fn retro_load_game(info: *const GameInfo) -> bool {
         let rom = variable(c"copperline_rom", "AROS");
         let protected = variable(c"copperline_write_protect", "disabled") == "enabled";
         let config = core::configuration(model, &video, rom == "Kickstart", &system)?;
-        ensure!(env(10, &mut 1u32), "frontend must support XRGB8888 video");
+        ensure!(
+            env(ENVIRONMENT_SET_PIXEL_FORMAT, &mut { PIXEL_FORMAT_XRGB8888 }),
+            "frontend must support XRGB8888 video"
+        );
         let mut core =
             Core::load_with_system(&config, path.as_deref(), save, protected, &system, netplay)?;
         RUNTIME.with(|runtime| -> Result<()> {
@@ -516,7 +532,7 @@ pub extern "C" fn retro_run() {
     boundary(|| {
         let callbacks = CALLBACKS.get();
         let mut av_enable = 3u32;
-        env(47 | 0x10000, &mut av_enable);
+        env(ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE, &mut av_enable);
         if let Some(poll) = callbacks.poll {
             unsafe {
                 poll();
@@ -558,9 +574,9 @@ pub extern "C" fn retro_run() {
         })?;
         let previous = RUNTIME.with(|runtime| runtime.borrow_mut().av.replace(av));
         if previous.is_some_and(|previous| previous.timing != av.timing) {
-            env(32, &mut { av });
+            env(ENVIRONMENT_SET_SYSTEM_AV_INFO, &mut { av });
         } else if previous.is_some_and(|previous| previous.geometry != av.geometry) {
-            env(37, &mut { av.geometry });
+            env(ENVIRONMENT_SET_GEOMETRY, &mut { av.geometry });
         }
         if let Some(video) = callbacks.video.filter(|_| av_enable & 1 != 0) {
             if !pixels.is_empty() {
@@ -678,7 +694,7 @@ pub unsafe extern "C" fn retro_serialize(data: *mut c_void, size: usize) -> bool
             "save-state buffer is too small"
         );
         let mut context = 0u32;
-        env(72 | 0x10000, &mut context);
+        env(ENVIRONMENT_GET_SAVESTATE_CONTEXT, &mut context);
         with_core(|core| {
             ensure!(
                 context != 3 || core.netplay,

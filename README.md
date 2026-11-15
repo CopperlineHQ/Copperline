@@ -44,8 +44,8 @@ The [Debug workspace](docs/debugger/window.md) puts the Amiga display beside
 its debugger, Frame Analyzer, and Console in one desktop window. Open
 **Debugger...** in the menu or press
 `Cmd+B` on macOS or `Alt+B` on Linux/Windows. Drag the display divider to resize
-the panes; **Return to Play** restores the display layout while keeping the
-inspectors and their state. Click the display to send input to the Amiga, and
+the panes; the title bar's **Play** switch restores the display layout while
+keeping the inspectors and their state. Click the display to send input to the Amiga, and
 use `Cmd+G` / `Alt+G` to return input to the debugger. Monospace readouts use
 Hack with a slashed zero. Audio scopes stay beside fixed-height channel
 details as DMA and interrupt events change.

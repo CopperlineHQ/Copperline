@@ -114,7 +114,8 @@ with several arguments, the inline value is its first argument:
 any further `=` characters. Switches such as `--factory` and `--noaudio`
 take no value; `--noaudio=false` is an error.
 
-`--help` and `--version` print to stdout and exit successfully. Invalid
+`--help` (or `-h`) and `--version` (or `-V`) print to stdout and exit
+successfully; `-c` is short for `--config`. Invalid
 arguments print to stderr and exit with status 1. A mistyped long option
 suggests a close, unambiguous match when one is available.
 
@@ -345,7 +346,7 @@ instead of the search.
 # traces = "traces"          # debugger traces and waveform captures
 # configs = "configs"        # configurations saved from the launcher
 # roms = "roms"              # the rest are media folders (see below):
-# mt32_roms = "roms/mt32"    # MT-32 control and PCM ROMs
+# mt32_roms = "roms/mt32"    # MT-32 control and PCM ROMs (default: mt32 inside roms)
 # floppies = "floppies"
 # harddrives = "harddrives"
 # cds = "cds"
@@ -385,7 +386,7 @@ rtc = true        # add a battery RTC (default: only A500+/A2000/CDTV/A3000/A400
 # rtc_chip = "RP5C01"              # MSM6242 (default) or RP5C01 (A3000/A4000 default)
 # rtc_time = "2005-03-18 01:58:29" # seed the clock; it then ticks in emulated time
 # rtc_frozen = true                # stop the seeded clock at rtc_time exactly
-# battmem = "battmem.nvram"        # RP5C01 battery-RAM backing file (default when fitted)
+# battmem = "battmem.nvram"        # RP5C01 battery-RAM backing file (default when fitted: in the [paths] nvram folder)
 # mem_controller = "ramsey-07"     # none, ramsey-04 (A3000), ramsey-07 (A4000)
 # rom_scsi_device_disable = true   # skip the ROM's scsi.device (default: when its bus has no drives)
 ```
@@ -472,6 +473,14 @@ will not read back as the year you set. A host-initiated reset or power
 cycle restarts the emulated timeline and therefore restarts a seeded clock
 from `rtc_time`; a guest-initiated reboot (the 68000 `RESET` instruction)
 leaves it ticking, like real battery-backed hardware.
+
+The guest can set the clock: the chip's counters are read/write, so
+`SetClock SAVE` (or the Time preferences editor, or another OS's `hwclock`)
+takes effect and the clock counts on from the written time. That time
+belongs to the running machine: it counts on through a guest reboot and a
+keyboard reset, and travels in save states, but the host clock is never
+changed, and the next power cycle starts again from the host time or from
+`rtc_time`.
 
 The `A3000` and `A4000` profiles are the big-box machines. They carry a
 Ramsey memory controller (`mem_controller`), whose two registers answer at
@@ -1338,8 +1347,8 @@ set whose picture sat a little right of centre. Glass the nudge
 exposes beyond the captured raster is unscanned and shows black. The
 knobs move the TV aperture, so `overscan = "full"` ignores them; captures
 (screenshots, frame dumps) follow them like the live window. The menu's
-*Screen Centring* rows (under Video Settings) step the same knobs live
-without touching the config.
+*Screen Centring* rows (under Video Settings) step the same knobs live;
+the change is [remembered like any menu setting](ui.md#menu-settings-persist).
 
 `pixel_aspect` selects how emulated scanlines map to host rows. The default
 `"tv"` presents the field with the non-square pixel aspect of a 4:3 CRT:
@@ -1350,7 +1359,7 @@ scanline instead, so every low-resolution pixel is an integer 2x2 square
 and a 320x256 PAL screen occupies precisely 640x512 window pixels --
 slightly taller than a real CRT picture, but exact for side-by-side pixel
 comparison with square-pixel emulators. The menu's *Pixel Aspect* item
-flips the mode live without touching the config, and
+flips the mode live ([remembered like any menu setting](ui.md#menu-settings-persist)), and
 `COPPERLINE_PIXEL_ASPECT=tv|square` overrides it for a single run.
 
 `scaling` selects how that presentation canvas reaches the window, which is
@@ -1519,9 +1528,10 @@ texel-snapped pass-through the window otherwise uses at magnification.
 `"none"` skips the pass altogether and is the only truly zero-cost setting.
 
 The menu's *Video Settings -> CRT Shader* and *Shader Strength* items change
-the preset and the mix live for the rest of the session without touching the
-config file; the launcher's *A/V & Emu* tab (*Video* category) has
-*CRT shader* and *Shader strength* rows that do write it.
+the preset and the mix live, and the change is
+[remembered like any menu setting](ui.md#menu-settings-persist); the launcher's
+*A/V & Emu* tab (*Video* category) has *CRT shader* and *Shader strength*
+rows for the same.
 `COPPERLINE_SHADER=crt|scanlines|mask|none|PATH.wgsl` and
 `COPPERLINE_SHADER_STRENGTH=0.0..1.0` override the config for a single run.
 There is no command-line flag.
@@ -1562,9 +1572,10 @@ the extra border keeps clear of the arcs.
 The bezel is independent of `shader` and composes with any preset: with
 `"crt"` the bowed tube face sits inside the opening for the full monitor
 look. Cmd+M (macOS) / Alt+M turns it off and back on to whichever front is
-chosen, for the rest of the session and without touching the config;
-*Video Settings -> Monitor Bezel* picks the front, the launcher's *Monitor
-bezel* row (*A/V & Emu*, *Video*) writes it, and `COPPERLINE_BEZEL` (a
+chosen and *Video Settings -> Monitor Bezel* picks the front, both
+[remembered like any menu setting](ui.md#menu-settings-persist); the
+launcher's *Monitor bezel* row (*A/V & Emu*, *Video*) sets it too, and
+`COPPERLINE_BEZEL` (a
 style name, or the old `1`/`0`) overrides the config for a single run.
 
 Interactive screenshots include the bezel; scheduled captures bypass it.
@@ -1616,8 +1627,9 @@ live readout of emulated fps, speed factor, per-frame emulation cost, host
 utilisation, audio health, and pacer slips in the top-right corner of the
 display, one line per data point (see
 [the window chapter](ui.md#performance-overlay) for what each line means).
-Cmd+P (macOS) / Alt+P toggles it live for the rest of the session without
-touching the config, `--perf-overlay` shows it for one run, and
+Cmd+P (macOS) / Alt+P toggles it live
+([remembered like any menu setting](ui.md#menu-settings-persist)),
+`--perf-overlay` shows it for one run, and
 `COPPERLINE_PERF_OVERLAY=1|0` overrides the config for a single run; the
 launcher's *Perf overlay* row (*A/V & Emu*, *Display*) writes it. Like the
 transient message overlay it is presentation only. Interactive screenshots
@@ -1634,15 +1646,16 @@ Interactive screenshots include the tint. Scheduled screenshots, frame dumps,
 recordings and headless runs stay untinted; the status bar and overlay
 menus keep their colours, and RTG board scanout (the monitor on the
 board's own output, not the Amiga's video output) is never tinted. The
-menu's *Screen Tint* item changes the tint live for the rest of the
-session without touching the config file; the launcher's *A/V & Emu* tab
-(*Video* category) has a *Screen tint* row that does write it.
+menu's *Screen Tint* item changes the tint live, and the change is
+[remembered like any menu setting](ui.md#menu-settings-persist); the launcher's
+*A/V & Emu* tab (*Video* category) has a *Screen tint* row for the same.
 `COPPERLINE_TINT=bw|green|...` overrides the config for a single run.
 
 `menu_scale` draws the pop-up menu at `"1x"` (the default) or `"2x"` -- the
-whole menu, rows and text together. It is a start-up preference:
-*Video Settings -> Menu Size* changes it live without altering the saved
-value, `--menu-scale` sets it on the command line, and the launcher's A/V &
+whole menu, rows and text together.
+*Video Settings -> Menu Size* changes it live
+([remembered like any menu setting](ui.md#menu-settings-persist)),
+`--menu-scale` sets it on the command line, and the launcher's A/V &
 Emu page (Display category) has a *Menu size* picker for the same.
 
 `window_scale` multiplies the normal window width and height in logical host
@@ -1671,10 +1684,11 @@ Track Display* switches it live, and the launcher's Display category has a
 *Track display* row for the start-up value.
 
 `full_screen` opens the window fullscreen at start (borderless), and
-`status_bar` chooses whether the status bar starts visible. Both are start-up
-preferences; the runtime toggles -- `Cmd+F` / `Alt+F` for fullscreen and
-`Cmd+Shift+F` / `Alt+Shift+F` for the status bar, plus their menu items --
-still flip either live without changing the saved value. On the command line
+`status_bar` chooses whether the status bar starts visible. The runtime
+toggles -- `Cmd+F` / `Alt+F` for fullscreen and `Cmd+Shift+F` /
+`Alt+Shift+F` for the status bar, plus their menu items -- flip either live,
+and the new state is
+[remembered like any menu setting](ui.md#menu-settings-persist). On the command line
 `--full-screen` / `--windowed` set the fullscreen state and `--show-status-bar` /
 `--hide-status-bar` set the status bar; the launcher's A/V & Emu page (Display
 category) has *Start fullscreen* and *Status bar* toggles for the same. Left
@@ -1869,8 +1883,9 @@ empty-drive poll just as they do on real hardware.
 `floppy_sounds` is the switch for all drive sounds: with it `false` the
 drives are silent whatever `floppy_sounds_set` names. While it is on,
 `floppy_sounds_set` replaces the synthesis with a recorded sample set -- the
-drive sound packs WinUAE and FS-UAE use (FS-UAE's `floppy_drive_N_sounds`). A
-set is up to five WAV files sharing a name:
+drive sound packs WinUAE and FS-UAE use (FS-UAE's `floppy_drive_N_sounds`).
+Leaving the key out, or setting it to `""` or `"synthesized"`, keeps the
+synthesized sounds. A set is up to five WAV files sharing a name:
 
 | File | Plays |
 |---|---|
@@ -2172,7 +2187,8 @@ mode = "stdout"          # off, stdout, midi, tcp, tcp-connect, pty, modem, or d
 # listen = "127.0.0.1:1234"  # tcp mode: bind address; modem mode: incoming-call address
 # connect = "bbs.example.com:1337"  # tcp-connect mode: remote to dial
 # device = "/dev/tty.usbserial-1420"  # device mode: the host serial port (COM3 on Windows)
-# telnet = true            # modem mode: start with AT*T1 telnet NVT translation on (default off)
+# telnet = true            # modem mode: start with AT*T1 telnet NVT translation on (unset: the
+#                          # stored AT&W profile decides; off without one)
 # session = "bbs-demo.session"  # modem mode: replay a scripted session instead of TCP
 # mt32_control_rom, mt32_pcm_rom, mt32_panel, mt32_lcd    # the emulated MT-32 (see below)
 # coppersynth_soundfont, coppersynth_mt32_mode, coppersynth_panel  # Coppersynth (see below)
@@ -2223,8 +2239,10 @@ Paula's serial in/out is connected:
   through -- the guest (or its S0 register, if auto-answer is configured)
   has to `ATA` to pick up, as a real modem waits for the terminal program
   to answer. `telnet = true` switches on `AT*T1`, the WiModem-style telnet
-  NVT translation layer, at power-on (it is off otherwise, and the guest
-  can still toggle it with `AT*T1`/`AT*T0`). Turn it on when the far end is
+  NVT translation layer, at power-on, and `telnet = false` switches it off.
+  With the key left out the setting comes from the profile a previous
+  session stored with `AT&W`, and is off when there is none. Either way the
+  guest can still toggle it with `AT*T1`/`AT*T0`. Turn it on when the far end is
   a real telnet server (a BBS) rather than a raw TCP byte service, so IAC
   option negotiation and CR handling are answered instead of leaking into
   the data stream.
@@ -2545,6 +2563,15 @@ Images are opened read/write. Both kinds of HDF work directly:
   of 256 KiB so the partition is an exact cylinder count. Writes to the
   partition go back to the image file; writes to the synthesized RDB area
   (re-partitioning) live only for the session.
+
+An IDE drive reports the geometry its disk was partitioned with: the heads
+and sectors per track the Rigid Disk Block records for the physical drive
+(for example 16 x 63 for an image prepared in another emulator or on a
+real drive). Every block the partition table describes is then reachable
+by cylinder/head/sector addressing, which is all a Kickstart 2.x/3.x
+`scsi.device` uses. A disk with no RDSK block, or one whose recorded
+geometry an ATA drive cannot present (more than 16 heads, or describing
+more sectors than the image holds), gets 16 heads x 32 sectors per track.
 
 A **gzip-compressed hardfile** attaches too -- the `.hdz` convention, or a
 plainly gzipped `.hdf`. Like the floppy formats it is recognised by content
@@ -3083,8 +3110,19 @@ buffer_kib = 96
 id = "quick-conner"
 base = "conner-cp2064"        # every figure from the built-in...
 seek_ms = [4, 15, 30]         # ...except these
-``` `HDD-TIMING-PLAN.md` in the source tree records
-each profile's sources and the figures that had to be estimated.
+```
+
+A table without `base` must give `rpm`, `heads` and `seek_ms`, plus its
+geometry as `zones` or as `cylinders` and `sectors_per_track`. `id` cannot be
+`instant`, `off`, `none` or `period`, which `timing` already uses. A profile
+the model cannot use is rejected with the configuration: `rpm` must be 1 to
+20000, `heads` 1 to 64, each zone's `sectors_per_track` 1 to 1024 with at
+least two cylinders in all, `buffer_kib` at least 1, and the three seek times
+must rise (track-to-track < average < full stroke). Millisecond figures may
+not exceed 600000 and second figures 600.
+
+`HDD-TIMING-PLAN.md` in the source tree records each profile's sources and
+the figures that had to be estimated.
 
 The model runs in emulated time, so a timed machine is as reproducible as
 any other: headless runs repeat byte for byte, a save state resumes

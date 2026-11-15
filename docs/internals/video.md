@@ -356,7 +356,16 @@ terminator's CTL to silence a channel for good, so a later bare
 SPRxDATA arm must redisplay the DMA-written words, not the last manual
 pattern (Hamazing's scene switch writes SPRxDATA=$0000 after a DMA sprite
 scene and expects invisible sprites; the stale write-shadow pattern would
-paint full-height bars). Only the authoritative sprite-DMA pass for a line
+paint full-height bars). The live collision path takes its sources from the
+same hardware-true view in every frame without sprite DMA, so a sprite the
+latch redisplays also collides. In such a frame neither path applies the
+control words' VSTART/VSTOP to an armed sprite, in the frame it was armed in
+or in any later one: those bits only steer Agnus's sprite DMA, and a sprite
+armed with VSTART equal to VSTOP is displayed, and collides, on every line.
+While sprite DMA fetches, the CPU/Copper write shadow is not the whole
+register history, and a latch seeded from it is kept to its vertical
+window. Only the
+authoritative sprite-DMA pass for a line
 writes the hardware view through: pre-display lines are computed twice, and
 the pre-display replay at the display start owns them (`sprprobe-latch` in
 timing-test/ pins the whole sequence).
@@ -1155,8 +1164,8 @@ state load), so nothing from the previous presentation stream weaves or
 glows into the next one.
 
 The deinterlacer also hosts the optional CRT phosphor-persistence stage
-(`[display] phosphor` / `COPPERLINE_PHOSPHOR`, off by default, clamped to
-0.95): when on, `present_with_phosphor` blends each presented frame over a
+(`[display] phosphor` / `COPPERLINE_PHOSPHOR`, off by default, 0.0 to
+0.95; an out-of-range environment value is ignored with a warning): when on, `present_with_phosphor` blends each presented frame over a
 retained copy of the previous one, keeping the `phosphor` fraction of the
 old value per channel (quantized to 1/256) for an exponential trail. This
 is what fuses field-rate flicker

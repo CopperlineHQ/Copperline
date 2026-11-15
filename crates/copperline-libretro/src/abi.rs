@@ -19,6 +19,30 @@ pub const KEYBOARD: u32 = 3;
 pub const CD32_PAD: u32 = JOYPAD | (2 << 8);
 pub const AUTO: u32 = JOYPAD | (1 << 8);
 
+/// `RETRO_ENVIRONMENT_*` commands, with the header's values. A frontend
+/// dispatches on the whole number, so a command the header defines with
+/// `RETRO_ENVIRONMENT_EXPERIMENTAL` is not recognised without that bit.
+pub const ENVIRONMENT_EXPERIMENTAL: u32 = 0x10000;
+pub const ENVIRONMENT_SET_MESSAGE: u32 = 6;
+pub const ENVIRONMENT_GET_SYSTEM_DIRECTORY: u32 = 9;
+pub const ENVIRONMENT_SET_PIXEL_FORMAT: u32 = 10;
+pub const ENVIRONMENT_SET_INPUT_DESCRIPTORS: u32 = 11;
+pub const ENVIRONMENT_SET_DISK_CONTROL_INTERFACE: u32 = 13;
+pub const ENVIRONMENT_GET_VARIABLE: u32 = 15;
+pub const ENVIRONMENT_SET_VARIABLES: u32 = 16;
+pub const ENVIRONMENT_SET_SUPPORT_NO_GAME: u32 = 18;
+pub const ENVIRONMENT_GET_LOG_INTERFACE: u32 = 27;
+pub const ENVIRONMENT_GET_SAVE_DIRECTORY: u32 = 31;
+pub const ENVIRONMENT_SET_SYSTEM_AV_INFO: u32 = 32;
+pub const ENVIRONMENT_SET_CONTROLLER_INFO: u32 = 35;
+pub const ENVIRONMENT_SET_MEMORY_MAPS: u32 = 36 | ENVIRONMENT_EXPERIMENTAL;
+pub const ENVIRONMENT_SET_GEOMETRY: u32 = 37;
+pub const ENVIRONMENT_GET_AUDIO_VIDEO_ENABLE: u32 = 47 | ENVIRONMENT_EXPERIMENTAL;
+pub const ENVIRONMENT_GET_SAVESTATE_CONTEXT: u32 = 72 | ENVIRONMENT_EXPERIMENTAL;
+
+/// `RETRO_PIXEL_FORMAT_XRGB8888`.
+pub const PIXEL_FORMAT_XRGB8888: u32 = 1;
+
 /// `retro_get_memory_data` / `retro_get_memory_size` region ids.
 pub const MEMORY_SAVE_RAM: u32 = 0;
 pub const MEMORY_SYSTEM_RAM: u32 = 2;

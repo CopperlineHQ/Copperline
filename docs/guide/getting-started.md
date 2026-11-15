@@ -194,7 +194,7 @@ features to keep; the [FluxBridge](fluxbridge.md), [MT-32](mt32.md), and
 | `profile-stats` | yes | Detailed host-cost counters for native diagnostics. |
 | `bench-bin` | no | The headless `copperline-bench` benchmark binary (see [](browser.md)). |
 | `display-plan-trace` | no | Display-plan tracing (`COPPERLINE_TRACE_DISPLAY_PLAN`) in release builds; debug and test builds always have it. |
-| `internal-diagnostics` | no | Environment overrides that deliberately change timing (`COPPERLINE_NO_BUS_ARB` and similar), for local investigation only. |
+| `internal-diagnostics` | no | Environment overrides that deliberately change timing or rendering (`COPPERLINE_NO_BUS_ARB` and similar), for local investigation only. |
 
 ### Tests
 

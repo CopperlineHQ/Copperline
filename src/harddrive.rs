@@ -963,6 +963,36 @@ impl HardDriveImage {
         self.total_sectors
     }
 
+    /// The physical drive geometry recorded in the disk's Rigid Disk Block:
+    /// `(cylinders, heads, sectors per track)` from the RDSK block's
+    /// physical-drive fields, as the partitioning tool read them from the
+    /// drive the disk was prepared on. `None` when the first sectors hold no
+    /// RDSK block with a valid checksum and 512-byte blocks.
+    pub(crate) fn rdb_physical_geometry(&mut self) -> Option<(u32, u32, u32)> {
+        let mut sector = [0u8; SECTOR_SIZE];
+        let limit = (RDB_LOCATION_LIMIT as u64).min(self.total_sectors);
+        for lba in 0..limit {
+            if self.read_sector_real(lba, &mut sector).is_err() {
+                return None;
+            }
+            if &sector[..4] != b"RDSK" {
+                continue;
+            }
+            let be32 =
+                |offset: usize| u32::from_be_bytes(sector[offset..offset + 4].try_into().unwrap());
+            let summed_longs = be32(4) as usize;
+            if !(26..=SECTOR_SIZE / 4).contains(&summed_longs) || be32(16) != SECTOR_SIZE as u32 {
+                return None;
+            }
+            let sum = (0..summed_longs).fold(0u32, |sum, i| sum.wrapping_add(be32(i * 4)));
+            if sum != 0 {
+                return None;
+            }
+            return Some((be32(64), be32(72), be32(68)));
+        }
+        None
+    }
+
     /// Whether the guest's writes are refused: a CHD with no write overlay,
     /// a read-only session copy, or a physical disk attached read-only.
     /// Writes to such a drive fail with `PermissionDenied`, which the
@@ -1098,6 +1128,7 @@ impl HardDriveImage {
         if self.write_protected() {
             return Err(Self::write_protected_error());
         }
+        self.check_range(lba, (buf.len() / SECTOR_SIZE) as u64)?;
         if self.fault.is_empty() {
             return self.write_sectors_real(lba, buf);
         }
@@ -1161,6 +1192,20 @@ impl HardDriveImage {
         }
     }
 
+    /// Refuse a transfer that does not lie wholly inside the drive. The
+    /// controllers range-check a request's first block; one that streams
+    /// further blocks (an SD multi-block write) advances past that check,
+    /// and a raw image file would otherwise simply grow.
+    fn check_range(&self, lba: u64, sectors: u64) -> std::io::Result<()> {
+        match lba.checked_add(sectors) {
+            Some(end) if end <= self.total_sectors => Ok(()),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "transfer runs past the end of the drive",
+            )),
+        }
+    }
+
     fn write_protected_error() -> std::io::Error {
         std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -1191,6 +1236,7 @@ impl HardDriveImage {
     fn write_sectors_real(&mut self, lba: u64, buf: &[u8]) -> std::io::Result<()> {
         debug_assert!(buf.len().is_multiple_of(SECTOR_SIZE));
         let sectors = (buf.len() / SECTOR_SIZE) as u64;
+        self.check_range(lba, sectors)?;
         let overlay = self.overlay_sectors();
         let in_overlay = overlay.saturating_sub(lba).min(sectors) as usize * SECTOR_SIZE;
         let (head, tail) = buf.split_at(in_overlay);
@@ -1225,6 +1271,7 @@ impl HardDriveImage {
         if self.write_protected() {
             return Err(Self::write_protected_error());
         }
+        self.check_range(lba, 1)?;
         if let Some(overlay) = &mut self.rdb_overlay {
             if lba < u64::from(CYL_SECTORS) {
                 if !self.overlay_write_warned {

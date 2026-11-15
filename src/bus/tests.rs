@@ -10,7 +10,9 @@ use super::{
     framebuffer_x_for_live_collision_hpos, live_bitplane_collision_bits,
     live_bitplane_collision_pixel_at, live_display_window_x, live_manual_sprite_collision_sources,
     live_playfield_collision_pixel, live_sprite_playfield_collision_bits_in_range,
-    live_sprite_sprite_collision_bits, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
+    live_sprite_source_framebuffer_bounds, live_sprite_source_has_pixels,
+    live_sprite_source_pixel_presence, live_sprite_sprite_collision_bits,
+    live_sprite_wide_presence, sprite_hstart_for_fmode, visible_start_vpos_for_diw,
     BeamChipRamWrite, BeamRegisterWrite, BeamWriteSource, BitplaneBplcon0Delay, Bus, BusSlotRecord,
     CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuTraceSlot,
     CpuWaitClass, CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData,
@@ -40,6 +42,7 @@ use crate::chipset::cia::{
 use crate::chipset::copper::{CopperWait, DMACON_COPEN};
 use crate::chipset::denise::BPLCON2_RDRAM;
 use crate::chipset::denise::{rgb12_to_rgba8, DeniseRevision, DiwHigh, COLOR_TRANSPARENCY_BIT};
+use crate::chipset::paula::INT_DSKBLK;
 use crate::chipset::paula::{
     pending_ipl, Paula, DMACON_DMAEN, INT_AUD0, INT_BLIT, INT_COPER, INT_EXTER, INT_MASTER,
     INT_PORTS, INT_VERTB, PAULA_CLOCK_HZ,
@@ -518,6 +521,12 @@ fn cpu_trace_peek_follows_agnus_chip_ram_mirroring() {
     bus.set_agnus_revision(AgnusRevision::Ocs);
     bus.mem.chip_ram[0..2].copy_from_slice(&[0xCA, 0xFE]);
 
+    assert_eq!(bus.peek_word_any(0x0008_0000), 0xCAFE);
+    assert_eq!(bus.peek_cpu_trace_data(0x0008_0000, 2), 0xCAFE);
+
+    // An 8372A with 512 KiB fitted is strapped with A19 following CPU A23,
+    // so the first bank still repeats at $080000.
+    bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
     assert_eq!(bus.peek_word_any(0x0008_0000), 0xCAFE);
     assert_eq!(bus.peek_cpu_trace_data(0x0008_0000, 2), 0xCAFE);
 }
@@ -1213,75 +1222,129 @@ fn frame_analyzer_attributes_cpu_wait_to_fixed_dma() {
     assert_eq!(owners[2], b'P');
 }
 
-#[test]
-fn frame_analyzer_attributes_posted_write_drain_waits_to_the_blitter() {
-    // A posted 020 chip write drains through the ordinary arbitration, in
-    // which a busy nice blitter keeps every access cycle: the slowdown
-    // yield that frees a synchronous grant after three misses does not
-    // apply to the drain, so every clock it waits belongs to the blitter,
-    // however many in a row the CPU misses. Only the port turnaround the
-    // following read pays after the drain is the CPU's own.
+/// A 020+ bus with a BLTPRI-clear blit that uses the chip bus on every
+/// cycle (all four channels) and runs for `rows` rows of four words.
+fn bus_with_short_cycle_cpu_and_busy_nice_blitter(rows: u16) -> Bus {
     let mut bus = empty_bus();
     bus.set_chipset_revisions(AgnusRevision::Ecs8375, DeniseRevision::Ecs8373);
     bus.set_cpu_clocks_per_cck(4);
     bus.set_cpu_short_bus_cycle(true);
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
-    bus.agnus.hpos = 0x20;
-    bus.blitter.bltcon0 = 0x0E00;
+    bus.agnus.hpos = 0x40;
+    bus.blitter.bltcon0 = 0x0FCA;
     bus.blitter.bltcon1 = 0;
     bus.blitter.bltafwm = 0xFFFF;
     bus.blitter.bltalwm = 0xFFFF;
-    bus.blitter.bltapt = 0x10;
-    bus.blitter.bltbpt = 0x20;
-    bus.blitter.bltcpt = 0x30;
-    for (off, val) in [
-        (0x10, 0x1111),
-        (0x12, 0x2222),
-        (0x14, 0x3333),
-        (0x16, 0x4444),
-        (0x20, 0xAAAA),
-        (0x22, 0xBBBB),
-        (0x24, 0xCCCC),
-        (0x26, 0xDDDD),
-        (0x30, 0x5555),
-        (0x32, 0x6666),
-        (0x34, 0x7777),
-        (0x36, 0x8888),
-    ] {
-        write_chip_word(&mut bus, off, val);
-    }
-    bus.blitter.start_scheduled((1 << 6) | 4, &bus.mem.chip_ram);
-    bus.advance_chipset(4);
-    bus.set_frame_analyzer_enabled(true);
+    bus.blitter.bltapt = 0x1000;
+    bus.blitter.bltbpt = 0x2000;
+    bus.blitter.bltcpt = 0x3000;
+    bus.blitter.bltdpt = 0x3000;
+    bus.blitter
+        .start_scheduled((rows << 6) | 4, &bus.mem.chip_ram);
+    bus.advance_chipset(8);
+    assert!(bus.blitter.busy);
     bus.set_cpu_bus_arbitration_enabled(true);
+    bus
+}
+
+#[test]
+fn frame_analyzer_attributes_posted_write_drain_waits_to_the_nice_blitter() {
+    // A posted 020 chip write is a bus request like a synchronous access:
+    // a BLTPRI-clear blitter passes it over for the slowdown limit and then
+    // gives up one bus cycle for it. The clocks it waits belong to the
+    // blitter, and so do the ones the following read waits: the blitter
+    // takes its cycles back while the port turns around.
+    let mut bus = bus_with_short_cycle_cpu_and_busy_nice_blitter(64);
+    bus.set_frame_analyzer_enabled(true);
 
     // The write posts without stalling; the read that follows first
-    // retires it, waiting out the blit's remaining source fetches.
+    // retires it.
     bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
     assert_eq!(bus.take_slice_bus_advance().0, 0);
     bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Read);
-    let (cck, _) = bus.take_slice_bus_advance();
-    assert!(!bus.blitter.busy);
+    let _ = bus.take_slice_bus_advance();
+    assert!(
+        bus.blitter.busy,
+        "the write retires long before the blit ends"
+    );
 
     let trace = bus
         .frame_bus_trace()
         .expect("the armed analyzer records the slice");
-    let nice = trace.cpu_wait_by_class[CpuWaitClass::BlitterNice.accounting_index()];
-    let port = trace.cpu_wait_by_class[CpuWaitClass::Port.accounting_index()];
-    assert!(
-        nice > u64::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT),
-        "drain waits stay the blitter's past the slowdown limit: {nice} of {cck}"
-    );
+    let limit = u64::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT);
     assert_eq!(
         trace.cpu_wait_by_kind[CpuBusAccessKind::Write.accounting_index()],
-        nice
+        limit,
+        "the drain waits exactly the slowdown limit"
     );
-    assert!(port >= 1, "the read pays the port turnaround: {port}");
+    let nice = trace.cpu_wait_by_class[CpuWaitClass::BlitterNice.accounting_index()];
+    let port = trace.cpu_wait_by_class[CpuWaitClass::Port.accounting_index()];
+    assert!(nice >= limit, "drain waits are the blitter's: {nice}");
     assert_eq!(
         trace.cpu_wait_by_kind[CpuBusAccessKind::Read.accounting_index()],
-        port
+        nice + port - limit,
+        "the read waits for its own grant after the write retires"
     );
     assert_eq!(trace.cpu_wait_cck, nice + port);
+}
+
+#[test]
+fn posted_write_request_counts_blitter_misses_while_the_cpu_runs_on() {
+    // The bus request of a posted write stays asserted while the execution
+    // unit carries on with work that needs no chip access, so the blitter's
+    // slowdown counter runs for it and the write retires after the limit,
+    // not when the blit ends.
+    let mut bus = bus_with_short_cycle_cpu_and_busy_nice_blitter(64);
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    assert_eq!(bus.take_slice_bus_advance().0, 0);
+    assert_eq!(bus.cpu_posted_write_debt, 1);
+
+    bus.advance_chipset(u32::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT));
+    assert_eq!(bus.cpu_posted_write_debt, 1, "passed over for the limit");
+    bus.advance_chipset(1);
+    assert_eq!(bus.cpu_posted_write_debt, 0, "the blitter yields one cycle");
+    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Cpu);
+    assert!(bus.blitter.busy);
+
+    // The next write posts again without stalling.
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    assert_eq!(bus.take_slice_bus_advance().0, 0);
+}
+
+#[test]
+fn back_to_back_posted_writes_are_not_starved_by_a_nice_blitter() {
+    // With BLTPRI clear the CPU gets one chip cycle for every three the
+    // blitter takes. Back-to-back 020 chip writes therefore advance at
+    // limit + 1 colour clocks each instead of waiting for the whole blit.
+    let mut bus = bus_with_short_cycle_cpu_and_busy_nice_blitter(64);
+    let writes = 16;
+    let mut total = 0;
+    for _ in 0..writes {
+        bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+        total += bus.take_slice_bus_advance().0;
+    }
+    assert!(bus.blitter.busy, "the blit outlasts the writes");
+    let per_write = u32::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT) + 1;
+    assert!(
+        total <= writes * per_write,
+        "{writes} writes took {total} colour clocks"
+    );
+    assert!(
+        total >= (writes - 1) * per_write - 1,
+        "the blitter keeps its three cycles in four: {total}"
+    );
+}
+
+#[test]
+fn posted_write_waits_out_a_bltpri_blitter() {
+    // With BLTPRI set the blitter never yields a bus cycle, to a posted
+    // write no more than to a synchronous access.
+    let mut bus = bus_with_short_cycle_cpu_and_busy_nice_blitter(2);
+    bus.agnus.dmacon |= DMACON_BLTPRI;
+    bus.grant_cpu_bus_access_at(Some(0x0002_0000), 2, CpuBusAccessKind::Write);
+    bus.advance_chipset(u32::from(BLITTER_SLOWDOWN_CPU_MISS_LIMIT) + 4);
+    assert!(bus.blitter.busy);
+    assert_eq!(bus.cpu_posted_write_debt, 1);
 }
 
 #[test]
@@ -1863,7 +1926,7 @@ fn run_copper_guarded_move(revision: AgnusRevision, register: u16, cdang: bool) 
     }
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(8);
     bus
 }
@@ -3096,6 +3159,38 @@ fn fat_gary_coldboot_is_set_by_power_on_not_by_the_reset_line() {
 }
 
 #[test]
+fn a_reset_restarts_a_stopped_battery_clock_on_the_emulated_timeline() {
+    const SEED: u64 = 1_111_111_111; // 2005-03-18 01:58:31
+    let stopped_clock_at = |secs: u64| {
+        let mut bus = empty_bus();
+        bus.set_rtc_chip(crate::rtc::RtcChip::Rp5c01);
+        bus.rtc.set_seed(Some(SEED), false);
+        bus.emulated_cck = secs * PAULA_CLOCK_HZ as u64;
+        // The guest clears TIMER EN: the counters stand at seed + secs.
+        let now = bus.emulated_seconds();
+        bus.rtc.write(0xD * 4, 4, 0x0, now);
+        bus
+    };
+
+    // The CPU RESET instruction leaves emulated time running: the clock
+    // starts again there, not at time zero with the session counted in.
+    let mut bus = stopped_clock_at(100);
+    bus.reset_custom_chips_from_cpu_reset();
+    let now = bus.emulated_seconds();
+    assert_eq!(now, 100.0);
+    assert_eq!(bus.rtc.current_unix(now), SEED + 100);
+    assert_eq!(bus.rtc.current_unix(now + 5.0), SEED + 105);
+
+    // A keyboard reset starts emulated time again from zero, and the
+    // clock it restarted counts on from where it stood.
+    let mut bus = stopped_clock_at(100);
+    bus.reset_for_keyboard_reset();
+    assert_eq!(bus.emulated_seconds(), 0.0);
+    assert_eq!(bus.rtc.current_unix(0.0), SEED + 100);
+    assert_eq!(bus.rtc.current_unix(5.0), SEED + 105);
+}
+
+#[test]
 fn cpu_reset_drives_external_floppy_reset_line() {
     let mut bus = empty_bus();
     bus.floppy.set_connected_drives([true, true, false, false]);
@@ -3127,7 +3222,7 @@ fn copper_jump_latches_bitplane_state_from_chip_ram() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, 0x0100));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // Four MOVEs at the 4-color-clock Copper cadence (last write at +14).
     bus.advance_chipset(18);
 
@@ -3152,7 +3247,7 @@ fn copper_can_fetch_list_from_chip_ram_base() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, 0x0000));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(6);
 
     assert_eq!(bus.denise.palette[0], 0x00F0);
@@ -3170,7 +3265,7 @@ fn copper_interrupt_wait_fires_coper_at_programmed_line() {
     write_chip_word(&mut bus, cop1 + 10, 0xFFFE);
     bus.agnus.cop1lc = cop1 as u32;
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     let target_cck = 0xD4 * COLORCLOCKS_PER_LINE + 0x20;
     bus.advance_chipset(target_cck);
@@ -3222,7 +3317,7 @@ fn bus_with_copper_intreq_move_on_second_word_slot() -> Bus {
     bus.agnus.cop1lc = cop1 as u32;
     bus.agnus.hpos = 0x20;
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     // The first MOVE word is fetched at $20. The CPU's granted read at $21
     // samples before the Copper fetches the value and asserts INTREQ during
@@ -3283,6 +3378,37 @@ fn long_read_samples_intreq_word_in_its_own_bus_slot() {
         ((INT_MASTER as u64) << 16) | INT_COPER as u64
     );
     assert_ne!(bus.paula.intreq & INT_COPER, 0);
+}
+
+#[test]
+fn long_read_returns_its_first_word_when_that_word_cycle_completes() {
+    // A 68000 long read of a custom register pair is two word cycles, two
+    // colour clocks apart. The first word is the value a word read of the
+    // same register returns from the same starting position, not the value
+    // at the end of the second cycle.
+    let bus_at = |hpos: u32| {
+        let mut bus = empty_bus();
+        bus.agnus.vpos = 0x40;
+        bus.agnus.hpos = hpos;
+        bus.set_cpu_bus_arbitration_enabled(true);
+        bus
+    };
+
+    let word = bus_at(0x60).custom_read(0x006, 2);
+    assert_eq!(word >> 8, 0x40);
+    let long = bus_at(0x60).custom_read(0x006, 4);
+    assert_eq!(long >> 16, word);
+
+    // The pair of words therefore tears when the counter steps between the
+    // two cycles: the long read's VPOSR half is one word cycle older than
+    // its VHPOSR half.
+    let mut bus = bus_at(0x60);
+    let first = bus.custom_read(0x004, 4);
+    let mut reference = bus_at(0x60);
+    let vposr = reference.custom_read(0x004, 2);
+    let vhposr = reference.custom_read(0x006, 2);
+    assert_eq!(first >> 16, vposr);
+    assert_eq!(first & 0xFFFF, vhposr);
 }
 
 #[test]
@@ -3477,7 +3603,7 @@ fn copper_jump_does_not_raise_delayed_coper_immediately() {
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     assert_eq!(bus.paula.intreq & INT_COPER, 0);
 }
@@ -3493,12 +3619,16 @@ fn copper_dma_enable_gates_instruction_execution() {
 
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     assert_eq!(bus.denise.bplcon0, 0);
 
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x096, 2, (0x8000 | DMACON_DMAEN | DMACON_COPEN) as u64));
+    // The strobe came with DMA off, so the bus-request cycle is still owed:
+    // request at 0x20, first word at 0x22, second word and write at 0x24.
     bus.advance_chipset(4);
+    assert_eq!(bus.denise.bplcon0, 0);
+    bus.advance_chipset(2);
     assert_eq!(bus.denise.bplcon0, 0x4200);
 }
 
@@ -3526,7 +3656,7 @@ fn copper_lc_write_retargets_dormant_copper_pc() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF)); // strobe: list 1, PC = cop1
+    cpu_copjmp_strobe(&mut bus, 0x088); // strobe: list 1, PC = cop1
 
     // Dormant retarget: the rewrite moves the PC, no strobe needed.
     assert!(!bus.custom_write(0x082, 2, redirected as u64));
@@ -3597,8 +3727,8 @@ fn copper_dma_enable_gates_current_pc_until_copjmp_strobe() {
     assert_eq!(bus.denise.palette[0], 0x0999);
     assert_eq!(bus.denise.bplcon0, 0);
 
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
-    bus.advance_chipset(4);
+    cpu_copjmp_strobe(&mut bus, 0x088);
+    bus.advance_chipset(6);
     assert_eq!(bus.denise.bplcon0, 0x4200);
 }
 
@@ -3644,7 +3774,7 @@ fn copjmp_strobe_fires_on_read_access() {
         0xCAFE,
         "the strobe address is undriven: the read must float to the residue"
     );
-    bus.advance_chipset(4);
+    bus.advance_chipset(6);
     assert_eq!(
         bus.denise.bplcon0, 0x4200,
         "a read of COPJMP1 must strobe the jump to COP1LC"
@@ -3658,7 +3788,7 @@ fn copjmp_strobe_fires_on_read_access() {
         0xBEEF,
         "the strobe address is undriven: the read must float to the residue"
     );
-    bus.advance_chipset(4);
+    bus.advance_chipset(6);
     assert_eq!(
         bus.denise.palette[0], 0x0999,
         "a read of COPJMP2 must strobe the jump to COP2LC"
@@ -3879,19 +4009,16 @@ fn sleeping_copper_deadline_matches_reference_across_random_beam_spans() {
 }
 
 #[test]
-fn next_copper_wakeup_cck_waits_for_vertical_low_byte_rollover_after_line_255() {
+fn next_copper_wakeup_cck_spans_the_lines_after_the_vertical_low_byte_rollover() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
-    bus.agnus.vpos = 0xFF;
-    bus.agnus.hpos = 0xDF;
     bus.copper.wait(CopperWait::new(0x1B01, 0xFFFE));
 
-    let expected = bus.agnus.cck_until_line_start(0x11B).unwrap();
-    assert_eq!(
-        expected,
-        (COLORCLOCKS_PER_LINE - 0xDF) + 0x1B * COLORCLOCKS_PER_LINE
-    );
-    assert_eq!(bus.next_copper_wakeup_cck(), Some(expected));
+    // Sleeping on line 255 the comparator already matches ($FF >= $1B):
+    // there is no later deadline to skip to.
+    bus.agnus.vpos = 0xFF;
+    bus.agnus.hpos = 0x40;
+    assert_eq!(bus.next_copper_wakeup_cck(), Some(0));
 
     bus.agnus.vpos = 0x100;
     bus.agnus.hpos = 0;
@@ -3956,6 +4083,69 @@ fn copper_line_310_move_lands_at(bitplane_dma: bool) -> Option<u32> {
         }
     }
     None
+}
+
+/// Run a Copper list whose first WAIT is `first_wait` (a position on line
+/// 255), followed by WAIT vp=$36 and a MOVE of $0123 into COLOR00. Returns
+/// the beam line the write landed on.
+fn copper_move_behind_a_line_255_wait_lands_at(first_wait: u16) -> Option<u32> {
+    let mut bus = empty_bus();
+    let cop1 = 0x0100usize;
+    write_chip_word(&mut bus, cop1, first_wait);
+    write_chip_word(&mut bus, cop1 + 2, 0xFFFE);
+    write_chip_word(&mut bus, cop1 + 4, 0x3601);
+    write_chip_word(&mut bus, cop1 + 6, 0xFFFE);
+    write_chip_word(&mut bus, cop1 + 8, 0x0180);
+    write_chip_word(&mut bus, cop1 + 10, 0x0123);
+    write_chip_word(&mut bus, cop1 + 12, 0xFFFF);
+    write_chip_word(&mut bus, cop1 + 14, 0xFFFE);
+
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+    bus.agnus.vpos = 0x18;
+    bus.agnus.hpos = 0x30;
+    bus.copper.jump(cop1 as u32);
+
+    for _ in 0..(313 * 227) {
+        bus.advance_chipset(1);
+        if bus.denise.palette[0] == 0x0123 {
+            return Some(bus.agnus.vpos);
+        }
+        if bus.agnus.vpos == 0 && bus.agnus.hpos == 0 {
+            break;
+        }
+    }
+    None
+}
+
+#[test]
+fn copper_wait_evaluated_on_line_255_is_already_satisfied() {
+    // The Copper compares eight vertical bits. A WAIT for line $36 that
+    // is evaluated while the beam is still on line 255 sees $FF >= $36
+    // and releases at once: the MOVE behind it lands on line 255, not on
+    // line $136. (This is why lists hold the Copper to the end of line
+    // 255 first; see the next test.)
+    assert_eq!(
+        copper_move_behind_a_line_255_wait_lands_at(0xFF07),
+        Some(255)
+    );
+    assert_eq!(
+        copper_move_behind_a_line_255_wait_lands_at(0xFF81),
+        Some(255)
+    );
+}
+
+#[test]
+fn copper_wait_fetched_at_the_end_of_line_255_is_evaluated_after_the_wrap() {
+    // WAIT $FFDF, $FFE1 and $FFDD all release late enough on line 255
+    // that the next WAIT's comparison happens after the vertical low byte
+    // has wrapped, so it waits for line 256 + $36.
+    for first_wait in [0xFFDF, 0xFFE1, 0xFFDD] {
+        assert_eq!(
+            copper_move_behind_a_line_255_wait_lands_at(first_wait),
+            Some(310),
+            "first WAIT {first_wait:#06X}"
+        );
+    }
 }
 
 #[test]
@@ -4563,12 +4753,12 @@ fn copper_write_restrictions_require_copcon_for_blitter_registers() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(4);
     assert_eq!(bus.blitter.bltcon0, 0);
 
     assert!(!bus.custom_write(0x02E, 2, 0x0002));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(4);
     assert_eq!(bus.blitter.bltcon0, 0x1234);
 }
@@ -4637,7 +4827,7 @@ fn ecs_copper_can_clear_copcon_then_loses_lower_register_access() {
     assert!(!bus.custom_write(0x02E, 2, 0x0002));
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(8);
 
     assert_eq!(bus.agnus.copcon, 0);
@@ -4665,13 +4855,13 @@ fn copper_halts_on_forbidden_register_move_until_next_strobe() {
     assert!(!bus.custom_write(0x082, 2, illegal as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, legal as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     bus.advance_chipset(8);
     assert_eq!(bus.denise.palette[0], 0);
     assert!(!bus.copper.is_running());
 
-    assert!(!bus.custom_write(0x08A, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x08A);
     bus.advance_chipset(4);
     assert_eq!(bus.denise.palette[0], 0x0666);
 }
@@ -4696,7 +4886,7 @@ fn forbidden_copper_move_recovers_at_start_of_frame_from_cop1lc() {
     assert!(!bus.custom_write(0x082, 2, legal as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, illegal as u64));
-    assert!(!bus.custom_write(0x08A, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x08A);
     bus.advance_chipset(8);
 
     assert_eq!(bus.denise.palette[0], 0);
@@ -4733,7 +4923,7 @@ fn copper_move_updates_cop1lc_location_register() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(12);
 
     assert_eq!(bus.agnus.cop1lc, 0x030200);
@@ -4755,15 +4945,33 @@ fn copper_cannot_set_copcon_itself() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(8);
 
     assert_eq!(bus.agnus.copcon, 0);
     assert_eq!(bus.blitter.bltcon0, 0);
 }
 
+/// Strobe COPJMP1/COPJMP2 from the CPU so that the Copper's first fetch
+/// from the new list is due at the current beam position. After a CPU
+/// strobe the Copper spends one access-parity cycle requesting the bus
+/// (see `Copper::cpu_strobe`), so the strobe is issued two colour clocks
+/// earlier and the request cycle is run off here. Tests about what a list
+/// does, rather than about the strobe's own latency, start their lists
+/// with this. At the very start of a line there is no earlier colour clock
+/// to issue the strobe from, so the request cycle is left to run in line.
+fn cpu_copjmp_strobe(bus: &mut Bus, register: u64) {
+    if bus.agnus.hpos < 2 {
+        assert!(!bus.custom_write(register, 2, 0xFFFF));
+        return;
+    }
+    bus.agnus.hpos -= 2;
+    assert!(!bus.custom_write(register, 2, 0xFFFF));
+    bus.advance_chipset(2);
+}
+
 #[test]
-fn cpu_copjmp1_strobe_waits_for_target_instruction_dma_slots() {
+fn cpu_copjmp1_strobe_spends_a_request_cycle_before_the_first_fetch() {
     let mut bus = empty_bus();
     let cop1 = 0x0100usize;
     write_chip_word(&mut bus, cop1, 0x0180);
@@ -4775,19 +4983,70 @@ fn cpu_copjmp1_strobe_waits_for_target_instruction_dma_slots() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    assert!(!bus.custom_write(0x088, 2, 0x0000));
 
+    // Bus request at 0x20 (no memory cycle), idle half at 0x21, first-word
+    // fetch at 0x22, idle half at 0x23.
     bus.advance_chipset(1);
+    assert_eq!(bus.last_chip_bus_owner(), ChipBusOwner::Idle);
+    bus.advance_chipset(3);
     assert_eq!(bus.denise.palette[0], 0);
     assert!(bus.current_render_events().is_empty());
 
-    // First-word fetch at 0x20, idle half at 0x21, second-word fetch+write
-    // at 0x22 (recorded at its Denise-effective position, 0x26).
-    bus.advance_chipset(2);
+    // Second-word fetch and write at 0x24 (recorded at its
+    // Denise-effective position, 0x28).
+    bus.advance_chipset(1);
     assert_eq!(bus.denise.palette[0], 0x0123);
     let event = &bus.current_render_events()[0];
-    assert_eq!(event.hpos, 0x26);
+    assert_eq!(event.hpos, 0x28);
     assert_eq!(event.source, super::BeamWriteSource::Copper);
+}
+
+#[test]
+fn double_copjmp1_strobe_restarts_a_list_that_rewrites_cop1lc() {
+    // CLR.W COPJMP1 strobes twice, on its read cycle and on its write
+    // cycle four colour clocks later. A list that begins by rewriting
+    // COP1LC must not have that MOVE take effect between the two: the
+    // second strobe would then jump to the half-written address ($10100
+    // here, the new high word with the old low word) instead of
+    // restarting the list.
+    let list = 0x0100usize;
+    let next = 0x0001_0300usize;
+    let half_written = 0x0001_0100usize;
+    for first_strobe_hpos in [0x20, 0x21] {
+        let mut bus = empty_bus();
+        write_chip_word(&mut bus, list, 0x0080); // COP1LCH = $0001
+        write_chip_word(&mut bus, list + 2, 0x0001);
+        write_chip_word(&mut bus, list + 4, 0x0082); // COP1LCL = $0300
+        write_chip_word(&mut bus, list + 6, 0x0300);
+        write_chip_word(&mut bus, list + 8, 0x0180); // COLOR00: the list ran
+        write_chip_word(&mut bus, list + 10, 0x00F0);
+        write_chip_word(&mut bus, list + 12, 0xFFFF);
+        write_chip_word(&mut bus, list + 14, 0xFFFE);
+        write_chip_word(&mut bus, half_written, 0x0180); // must never run
+        write_chip_word(&mut bus, half_written + 2, 0x0F00);
+        write_chip_word(&mut bus, half_written + 4, 0xFFFF);
+        write_chip_word(&mut bus, half_written + 6, 0xFFFE);
+
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_COPEN;
+        bus.agnus.hpos = first_strobe_hpos;
+        assert!(!bus.custom_write(0x080, 2, 0x0000));
+        assert!(!bus.custom_write(0x082, 2, list as u64));
+        let _ = bus.read_custom_word(0x088); // the read cycle
+        bus.advance_chipset(4);
+        assert_eq!(
+            bus.agnus.cop1lc, list as u32,
+            "hpos {first_strobe_hpos:#x}: no MOVE has landed before the second strobe"
+        );
+        assert!(!bus.custom_write(0x088, 2, 0x0000)); // the write cycle
+        bus.advance_chipset(24);
+
+        assert_eq!(
+            bus.denise.palette[0], 0x00F0,
+            "hpos {first_strobe_hpos:#x}: the list was restarted"
+        );
+        assert_eq!(bus.agnus.cop1lc, next as u32);
+    }
 }
 
 #[test]
@@ -4810,7 +5069,7 @@ fn copper_move_to_copjmp2_loads_second_list() {
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, cop2 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // COPJMP2 MOVE fetch (4 cck), the strobe's two tail cycles
     // (COP_JMP1/COP_JMP2, reloading the program counter), then the cop2
     // MOVE fetch: write at hpos 0x2A.
@@ -4843,7 +5102,7 @@ fn copper_copjmp2_strobe_waits_for_target_instruction_dma_slots() {
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, cop2 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
 
     bus.advance_chipset(2);
     assert_eq!(bus.denise.palette[0], 0);
@@ -4891,7 +5150,7 @@ fn copper_can_program_cop2lc_before_copjmp2_loop_branch() {
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, stale_cop2 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // Three programming MOVEs, the strobe's two tail cycles
     // (COP_JMP1/COP_JMP2), then the jumped-to MOVE: the final write lands
     // at hpos 0x32.
@@ -4923,7 +5182,7 @@ fn copper_can_program_cop1lc_before_copjmp1_loop_branch() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // Two programming MOVEs and the COPJMP1 MOVE, the strobe's two tail
     // cycles (COP_JMP1/COP_JMP2), then the jumped-to MOVE: the final write
     // lands at hpos 0x32.
@@ -4953,7 +5212,7 @@ fn copper_programmed_cop1lc_sets_automatic_frame_restart() {
     bus.agnus.hpos = 0x20;
     assert!(!bus.custom_write(0x080, 2, 0x0000));
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     bus.advance_chipset(8);
 
     assert_eq!(bus.agnus.cop1lc, programmed_cop1 as u32);
@@ -4991,7 +5250,7 @@ fn automatic_vblank_reload_restarts_cop1_after_copjmp2_branch() {
     assert!(!bus.custom_write(0x082, 2, cop1 as u64));
     assert!(!bus.custom_write(0x084, 2, 0x0000));
     assert!(!bus.custom_write(0x086, 2, cop2 as u64));
-    assert!(!bus.custom_write(0x088, 2, 0xFFFF));
+    cpu_copjmp_strobe(&mut bus, 0x088);
     // MOVE 0x0111 writes at 0x22; the COPJMP2 MOVE, its two strobe tail
     // cycles (COP_JMP1/COP_JMP2), then the cop2 MOVE follow, writing 0x0222
     // at hpos 0x2E. Recorded render events sit at the writes'
@@ -9733,10 +9992,10 @@ fn manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
     bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[2] = pos;
-    bus.denise.sprctl[2] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(2, pos);
+    bus.denise.write_sprctl(2, ctl);
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
 
@@ -9757,10 +10016,10 @@ fn frame_end_completes_unread_live_sprite_sprite_clxdat() {
     bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[2] = pos;
-    bus.denise.sprctl[2] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(2, pos);
+    bus.denise.write_sprctl(2, ctl);
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
 
@@ -9781,12 +10040,12 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_sprite_clxdat() {
     bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[1] = pos;
-    bus.denise.sprctl[1] = ctl | 0x0080;
-    bus.denise.sprpos[2] = pos;
-    bus.denise.sprctl[2] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(1, pos);
+    bus.denise.write_sprctl(1, ctl | 0x0080);
+    bus.denise.write_sprpos(2, pos);
+    bus.denise.write_sprctl(2, ctl);
     bus.denise.clxcon = 1 << 12;
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
@@ -9813,12 +10072,12 @@ fn attached_manual_sprite_odd_data_writes_accumulate_later_live_sprite_sprite_cl
     bus.agnus.hpos = 0x34;
     bus.denise.diwstrt = 0x2C83;
     bus.denise.diwstop = 0x2DC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[1] = pos;
-    bus.denise.sprctl[1] = ctl | 0x0080;
-    bus.denise.sprpos[2] = pos;
-    bus.denise.sprctl[2] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(1, pos);
+    bus.denise.write_sprctl(1, ctl | 0x0080);
+    bus.denise.write_sprpos(2, pos);
+    bus.denise.write_sprctl(2, ctl);
     bus.denise.clxcon = 1 << 12;
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
@@ -9840,12 +10099,12 @@ fn attached_manual_sprite_odd_data_writes_accumulate_later_live_sprite_sprite_cl
 fn attached_manual_sprite_sources_preserve_even_intervals_outside_odd_attachment() {
     let mut bus = empty_bus();
     let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprdata[0] = 0xA000;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprdata(0, 0xA000);
     bus.denise.spr_armed[0] = true;
-    bus.denise.sprpos[1] = pos;
-    bus.denise.sprctl[1] = ctl | 0x0080;
+    bus.denise.write_sprpos(1, pos);
+    bus.denise.write_sprctl(1, ctl | 0x0080);
     let frame_base = bus.capture_render_snapshot();
     let events = [BeamRegisterWrite {
         vpos: RENDER_VISIBLE_START_VPOS,
@@ -9856,7 +10115,7 @@ fn attached_manual_sprite_sources_preserve_even_intervals_outside_odd_attachment
     }];
 
     let event_index = BeamEventIndex::from_register_writes(&events);
-    let sources = live_manual_sprite_collision_sources(frame_base, &event_index, 0x2C, 0, 8);
+    let sources = live_manual_sprite_collision_sources(frame_base, &event_index, 0x2C, 0, 8, true);
 
     assert!(sources.iter().any(|source| {
         source.sprite == 0
@@ -9899,9 +10158,9 @@ fn manual_sprite_position_write_on_compare_boundary_preserves_live_source() {
     let second_hstart = 0x008E;
     let (first_pos, ctl) = sprite_control_words(0x2C, 0x2D, first_hstart);
     let (second_pos, _) = sprite_control_words(0x2C, 0x2D, second_hstart);
-    bus.denise.sprpos[0] = first_pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprdata[0] = 0xFFFF;
+    bus.denise.write_sprpos(0, first_pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprdata(0, 0xFFFF);
     bus.denise.spr_armed[0] = true;
     let frame_base = bus.capture_render_snapshot();
     let boundary_hpos = u32::from(first_hstart / 2) + DENISE_HPOS_LAG_CCK;
@@ -9921,6 +10180,7 @@ fn manual_sprite_position_write_on_compare_boundary_preserves_live_source() {
         0x2C,
         first_base_x,
         first_base_x + 2,
+        true,
     );
 
     assert!(sources.iter().any(|source| {
@@ -9950,8 +10210,8 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     // still match (CLXCON_RESET's all-six-planes=1 never matches one plane ->
     // no collision on hardware).
     bus.denise.clxcon = 0x0FC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
     bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
@@ -9977,6 +10237,158 @@ fn manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
 }
 
+/// One lores bitplane row whose second pixel is set, on the framebuffer row
+/// of line $2C, with CLXCON matching bitplane 1 only.
+fn stage_one_plane_collision_row(bus: &mut Bus) {
+    bus.denise.diwstrt = 0x2C81;
+    bus.denise.diwstop = 0x2DC1;
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x0038;
+    bus.denise.bplcon0 = 0x1000;
+    bus.denise.clxcon = 0x0FC1;
+    bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
+    bus.current_frame_bitplane_rows[0] = Some(CapturedBitplaneRow {
+        nplanes: 1,
+        words_per_row: 1,
+        fetch_origin_cck: None,
+        planes: [
+            vec![0x4000],
+            vec![0],
+            vec![0],
+            vec![0],
+            vec![0],
+            vec![0],
+            Vec::new(),
+            Vec::new(),
+        ],
+    });
+}
+
+#[test]
+fn latched_sprite_collides_in_a_frame_with_no_sprite_register_writes() {
+    let mut bus = empty_bus();
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
+    // Sprite DMA is off. The CPU positions sprite 0 and arms it with an
+    // SPR0DATA write, then leaves the sprite registers alone.
+    assert!(!bus.custom_write(0x140, 2, u64::from(pos)));
+    assert!(!bus.custom_write(0x142, 2, u64::from(ctl)));
+    assert!(!bus.custom_write(0x146, 2, 0x0000));
+    assert!(!bus.custom_write(0x144, 2, 0x8000));
+    assert!(bus.denise.spr_hw_armed[0]);
+
+    // A later frame: no sprite register is written in it, and Denise's
+    // display latch is still armed, so the sprite serializes on every
+    // line and still collides with the playfield.
+    bus.begin_new_beam_frame();
+    assert!(bus.current_frame_collision_sprite_events.is_empty());
+    let _ = bus.custom_read(0x00E, 2);
+    bus.current_frame_visible_start_vpos = 0x2C;
+    stage_one_plane_collision_row(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x38;
+    advance_collision_fixture_observation(&mut bus, 6);
+
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8022);
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
+}
+
+#[test]
+fn armed_sprite_collides_on_every_line_whatever_its_control_words_say() {
+    // Denise has no vertical comparator: VSTART/VSTOP only steer Agnus's
+    // sprite DMA. With sprite DMA off, a sprite armed by an SPRxDATA write
+    // whose control words describe an empty window (VSTART = VSTOP = 0)
+    // still serializes, and collides, on every line.
+    let (pos, ctl) = sprite_control_words_for_output(0, 0, 0x0082);
+    assert_eq!((pos >> 8, ctl >> 8, ctl & 0x0006), (0, 0, 0));
+    let arm = |bus: &mut Bus| {
+        assert!(!bus.custom_write(0x140, 2, u64::from(pos)));
+        assert!(!bus.custom_write(0x142, 2, u64::from(ctl)));
+        assert!(!bus.custom_write(0x146, 2, 0x0000));
+        assert!(!bus.custom_write(0x144, 2, 0x8000));
+    };
+    let observe = |bus: &mut Bus| {
+        let _ = bus.custom_read(0x00E, 2);
+        bus.current_frame_visible_start_vpos = 0x2C;
+        stage_one_plane_collision_row(bus);
+        bus.agnus.vpos = 0x2C;
+        bus.agnus.hpos = 0x38;
+        advance_collision_fixture_observation(bus, 6);
+        bus.custom_read(0x00E, 2)
+    };
+
+    // The frame the sprite is armed in: the writes land before the line.
+    let mut bus = empty_bus();
+    bus.begin_new_beam_frame();
+    bus.agnus.vpos = 0x20;
+    bus.agnus.hpos = 0x40;
+    arm(&mut bus);
+    assert!(!bus.current_frame_collision_sprite_events.is_empty());
+    assert_eq!(observe(&mut bus), 0x8022);
+
+    // A later frame with no sprite register writes at all.
+    let mut bus = empty_bus();
+    arm(&mut bus);
+    bus.begin_new_beam_frame();
+    assert!(bus.current_frame_collision_sprite_events.is_empty());
+    assert_eq!(observe(&mut bus), 0x8022);
+
+    // While sprite DMA runs, the write shadow is not the whole register
+    // history and stays limited to its control words' window.
+    let mut bus = empty_bus();
+    bus.begin_new_beam_frame();
+    bus.agnus.vpos = 0x20;
+    bus.agnus.hpos = 0x40;
+    arm(&mut bus);
+    bus.current_frame_sprite_dma_observed = true;
+    assert_eq!(observe(&mut bus), 0x8000);
+}
+
+#[test]
+fn sprite_disarmed_by_sprctl_does_not_collide_in_later_frames() {
+    let mut bus = empty_bus();
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
+    assert!(!bus.custom_write(0x140, 2, u64::from(pos)));
+    assert!(!bus.custom_write(0x146, 2, 0x0000));
+    assert!(!bus.custom_write(0x144, 2, 0x8000));
+    // The SPR0CTL write clears the display latch for good.
+    assert!(!bus.custom_write(0x142, 2, u64::from(ctl)));
+    assert!(!bus.denise.spr_hw_armed[0]);
+
+    bus.begin_new_beam_frame();
+    let _ = bus.custom_read(0x00E, 2);
+    bus.current_frame_visible_start_vpos = 0x2C;
+    stage_one_plane_collision_row(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x38;
+    advance_collision_fixture_observation(&mut bus, 6);
+
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
+}
+
+#[test]
+fn latched_sprite_state_is_not_a_collision_source_while_sprite_dma_runs() {
+    let mut bus = empty_bus();
+    let (pos, ctl) = sprite_control_words_for_output(0x2C, 0x2D, 0x0082);
+    assert!(!bus.custom_write(0x140, 2, u64::from(pos)));
+    assert!(!bus.custom_write(0x142, 2, u64::from(ctl)));
+    assert!(!bus.custom_write(0x146, 2, 0x0000));
+    assert!(!bus.custom_write(0x144, 2, 0x8000));
+
+    // Once Agnus has fetched sprite data in the frame, the captured DMA
+    // lines are the collision sources and the latch is not replayed on
+    // top of them.
+    bus.begin_new_beam_frame();
+    bus.current_frame_sprite_dma_observed = true;
+    let _ = bus.custom_read(0x00E, 2);
+    bus.current_frame_visible_start_vpos = 0x2C;
+    stage_one_plane_collision_row(&mut bus);
+    bus.agnus.vpos = 0x2C;
+    bus.agnus.hpos = 0x38;
+    advance_collision_fixture_observation(&mut bus, 6);
+
+    assert_eq!(bus.custom_read(0x00E, 2), 0x8000);
+}
+
 #[test]
 fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() {
     let mut bus = empty_bus();
@@ -9989,10 +10401,10 @@ fn attached_manual_sprite_data_writes_accumulate_live_sprite_playfield_clxdat() 
     bus.denise.ddfstrt = 0x0038;
     bus.denise.ddfstop = 0x0038;
     bus.denise.bplcon0 = 0x1000;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
-    bus.denise.sprpos[1] = pos;
-    bus.denise.sprctl[1] = ctl | 0x0080;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
+    bus.denise.write_sprpos(1, pos);
+    bus.denise.write_sprctl(1, ctl | 0x0080);
     bus.denise.clxcon = 1 << 12;
     bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
     bus.current_frame_render_base = bus.capture_render_snapshot();
@@ -10133,6 +10545,8 @@ fn aga_sprite_meets_a_quarter_pixel_scrolled_playfield_at_35ns_positions() {
                 hsub_35ns: aga && position & 1 != 0,
                 words: [0x8000, 0, 0, 0],
                 requires_odd_enable: false,
+                wide_presence: [0; 3],
+                width_words: 1,
             };
             let (x_start, x_stop) = super::live_sprite_source_framebuffer_bounds(&source);
             (x_start..x_stop).any(|x| {
@@ -10504,6 +10918,8 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
         hsub_35ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
+        wide_presence: [0; 3],
+        width_words: 1,
     };
 
     assert_eq!(
@@ -10537,6 +10953,171 @@ fn denise_horizontal_delay_aligns_sprite_playfield_collision_domain() {
 }
 
 #[test]
+fn aga_wide_sprite_collision_source_covers_32_and_64_pixels() {
+    // FMODE SPR32/SPAGEM make a sprite 32 or 64 pixels wide. Its collision
+    // source carries every word the serializer shifts out, not only the
+    // first sixteen pixels.
+    let control = LiveCollisionControl::from_current(
+        AgnusRevision::AgaAlice,
+        0x1000,
+        0,
+        0,
+        0,
+        0,
+        0x2C81,
+        0x2DC1,
+        DiwHigh::ocs_implicit(),
+        0x0038,
+        [0; 8],
+    );
+    let replay = LiveCollisionLineReplay::from_index(
+        control,
+        RenderRegisterSnapshot::default(),
+        &BeamEventIndex::from_register_writes(&[]),
+        RENDER_VISIBLE_START_VPOS as i32,
+    );
+    for (width_words, pixels) in [(1u8, 16), (2, 32), (4, 64)] {
+        let source = LiveSpriteCollisionSource {
+            group: 0,
+            hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
+            hsub_70ns: false,
+            hsub_35ns: false,
+            words: [0xFFFF, 0, 0, 0],
+            requires_odd_enable: false,
+            wide_presence: live_sprite_wide_presence([0xFFFF; 3], [0; 3], width_words),
+            width_words,
+        };
+        let (start, stop) = live_sprite_source_framebuffer_bounds(&source);
+        assert_eq!(stop - start, 2 * pixels, "{width_words} words");
+        // Two framebuffer pixels per lores sprite pixel.
+        for pixel in 0..80 {
+            let presence = live_sprite_source_pixel_presence(&source, &replay, start + 2 * pixel);
+            assert_eq!(
+                presence.even,
+                pixel < pixels,
+                "{width_words} words, sprite pixel {pixel}"
+            );
+        }
+    }
+}
+
+#[test]
+fn aga_wide_sprite_collision_source_reads_each_word_in_output_order() {
+    // A 64-pixel sprite whose only set pixels are the last pixel of the
+    // second word (DATB) and the first pixel of the fourth word (DATA).
+    let control = LiveCollisionControl::from_current(
+        AgnusRevision::AgaAlice,
+        0x1000,
+        0,
+        0,
+        0,
+        0,
+        0x2C81,
+        0x2DC1,
+        DiwHigh::ocs_implicit(),
+        0x0038,
+        [0; 8],
+    );
+    let replay = LiveCollisionLineReplay::from_index(
+        control,
+        RenderRegisterSnapshot::default(),
+        &BeamEventIndex::from_register_writes(&[]),
+        RENDER_VISIBLE_START_VPOS as i32,
+    );
+    let source = LiveSpriteCollisionSource {
+        group: 0,
+        hstart: 0x81 - SPRITE_OUTPUT_DELAY_LORES,
+        hsub_70ns: false,
+        hsub_35ns: false,
+        words: [0, 0, 0, 0],
+        requires_odd_enable: false,
+        wide_presence: live_sprite_wide_presence([0, 0, 0x8000], [0x0001, 0, 0], 4),
+        width_words: 4,
+    };
+    assert!(live_sprite_source_has_pixels(&source));
+    let (start, _) = live_sprite_source_framebuffer_bounds(&source);
+    let lit: Vec<i32> = (0..64)
+        .filter(|&pixel| {
+            live_sprite_source_pixel_presence(&source, &replay, start + 2 * pixel).even
+        })
+        .collect();
+    assert_eq!(lit, [31, 48]);
+
+    // A narrower mode ignores the words it does not shift out.
+    assert_eq!(
+        live_sprite_wide_presence([0x1111, 0x2222, 0x3333], [0; 3], 2),
+        [0x1111, 0, 0]
+    );
+    assert_eq!(
+        live_sprite_wide_presence([0x1111, 0x2222, 0x3333], [0; 3], 1),
+        [0; 3]
+    );
+}
+
+#[test]
+fn aga_wide_sprite_collision_sources_take_every_serialized_word() {
+    // A DMA-fetched 64-pixel line whose first word is empty still collides:
+    // the source is built from all four words the fetch delivered.
+    let line = CapturedSpriteLine {
+        sprite: 2,
+        hstart: 0x90,
+        hsub_70ns: false,
+        hsub_35ns: false,
+        beam_y: 42,
+        data: 0,
+        datb: 0,
+        data_ext: [0, 0x0100, 0],
+        datb_ext: [0, 0, 0x0001],
+        width_words: 4,
+        attached: false,
+    };
+    let timeline = super::SpriteDmaMatchTimeline::new(0x000C, std::iter::empty());
+    let sources = super::live_sprite_collision_sources_with_beam_gated_odd(&[line], 42, &timeline);
+    assert_eq!(sources.len(), 1);
+    assert_eq!(sources[0].width_words, 4);
+    assert_eq!(sources[0].wide_presence, [0, 0x0100, 0x0001]);
+
+    // A CPU-written SPRxDATA/SPRxDATB pair repeats across the width FMODE
+    // selects; with FMODE clear the sprite stays 16 pixels wide.
+    for (fmode, width_words, wide_presence) in [
+        (0x0000, 1, [0; 3]),
+        (0x0004, 2, [0xA005, 0, 0]),
+        (0x0008, 2, [0xA005, 0, 0]),
+        (0x000C, 4, [0xA005; 3]),
+    ] {
+        let mut bus = empty_bus();
+        bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+        bus.agnus.write_fmode(fmode);
+        let (pos, ctl) = sprite_control_words(0x2C, 0x2D, 0x0083);
+        bus.denise.sprpos[0] = pos;
+        bus.denise.sprctl[0] = ctl;
+        bus.denise.sprdata[0] = 0xA000;
+        bus.denise.sprdatb[0] = 0x0005;
+        bus.denise.spr_armed[0] = true;
+        let frame_base = bus.capture_render_snapshot();
+        let event_index = BeamEventIndex::from_register_writes(&[]);
+        let sources = live_manual_sprite_collision_sources(
+            frame_base,
+            &event_index,
+            0x2C,
+            0,
+            super::RENDER_FRAMEBUFFER_WIDTH,
+            true,
+        );
+        assert_eq!(sources.len(), 1, "FMODE {fmode:#06X}");
+        assert_eq!(sources[0].source.words, [0xA000, 0x0005, 0, 0]);
+        assert_eq!(
+            sources[0].source.width_words, width_words,
+            "FMODE {fmode:#06X}"
+        );
+        assert_eq!(
+            sources[0].source.wide_presence, wide_presence,
+            "FMODE {fmode:#06X}"
+        );
+    }
+}
+
+#[test]
 fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
     let control = LiveCollisionControl::from_current(
         AgnusRevision::Ocs,
@@ -10563,6 +11144,8 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10571,6 +11154,8 @@ fn sprite_sprite_clxdat_waits_for_bpl1dat_display_enable() {
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 
@@ -10639,6 +11224,8 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10647,6 +11234,8 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 2,
@@ -10655,6 +11244,8 @@ fn live_sprite_sprite_clxdat_skips_already_latched_bits() {
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 
@@ -10715,6 +11306,8 @@ fn live_sprite_playfield_clxdat_skips_already_latched_bits() {
         hsub_35ns: false,
         words: [0x8000, 0, 0, 0],
         requires_odd_enable: false,
+        wide_presence: [0; 3],
+        width_words: 1,
     };
 
     let clxdat = live_sprite_playfield_collision_bits_in_range(
@@ -10787,6 +11380,8 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10795,6 +11390,8 @@ fn brdsprt_bypasses_bpl1dat_display_enable_for_live_sprite_clxdat() {
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 
@@ -10839,6 +11436,8 @@ fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10847,6 +11446,8 @@ fn brdrblnk_suppresses_brdsprt_live_sprite_clxdat_bypass() {
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 
@@ -10891,6 +11492,8 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
         LiveSpriteCollisionSource {
             group: 1,
@@ -10899,6 +11502,8 @@ fn manual_bpl1dat_display_enable_allows_live_sprite_clxdat_on_vertically_closed_
             hsub_35ns: false,
             words: [0x8000, 0, 0, 0],
             requires_odd_enable: false,
+            wide_presence: [0; 3],
+            width_words: 1,
         },
     ];
 
@@ -11110,8 +11715,8 @@ fn manual_sprite_and_bpl1dat_writes_accumulate_live_sprite_playfield_clxdat() {
     // One-bitplane playfield: match only bitplane 1 (absent planes 2-6 read 0
     // and still match); CLXCON_RESET's all-six-planes=1 never matches.
     bus.denise.clxcon = 0x0FC1;
-    bus.denise.sprpos[0] = pos;
-    bus.denise.sprctl[0] = ctl;
+    bus.denise.write_sprpos(0, pos);
+    bus.denise.write_sprctl(0, ctl);
     bus.current_frame_render_base = bus.capture_render_snapshot();
 
     bus.write_custom_word_from(0x144, 0x8000, BeamWriteSource::Cpu);
@@ -11498,6 +12103,71 @@ fn software_intreq_blit_write_keeps_the_full_irq_recognition_delay() {
     assert_eq!(bus.cpu_visible_intreq() & INT_BLIT, 0);
     bus.advance_chipset(1);
     assert_ne!(bus.cpu_visible_intreq() & INT_BLIT, 0);
+}
+
+// Paula's IPL outputs trail INTENA on both edges: a source software unmasks
+// and masks again three colour clocks later still shows at the IPL inputs,
+// from the unmask's recognition deadline until the same delay after the
+// mask write. Only the machines outside the measured 68000 A500 poll model
+// take this path.
+#[test]
+fn cpu_masked_source_still_reaches_the_ipl_inputs_as_a_pulse() {
+    let mut bus = empty_bus();
+    bus.irq_latency_setting = 6;
+    bus.set_cpu_clocks_per_cck(4);
+    bus.paula.intena = INT_MASTER;
+    bus.paula.intreq = INT_DSKBLK;
+    bus.note_irq_latches_changed();
+    bus.advance_chipset(20);
+
+    bus.write_custom_word_from(0x09A, 0x8000 | INT_DSKBLK, BeamWriteSource::Cpu);
+    bus.advance_chipset(3);
+    assert_eq!(bus.cpu_visible_intreq() & INT_DSKBLK, 0);
+    bus.write_custom_word_from(0x09A, INT_DSKBLK, BeamWriteSource::Cpu);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0, "unmask deadline not reached");
+    bus.advance_chipset(2);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0, "five cck after the unmask");
+    bus.advance_chipset(1);
+    assert_eq!(bus.cpu_masked_irq_pulse(), INT_DSKBLK, "the unmask arrives");
+    bus.advance_chipset(2);
+    assert_eq!(bus.cpu_masked_irq_pulse(), INT_DSKBLK);
+    bus.advance_chipset(1);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0, "the mask write arrives");
+}
+
+// A source that was already visible when it was masked stays eligible for
+// the same delay, and acknowledging it in INTREQ ends the pulse at once.
+#[test]
+fn cpu_masked_visible_source_lingers_until_acknowledged() {
+    let mut bus = empty_bus();
+    bus.irq_latency_setting = 6;
+    bus.set_cpu_clocks_per_cck(4);
+    bus.paula.intena = INT_MASTER | INT_DSKBLK;
+    bus.paula.intreq = INT_DSKBLK;
+    bus.note_irq_latches_changed();
+    bus.advance_chipset(20);
+    assert_ne!(bus.cpu_visible_intreq() & INT_DSKBLK, 0);
+
+    bus.write_custom_word_from(0x09A, INT_DSKBLK, BeamWriteSource::Cpu);
+    assert_eq!(bus.cpu_masked_irq_pulse(), INT_DSKBLK);
+    bus.advance_chipset(5);
+    assert_eq!(bus.cpu_masked_irq_pulse(), INT_DSKBLK);
+    bus.write_custom_word_from(0x09C, INT_DSKBLK, BeamWriteSource::Cpu);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0);
+}
+
+// The stock 68000 machine keeps its measured poll model: no pulse.
+#[test]
+fn stock_68000_poll_model_has_no_masked_source_pulse() {
+    let mut bus = empty_bus();
+    bus.irq_latency_setting = 6;
+    bus.paula.intena = INT_MASTER | INT_DSKBLK;
+    bus.paula.intreq = INT_DSKBLK;
+    bus.note_irq_latches_changed();
+    bus.advance_chipset(20);
+
+    bus.write_custom_word_from(0x09A, INT_DSKBLK, BeamWriteSource::Cpu);
+    assert_eq!(bus.cpu_masked_irq_pulse(), 0);
 }
 
 #[test]
@@ -12054,10 +12724,7 @@ fn stock_cpu_cycle_waits_before_crossing_line_end_refresh() {
     );
     bus.last_chip_bus_owner = ChipBusOwner::Copper;
     assert!(bus.cpu_cycle_crosses_line_end_refresh());
-    assert!(matches!(
-        bus.cpu_bus_denial_class(true),
-        CpuWaitClass::Refresh
-    ));
+    assert!(matches!(bus.cpu_bus_denial_class(), CpuWaitClass::Refresh));
     bus.grant_cpu_bus_access(2, CpuBusAccessKind::Read);
     let (cck, tick) = bus.take_slice_bus_advance();
     assert!(cck > 2);
@@ -13152,13 +13819,13 @@ fn unplugging_a_device_releases_its_lines_but_keeps_the_counters() {
         .set_joystick(1, true, false, false, false, true, true);
     assert_eq!(
         bus.custom_read(0x00C, 2) as u16,
-        super::digital_joydat(true, false, false, false)
+        0x1034 | super::digital_joydat(true, false, false, false)
     );
 
     // Swapping the joystick for a mouse releases fire and button 2, and
     // the chip-side quadrature counters still hold the JOYTEST value.
     bus.input.set_port_device(1, PortDevice::Mouse);
-    assert_eq!(bus.custom_read(0x00C, 2), 0x1234);
+    assert_eq!(bus.custom_read(0x00C, 2), 0x1034);
     assert_ne!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x80, 0);
     assert_ne!(bus.custom_read(0x016, 2) & 0x4000, 0);
 }
@@ -13219,9 +13886,10 @@ fn empty_port_reads_like_an_idle_mouse() {
     bus.input.set_port_device(0, PortDevice::None);
     assert!(!bus.custom_write(0x036, 2, 0xABCD));
 
-    // Nothing drives the pins: JOY0DAT reports the counters, the pot
-    // pins float high, and /FIR0 stays released.
-    assert_eq!(bus.custom_read(0x00A, 2), 0xABCD);
+    // Nothing drives the pins: JOY0DAT reports the counters (JOYTEST
+    // loads their bits 7-2), the pot pins float high, and /FIR0 stays
+    // released.
+    assert_eq!(bus.custom_read(0x00A, 2), 0xA8CC);
     assert_eq!(bus.custom_read(0x016, 2) & 0x0500, 0x0500);
     assert_ne!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x40, 0);
 }
@@ -13422,12 +14090,14 @@ fn joydat_reports_mouse_until_joystick_engaged() {
     bus.input.ports[1].right = true;
     assert_eq!(bus.custom_read(0x00C, 2), 0x3412);
 
-    // Engaging the joystick switches JOY1DAT to the direction encoding.
+    // Engaging the joystick puts its switches on the quadrature inputs:
+    // bits 1-0 of each counter take the direction encoding, while bits
+    // 7-2 keep the count the mouse left in the chip.
     bus.input
         .set_joystick(1, false, false, false, true, false, false);
     assert_eq!(
         bus.custom_read(0x00C, 2) as u16,
-        super::digital_joydat(false, false, false, true)
+        0x3410 | super::digital_joydat(false, false, false, true)
     );
 }
 
@@ -13515,13 +14185,64 @@ fn vposw_and_vhposw_update_beam_register_reads() {
 }
 
 #[test]
-fn joytest_sets_both_mouse_counter_pairs() {
+fn joytest_loads_bits_7_to_2_of_all_four_counters() {
     let mut bus = empty_bus();
+    bus.input.set_port_device(0, PortDevice::Mouse);
+    bus.input.set_port_device(1, PortDevice::Mouse);
+
+    assert!(!bus.custom_write(0x036, 2, 0xFFFF));
+
+    // HRM appendix A: JOYTEST data bits 15-10 load Y7-Y2 and bits 7-2 load
+    // X7-X2 of both ports' counters; bits 9-8 and 1-0 are not written.
+    assert_eq!(bus.custom_read(0x00A, 2), 0xFCFC);
+    assert_eq!(bus.custom_read(0x00C, 2), 0xFCFC);
 
     assert!(!bus.custom_write(0x036, 2, 0x1234));
+    assert_eq!(bus.custom_read(0x00A, 2), 0x1034);
+    assert_eq!(bus.custom_read(0x00C, 2), 0x1034);
+}
 
-    assert_eq!(bus.custom_read(0x00A, 2), 0x1234);
-    assert_eq!(bus.custom_read(0x00C, 2), 0x1234);
+#[test]
+fn joytest_leaves_the_quadrature_bits_of_each_counter() {
+    let mut bus = empty_bus();
+    bus.input.set_port_device(0, PortDevice::Mouse);
+    // Three counts right and one down: the low two bits of each counter
+    // are the quadrature phase the mouse left its pins at.
+    bus.input.add_mouse_delta(0, 3, 1);
+    assert_eq!(bus.custom_read(0x00A, 2), 0x0103);
+
+    assert!(!bus.custom_write(0x036, 2, 0x0000));
+    assert_eq!(bus.custom_read(0x00A, 2), 0x0103);
+
+    assert!(!bus.custom_write(0x036, 2, 0xA5C3));
+    assert_eq!(bus.custom_read(0x00A, 2), 0xA5C3);
+    assert!(!bus.custom_write(0x036, 2, 0x5A3C));
+    assert_eq!(bus.custom_read(0x00A, 2), 0x593F);
+}
+
+#[test]
+fn joytest_counter_bits_read_back_behind_a_joystick() {
+    let mut bus = empty_bus();
+    bus.input.set_port_device(1, PortDevice::Joystick);
+
+    // The counters are in the chip, not in the controller: with a switch
+    // joystick plugged in, bits 7-2 still read back what JOYTEST loaded
+    // and bits 1-0 of each counter still follow the direction switches.
+    assert!(!bus.custom_write(0x036, 2, 0xFFFF));
+    assert_eq!(bus.custom_read(0x00C, 2), 0xFCFC);
+
+    bus.input
+        .set_joystick(1, false, true, false, true, false, false);
+    assert_eq!(
+        bus.custom_read(0x00C, 2) as u16,
+        0xFCFC | super::digital_joydat(false, true, false, true)
+    );
+
+    assert!(!bus.custom_write(0x036, 2, 0x0000));
+    assert_eq!(
+        bus.custom_read(0x00C, 2) as u16,
+        super::digital_joydat(false, true, false, true)
+    );
 }
 
 #[test]
@@ -13588,8 +14309,8 @@ fn clxdat_transfer_leaves_bus_tail_collision_for_next_read() {
         bus.denise.diwstrt = 0x2C83;
         bus.denise.diwstop = 0x2DC1;
         for sprite in [0, 2] {
-            bus.denise.sprpos[sprite] = pos;
-            bus.denise.sprctl[sprite] = ctl;
+            bus.denise.write_sprpos(sprite, pos);
+            bus.denise.write_sprctl(sprite, ctl);
         }
         bus.current_frame_sprite_display_enable_x_by_y[0] = Some(0);
         bus.current_frame_render_base = bus.capture_render_snapshot();

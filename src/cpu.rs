@@ -360,6 +360,9 @@ struct MachineRuntimeState {
     sampled_irq_level: Option<u8>,
     #[serde(default)]
     ipl_sample_held: Option<bool>,
+    /// `CpuBus::ipl_latched_level`, live at a boundary like the sample.
+    #[serde(default)]
+    ipl_latched_level: Option<u8>,
 }
 
 /// Same-process rollback restores the interrupt sample alongside the bus
@@ -370,6 +373,8 @@ pub(crate) struct MachineRollbackState {
     bus: crate::bus::RollbackState,
     sampled_irq_level: u8,
     ipl_sample_held: bool,
+    #[serde(default)]
+    ipl_latched_level: u8,
 }
 
 /// The components a state parses into before the machine swaps onto them.
@@ -498,6 +503,9 @@ struct CpuBus {
     /// additional 68000 poll candidates. The Bus helper itself limits early
     /// candidates to the stock two-CPU-clocks-per-CCK path.
     m68000_ipl_poll: bool,
+    /// The CPU has the 68020 family's pending-interrupt latch (see
+    /// `ipl_latched_level`): every model from the 68EC020 up.
+    ipl_latches_requests: bool,
     /// Set by the core's `ipl_hold_sample` poll-point marker: the current
     /// `sampled_irq_level` is the instruction's microcode poll value and
     /// later accesses in the same instruction must not re-latch it (e.g.
@@ -505,6 +513,18 @@ struct CpuBus {
     /// writeback). Cleared when the boundary decision consumes the sample.
     /// File-save transient like `sampled_irq_level`; captured for rollback.
     ipl_sample_held: bool,
+    /// 68020+ pending-interrupt latch (IPEND): the highest level above the
+    /// status-register mask that an access sampled since the last
+    /// instruction boundary. The processor takes a request it has
+    /// recognised at the next boundary even if the IPL pins have dropped
+    /// by then; a 68000 or 68010 only acts on the level it polls. Consumed
+    /// by `refresh_irq_line`; saved like `sampled_irq_level`.
+    ipl_latched_level: u8,
+    /// The status register's interrupt mask at the last instruction
+    /// boundary, which the latch above compares samples against. An
+    /// instruction that lowers the mask (RTE, a move to SR) does so as it
+    /// ends, so its own accesses still see the old mask.
+    sr_ipl_mask: u8,
     /// Start PC of the instruction currently inside the core, used only by
     /// `COPPERLINE_DIAG_CPU_SYNC` to filter internal-cycle trace lines.
     diag_current_pc: u32,
@@ -740,7 +760,10 @@ impl M68kMachine {
                 sampled_irq_level: 0,
                 sampled_operand_irq_level: 0,
                 m68000_ipl_poll: cpu_model == CpuModel::M68000,
+                ipl_latches_requests: !matches!(cpu_model, CpuModel::M68000 | CpuModel::M68010),
                 ipl_sample_held: false,
+                ipl_latched_level: 0,
+                sr_ipl_mask: 7,
                 diag_current_pc: 0,
                 jit_enabled: false,
                 cache_free_window: None,
@@ -1825,6 +1848,7 @@ impl M68kMachine {
             jit_window_bank: self.bus.jit_window_bank,
             sampled_irq_level: Some(self.bus.sampled_irq_level),
             ipl_sample_held: Some(self.bus.ipl_sample_held),
+            ipl_latched_level: Some(self.bus.ipl_latched_level),
         }
     }
 
@@ -1943,6 +1967,7 @@ impl M68kMachine {
             bus: self.bus.bus.rollback_state(),
             sampled_irq_level: self.bus.sampled_irq_level,
             ipl_sample_held: self.bus.ipl_sample_held,
+            ipl_latched_level: self.bus.ipl_latched_level,
         }
     }
 
@@ -2003,10 +2028,12 @@ impl M68kMachine {
         // values for a state that predates the fields.
         self.bus.sampled_irq_level = runtime.sampled_irq_level.unwrap_or(0);
         self.bus.ipl_sample_held = runtime.ipl_sample_held.unwrap_or(false);
+        self.bus.ipl_latched_level = runtime.ipl_latched_level.unwrap_or(0);
         if let Some(rollback) = rollback {
             bus.restore_rollback_state(rollback.bus);
             self.bus.sampled_irq_level = rollback.sampled_irq_level;
             self.bus.ipl_sample_held = rollback.ipl_sample_held;
+            self.bus.ipl_latched_level = rollback.ipl_latched_level;
         } else {
             bus.reset_transient_video_after_state_load();
         }
@@ -2018,6 +2045,8 @@ impl M68kMachine {
         self.bus.cacr_040_layout = cacr_040_layout(cpu.cpu_type);
         self.cpu = cpu;
         self.bus.m68000_ipl_poll = self.cpu.cpu_type == CpuType::M68000;
+        self.bus.ipl_latches_requests =
+            !matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010);
         self.bus.sampled_operand_irq_level = 0;
         self.bus.bus = bus;
         // The cache is silicon, not dynamic state: a CPU that has one keeps it
@@ -3155,10 +3184,15 @@ impl M68kMachine {
         // a JIT machine takes the live level instead (the raw model).
         if self.bus.bus.irq_latency_setting != 0 && !self.cpu.is_stopped() && !self.jit_enabled {
             level = level.min(self.bus.sampled_irq_level);
+            // A 68020+ takes the request it latched during the instruction
+            // even when the pins have dropped since (IPEND).
+            level = level.max(self.bus.ipl_latched_level);
         }
         // The boundary decision consumed the sample: release any poll-point
         // hold so the next instruction's accesses latch normally.
         self.bus.ipl_sample_held = false;
+        self.bus.ipl_latched_level = 0;
+        self.bus.sr_ipl_mask = ((self.cpu.get_sr() >> 8) & 7) as u8;
         self.cpu.set_irq(level);
         level
     }
@@ -3765,10 +3799,16 @@ impl M68kMachine {
         if bus.cartridge_nmi_pending() {
             return 7;
         }
-        if bus.paula.intena & INT_MASTER == 0 {
+        let pulse = bus.cpu_masked_irq_pulse();
+        if bus.paula.intena & INT_MASTER == 0 && pulse == 0 {
             return 0;
         }
-        let pending = bus.paula.intena & bus.cpu_visible_intreq();
+        let enabled = if bus.paula.intena & INT_MASTER != 0 {
+            bus.paula.intena & bus.cpu_visible_intreq()
+        } else {
+            0
+        };
+        let pending = enabled | pulse;
         let level = pending_ipl(pending);
         if level == 0 {
             return 0;
@@ -3919,21 +3959,23 @@ impl CpuBus {
 
     /// CPU-side chip RAM decode. The motherboard address decode (Gary and
     /// equivalents) routes the whole $000000-$1FFFFF window to Agnus, and
-    /// Agnus only decodes as many address bits as its DRAM reach
-    /// (dma_addr_capability_mask): an OCS 8370/8371 ignores A19/A20, so its
+    /// Agnus only decodes as many address bits as it is wired to see
+    /// (cpu_chip_decode_mask): an OCS 8370/8371 ignores A19/A20, so its
     /// 512 KiB image repeats at $080000/$100000/$180000; the 1 MiB 8372A
-    /// ignores A20, repeating its 1 MiB image at $100000; the 2 MiB
-    /// 8375/Alice decode the full window with no repeat. Within one image,
-    /// addresses past the fitted RAM select no DRAM bank and stay open bus
-    /// (e.g. $080000-$0FFFFF on an 8372A with 512 KiB fitted). Kickstart's
-    /// chip sizing copes: it detects the wrap by checking whether a probe
-    /// write aliased the bottom of RAM.
+    /// ignores A20, repeating its 1 MiB image at $100000, and with only
+    /// 512 KiB of chip RAM its A19 input is strapped to A23, so it repeats
+    /// the first bank like OCS; the 2 MiB 8375/Alice decode the full window
+    /// with no repeat. Within one image, addresses past the fitted RAM
+    /// select no DRAM bank and stay open bus (e.g. $0C0000-$0FFFFF on an
+    /// 8372A with 768 KiB fitted). Kickstart's chip sizing copes: it
+    /// detects the wrap by checking whether a probe write aliased the
+    /// bottom of RAM.
     fn chip_window_offset(&self, addr: u32, size: usize) -> Option<usize> {
         let len = self.bus.mem.chip_ram.len();
         if len == 0 || u64::from(addr) >= CHIP_WINDOW_SIZE {
             return None;
         }
-        let off = (addr & self.bus.agnus.revision().dma_addr_capability_mask()) as usize;
+        let off = (addr & self.bus.agnus.revision().cpu_chip_decode_mask(len)) as usize;
         (off.checked_add(size)? <= len).then_some(off)
     }
 
@@ -5145,20 +5187,29 @@ impl CpuBus {
         }
         let qualified_lead = if self.m68000_ipl_poll { 2 } else { 0 };
         let operand_lead = if self.m68000_ipl_poll { 4 } else { 0 };
+        // A source masked again before its unmask reached the pins is still
+        // on its way there (Bus::note_cpu_masked_irq_sources).
+        let pulse = self.bus.cpu_masked_irq_pulse();
         self.sampled_irq_level = if nmi {
             7
         } else if master_enabled {
-            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(qualified_lead))
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(qualified_lead) | pulse)
         } else {
-            0
+            pending_ipl(pulse)
         };
         self.sampled_operand_irq_level = if nmi {
             7
         } else if master_enabled {
-            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(operand_lead))
+            pending_ipl(self.bus.paula.intena & self.bus.cpu_poll_intreq(operand_lead) | pulse)
         } else {
-            0
+            pending_ipl(pulse)
         };
+        // 68020+ IPEND: a level above the mask that the processor has
+        // sampled stays pending until the instruction boundary. The 68010
+        // polls like the 68000 and has no such latch.
+        if self.ipl_latches_requests && self.sampled_irq_level > self.sr_ipl_mask {
+            self.ipl_latched_level = self.ipl_latched_level.max(self.sampled_irq_level);
+        }
     }
 
     /// Primary local-RAM window: the bank the batch starts executing in,
@@ -6626,21 +6677,149 @@ mod tests {
         assert_eq!(machine.debug_write_memory(0x1E0004, &[0x77]), 1);
         assert_eq!(machine.bus().mem.chip_ram[0x60004], 0x77);
 
-        // 8372A (1 MiB reach, A20 unused): $0E0000 selects the unfitted
-        // second DRAM bank (open bus) while $160000 is the A20 image of
-        // $060000.
+        // 8372A with 512 KiB of chip RAM: the board straps the chip's A19
+        // input to CPU A23 (which is what puts the second DRAM bank at
+        // $C00000 as slow RAM), so chip-window accesses always reach Agnus
+        // with A19 low and the first bank repeats every 512 KiB, as on OCS.
         machine
             .bus_mut()
             .set_agnus_revision(AgnusRevision::Ecs8372Rev4);
-        assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xFF);
-        assert_eq!(machine.debug_write_memory(0x0E0000, &[0x11]), 0);
+        assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xA5);
         assert_eq!(machine.debug_read_memory(0x160000, 1)[0], 0xA5);
+        assert_eq!(machine.debug_write_memory(0x0E0008, &[0x11]), 1);
+        assert_eq!(machine.bus().mem.chip_ram[0x60008], 0x11);
 
         // 8375/Alice (2 MiB reach): the full window is decoded, so nothing
         // past the fitted RAM answers.
         machine.bus_mut().set_agnus_revision(AgnusRevision::Ecs8375);
         assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xFF);
         assert_eq!(machine.debug_read_memory(0x160000, 1)[0], 0xFF);
+        Ok(())
+    }
+
+    // A wait loop that keeps a request pending in INTREQ and unmasks it in
+    // INTENA for two instructions at a time: unmask, branch, mask. On a
+    // 68020 the window is about three colour clocks, shorter than the
+    // recognition deadline, so the request only reaches the CPU because
+    // Paula's IPL outputs trail a mask write as they trail an unmask write,
+    // and because the 68020 holds a request it has seen until the next
+    // instruction boundary. Regression example: the CD32 Classic Lotus
+    // Trilogy froze at its race screen waiting for the level 1 handler
+    // that counts frames this way.
+    fn run_unmask_window_wait_loop(model: CpuModel, clocks_per_cck: u32) -> Result<(u16, u32)> {
+        const HANDLER: u32 = 0x0600;
+        const COUNTER: usize = 0x0700;
+        const DONE: u32 = 0x0524;
+        let mut machine = machine_with_program_model(
+            0x0500,
+            &[
+                0x46FC, 0x2000, // move #$2000,sr
+                0x4DF9, 0x00DF, 0xF000, // lea $dff000,a6
+                0x3D7C, 0x0002, 0x009A, // loop: move.w #$0002,$9a(a6)  mask DSKBLK
+                0x3039, 0x0000, 0x0700, // move.w $700.l,d0
+                0xB07C, 0x0001, // cmp.w #1,d0
+                0x6408, // bcc.b done
+                0x3D7C, 0x8002, 0x009A, // move.w #$8002,$9a(a6)  unmask DSKBLK
+                0x60E6, // bra.b loop
+                0x60FE, // done: bra.b done
+            ],
+            model,
+        )?;
+        machine.cpu_clocks_per_cck = clocks_per_cck;
+        machine.bus.bus.set_cpu_clocks_per_cck(clocks_per_cck);
+        {
+            let bus = machine.bus_mut();
+            bus.irq_latency_setting = 6;
+            // Level 1 autovector and a handler that acknowledges and counts.
+            bus.mem.chip_ram[0x64..0x68].copy_from_slice(&HANDLER.to_be_bytes());
+            write_program(
+                bus,
+                HANDLER,
+                &[
+                    0x33FC, 0x0002, 0x00DF, 0xF09C, // move.w #$0002,$dff09c
+                    0x5279, 0x0000, 0x0700, // addq.w #1,$700.l
+                    0x4E73, // rte
+                ],
+            );
+            bus.paula.intena = INT_MASTER;
+            bus.paula.intreq = crate::chipset::paula::INT_DSKBLK;
+        }
+        for _ in 0..2_000 {
+            machine.step_slice(1)?;
+            if machine.pc() == DONE {
+                break;
+            }
+        }
+        let counter = u16::from_be_bytes([
+            machine.bus().mem.chip_ram[COUNTER],
+            machine.bus().mem.chip_ram[COUNTER + 1],
+        ]);
+        Ok((counter, machine.pc()))
+    }
+
+    #[test]
+    fn m68ec020_takes_a_request_unmasked_for_two_instructions() -> Result<()> {
+        let (counter, pc) = run_unmask_window_wait_loop(CpuModel::M68EC020, 4)?;
+        assert_eq!(
+            (counter, pc),
+            (1, 0x0524),
+            "the level 1 handler must run from inside the window"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn m68000_takes_a_request_unmasked_for_two_instructions() -> Result<()> {
+        let (counter, pc) = run_unmask_window_wait_loop(CpuModel::M68000, 2)?;
+        assert_eq!((counter, pc), (1, 0x0524));
+        Ok(())
+    }
+
+    // An 8372A strapped for 1 MiB of chip RAM sees CPU A19 and decodes both
+    // DRAM banks: the 1 MiB image repeats at $100000 (A20 unused), and with
+    // the second bank only partly fitted the rest of it stays open bus.
+    #[test]
+    fn chip_window_8372a_one_meg_strap_decodes_both_banks() -> Result<()> {
+        use crate::chipset::agnus::AgnusRevision;
+        let mut machine = machine_with_program(0x0500, &[0x4E71])?;
+        machine.bus_mut().mem.chip_ram.resize(768 * 1024, 0);
+        machine
+            .bus_mut()
+            .set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        machine.bus_mut().mem.chip_ram[0x60000] = 0xA5;
+        machine.bus_mut().mem.chip_ram[0xA0000] = 0x5A;
+
+        assert_eq!(machine.debug_read_memory(0x0A0000, 1)[0], 0x5A);
+        assert_eq!(machine.debug_read_memory(0x160000, 1)[0], 0xA5);
+        assert_eq!(machine.debug_read_memory(0x1A0000, 1)[0], 0x5A);
+        // $0E0000 is in the unfitted part of the second bank.
+        assert_eq!(machine.debug_read_memory(0x0E0000, 1)[0], 0xFF);
+        assert_eq!(machine.debug_write_memory(0x0E0000, &[0x11]), 0);
+        Ok(())
+    }
+
+    // A loader that sizes chip RAM by writing at $080000 and looking for the
+    // write at $000000 must find the alias on an 8372A machine with 512 KiB
+    // chip RAM, exactly as on OCS. Regression example: a cracked Cannon
+    // Fodder unpacked its game to $080000 on the ECS-Agnus 512K+512K A500
+    // and crashed into a Guru when the probe found no alias.
+    #[test]
+    fn cpu_write_at_512k_aliases_first_bank_on_8372a_512k() -> Result<()> {
+        use crate::chipset::agnus::AgnusRevision;
+        // move.b #$55,$0803FF.l ; move.b $0003FF.l,d1
+        let mut machine = machine_with_program(
+            0x0500,
+            &[
+                0x13FC, 0x0055, 0x0008, 0x03FF, // move.b #$55,$0803FF.l
+                0x1239, 0x0000, 0x03FF, // move.b $0003FF.l,d1
+            ],
+        )?;
+        machine
+            .bus_mut()
+            .set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        machine.step_slice(2)?;
+        assert_eq!(machine.bus().mem.chip_ram[0x3FF], 0x55);
+        assert_eq!(machine.d(1) & 0xFF, 0x55);
         Ok(())
     }
 
@@ -6706,7 +6885,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6747,7 +6929,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6799,7 +6984,10 @@ mod tests {
                 sampled_irq_level: 0,
                 sampled_operand_irq_level: 0,
                 m68000_ipl_poll: false,
+                ipl_latches_requests: false,
                 ipl_sample_held: false,
+                ipl_latched_level: 0,
+                sr_ipl_mask: 7,
                 diag_current_pc: 0,
                 jit_enabled: false,
                 cache_free_window: None,
@@ -6866,7 +7054,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6921,7 +7112,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -6972,7 +7166,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7032,7 +7229,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7317,7 +7517,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7388,7 +7591,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7535,7 +7741,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7575,7 +7784,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7647,7 +7859,10 @@ mod tests {
             sampled_irq_level: 0,
             sampled_operand_irq_level: 0,
             m68000_ipl_poll: false,
+            ipl_latches_requests: false,
             ipl_sample_held: false,
+            ipl_latched_level: 0,
+            sr_ipl_mask: 7,
             diag_current_pc: 0,
             jit_enabled: false,
             cache_free_window: None,
@@ -7882,13 +8097,15 @@ mod tests {
         machine_bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
         let mut bus = cpu_bus(machine_bus);
 
-        // A Rev.6 board with an ECS 8372A still has only the fitted 512 KiB
-        // motherboard bank at $000000-$07FFFF. The unfitted upper half of the
-        // 1 MiB Agnus image is open, while A20 repeats the image at $100000.
+        // A Rev.6 board with an ECS 8372A has only the fitted 512 KiB
+        // motherboard bank as chip RAM. With the trapdoor bank at $C00000,
+        // JP2 feeds CPU A23 to the Agnus A19 input, so the CPU never
+        // selects the second DRAM bank inside the chip window: the fitted
+        // bank repeats at $080000, and A20 repeats it again at $100000.
         bus.write_word(0x0000_0000, 0x1111);
         bus.write_word(0x0007_FFFE, 0x2222);
         bus.write_word(0x0008_0000, 0x3333);
-        assert_eq!(bus.read_word(0x0000_0000), 0x1111);
+        assert_eq!(bus.read_word(0x0000_0000), 0x3333, "A19 chip image");
         assert_eq!(bus.read_word(0x0007_FFFE), 0x2222);
         bus.write_word(0x0010_0000, 0x4444);
         assert_eq!(bus.read_word(0x0000_0000), 0x4444, "A20 chip image");

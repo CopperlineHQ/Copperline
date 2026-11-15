@@ -969,6 +969,16 @@ pub struct Bus {
     /// the former unmeasured external-pin path.
     #[serde(default)]
     irq_cia_request_mask: u16,
+    /// Sources a CPU write masked in INTENA while they were still requested
+    /// in INTREQ, on machines outside the measured 68000 poll model. Each
+    /// stays eligible at the IPL inputs from `irq_masked_pulse_from` until
+    /// `irq_masked_pulse_until` (see note_cpu_masked_irq_sources).
+    #[serde(default)]
+    irq_masked_pulse: u16,
+    #[serde(default)]
+    irq_masked_pulse_from: [u64; 16],
+    #[serde(default)]
+    irq_masked_pulse_until: [u64; 16],
     /// Configured IPL-pipe length in cck (from COPPERLINE_IRQ_LATENCY_CCK or the
     /// default); 0 disables the pipe and the cpu.rs boundary-sampling delay. A
     /// field (not a global) so tests can set it per-instance -- mechanism tests
@@ -1800,6 +1810,21 @@ pub struct RenderRegisterSnapshot {
     pub long_field: bool,
 }
 
+impl RenderRegisterSnapshot {
+    /// The same snapshot with the sprite registers taken from the
+    /// hardware-true view (CPU/Copper writes and sprite DMA fetches) instead
+    /// of the CPU/Copper write shadow. With sprite DMA idle that view is
+    /// what Denise's display latches hold.
+    pub(crate) fn with_hardware_sprite_latch(mut self) -> Self {
+        self.sprpos = self.spr_hw_pos;
+        self.sprctl = self.spr_hw_ctl;
+        self.sprdata = self.spr_hw_data;
+        self.sprdatb = self.spr_hw_datb;
+        self.spr_armed = self.spr_hw_armed;
+        self
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuBusAccessKind {
     Fetch,
@@ -1810,8 +1835,13 @@ pub enum CpuBusAccessKind {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CpuBusSamplePhase {
+    /// Before the granted chip-bus slot.
     Start,
+    /// After the granted slot, before the cycle's trailing colour clock.
     End,
+    /// After the trailing colour clock: the 68000 has finished this word's
+    /// bus cycle, which is where a word-sized access returns its data.
+    Complete,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3112,7 +3142,11 @@ impl ControllerPort {
             | PortDevice::LightPen
             | PortDevice::None => mouse_joydat(self.counter_x, self.counter_y),
             PortDevice::Joystick | PortDevice::Cd32Pad => {
-                digital_joydat(self.up, self.down, self.left, self.right)
+                // The switches drive the quadrature inputs, which are bits
+                // 1-0 of each counter; bits 7-2 are still the counter the
+                // chip holds (and JOYTEST loads) whatever is plugged in.
+                (mouse_joydat(self.counter_x, self.counter_y) & !JOYDAT_QUADRATURE_BITS)
+                    | digital_joydat(self.up, self.down, self.left, self.right)
             }
             PortDevice::Analogue => {
                 // Paddle buttons are switches on the LEFT/RIGHT lines, which
@@ -3531,12 +3565,17 @@ impl InputState {
         p.pot_y_ohms = y_ohms;
     }
 
-    /// JOYTEST loads both ports' quadrature counters with the same value,
-    /// whatever devices are plugged in.
+    /// JOYTEST loads bits 7-2 of all four quadrature counters with the same
+    /// value, whatever devices are plugged in. Bits 1-0 of each counter
+    /// follow the port's quadrature input pins and are not written (HRM
+    /// appendix A, JOYTEST: data bits 9-8 and 1-0 are "not affected").
     pub fn write_joytest(&mut self, val: u16) {
+        let keep = JOYDAT_QUADRATURE_BITS;
+        let load = val & !keep;
         for p in &mut self.ports {
-            p.counter_y = (val >> 8) as u8;
-            p.counter_x = val as u8;
+            let held = mouse_joydat(p.counter_x, p.counter_y) & keep;
+            p.counter_y = ((held | load) >> 8) as u8;
+            p.counter_x = (held | load) as u8;
         }
     }
 
@@ -3569,6 +3608,11 @@ impl InputState {
         }
     }
 }
+
+/// Bits 1-0 of each JOYxDAT counter (Y1-Y0 in bits 9-8, X1-X0 in bits 1-0):
+/// the state of the port's two quadrature input pairs, which the counters'
+/// bits 7-2 count the wraps of.
+const JOYDAT_QUADRATURE_BITS: u16 = 0x0303;
 
 fn mouse_joydat(x: u8, y: u8) -> u16 {
     ((y as u16) << 8) | x as u16
@@ -3777,6 +3821,9 @@ impl Bus {
             irq_latency_visible_at: [0; 16],
             irq_latency_mask: 0,
             irq_latency_last_pending: 0,
+            irq_masked_pulse: 0,
+            irq_masked_pulse_from: [0; 16],
+            irq_masked_pulse_until: [0; 16],
             cia_irq_routes: Default::default(),
             irq_software_request_mask: 0,
             irq_cia_request_mask: 0,
@@ -5229,7 +5276,7 @@ impl Bus {
         // reset state, then restore the emulator's monotonic time coordinate.
         let emulated_cck = self.emulated_cck;
         let emulated_frames = self.emulated_frames;
-        self.reset_for_keyboard_reset();
+        self.reset_devices(false);
         self.emulated_cck = emulated_cck;
         self.emulated_frames = emulated_frames;
     }
@@ -5401,6 +5448,14 @@ impl Bus {
     }
 
     pub fn reset_for_keyboard_reset(&mut self) {
+        self.reset_devices(true);
+    }
+
+    /// The reset line's effect on every device. `restart_time` says the
+    /// emulated time coordinate really starts again from zero; the CPU
+    /// RESET instruction's caller puts the coordinate back afterwards, and
+    /// the battery clock must not hear of a restart that did not happen.
+    fn reset_devices(&mut self, restart_time: bool) {
         // The serial sink hears about the reset first: an in-process
         // synthesizer releases what the interrupted guest left
         // sounding, exactly as if its line had dropped.
@@ -5421,7 +5476,7 @@ impl Bus {
         self.video_slot_live.invalidate();
         self.blitter = Blitter::new();
         self.configure_chip_dma_masks();
-        self.rtc.reset();
+        self.rtc.reset(self.emulated_seconds());
         if let Some(gayle) = self.gayle.as_mut() {
             gayle.reset();
         }
@@ -5482,6 +5537,9 @@ impl Bus {
         self.irq_latency_visible_at = [0; 16];
         self.irq_latency_mask = 0;
         self.irq_latency_last_pending = 0;
+        self.irq_masked_pulse = 0;
+        self.irq_masked_pulse_from = [0; 16];
+        self.irq_masked_pulse_until = [0; 16];
         self.cia_irq_routes = Default::default();
         self.irq_software_request_mask = 0;
         self.irq_cia_request_mask = 0;
@@ -5538,6 +5596,9 @@ impl Bus {
         self.slice_bus_tick = AgnusTick::default();
         self.last_chip_bus_owner = ChipBusOwner::Idle;
         self.device_clock.reset();
+        if restart_time {
+            self.rtc.emulated_time_restarted(self.emulated_seconds());
+        }
         self.emulated_cck = 0;
         self.emulated_frames = 0;
         self.cpu_posted_write_debt = 0;
@@ -7421,7 +7482,7 @@ impl Bus {
                 || (self.cpu_short_bus_cycle && self.emulated_cck < self.cpu_chip_port_free_at)
             {
                 if self.frame_analyzer_enabled {
-                    self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(kind, true));
+                    self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(kind));
                 }
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 wait_cck += cck;
@@ -7467,6 +7528,7 @@ impl Bus {
                 sample(self, slot, slot_stride, CpuBusSamplePhase::End);
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 self.record_slice_bus_advance(cck, tick);
+                sample(self, slot, slot_stride, CpuBusSamplePhase::Complete);
             }
             if trace_cpu_bus {
                 self.diag_cpu_bus_access(
@@ -7631,23 +7693,22 @@ impl Bus {
     }
 
     /// Advance the chipset until a posted CPU chip write has retired into a
-    /// free chip slot (the drain in `advance_one_chip_bus_quantum`). Quanta
-    /// that could not retire it count as missed CPU slots, like the grant
-    /// wait loop's.
+    /// chip slot (the drain in `advance_one_chip_bus_quantum`). Quanta that
+    /// could not retire it are colour clocks the CPU waited; the drain
+    /// itself counts them towards the blitter's yield, because the request
+    /// is pending whether or not the CPU is stalled behind it.
     fn settle_cpu_posted_writes(&mut self) {
         while self.cpu_posted_write_debt > 0 {
             let debt_before = self.cpu_posted_write_debt;
             if self.frame_analyzer_enabled {
-                // Attributed as the write it is retiring, from the ordinary
-                // arbitration the drain is subject to (no BLS yield, no
-                // fence). A quantum that does drain it records the CPU as
-                // the slot owner instead, so the sample only lands on
-                // genuinely missed clocks.
-                self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(CpuBusAccessKind::Write, false));
+                // Attributed as the write it is retiring. A quantum that
+                // does drain it records the CPU as the slot owner instead,
+                // so the sample only lands on genuinely missed clocks.
+                self.cpu_bus_wait = Some(self.cpu_bus_wait_sample(CpuBusAccessKind::Write));
             }
             let (cck, tick) = self.advance_one_chip_bus_quantum(None);
             if self.cpu_posted_write_debt == debt_before {
-                self.note_cpu_missed_chip_bus_cycle(cck);
+                self.note_cpu_waited_chip_bus_cycle(cck);
             }
             self.record_slice_bus_advance(cck, tick);
         }
@@ -7657,13 +7718,12 @@ impl Bus {
 
     /// The analyzer's attribution of the colour clock the CPU is about to
     /// miss: who holds the slot from the waiting access's point of view
-    /// (`for_cpu`: the CPU's own view for a synchronous grant, the ordinary
-    /// arbitration for a posted-write drain; see `cpu_bus_denial_class`),
-    /// what access is pending, and the instruction that made it.
+    /// (see `cpu_bus_denial_class`), what access is pending, and the
+    /// instruction that made it.
     /// Side-effect free; only evaluated while the frame analyzer is armed.
-    fn cpu_bus_wait_sample(&self, kind: CpuBusAccessKind, for_cpu: bool) -> CpuWaitSample {
+    fn cpu_bus_wait_sample(&self, kind: CpuBusAccessKind) -> CpuWaitSample {
         CpuWaitSample {
-            class: self.cpu_bus_denial_class(for_cpu),
+            class: self.cpu_bus_denial_class(),
             kind,
             pc: self.cpu_pc,
         }
@@ -7693,9 +7753,21 @@ impl Bus {
         self.record_slice_bus_advance(cck, tick);
     }
 
+    /// A colour clock a synchronous CPU access waited for the chip bus.
     fn note_cpu_missed_chip_bus_cycle(&mut self, cck: u32) {
+        self.note_cpu_waited_chip_bus_cycle(cck);
+        self.note_cpu_request_passed_over();
+    }
+
+    /// Wait accounting only: a colour clock the CPU spent stalled behind a
+    /// chip-bus request.
+    fn note_cpu_waited_chip_bus_cycle(&mut self, cck: u32) {
         self.cpu_missed_chip_slots = self.cpu_missed_chip_slots.wrapping_add(1);
         self.cpu_wait_cck_total = self.cpu_wait_cck_total.wrapping_add(u64::from(cck));
+    }
+
+    /// A pending CPU chip-bus request was passed over for one quantum.
+    fn note_cpu_request_passed_over(&mut self) {
         // BLS follows the waiting CPU, not the blitter's current pipeline
         // phase. Fixed DMA can deny the CPU while a disabled blit channel
         // leaves an idle slot; those misses still count towards the yield.
@@ -8188,6 +8260,7 @@ impl Bus {
     /// running code. Preserve the unmeasured pin-fed unmask path.
     fn note_cpu_irq_latches_changed(&mut self) {
         if self.cpu_clocks_per_cck != 2 || self.cpu_short_bus_cycle {
+            self.note_cpu_masked_irq_sources();
             self.note_irq_latches_changed();
             return;
         }
@@ -8201,6 +8274,88 @@ impl Bus {
         }
         self.irq_latency_mask &= pending;
         self.irq_latency_last_pending = pending;
+    }
+
+    /// Paula drives the IPL pins from a registered copy of INTREQ & INTENA,
+    /// so a write that masks a source reaches the CPU no sooner than the
+    /// write that unmasked it did. A source that software unmasks for a few
+    /// colour clocks and masks again therefore still appears at the pins,
+    /// as a pulse of the same width, after the mask write has landed. Wait
+    /// loops that open such a window around a pending request depend on it:
+    /// on a 68020 the unmask, a branch and the mask write take about three
+    /// colour clocks, less than the recognition deadline, so without the
+    /// pulse the request is never seen.
+    ///
+    /// Called for a CPU INTENA/INTREQ write, before the latches are noted,
+    /// on machines outside the measured 68000 A500 poll model. A source the
+    /// write masked (still requested in INTREQ, no longer enabled) stays
+    /// eligible until the recognition deadline after the mask write, and
+    /// from the deadline its unmask armed if that has not passed yet. PORTS
+    /// keeps its immediate level path, as on unmask.
+    ///
+    /// TODO: this is one edge of a full IPL delay line. An INTREQ
+    /// acknowledge reaches the pins through the same register and should
+    /// linger the same way, which is what makes clear-then-RTE re-enter a
+    /// handler on fast CPUs; that needs the 68020-path delay measured on
+    /// hardware first, and the 68000 path needs the same check against its
+    /// A500 captures.
+    fn note_cpu_masked_irq_sources(&mut self) {
+        let setting = self.irq_latency_setting;
+        if setting == 0 {
+            self.irq_masked_pulse = 0;
+            return;
+        }
+        let now = self.emulated_cck;
+        let requested = self.paula.intreq & IRQ_SOURCE_BITS;
+        let pending = self.current_enabled_irq_sources();
+        // An acknowledged source drops out at once; an expired pulse is done.
+        let mut live = self.irq_masked_pulse & requested;
+        let mut scan = live;
+        while scan != 0 {
+            let bit = scan.trailing_zeros() as usize;
+            scan &= scan - 1;
+            if now >= self.irq_masked_pulse_until[bit] {
+                live &= !(1u16 << bit);
+            }
+        }
+        let mut masked = self.irq_latency_last_pending & !pending & requested & !INT_PORTS;
+        let until = now.saturating_add(u64::from(setting));
+        while masked != 0 {
+            let bit = masked.trailing_zeros() as usize;
+            masked &= masked - 1;
+            let mask = 1u16 << bit;
+            let mut from = if self.irq_latency_mask & mask != 0 {
+                self.irq_latency_visible_at[bit]
+            } else {
+                now
+            };
+            if live & mask != 0 {
+                // An earlier window is still on its way to the pins.
+                from = from.min(self.irq_masked_pulse_from[bit]);
+            }
+            self.irq_masked_pulse_from[bit] = from;
+            self.irq_masked_pulse_until[bit] = until;
+            live |= mask;
+        }
+        self.irq_masked_pulse = live;
+    }
+
+    /// Sources inside a masked-source pulse at the IPL inputs right now
+    /// (see note_cpu_masked_irq_sources). These are presented to the CPU
+    /// whatever INTENA currently says.
+    pub(crate) fn cpu_masked_irq_pulse(&self) -> u16 {
+        let mut scan = self.irq_masked_pulse & self.paula.intreq;
+        let mut visible = 0;
+        while scan != 0 {
+            let bit = scan.trailing_zeros() as usize;
+            scan &= scan - 1;
+            if self.emulated_cck >= self.irq_masked_pulse_from[bit]
+                && self.emulated_cck < self.irq_masked_pulse_until[bit]
+            {
+                visible |= 1u16 << bit;
+            }
+        }
+        visible
     }
 
     fn note_irq_source_asserted(&mut self) {
@@ -9987,11 +10142,20 @@ impl Bus {
                 } else {
                     CpuBusSamplePhase::End
                 };
-                if matches!(word_off, 0x00E | 0x01E) && phase == sample_phase {
-                    // CLXDAT samples/clears before the word's trailing
-                    // clocks; INTREQR retains its end-of-slot sampling.
+                if matches!(word_off, 0x00E | 0x01E) {
+                    if phase == sample_phase {
+                        // CLXDAT samples/clears before the word's trailing
+                        // clocks; INTREQR retains its end-of-slot sampling.
+                        bus.flush_timed_devices();
+                        sampled_words[slot as usize] = Some(bus.read_custom_word(word_off));
+                    }
+                } else if size == 4 && slot == 0 && phase == CpuBusSamplePhase::Complete {
+                    // A 68000 long read is two word cycles on the chips'
+                    // 16-bit bus. The first word is returned when its own
+                    // cycle completes, one whole cycle before the second,
+                    // exactly where a word read of that register returns.
                     bus.flush_timed_devices();
-                    sampled_words[slot as usize] = Some(bus.read_custom_word(word_off));
+                    sampled_words[0] = Some(bus.read_custom_word(word_off));
                 }
             },
         );
@@ -10573,7 +10737,11 @@ impl Bus {
         // Agnus. Smaller Agnus revisions ignore their unsupported high
         // address bits, so the fitted image repeats inside that window.
         if u64::from(addr) < CHIP_WINDOW_SIZE {
-            let off = (addr & self.agnus.revision().dma_addr_capability_mask()) as usize;
+            let decode = self
+                .agnus
+                .revision()
+                .cpu_chip_decode_mask(self.mem.chip_ram.len());
+            let off = (addr & decode) as usize;
             if off
                 .checked_add(1)
                 .is_some_and(|last| last < self.mem.chip_ram.len())
@@ -11475,28 +11643,52 @@ struct LiveSpriteCollisionSource {
     hsub_35ns: bool,
     words: [u16; 4],
     requires_odd_enable: bool,
+    /// AGA FMODE wide sprites: pixel presence (DATA | DATB) of the words
+    /// after the first, in output order.
+    #[serde(default)]
+    wide_presence: [u16; 3],
+    /// 16-bit words the sprite serializes per line: 1 (16 pixels), 2 or 4
+    /// (FMODE SPR32/SPAGEM). 0, from a state saved before the field
+    /// existed, counts as 1.
+    #[serde(default)]
+    width_words: u8,
 }
 
 impl LiveSpriteCollisionSource {
     /// Sprite pixels serialized per line.
     fn pixel_count(&self) -> i32 {
-        16
+        16 * i32::from(self.width_words.clamp(1, 4))
     }
 
     /// Whether the sprite pixel `index` (0 = first out) is non-transparent
     /// in this sprite's own planes (`low`) and in the second pair of
     /// planes carried by `words[2..]` (`high`).
     fn pixel_presence(&self, index: i32) -> (bool, bool) {
-        if !(0..16).contains(&index) {
-            return (false, false);
+        let mask = 0x8000u16 >> (index & 15);
+        match index >> 4 {
+            0 => (
+                (self.words[0] | self.words[1]) & mask != 0,
+                (self.words[2] | self.words[3]) & mask != 0,
+            ),
+            word @ 1..=3 => (self.wide_presence[word as usize - 1] & mask != 0, false),
+            _ => (false, false),
         }
-        let mask = 0x8000u16 >> index;
-        (
-            (self.words[0] | self.words[1]) & mask != 0,
-            (self.words[2] | self.words[3]) & mask != 0,
-        )
     }
+}
 
+/// Pixel presence of an AGA wide sprite line's extension words, limited to
+/// the words its width uses.
+fn live_sprite_wide_presence(data_ext: [u16; 3], datb_ext: [u16; 3], width_words: u8) -> [u16; 3] {
+    let mut presence = [0u16; 3];
+    for (word, slot) in presence.iter_mut().enumerate() {
+        if word + 1 < usize::from(width_words) {
+            *slot = data_ext[word] | datb_ext[word];
+        }
+    }
+    presence
+}
+
+impl LiveSpriteCollisionSource {
     /// The collision inputs the sprite pixel `index` drives.
     fn presence(&self, index: i32) -> LiveSpritePixelPresence {
         let (low, high) = self.pixel_presence(index);
@@ -11573,6 +11765,12 @@ fn live_sprite_collision_sources_with_odd_policy(
                     hsub_35ns: line.hsub_35ns,
                     words: [line.data, line.datb, 0, 0],
                     requires_odd_enable,
+                    wide_presence: live_sprite_wide_presence(
+                        line.data_ext,
+                        line.datb_ext,
+                        line.width_words,
+                    ),
+                    width_words: line.width_words,
                 },
             );
         }
@@ -11708,6 +11906,7 @@ fn live_manual_sprite_sprite_collision_bits_in_range(
     x_stop: i32,
     display_enable_x: Option<i32>,
     latched_clxdat: u16,
+    sprite_dma_idle: bool,
 ) -> u16 {
     if beam_y < 0 {
         return 0;
@@ -11717,8 +11916,14 @@ fn live_manual_sprite_sprite_collision_bits_in_range(
     if x_start >= x_stop {
         return 0;
     }
-    let sources =
-        live_manual_sprite_collision_sources(frame_base, source_index, beam_y, x_start, x_stop);
+    let sources = live_manual_sprite_collision_sources(
+        frame_base,
+        source_index,
+        beam_y,
+        x_start,
+        x_stop,
+        sprite_dma_idle,
+    );
     if sources.len() < 2 {
         return 0;
     }
@@ -11813,6 +12018,7 @@ fn live_manual_sprite_playfield_collision_bits_in_range(
     x_stop: i32,
     display_enable_x: Option<i32>,
     latched_clxdat: u16,
+    sprite_dma_idle: bool,
 ) -> u16 {
     if beam_y < 0 {
         return 0;
@@ -11822,8 +12028,14 @@ fn live_manual_sprite_playfield_collision_bits_in_range(
     if x_start >= x_stop {
         return 0;
     }
-    let sources =
-        live_manual_sprite_collision_sources(frame_base, source_index, beam_y, x_start, x_stop);
+    let sources = live_manual_sprite_collision_sources(
+        frame_base,
+        source_index,
+        beam_y,
+        x_start,
+        x_stop,
+        sprite_dma_idle,
+    );
     if sources.is_empty() {
         return 0;
     }
@@ -11896,12 +12108,18 @@ fn live_manual_sprite_playfield_collision_bits_in_range(
     clxdat
 }
 
+/// `sprite_dma_idle` says no sprite DMA has fetched in the frame so far.
+/// Denise has no vertical comparator, so an armed sprite then serializes on
+/// every line; with sprite DMA running, the CPU/Copper write shadow in
+/// `frame_base` is not the whole register history and a source is kept to
+/// its VSTART/VSTOP window, as the renderer's replay keeps a seeded latch.
 fn live_manual_sprite_collision_sources(
     frame_base: RenderRegisterSnapshot,
     event_index: &BeamEventIndex,
     beam_y: i32,
     x_start: i32,
     x_stop: i32,
+    sprite_dma_idle: bool,
 ) -> Vec<LiveManualSpriteCollisionSource> {
     let mut sprpos = frame_base.sprpos;
     let mut sprctl = frame_base.sprctl;
@@ -11971,6 +12189,7 @@ fn live_manual_sprite_collision_sources(
             aga,
             frame_base.fmode,
             beam_y,
+            sprite_dma_idle,
             interval_start[sprite].max(x_start),
             source_stop.min(x_stop),
         );
@@ -11998,6 +12217,7 @@ fn live_manual_sprite_collision_sources(
             aga,
             frame_base.fmode,
             beam_y,
+            sprite_dma_idle,
             interval_start[sprite].max(x_start),
             x_stop,
         );
@@ -12101,14 +12321,19 @@ fn push_live_manual_collision_source_if_visible(
 }
 
 fn live_sprite_source_has_pixels(source: &LiveSpriteCollisionSource) -> bool {
-    source.words.iter().any(|&word| word != 0)
+    source.words.iter().any(|&word| word != 0) || source.wide_presence.iter().any(|&word| word != 0)
 }
 
 fn live_sprite_source_framebuffer_bounds(source: &LiveSpriteCollisionSource) -> (i32, i32) {
     let x_start = (source.hstart + SPRITE_OUTPUT_DELAY_LORES - RENDER_DIW_HSTART_FB0) * 2
         + i32::from(source.hsub_70ns);
-    // A 35 ns offset spills half a framebuffer pixel past the end.
-    (x_start, x_start + 32 + i32::from(source.hsub_35ns))
+    // Two framebuffer pixels per lores sprite pixel, the widest a sprite
+    // pixel gets. A 35 ns offset spills half a framebuffer pixel past
+    // the end.
+    (
+        x_start,
+        x_start + 2 * source.pixel_count() + i32::from(source.hsub_35ns),
+    )
 }
 
 fn live_sprite_source_may_overlap_x_range(
@@ -12241,17 +12466,21 @@ fn push_live_manual_sprite_source(
     aga: bool,
     fmode: u16,
     beam_y: i32,
+    sprite_dma_idle: bool,
     x_start: i32,
     x_stop: i32,
 ) {
     if x_start >= x_stop || !spr_armed {
         return;
     }
-    let vstart = sprite_vstart_from_words(sprpos, sprctl);
-    let vstop = sprite_vstop_from_ctl(sprctl);
-    if beam_y < vstart || beam_y >= vstop {
-        return;
+    if !sprite_dma_idle {
+        let vstart = sprite_vstart_from_words(sprpos, sprctl);
+        let vstop = sprite_vstop_from_ctl(sprctl);
+        if beam_y < vstart || beam_y >= vstop {
+            return;
+        }
     }
+    let width_words = sprite_fetch_quantum(fmode) as u8;
     sources.push(LiveManualSpriteCollisionSource {
         sprite,
         source: LiveSpriteCollisionSource {
@@ -12262,6 +12491,11 @@ fn push_live_manual_sprite_source(
             hsub_35ns: aga && sprctl & 0x0008 != 0,
             words: [sprdata, sprdatb, 0, 0],
             requires_odd_enable: sprite & 1 != 0,
+            // A manually written data word repeats across a wide sprite's
+            // serializer, as the renderer draws it. FMODE reads zero off
+            // AGA, so the width stays one word there.
+            wide_presence: live_sprite_wide_presence([sprdata; 3], [sprdatb; 3], width_words),
+            width_words,
         },
         x_start,
         x_stop,
@@ -12945,6 +13179,7 @@ fn live_manual_bpl_collision_bits_in_range(
     x_stop: i32,
     vertical_open: bool,
     display_enable_x: Option<i32>,
+    sprite_dma_idle: bool,
 ) -> u16 {
     const MANUAL_BPL_WORD_BITS: usize = 16;
     const MAX_BPLCON1_DELAY: usize = 15;
@@ -12994,6 +13229,7 @@ fn live_manual_bpl_collision_bits_in_range(
                 MAX_MANUAL_BPL_NATIVE_SAMPLES,
                 vertical_open,
                 display_enable_x,
+                sprite_dma_idle,
             );
         }
     }
@@ -13033,6 +13269,7 @@ fn live_manual_bpl_word_collision_bits(
     max_native_samples: usize,
     vertical_open: bool,
     display_enable_x: Option<i32>,
+    sprite_dma_idle: bool,
 ) -> u16 {
     const MANUAL_BPL_WORD_BITS: usize = 16;
 
@@ -13053,8 +13290,14 @@ fn live_manual_bpl_word_collision_bits(
         SpriteDmaMatchTimeline::new(frame_base.fmode, std::iter::empty())
     };
     let sources = live_sprite_playfield_collision_sources(sprite_lines, beam_y, &sprite_timeline);
-    let manual_sources =
-        live_manual_sprite_collision_sources(frame_base, sprite_index, beam_y, x_start, x_stop);
+    let manual_sources = live_manual_sprite_collision_sources(
+        frame_base,
+        sprite_index,
+        beam_y,
+        x_start,
+        x_stop,
+        sprite_dma_idle,
+    );
     let mut clxdat = 0u16;
     let mut x_cursor = segment_x;
     let mut native_idx = 0usize;

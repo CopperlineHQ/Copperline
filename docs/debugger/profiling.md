@@ -420,7 +420,8 @@ node tools/check-bartman-profile.cjs /path/to/vscode-amiga-debug scene.profile
 ## Static size profile
 
 For static footprint rather than runtime cost, `copperline-ctl size-report
-PROG [--elf PROG.elf] [--out FILE]` emits a `.cpuprofile` weighted in bytes.
+PROG [--elf PROG.elf] [--out FILE]` emits a `.cpuprofile` weighted in bytes
+(`PROG.size.cpuprofile` beside the program unless `--out` names another file).
 Its hierarchy is hunk, section, and function, with unattributed bytes kept as
 an explicit node. The VS Code extension's **Profile File Size** command runs
 the same converter and opens the result.

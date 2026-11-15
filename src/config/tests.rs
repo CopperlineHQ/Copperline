@@ -43,6 +43,29 @@ fn host_monitor_selectors_validate_and_round_trip() -> Result<()> {
 }
 
 #[test]
+fn every_single_override_counts_as_specified() {
+    // `is_empty` decides whether a command line named a machine at all (a
+    // bare launch opens the launcher), so each override has to register.
+    assert!(ConfigOverrides::default().is_empty());
+    for overrides in [
+        ConfigOverrides {
+            pcmcia_cf: Some("card.hdf".into()),
+            ..Default::default()
+        },
+        ConfigOverrides {
+            pcmcia_sram: Some("2M".into()),
+            ..Default::default()
+        },
+        ConfigOverrides {
+            serial_device: Some("/dev/ttyUSB0".into()),
+            ..Default::default()
+        },
+    ] {
+        assert!(!overrides.is_empty(), "{overrides:?}");
+    }
+}
+
+#[test]
 fn host_monitor_override_replaces_config_and_can_restore_auto() -> Result<()> {
     let mut raw = RawConfig::parse("[display]\nmonitor = \"primary\"\n")?;
     let overrides = ConfigOverrides {
@@ -870,6 +893,17 @@ fn rtc_time_cli_override_matches_the_config_field() -> Result<()> {
     assert!(cfg.rtc_frozen);
     assert!(cfg.rtc_present);
     Ok(())
+}
+
+#[test]
+fn parse_size_refuses_a_size_too_large_to_count_in_bytes() {
+    // (2^44 + 8) MiB is 2^64 + 8 MiB: the byte count does not fit, and a
+    // wrapped product would read as a plausible 8 MiB.
+    for text in ["17592186044424M", "18014398509481985K", "17179869185G"] {
+        let err = parse_size(text, "test").unwrap_err();
+        assert!(err.to_string().contains("too large"), "{text}: {err}");
+    }
+    assert_eq!(parse_size("8M", "test").unwrap(), 8 * 1024 * 1024);
 }
 
 #[test]
@@ -2633,6 +2667,27 @@ fn chipset_agnus_denise_overrides_parse() -> Result<()> {
 }
 
 #[test]
+fn the_agnus_error_names_every_accepted_revision() -> anyhow::Result<()> {
+    // 8372B is accepted (it selects the same Agnus as 8375), so the message
+    // that lists the choices has to offer it.
+    let cfg = parse_config("[chipset]\nagnus = \"8372B\"\n")?;
+    assert_eq!(cfg.agnus_revision, AgnusRevision::Ecs8375);
+    let err = parse_config("[chipset]\nagnus = \"8378\"\n").unwrap_err();
+    let message = format!("{err:#}");
+    for name in [
+        "OCS", "8370", "8371", "8372", "8372A", "8372B", "8375", "8374", "ALICE",
+    ] {
+        assert!(
+            message
+                .split(|c: char| !c.is_ascii_alphanumeric())
+                .any(|word| word == name),
+            "{name} missing from: {message}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn chip_ram_beyond_agnus_reach_is_rejected() {
     let err = parse_config(
         r#"
@@ -3934,6 +3989,26 @@ fn the_memory_controller_can_be_selected() -> anyhow::Result<()> {
     .unwrap_err()
     .to_string();
     assert!(err.contains("ramsey-04"), "{err}");
+    Ok(())
+}
+
+#[test]
+fn the_memory_controller_name_is_trimmed_and_case_folded() -> anyhow::Result<()> {
+    for (written, expected) in [
+        ("Ramsey-07", MemController::Ramsey7),
+        (" RAMSEY-07 ", MemController::Ramsey7),
+        ("None", MemController::None),
+    ] {
+        let cfg = parse_config(&format!(
+            "[machine]\nprofile = \"A1200\"\nmem_controller = {written:?}\n"
+        ))?;
+        assert_eq!(cfg.mem_controller, expected, "{written:?}");
+    }
+    // A wrong name is still reported as it was written.
+    let err = parse_config("[machine]\nmem_controller = \"Ramsey-08\"\n")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("\"Ramsey-08\""), "{err}");
     Ok(())
 }
 

@@ -591,6 +591,13 @@ renders remain byte-identical. These references record the deterministic
 probe output; the timing model's hardware evidence is described in
 [`docs/internals/timing.md`](../docs/internals/timing.md#cia-register-transfers-and-timer-startup).
 
+The 68020-path masked-request pulse refreshes `jit-bus-boundary`: on the
+68040 JIT machine the AROS boot now takes requests that a mask write would
+previously have hidden inside their recognition deadline, which moves the
+handoff instant and with it the phase of the probe's markers by a few
+pixels. The band structure is unchanged. The other 55 existing renders,
+including every 68EC020 one, are byte-identical.
+
 The A500 timing branch also refreshes previously stale references verified
 byte-identical with binaries before and after its v1 rebase: timing-table
 rows 26, 27, 28 and 31 change from 6230/6428/3A23/131F to
@@ -740,10 +747,40 @@ the final encoding to true 35 ns output; cross-checked against vAmigaTS
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
 class; the whole-blit fence collapsed the fill/line bars),
+`bltprobe-post` (A1200 shape: 256 chip writes from a 68020 under an
+all-channel blit, then the DMACONR polls left until the blit ends, as a
+bar and a binary word, with BLTPRI clear and set -- a posted write is a
+bus request and gets the blitter's three-miss yield, so the BLTPRI-clear
+bar is long; a drain that never takes a yielded cycle stalls the writes
+for the whole blit and collapses it to the BLTPRI-set bar; not
+cross-checked against vAmiga, which has no 68020 bus model),
+`posprobe-v8` (131072 long reads of VPOSR:VHPOSR at a walking phase; the
+count of samples whose line number runs backwards, as a bar and a binary
+word -- V8 and V7-V0 are one counter, so the count is the number of frames
+spanned plus the tears of the long read's own two word cycles; a model
+that steps V8 three colour clocks after the low byte adds about ten more
+false steps),
+`posprobe-long` (320 pairs of a word read and a long read of VHPOSR with
+all DMA off; one bar per horizontal distance between the word read's
+sample and the long read's first word -- the first word of a 68000 long
+read is returned by its own word cycle, so the long bar is at distance 4;
+a model that samples both words at the end of the second cycle puts it at
+6; vAmiga-verified),
 `ddfprobe-sprmulti` (DMA sprite vertical reuse and an attached 15-colour
 pair -- the sprite register-FSM class), `regprobe-bytemirror` (CPU byte
 writes latch the mirrored word into COLOR00 -- both byte lanes must render
-the same magenta), `clxprobe` (the CLXDAT collision matrix rendered as
+the same magenta), `irqprobe-window` (a request left pending in INTREQ
+and unmasked in INTENA for two instructions at a time still reaches its
+level 1 handler: six passes, green where the handler ran from inside the
+window, red where 999 windows passed without it; run on the 68000 OCS
+machine and, as `irqprobe-window-aga`, on the 68EC020, where the window is
+shorter than the recognition delay and only arrives because the IPL pins
+trail the mask write as they trail the unmask), `memprobe-chipmirror` (the first chip DRAM bank answers
+again at $080000, $100000 and $180000 on a 512K-chip machine, checked by a
+write and a read through each image and painted as six green stripes; run
+on OCS and, as `memprobe-chipmirror-ecs`, on the 8372A whose A19 input is
+strapped to A23 -- the class of loaders that size chip RAM by its alias;
+vAmiga 4.4 renders the same six green stripes on both), `clxprobe` (the CLXDAT collision matrix rendered as
 bit cells for two CLXCON programs, including a plane enabled beyond the
 BPU count; its unsatisfied match clears both PF-PF bit 0 and odd
 sprite-playfield bit 1), `audprobe-en` (the AUD0 interrupt cadence as a
@@ -758,6 +795,10 @@ sprite 0 re-armed per band with SPRxCTL bits 4 and 3 for offsets of 0 to 3
 samples -- Lisa's sub-pixel scroll and sprite position; odd steps show as
 half-bright columns on the 70 ns canvas; no reference emulator models
 either, see the probe header),
+`sprprobe-armline` (sprite DMA never enabled; three sprites armed once by
+the CPU with control words for an empty, a sixteen-line and an inverted
+vertical window -- Denise has no vertical comparator, so all three are
+full-height bars; vAmiga-verified),
 `sprprobe-latch` (sprite DMA fetches land in the Denise display latches:
 bars armed manually with SPREN off, a DMA phase whose terminator CTL
 fetch disarms every channel and overwrites SPR0's data words, then SPREN
@@ -845,7 +886,13 @@ vAmiga-verified band colours, border span per the DIW-edge photos), and
 address exactly as on a write: each frame the CPU rewrites COP1LC and
 strobes with `tst.w COPJMP1`, so the stripe must render from the flipped
 list (green), not the vblank-restart list (red) -- the Sleepwalker CD32
-double-buffer flip class; vAmiga-verified), and
+double-buffer flip class; vAmiga-verified),
+`copprobe-clrjmp` (`clr.w COPJMP1` strobes twice, on the read and on the
+write cycle; two lists that begin by pointing COP1LC at a second list are
+strobed that way at both strobe parities, and the Copper's bus-request
+cycle after a CPU strobe makes the second strobe restart the list (green)
+before its COP1LC MOVE lands -- a Copper that fetches at once jumps to
+the second list (red); vAmiga-verified), and
 `sprprobe-banks` (BPLCON4 sprite palette banks: seven sprite bars --
 six unattached, one attached pair -- under four BPLCON4 bands whose
 hue-coded banks show even sprites reading the ESPRM high nibble, odd
@@ -859,7 +906,13 @@ length by one, and marker columns lock only while the $E2 cycle stays
 fetchable -- it stalls the CPU and blitter, never a Copper fetch. Losing
 $E2 flips the $A5 zone into a staircase and steepens the rest -- the
 Nexus 7 plasma-zoom streak class; vAmiga is NOT a valid reference here,
-see the probe header).
+see the probe header), and
+`copprobe-wait255` (the Copper compares eight vertical bits: `WAIT $FF07`
+then `WAIT $0801` is evaluated on line 255, where `$FF >= $08`, and turns
+the background red part way along line 255, while `WAIT $FFDF` then
+`WAIT $1001` is evaluated after the wrap and turns it green on line $110;
+a model that holds the first form until the low byte wraps starts red on
+line $108 and never reaches green; vAmiga-verified band lines).
 Excluded by design: `ddfprobe-cc5`/`-cc6` sit on deliberate
 race boundaries and would flip on any unrelated timing change, and
 `ddfprobe-cc7` replays a chip-RAM dump of a running demo that is not

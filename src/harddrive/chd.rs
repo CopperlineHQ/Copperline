@@ -52,8 +52,51 @@ const MAX_DISK_BYTES: u64 = 1 << 40;
 /// A metadata chain longer than this is not chdman's (it writes a handful
 /// of entries); the bound keeps a looping chain from spinning the classifier.
 const MAX_METADATA_ENTRIES: usize = 256;
+/// All the metadata this reads from one CHD. chdman's entries are a line
+/// of text each (a geometry, one line per CD track).
+const MAX_METADATA_BYTES: usize = 1 << 20;
 /// One metadata entry header: tag, flags and length, next-entry offset.
 const METADATA_HEADER_BYTES: usize = 16;
+
+/// Read a CHD's metadata entries, within [`MAX_METADATA_ENTRIES`] and
+/// [`MAX_METADATA_BYTES`].
+///
+/// The `chd` crate's own collection reads every entry on the chain into
+/// its own buffer. It refuses a chain that revisits an offset, but
+/// entries may overlap, and an entry's length is a 24-bit field: a chain
+/// packed sixteen bytes apart reads megabytes per entry, so the memory
+/// asked for grows with the square of the file's size. The entries are
+/// walked and read one at a time here instead, and counted as they come.
+pub(crate) fn read_metadata<F: Read + Seek>(
+    chd: &mut Chd<F>,
+    path: &Path,
+) -> Result<Vec<Metadata>> {
+    let failed = |e: chd::Error| anyhow!("{}: reading CHD metadata: {e}", path.display());
+    let mut refs = Vec::new();
+    for entry in chd.metadata_refs() {
+        if refs.len() == MAX_METADATA_ENTRIES {
+            bail!(
+                "{}: CHD metadata chain has more than {MAX_METADATA_ENTRIES} entries",
+                path.display()
+            );
+        }
+        refs.push(entry.map_err(failed)?);
+    }
+    let mut entries = Vec::with_capacity(refs.len());
+    let mut bytes = 0usize;
+    for entry in refs {
+        let entry = entry.read(chd.inner()).map_err(failed)?;
+        bytes += entry.value.len();
+        if bytes > MAX_METADATA_BYTES {
+            bail!(
+                "{}: CHD metadata is larger than {MAX_METADATA_BYTES} bytes",
+                path.display()
+            );
+        }
+        entries.push(entry);
+    }
+    Ok(entries)
+}
 
 /// What a CHD holds, as its metadata tags say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -380,10 +423,7 @@ impl ChdHardDisk {
             );
         }
 
-        let entries: Vec<Metadata> = chd
-            .metadata_refs()
-            .try_into()
-            .map_err(|e| anyhow!("{}: reading CHD metadata: {e}", path.display()))?;
+        let entries = read_metadata(&mut chd, path)?;
         let mut geometry = None;
         for entry in &entries {
             if entry.metatag == KnownMetadata::HardDisk as u32 {
@@ -972,6 +1012,46 @@ pub(crate) mod tests {
 
     pub(crate) fn remove_write_protected_image(path: &Path) {
         cleanup(path);
+    }
+
+    /// chdman writes a handful of short metadata entries. Every entry on
+    /// the chain is read into memory at open, and entries may overlap in
+    /// the file, so neither their number nor their size can be left to
+    /// the image: a megabyte of file can describe gigabytes of entries.
+    #[test]
+    fn a_metadata_chain_too_long_or_too_large_is_refused() {
+        let data = vec![0u8; HUNK_BYTES as usize];
+        let long = temp_path("meta-long.chd");
+        let mut metas = vec![gddd(1, 1, 4, SECTOR_SIZE as u32)];
+        metas.extend((0..MAX_METADATA_ENTRIES).map(|_| (*b"XXXX", vec![0u8; 1])));
+        write_chd_v5(
+            &long,
+            HUNK_BYTES,
+            SECTOR_SIZE as u32,
+            &data,
+            &metas,
+            [7; 20],
+        );
+        let err = ChdHardDisk::open(&long, "ide", false).unwrap_err();
+        assert!(format!("{err:#}").contains("metadata"), "{err:#}");
+
+        let large = temp_path("meta-large.chd");
+        let metas = [
+            gddd(1, 1, 4, SECTOR_SIZE as u32),
+            (*b"XXXX", vec![0u8; 2 << 20]),
+        ];
+        write_chd_v5(
+            &large,
+            HUNK_BYTES,
+            SECTOR_SIZE as u32,
+            &data,
+            &metas,
+            [8; 20],
+        );
+        let err = ChdHardDisk::open(&large, "ide", false).unwrap_err();
+        assert!(format!("{err:#}").contains("metadata"), "{err:#}");
+        cleanup(&long);
+        cleanup(&large);
     }
 
     #[test]

@@ -103,6 +103,11 @@ impl GdbClient {
         Self { stream }
     }
 
+    /// Fail a read that waits longer than `limit` instead of blocking.
+    pub(crate) fn set_read_timeout(&mut self, limit: std::time::Duration) {
+        self.stream.set_read_timeout(Some(limit)).unwrap();
+    }
+
     pub(crate) fn send(&mut self, payload: &str) {
         write!(
             self.stream,

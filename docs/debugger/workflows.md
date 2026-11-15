@@ -88,16 +88,20 @@ When a title that worked in one build misbehaves in another, find the first
 emulated state that differs before reading any code:
 
 1. **Pin the scene:** Save a state just before the problem with the build
-   that still works (`--save-state-after SECS before.clstate`) and record
-   the input that reaches it (`--record-input inputs.clscript`), so both
-   sides start from the same snapshot and see the same input.
+   that still works (`--save-state-after SECS before.clstate`), so both
+   sides start from the same snapshot. Record the input that reaches that
+   point (`--record-input inputs.clscript`) if the state has to be made
+   again. `diverge` itself cannot replay input: its emulators run under
+   `--control`, which refuses `--script` and the other scheduled-input
+   flags, so save the state late enough that the problem shows without
+   further input.
 2. **Run both builds in lockstep:**
 
    ```sh
    copperline-ctl diverge --a ./good/copperline --b ./bad/copperline \
        --until 130 --memory all --screenshots /tmp/shots -- \
        --factory --config game.toml --noaudio \
-       --load-state before.clstate --script inputs.clscript
+       --load-state before.clstate
    ```
 
    The report names the first differing frame, then the first instruction

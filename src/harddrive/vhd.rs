@@ -393,7 +393,7 @@ impl Dynamic {
         };
         for block in 0..dynamic.bat.len() {
             dynamic
-                .admit(block)
+                .admit(block, len)
                 .map_err(|e| anyhow!("{}: dynamic VHD {e}", path.display()))?;
         }
         Ok(dynamic)
@@ -404,14 +404,27 @@ impl Dynamic {
     }
 
     /// Accept the BAT entry just read for `block`: refuse one that overlaps
-    /// the file's own structures, and count its end in `known_end`.
-    fn admit(&mut self, block: usize) -> io::Result<()> {
+    /// the file's own structures or starts beyond the `file_len` bytes the
+    /// file holds, and count its end in `known_end`.
+    ///
+    /// A block is only ever given a table entry after it and the footer
+    /// behind it are written, so an entry at or past the end of the file
+    /// is not one this format produces. Left in, a write to that block
+    /// would extend the host file out to wherever the entry points.
+    fn admit(&mut self, block: usize, file_len: u64) -> io::Result<()> {
         let entry = self.bat[block];
         if entry == UNALLOCATED {
             return Ok(());
         }
         let start = u64::from(entry) * SECTOR;
         let end = start + self.block_bytes();
+        if start >= file_len {
+            self.bat[block] = UNALLOCATED;
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("block {block} at sector {entry} lies past the end of the file"),
+            ));
+        }
         if self.metadata.iter().any(|&(lo, hi)| start < hi && lo < end) {
             self.bat[block] = UNALLOCATED;
             return Err(io::Error::new(
@@ -434,7 +447,10 @@ impl Dynamic {
             let mut raw = [0u8; 4];
             read_at(file, self.table_offset + block as u64 * 4, &mut raw)?;
             self.bat[block] = u32::from_be_bytes(raw);
-            self.admit(block)?;
+            if self.bat[block] != UNALLOCATED {
+                let file_len = file.metadata()?.len();
+                self.admit(block, file_len)?;
+            }
         }
         Ok(self.bat[block])
     }
@@ -837,6 +853,29 @@ pub(super) mod tests {
         // A block placed over the header.
         let err = patch(&|image| image[1536..1540].copy_from_slice(&1u32.to_be_bytes())).unwrap();
         assert!(err.contains("overlaps"), "{err}");
+    }
+
+    /// A block the table places beyond the end of the file has no data to
+    /// read, and a write to it would extend the host file out to wherever
+    /// the entry points -- up to 2 TiB for a few megabytes of disk.
+    #[test]
+    fn a_block_placed_past_the_end_of_the_file_is_refused() {
+        let mut image = empty_dynamic_vhd(4 << 20, 2 << 20);
+        // The second block's table entry.
+        image[1540..1544].copy_from_slice(&0x7FFF_FFFFu32.to_be_bytes());
+        let (_dir, path) = temp_file("far.vhd", &image);
+        let len = std::fs::metadata(&path).unwrap().len();
+        match VhdHardDisk::open(&path, "ide", true) {
+            Err(e) => assert!(e.to_string().contains("past the end"), "{e}"),
+            Ok(mut disk) => {
+                let _ = disk.write_sector(4096, &sector(0xA5));
+                panic!(
+                    "opened; a write then left the file {} bytes long (was {len})",
+                    std::fs::metadata(&path).unwrap().len()
+                );
+            }
+        }
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
     }
 
     #[test]

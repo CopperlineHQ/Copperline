@@ -2095,6 +2095,47 @@ fn host_shortcuts_remain_available_without_stealing_text_edits() {
 }
 
 #[test]
+fn shifted_g_and_v_are_main_window_shortcuts_in_the_debug_layout() {
+    use winit::keyboard::ModifiersState;
+    let host = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::ALT
+    };
+    let shifted = host | ModifiersState::SHIFT;
+    // Save Clip as GIF and Paste as Keystrokes belong to the main window.
+    assert!(workspace::host_shortcut_reaches_main(
+        KeyCode::KeyG,
+        shifted,
+        false
+    ));
+    assert!(workspace::host_shortcut_reaches_main(
+        KeyCode::KeyV,
+        shifted,
+        false
+    ));
+    // A debugger text field keeps the paste keys to itself.
+    assert!(!workspace::host_shortcut_reaches_main(
+        KeyCode::KeyV,
+        shifted,
+        true
+    ));
+    // Only the unshifted G is the layout's own input-ownership toggle.
+    assert!(workspace::toggles_guest_input(KeyCode::KeyG, host));
+    assert!(!workspace::toggles_guest_input(KeyCode::KeyG, shifted));
+    assert!(!workspace::toggles_guest_input(
+        KeyCode::KeyG,
+        ModifiersState::empty()
+    ));
+    assert!(!workspace::toggles_guest_input(KeyCode::KeyV, host));
+    assert!(!workspace::host_shortcut_reaches_main(
+        KeyCode::KeyG,
+        host,
+        false
+    ));
+}
+
+#[test]
 fn debug_display_stays_clear_of_inspectors_and_clicks_only_transfer_input() {
     let mut app = test_app();
     let before = app.emu.machine_state_bytes().unwrap();

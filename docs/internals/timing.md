@@ -18,6 +18,16 @@ CPU clock belong to the next read. Paula INTREQR retains its independently
 calibrated end-of-slot sample. Byte reads select their lane; long reads sample
 each custom-bus word separately. Other registers retain their existing phases.
 
+A 68000 long read is two word cycles on the chips' 16-bit bus. Its first
+word is returned when its own cycle completes, where a word read of that
+register starting at the same position returns it, and its second word two
+colour clocks later. A MOVE.L from VPOSR therefore pairs a V8 that is two
+colour clocks older than the VHPOSR half, and the pair tears when the
+counter steps in between, as on hardware. The 68020+ data-return path and
+the A1200's one-grant longword are unchanged. Test:
+`long_read_returns_its_first_word_when_that_word_cycle_completes`; golden
+probe `posprobe-long` (vAmiga-verified).
+
 Live collision scans use the absolute pixel-comparator conversion
 `x = 4 * H - 2 * DIW_HSTART_FB0`, matching the window and sprite coordinates.
 The render-write anchor is a different domain and must not advance the
@@ -408,11 +418,21 @@ counters; the BFD bit controls whether a satisfied position wait must also
 wait for the blitter to go idle.
 
 - Full-mask waits are satisfied once the beam reaches or passes the target
-  in the current 8-bit vertical phase. Near the end of PAL line 255,
-  low-half targets wait for the short post-rollover tail while high-half
-  targets (e.g. `$fc`) stay satisfied because that phase has passed;
-  partial-mask waits with the high vertical bit set likewise stay
-  satisfied across the line-255-to-256 rollover.
+  in the current 8-bit vertical phase: only V7-V0 are compared. On line
+  255 the low byte is `$ff`, so a WAIT for any other line that is
+  evaluated there is already satisfied and releases at once (a list that
+  runs `WAIT $FF07` then `WAIT $0801` moves on during line 255). A list
+  reaches lines 256 and up by holding the Copper to the end of line 255
+  first: behind `WAIT $FFDF` (or `$FFE1`, `$FFDD`) the next WAIT's
+  comparison only happens after the low byte has wrapped to `$00`, which
+  falls out of the instruction-tail and line-end blackout timing below
+  rather than out of a special case for line 255. Partial-mask waits
+  with the high vertical bit set stay satisfied across the
+  line-255-to-256 rollover. Tests:
+  `full_mask_wait_compares_eight_vertical_bits_across_line_255`,
+  `copper_wait_evaluated_on_line_255_is_already_satisfied`,
+  `copper_wait_fetched_at_the_end_of_line_255_is_evaluated_after_the_wrap`,
+  and the vAmiga-verified `copprobe-wait255` golden render.
 - With BFD clear a position-satisfied wait parks while the blitter is
   busy and resumes once the scheduled blit consumes its slots; with BFD
   set it ignores a busy blitter.
@@ -436,7 +456,20 @@ wait for the blitter to go idle.
 
 - A CPU write to COPJMP1/COPJMP2 loads the Copper program counter
   immediately, but the target list has no visible effect until the Copper
-  gets DMA slots to fetch it.
+  gets DMA slots to fetch it. The Copper first spends one access-parity
+  cycle requesting the bus, with no memory cycle (vAmiga's COP_REQ_DMA),
+  and fetches the first word on the Copper cycle after that, so the first
+  MOVE of the new list lands five or six colour clocks after the strobe.
+  That latency is what makes a read-modify-write of the strobe safe:
+  `clr.w COPJMP1` on a 68000 strobes on its read cycle and again on its
+  write cycle four colour clocks later, and the second strobe has to
+  arrive before the first MOVE takes effect. A list that begins by
+  rewriting its own COP1LC would otherwise be restarted from the
+  half-written address (new high word, old low word) whenever the two
+  lists sit in different 64K pages. Tests:
+  `cpu_copjmp1_strobe_spends_a_request_cycle_before_the_first_fetch`,
+  `double_copjmp1_strobe_restarts_a_list_that_rewrites_cop1lc`; golden
+  probe: `timing-test/copprobe-clrjmp.asm` (vAmiga-verified).
 - A CPU *read* of COPJMP1/COPJMP2 fires the same strobe: the register
   decode acts on the address alone (reading a write-only register performs
   a bus write of the floating data-bus residue into it -- the UAE/vAmiga
@@ -702,11 +735,11 @@ Copper's access clock (`copper`), a BLTPRI-clear blitter hold (`blitter`), or
 a BLTPRI-set blitter bus access (`blitter_nasty`). An idle pipeline cycle is
 not attributed to the blitter. The `port` class describes the 020+ chip
 port's two-clock turnaround, a wait on the CPU's own bus unit rather than a
-denial. A synchronous grant sees the CPU's arbitration view, including the
-three-miss yield; a posted 020+ write drains through ordinary arbitration,
-where a busy blitter keeps every requested access cycle. Tests:
+denial. A synchronous grant and the drain of a posted 020+ write both see
+the CPU's arbitration view, including the three-miss yield. Tests:
 `frame_analyzer_attributes_cpu_wait_to_nice_blitter`,
-`frame_analyzer_attributes_cpu_wait_to_bltpri_bus_access`.
+`frame_analyzer_attributes_cpu_wait_to_bltpri_bus_access`,
+`frame_analyzer_attributes_posted_write_drain_waits_to_the_nice_blitter`.
 The analyzer has two recording levels. The cheap level keeps the one-byte
 owner and CPU-wait grids used by the live heatmap. The full level adds one
 24-byte record per raster colour clock and is armed only for an open Frame
@@ -808,6 +841,37 @@ readback:
    writes that occurred after the data transfer. Long accesses sample the
    INTREQR word in its own slot. Other custom registers retain their separately
    calibrated phases, and the shorter 020+ data-return path is unchanged.
+
+On the 68020 path (any CPU other than the stock-speed 68000) two further
+rules apply, because a faster CPU can open and close an INTENA window
+inside the recognition deadline:
+
+- Paula drives the IPL pins from a registered copy of INTREQ and INTENA,
+  so a mask write is as late reaching the CPU as an unmask write. A source
+  that a CPU write masks while it is still requested stays eligible until
+  the deadline after the mask write, starting from the deadline its unmask
+  armed if that has not passed. An unmask, a branch and a mask write (about
+  three CCK on a 68EC020) therefore still reach the CPU as a three-CCK
+  pulse, six CCK later. Acknowledging the source in INTREQ ends the pulse
+  at once, and PORTS keeps its immediate level path.
+- A 68020 or later holds a request it has sampled above its interrupt mask
+  until the next instruction boundary (IPEND), so the pulse does not have
+  to line up with a boundary. The mask compared is the one in force when
+  the instruction started: an RTE or a move to SR lowers it only as the
+  instruction ends. The 68000 and 68010 keep the poll rules above.
+
+The regression example is the wait loop of the CD32 Classic Lotus Trilogy:
+the Copper sets DSKBLK in INTREQ once a frame, and the game unmasks it for
+two instructions on each pass until its level 1 handler has counted two
+frames. Without the pulse the race screen froze.
+
+This is one edge of a delay line, not the whole of it. An INTREQ
+acknowledge passes through the same Paula register and should trail in the
+same way, which is why a fast CPU must not RTE straight after clearing
+INTREQ. That edge is not modelled: the 68020-path delay has not been
+measured on hardware, and an acknowledge that lingers too long makes
+handlers re-enter. The stock 68000 path has neither rule; its captures do
+not cover a mask write inside the deadline.
 
 The [focused One ROM measurements](a500-irq-focus-2026-10-15.md) match all
 2,212 A500 observations after these corrections; the earlier 2,560-divider
@@ -1128,6 +1192,24 @@ beam before `read_vhposr` samples it. The low byte is raw colour clocks, not
 half clocks. This is visible in timing-test rows 19/20/22/27 and in
 line-wrap polling loops that read VHPOSR immediately after INTREQR bits
 become visible.
+
+VPOSR's V8 is the top bit of the same vertical counter, so it steps in the
+same colour clock as VHPOSR's high byte: two reported positions into the
+line (vAmiga applies the one rule to both registers as well). A program
+that brackets a VHPOSR read with two VPOSR reads and retries when they
+differ can therefore trust the line number it assembles; a model that
+steps V8 at a different colour clock makes that idiom read line 0 at the
+255 -> 256 step and line 256 at the frame wrap whenever all three reads
+fall inside the gap, which a fast CPU manages. LOF and LOL are not part of
+the counter and keep the internal frame- and line-wrap timing. Tests:
+`vposr_v8_steps_two_reported_positions_into_the_line`,
+`vposr_v8_and_vhposr_line_byte_never_disagree`; golden probe
+`posprobe-v8`.
+
+A 68000 long read of VPOSR:VHPOSR is two word cycles two colour clocks
+apart, so that pair can still tear when the counter steps between them
+(see [](#custom-register-read-sampling)); only the three-read idiom above
+is safe.
 
 ## Real-time pacing
 

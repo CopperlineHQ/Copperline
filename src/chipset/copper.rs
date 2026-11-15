@@ -140,13 +140,6 @@ impl CopperWait {
             let target_v = ((target >> 8) & 0x00FF) as u32;
             let target_h = (target & 0x00FE) as u32;
             let vlow = vpos & 0x00FF;
-            // Near the end of line 255, low-half full-mask waits can
-            // target the short post-rollover tail of the field by
-            // waiting for V[7:0] to wrap back through zero. High-half
-            // targets have already been reached and remain satisfied.
-            if vpos == 0x00FF && target_v < 0x80 {
-                return false;
-            }
             return vlow > target_v || (vlow == target_v && hpos >= target_h);
         }
 
@@ -345,6 +338,11 @@ pub struct Copper {
     /// past the line wrap by the copper bus lockout therefore sees the next
     /// line's vertical phase.
     skip_eval: Option<CopperWait>,
+    /// A CPU access to COPJMP1/COPJMP2 has reloaded the program counter and
+    /// the Copper still owes the bus-request cycle that precedes its first
+    /// fetch from the new list (see [`Copper::cpu_strobe`]).
+    #[serde(default)]
+    strobe_request_pending: bool,
     /// Monotonic count of completed instructions (a MOVE applied or
     /// skipped, a WAIT/SKIP/COPJMP started). Debugger-only bookkeeping
     /// for copper single-stepping; transient, never serialized.
@@ -366,6 +364,7 @@ impl Copper {
             pending_first: None,
             skip_next_move: false,
             skip_eval: None,
+            strobe_request_pending: false,
             instructions_retired: 0,
         }
     }
@@ -385,13 +384,33 @@ impl Copper {
         self.pending_first = None;
         self.skip_next_move = false;
         self.skip_eval = None;
+        self.strobe_request_pending = false;
         self.state = CopperState::Running;
+    }
+
+    /// A CPU bus access to COPJMP1/COPJMP2 (read or write). The program
+    /// counter reloads at once, but the Copper was not fetching: it first
+    /// spends one access-parity cycle requesting the bus, with no memory
+    /// cycle, and fetches the first word of the new list on the Copper
+    /// cycle after that (vAmiga's COP_REQ_DMA before COP_FETCH).
+    ///
+    /// The cycle matters when the strobe comes twice. A read-modify-write
+    /// instruction on the strobe address (CLR, or any instruction whose
+    /// write is preceded by a read) accesses it in two bus cycles four
+    /// colour clocks apart. The second strobe has to arrive before the
+    /// first MOVE of the new list takes effect, or a list that begins by
+    /// rewriting its own location register is restarted from a half
+    /// written address.
+    pub fn cpu_strobe(&mut self, address: u32) {
+        self.jump(address);
+        self.strobe_request_pending = true;
     }
 
     pub fn stop(&mut self) {
         self.pending_first = None;
         self.skip_next_move = false;
         self.skip_eval = None;
+        self.strobe_request_pending = false;
         self.state = CopperState::Stopped;
     }
 
@@ -747,6 +766,12 @@ impl Copper {
                 if !allow_fetch || !Self::hpos_is_access_cycle(hpos) {
                     return CopperSlotAction::Idle;
                 }
+                if self.strobe_request_pending {
+                    // The bus-request cycle after a CPU strobe: the slot is
+                    // the Copper's to use, but no word is fetched in it.
+                    self.strobe_request_pending = false;
+                    return CopperSlotAction::Idle;
+                }
                 // A pending SKIP decision samples the comparator on the
                 // color clock of the next instruction's first-word fetch.
                 if self.pending_first.is_none() {
@@ -924,18 +949,20 @@ mod tests {
     }
 
     #[test]
-    fn full_mask_wait_after_line_255_waits_for_vertical_low_byte_rollover() {
+    fn full_mask_wait_compares_eight_vertical_bits_across_line_255() {
         let wait = CopperWait::new(0x1B01, 0xFFFE);
 
-        assert!(!wait.is_satisfied(0xFF, 0xDF));
+        // On line 255 the vertical low byte is $FF, past every other line:
+        // the wait is satisfied wherever on that line it is evaluated.
+        assert!(wait.is_satisfied(0xFE, 0x08));
+        assert!(wait.is_satisfied(0xFF, 0x08));
+        assert!(wait.is_satisfied(0xFF, 0xDF));
+        // Once the low byte has wrapped it waits for line 256 + $1B.
         assert!(!wait.is_satisfied(0x100, 0));
         assert!(!wait.is_satisfied(0x11A, COLORCLOCKS_PER_LINE - 1));
         assert!(wait.is_satisfied(0x11B, 0));
         assert!(wait.is_satisfied(0x11C, 0));
-        assert_eq!(
-            wait.cck_until_satisfied(0xFF, 0xDF),
-            Some((COLORCLOCKS_PER_LINE - 0xDF) + 0x1B * COLORCLOCKS_PER_LINE)
-        );
+        assert_eq!(wait.cck_until_satisfied(0xFF, 0x08), Some(0));
         assert_eq!(
             wait.cck_until_satisfied(0x100, 0),
             Some(0x1B * COLORCLOCKS_PER_LINE)

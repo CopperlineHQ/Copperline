@@ -250,7 +250,9 @@ impl App {
         }
         if let WindowEvent::KeyboardInput { event: key, .. } = event {
             if host_shortcut_modifier_pressed(self.modifiers) {
-                if key.physical_key == PhysicalKey::Code(KeyCode::KeyG) {
+                if matches!(key.physical_key, PhysicalKey::Code(code)
+                    if toggles_guest_input(code, self.modifiers))
+                {
                     if key.state == ElementState::Pressed && !key.repeat {
                         if self.debug_guest_input {
                             self.release_debug_guest_input();
@@ -448,12 +450,26 @@ impl App {
     }
 }
 
+/// Whether a key is the Debug layout's input-ownership toggle: the host
+/// modifier with G, and without Shift, which makes it Save Clip as GIF.
+pub(super) fn toggles_guest_input(
+    code: KeyCode,
+    modifiers: winit::keyboard::ModifiersState,
+) -> bool {
+    host_shortcut_modifier_pressed(modifiers) && code == KeyCode::KeyG && !modifiers.shift_key()
+}
+
 pub(super) fn host_shortcut_reaches_main(
     code: KeyCode,
     modifiers: winit::keyboard::ModifiersState,
     editing: bool,
 ) -> bool {
     if !host_shortcut_modifier_pressed(modifiers) {
+        return false;
+    }
+    // Paste as Keystrokes types into the guest; in a debugger text field
+    // the same keys are left to the field.
+    if editing && code == KeyCode::KeyV {
         return false;
     }
     // On macOS the app's Command+A/Z overlap Select All and Undo/Redo.
@@ -481,7 +497,13 @@ pub(super) fn host_shortcut_reaches_main(
         || (modifiers.shift_key()
             && matches!(
                 code,
-                KeyCode::KeyL | KeyCode::Equal | KeyCode::Minus | KeyCode::Period | KeyCode::Comma
+                KeyCode::KeyG
+                    | KeyCode::KeyL
+                    | KeyCode::KeyV
+                    | KeyCode::Equal
+                    | KeyCode::Minus
+                    | KeyCode::Period
+                    | KeyCode::Comma
             ))
 }
 
