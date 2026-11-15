@@ -648,9 +648,17 @@ impl App {
     /// machine kept Left Amiga down after switching back, and Intuition
     /// reads Left Amiga + select as a screen drag, so clicks on gadgets
     /// stopped working.
+    ///
+    /// Only keys the operator's hand holds (`live_held_rawkeys`) are let
+    /// go. `held_rawkeys` also carries `--key-after`, `--script` and
+    /// control-protocol holds, which are timed in emulated time and end at
+    /// their own scheduled release whatever the window focus is doing.
     pub(super) fn release_host_keys_on_focus_loss(&mut self) {
-        for rawkey in 0..self.held_rawkeys.len() as u8 {
-            self.release_amiga_rawkey_if_held(rawkey);
+        let live = self.live_held_rawkeys;
+        for (index, held) in live.into_iter().enumerate() {
+            if held {
+                self.release_amiga_rawkey_if_held(index as u8);
+            }
         }
         if self.keyboard_joy_held.iter().any(|held| held.any_held()) {
             self.keyboard_joy_held = Default::default();

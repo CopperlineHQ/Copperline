@@ -1373,7 +1373,9 @@ key and keyboard-joystick control the host keyboard still holds, since
 their releases will go to another window. X11 and Windows report those
 releases themselves; macOS does not, and without this a Cmd-Tab away
 left Left Amiga (Cmd) held, so Intuition treated later clicks as screen
-drags. Mouse deltas
+drags. Scheduled and control-protocol key holds are not the host
+keyboard's and are left alone: they are timed in emulated time and end
+at their own release. Mouse deltas
 feed the mouse port's JOYxDAT quadrature counters (JOY0DAT for the usual
 port 1). Gamepads are read through `gilrs`
 with its bundled SDL controller database enabled: a recognised pad

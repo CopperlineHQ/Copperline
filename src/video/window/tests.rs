@@ -329,6 +329,37 @@ fn focus_loss_releases_every_held_host_key() {
 }
 
 #[test]
+fn focus_loss_keeps_scheduled_and_control_key_holds() {
+    // --key-after, --script and the control protocol's input.key reach the
+    // machine through the same host-keyboard entry point as a real key,
+    // but they are timed in emulated time: a long press must last until
+    // its own scheduled release, not end because the window lost focus.
+    let mut app = test_app();
+    app.main_window_focused = true;
+    let scripted = 0x20; // A
+    let live = host_to_amiga_rawkey(KeyCode::SuperLeft).expect("Cmd is Left Amiga");
+    app.handle_amiga_key_event(scripted, true);
+    app.handle_live_amiga_key_event(live, true);
+    assert!(app.emu.bus().keyboard.is_held(scripted));
+    assert!(app.emu.bus().keyboard.is_held(live));
+
+    app.release_host_keys_on_focus_loss();
+    assert!(
+        app.emu.bus().keyboard.is_held(scripted),
+        "a scripted hold outlasts the focus"
+    );
+    assert!(app.amiga_rawkey_held(scripted));
+    assert!(
+        !app.emu.bus().keyboard.is_held(live),
+        "the operator's own key is let go"
+    );
+
+    // The scripted hold still ends where it was scheduled to.
+    app.handle_amiga_key_event(scripted, false);
+    assert!(!app.emu.bus().keyboard.is_held(scripted));
+}
+
+#[test]
 fn raw_device_alt_hold_blocks_altgr_aggregate_cleanup() {
     let mut app = test_app();
     app.main_window_focused = true;
