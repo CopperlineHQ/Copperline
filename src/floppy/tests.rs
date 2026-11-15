@@ -374,10 +374,10 @@ struct ZipDescriptor {
     unpacked_skew: i64,
 }
 
-/// One ADF-sized entry as a streaming archiver writes it (macOS Finder's
-/// Compress, `zip` writing to or reading from a pipe): general-purpose
-/// flag bit 3 set, the CRC and sizes zero in the local header and given
-/// in a data descriptor after the data instead.
+/// One entry as a streaming archiver writes it (macOS Finder's Compress,
+/// `zip` writing to or reading from a pipe): general-purpose flag bit 3
+/// set, the CRC and sizes zero in the local header and given in a data
+/// descriptor after the data instead.
 fn zip_with_data_descriptor(adf: &[u8], method: u16, descriptor: ZipDescriptor) -> Vec<u8> {
     let mut packed = zip_local_header(method, 0, 8, 0);
     packed[6..8].copy_from_slice(&0x0008u16.to_le_bytes());
@@ -409,72 +409,176 @@ fn zip_with_data_descriptor(adf: &[u8], method: u16, descriptor: ZipDescriptor) 
     packed
 }
 
-#[test]
-fn zip_floppy_with_a_data_descriptor_decodes_and_is_still_checked() -> Result<()> {
-    let adf: Vec<u8> = (0..ADF_SIZE).map(|i| (i * 13 / 512) as u8).collect();
+/// A signed, 32-bit data descriptor that states `data` correctly.
+fn zip_descriptor_for(data: &[u8]) -> ZipDescriptor {
     let mut crc = flate2::Crc::new();
-    crc.update(&adf);
-    let good = ZipDescriptor {
+    crc.update(data);
+    ZipDescriptor {
         signature: true,
         zip64: false,
         crc: crc.sum(),
         packed_skew: 0,
         unpacked_skew: 0,
-    };
-    // Deflated and stored, with and without the signature, with 32-bit
-    // and with zip64 sizes.
-    for method in [8, 0] {
-        for signature in [true, false] {
-            for zip64 in [false, true] {
-                let descriptor = ZipDescriptor {
-                    signature,
-                    zip64,
+    }
+}
+
+#[test]
+fn zip_floppy_with_a_data_descriptor_decodes_and_is_still_checked() -> Result<()> {
+    // Double and high density: the header of a streamed entry has no size,
+    // so the entry's data is what says which of the two it is.
+    for size in [ADF_SIZE, HD_ADF_SIZE] {
+        let adf: Vec<u8> = (0..size).map(|i| (i * 13 / 512) as u8).collect();
+        let good = zip_descriptor_for(&adf);
+        // Deflated and stored, with and without the signature, with 32-bit
+        // and with zip64 sizes.
+        for method in [8, 0] {
+            for signature in [true, false] {
+                for zip64 in [false, true] {
+                    let descriptor = ZipDescriptor {
+                        signature,
+                        zip64,
+                        ..good
+                    };
+                    let packed = zip_with_data_descriptor(&adf, method, descriptor);
+                    assert!(
+                        decode_zip_floppy_image(&packed, GZIP_IMAGE_LIMIT)? == adf,
+                        "size {size} method {method} signature {signature} zip64 {zip64}"
+                    );
+                }
+            }
+        }
+        let refused = |method: u16, descriptor: ZipDescriptor| {
+            let packed = zip_with_data_descriptor(&adf, method, descriptor);
+            format!(
+                "{:#}",
+                decode_zip_floppy_image(&packed, GZIP_IMAGE_LIMIT).unwrap_err()
+            )
+        };
+        for method in [8, 0] {
+            // The descriptor's CRC is checked like a header's.
+            let err = refused(
+                method,
+                ZipDescriptor {
+                    crc: !good.crc,
                     ..good
-                };
-                let packed = zip_with_data_descriptor(&adf, method, descriptor);
+                },
+            );
+            assert!(err.contains("checksum error"), "size {size}: {err}");
+            // So are its sizes, against what the entry's data turned out
+            // to be.
+            for (packed_skew, unpacked_skew) in [(0, -1), (0, 1), (1, 0), (-1, 0)] {
+                for zip64 in [false, true] {
+                    let err = refused(
+                        method,
+                        ZipDescriptor {
+                            zip64,
+                            packed_skew,
+                            unpacked_skew,
+                            ..good
+                        },
+                    );
+                    assert!(err.contains("data descriptor"), "size {size}: {err}");
+                }
+            }
+            // A descriptor cut short is not a descriptor.
+            let mut packed = zip_with_data_descriptor(&adf, method, good);
+            packed.truncate(packed.len() - 5);
+            let err = format!(
+                "{:#}",
+                decode_zip_floppy_image(&packed, GZIP_IMAGE_LIMIT).unwrap_err()
+            );
+            assert!(err.contains("data descriptor"), "size {size}: {err}");
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn zip_floppy_with_a_data_descriptor_must_hold_one_adf() {
+    // Shorter than a double-density image, between the two densities, and
+    // one byte past either: none of them is a disk, however well the
+    // descriptor describes it.
+    for size in [
+        4096,
+        ADF_SIZE - 1,
+        ADF_SIZE + 1,
+        ADF_SIZE + 512,
+        HD_ADF_SIZE - 1,
+        HD_ADF_SIZE + 1,
+    ] {
+        let data = vec![0x5A; size];
+        let good = zip_descriptor_for(&data);
+        let deflated = zip_with_data_descriptor(&data, 8, good);
+        let err = format!(
+            "{:#}",
+            decode_zip_floppy_image(&deflated, GZIP_IMAGE_LIMIT).unwrap_err()
+        );
+        assert!(
+            err.contains("invalid ADF file size in ZIP archive"),
+            "size {size}: {err}"
+        );
+        // Stored data has no end to measure, so the descriptor is simply
+        // not where one for a disk would be.
+        let stored = zip_with_data_descriptor(&data, 0, good);
+        let err = format!(
+            "{:#}",
+            decode_zip_floppy_image(&stored, GZIP_IMAGE_LIMIT).unwrap_err()
+        );
+        assert!(err.contains("data descriptor"), "size {size}: {err}");
+    }
+}
+
+#[test]
+fn zip_floppy_with_a_data_descriptor_is_bounded_by_the_expansion_limit() -> Result<()> {
+    for size in [ADF_SIZE, HD_ADF_SIZE] {
+        let adf = vec![0xA5; size];
+        let good = zip_descriptor_for(&adf);
+        for method in [8, 0] {
+            let packed = zip_with_data_descriptor(&adf, method, good);
+            assert!(
+                decode_zip_floppy_image(&packed, size)? == adf,
+                "size {size} method {method}"
+            );
+            // A high-density image is refused by a limit that admits
+            // only a double-density one, as well as by one a byte short.
+            for limit in [size - 1, ADF_SIZE - 1, 0] {
+                let err = format!("{:#}", decode_zip_floppy_image(&packed, limit).unwrap_err());
                 assert!(
-                    decode_zip_floppy_image(&packed, GZIP_IMAGE_LIMIT)? == adf,
-                    "method {method} signature {signature} zip64 {zip64}"
+                    err.contains(&format!("expanded floppy image exceeds {limit} bytes")),
+                    "size {size} method {method} limit {limit}: {err}"
                 );
             }
         }
     }
-    let refused = |descriptor: ZipDescriptor| {
-        let packed = zip_with_data_descriptor(&adf, 8, descriptor);
-        format!(
+    let hd = vec![0xA5; HD_ADF_SIZE];
+    for method in [8, 0] {
+        let packed = zip_with_data_descriptor(&hd, method, zip_descriptor_for(&hd));
+        let err = format!(
             "{:#}",
-            decode_zip_floppy_image(&packed, GZIP_IMAGE_LIMIT).unwrap_err()
-        )
-    };
-    // The descriptor's CRC is checked like a header's.
-    let err = refused(ZipDescriptor {
-        crc: !crc.sum(),
-        ..good
-    });
-    assert!(err.contains("checksum error"), "{err}");
-    // So are its sizes, against what the entry's data turned out to be.
-    for (packed_skew, unpacked_skew) in [(0, -1), (0, 1), (1, 0), (-1, 0)] {
-        for zip64 in [false, true] {
-            let err = refused(ZipDescriptor {
-                zip64,
-                packed_skew,
-                unpacked_skew,
-                ..good
-            });
-            assert!(err.contains("data descriptor"), "{err}");
-        }
+            decode_zip_floppy_image(&packed, ADF_SIZE).unwrap_err()
+        );
+        assert!(err.contains("exceeds"), "method {method}: {err}");
     }
-    // A descriptor cut short is not a descriptor.
-    let mut packed = zip_with_data_descriptor(&adf, 8, good);
-    packed.truncate(packed.len() - 5);
-    let err = format!(
-        "{:#}",
-        decode_zip_floppy_image(&packed, GZIP_IMAGE_LIMIT).unwrap_err()
-    );
-    assert!(err.contains("data descriptor"), "{err}");
-    // An entry that is not an ADF is refused before any of that.
-    let short = zip_with_data_descriptor(&adf[..4096], 8, good);
-    assert!(decode_zip_floppy_image(&short, GZIP_IMAGE_LIMIT).is_err());
+    Ok(())
+}
+
+#[test]
+fn stored_zip_floppy_is_not_cut_short_at_bytes_that_read_as_a_descriptor() -> Result<()> {
+    // A stored high-density image whose bytes at the double-density
+    // boundary read as a data descriptor for a double-density entry. The
+    // CRC those bytes give is not that of the image's first half, so the
+    // entry is still the high-density image its real descriptor describes.
+    let mut adf: Vec<u8> = (0..HD_ADF_SIZE).map(|i| (i / 512) as u8).collect();
+    let mut decoy = vec![0x50, 0x4b, 0x07, 0x08];
+    decoy.extend_from_slice(&0x1234_5678u32.to_le_bytes());
+    decoy.extend_from_slice(&(ADF_SIZE as u32).to_le_bytes());
+    decoy.extend_from_slice(&(ADF_SIZE as u32).to_le_bytes());
+    adf[ADF_SIZE..ADF_SIZE + decoy.len()].copy_from_slice(&decoy);
+    let packed = zip_with_data_descriptor(&adf, 0, zip_descriptor_for(&adf));
+    assert!(decode_zip_floppy_image(&packed, GZIP_IMAGE_LIMIT)? == adf);
+    // Under a limit that rules the high-density reading out, the entry
+    // is refused rather than read as the double-density image it is not.
+    assert!(decode_zip_floppy_image(&packed, ADF_SIZE).is_err());
     Ok(())
 }
 
