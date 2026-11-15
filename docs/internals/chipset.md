@@ -98,15 +98,36 @@ word repeats across that width in both paths.
 
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as
-many address bits as its DRAM reach, so the fitted chip RAM image repeats
-across the window. A 512K OCS machine mirrors chip RAM at
+many address bits as it is wired to see, so the fitted chip RAM image
+repeats across the window. A 512K OCS machine mirrors chip RAM at
 $080000/$100000/$180000, and the 8372A (A20 unused) repeats its 1M image
 at $100000, while addresses past the fitted RAM inside one image select
-no DRAM bank and stay open bus ($080000-$0FFFFF on an 8372A with 512K
+no DRAM bank and stay open bus ($0C0000-$0FFFFF on an 8372A with 768K
 fitted). Kickstart's chip sizing detects the wrap and still reports the
 fitted size. Action Replay freeze-disk loaders are a regression example:
 they park the supervisor stack at $100000 on a 512K OCS machine and rely
 on the pushes landing at the top of chip RAM.
+
+An 8372A machine with 512K of chip RAM mirrors like OCS, not like a 1M
+machine with half its RAM missing. The 8372A's A19 input selects its
+second 512K DRAM bank, and the board straps that pin (JP2 on the A500
+rev 6A) to CPU A19 only when the second bank is chip RAM. In the 512K
+position it follows CPU A23, which is what puts the second bank at
+$C00000 as trapdoor RAM, so a chip-window access always reaches Agnus
+with A19 low and the first bank answers at $080000/$100000/$180000.
+Loaders that size chip RAM by writing at $080000 and looking for the
+alias at $000000 depend on it: a cracked Cannon Fodder unpacks to
+$080000 when it finds no alias, and ran into a Guru on the ECS-Agnus
+512K + 512K A500 while the mirror was missing. vAmiga maps the window
+the same way.
+
+Not modelled: on that same 512K + trapdoor strapping the second bank is
+still driven by Agnus, so Agnus's own DMA addresses with bit 19 set
+($080000-$0FFFFF in a 20-bit pointer) reach the trapdoor RAM. Copperline
+masks DMA pointers to the fitted chip RAM instead, so they wrap into the
+first bank; vAmiga models the DMA view as its "ECS memory mirroring"
+option. Software has to point a bitplane, blitter, or audio pointer
+above 512K on a 512K-chip machine to tell the difference.
 
 Sprite DMA is modelled at the register level, the way the chips work:
 there is no separate "descriptor" concept. Each channel keeps Agnus-side
