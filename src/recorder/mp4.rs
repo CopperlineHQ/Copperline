@@ -158,10 +158,11 @@ impl Conversion {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        lower_priority(&mut cmd);
+        below_normal_at_creation(&mut cmd);
         let mut child = cmd
             .spawn()
             .with_context(|| format!("running {}", ffmpeg.display()))?;
+        lower_priority(&child);
         let stderr = match child.stderr.take() {
             Some(mut pipe) => Some(
                 std::thread::Builder::new()
@@ -268,21 +269,10 @@ impl Drop for Conversion {
 
 /// Run the encoder below the emulator: it is batch work, and on a host
 /// with few cores an ffmpeg at normal priority takes the time the
-/// emulation (and its audio) needs to keep up.
-fn lower_priority(cmd: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: the closure runs in the forked child before exec and
-        // makes one system call, touching no memory or locks it shares
-        // with the parent. A failure leaves ffmpeg at normal priority.
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setpriority(libc::PRIO_PROCESS, 0, 10);
-                Ok(())
-            });
-        }
-    }
+/// emulation (and its audio) needs to keep up. Windows takes the
+/// priority when the process is created; Unix is given it afterwards by
+/// [`lower_priority`].
+fn below_normal_at_creation(cmd: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -291,9 +281,32 @@ fn lower_priority(cmd: &mut Command) {
         const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
         cmd.creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS);
     }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(windows))]
     let _ = cmd;
 }
+
+/// The Unix half of [`below_normal_at_creation`]: lower the priority of
+/// the ffmpeg just started. It is set on the running child rather than
+/// from a `pre_exec` hook, because a hook makes the standard library
+/// `fork` the emulator's whole process to run it where it would
+/// otherwise use `posix_spawn`, and the kernel can refuse that fork for
+/// want of memory (ENOMEM, as a Linux CI runner did) when a spawn would
+/// have gone through. The threads ffmpeg starts later inherit the
+/// priority of the thread that makes them. A failure leaves ffmpeg at
+/// normal priority.
+fn lower_priority(child: &Child) {
+    #[cfg(unix)]
+    // SAFETY: one system call on a process id, passing no pointers.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, child.id() as libc::id_t, ENCODER_NICE);
+    }
+    #[cfg(not(unix))]
+    let _ = child;
+}
+
+/// The nice value ffmpeg runs at on Unix.
+#[cfg(unix)]
+const ENCODER_NICE: libc::c_int = 10;
 
 /// The picture size an MP4's H.264 sample entry declares: the `avc1`
 /// entry of the first `stsd` box holding one (`avc1` alone also turns up
@@ -483,6 +496,33 @@ mod tests {
         assert!(conversion.poll().is_none(), "the outcome is reported once");
         assert!(mp4.is_file());
         assert!(!avi.exists(), "the AVI is removed once the MP4 is there");
+    }
+
+    /// The priority is lowered without a `pre_exec` hook (see
+    /// [`lower_priority`]), so check it still arrives.
+    #[cfg(unix)]
+    #[test]
+    fn the_encoder_runs_below_the_emulator() {
+        let dir = tempfile::tempdir().unwrap();
+        let avi = dir.path().join("rec.recording.avi");
+        let mp4 = dir.path().join("rec.mp4");
+        std::fs::write(&avi, b"RIFF").unwrap();
+        let ffmpeg = fake_ffmpeg(
+            dir.path(),
+            "sleep 0.2; for last; do :; done; echo mp4 > \"$last\"",
+        );
+        let conversion = start(&ffmpeg, &avi, &mp4);
+        let pid = conversion.child.as_ref().unwrap().id() as libc::id_t;
+        // SAFETY: one system call on a process id, passing no pointers.
+        let (mine, encoder) = unsafe {
+            (
+                libc::getpriority(libc::PRIO_PROCESS, 0),
+                libc::getpriority(libc::PRIO_PROCESS, pid),
+            )
+        };
+        // A suite already run below ENCODER_NICE cannot raise its child.
+        assert_eq!(encoder, mine.max(ENCODER_NICE));
+        conversion.wait().unwrap();
     }
 
     #[cfg(unix)]
