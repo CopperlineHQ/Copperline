@@ -9,8 +9,20 @@
 //! Amiga output (large static regions, few colours) and needs no codec
 //! dependency beyond the flate2 crate already used elsewhere. Audio is
 //! plain 16-bit PCM stereo at the mixer rate. The result plays in
-//! VLC/mpv/ffmpeg-based players; `ffmpeg -i capture.avi out.mp4`
-//! transcodes it for anything else.
+//! VLC/mpv/ffmpeg-based players. For anything else, transcode it with:
+//!
+//! ```sh
+//! ffmpeg -i copperline-video-<ts>.avi \
+//!   -vf "scale=iw*2:ih*2:flags=neighbor:out_color_matrix=bt709:out_range=tv,format=yuv420p,setsar=1,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv" \
+//!   -c:v libx264 -crf 18 -c:a aac -b:a 192k -movflags +faststart \
+//!   copperline-video-<ts>.mp4
+//! ```
+//!
+//! A plain `ffmpeg -i capture.avi out.mp4` is not enough: for this bgr0
+//! input ffmpeg picks H.264 "High 4:4:4 Predictive", which QuickTime,
+//! Safari/iOS, most browsers and video sites cannot play. Forcing 4:2:0
+//! alone fails on the default TV-aspect 716x537 frame (libx264 rejects odd
+//! 4:2:0 heights), hence the nearest-neighbour 2x scale first.
 //!
 //! Frames are pushed on emulated-frame boundaries and audio is the exact
 //! mixer output for the same emulated interval, so A/V stay locked to the

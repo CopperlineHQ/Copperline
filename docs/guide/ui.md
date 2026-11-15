@@ -1215,8 +1215,24 @@ The file is an AVI with lossless ZMBV video (the DOSBox capture codec:
 zlib-compressed keyframes plus frame deltas, which keeps typical Amiga
 output to a few MB per minute) and uncompressed 16-bit stereo PCM audio
 at 44.1 kHz. It plays directly in VLC, mpv, and anything else built on
-ffmpeg; for other players, transcode with
-`ffmpeg -i copperline-video-<ts>.avi out.mp4`.
+ffmpeg; for other players, transcode it to MP4 (put the file's timestamp
+in place of `<ts>`):
+
+```sh
+ffmpeg -i copperline-video-<ts>.avi \
+  -vf "scale=iw*2:ih*2:flags=neighbor:out_color_matrix=bt709:out_range=tv,format=yuv420p,setsar=1,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv" \
+  -c:v libx264 -crf 18 -c:a aac -b:a 192k -movflags +faststart \
+  copperline-video-<ts>.mp4
+```
+
+A plain `ffmpeg -i copperline-video-<ts>.avi out.mp4` is not enough:
+from the recording's RGB frames ffmpeg picks the H.264 "High 4:4:4
+Predictive" profile, which QuickTime, Safari and iOS, most browsers and
+video sites will not play. The filter chain above converts to the widely
+supported 4:2:0 format instead, after a nearest-neighbour 2x scale that
+keeps pixels sharp and gives the even height 4:2:0 needs (the default
+TV-aspect recording is 716x537), and tags the output as BT.709 so colours
+come out right.
 
 Frames and audio are captured on the emulated timeline, not the host
 clock: the recording stays in sync even when the host stutters, and a
