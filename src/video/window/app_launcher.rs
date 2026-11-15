@@ -1676,6 +1676,7 @@ impl App {
         // and its automatic rate (the video standard) are that machine's.
         self.clip_settings = cfg.recording.clip_settings();
         self.clip_ring = None;
+        self.set_video_recording(&cfg.recording);
         self.apply_pixel_aspect(crate::config::resolve_pixel_aspect(cfg.pixel_aspect));
         // The bezel before the scaling: the canvas rule reads both, and
         // adopting them in this order moves the canvas at most once.

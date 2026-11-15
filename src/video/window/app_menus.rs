@@ -116,6 +116,7 @@ impl App {
             warp_speed: self.warp_speed,
             rewind: self.rewind_armed,
             recording: self.recorder.is_some(),
+            video_format: self.video_format,
             input_recording: self.input_recorder.is_some(),
             card_outputs: !self.card_monitors.is_empty(),
             card_recording: self.card_monitors.program_recording(),
@@ -553,6 +554,19 @@ impl App {
             }
 
             A::ToggleRecord => self.toggle_recording(),
+            A::SetVideoFormat(format) => {
+                self.video_format = format;
+                info!("video recording format: {}", format.label());
+                let label = format.menu_label();
+                if format == crate::config::VideoFormat::Mp4 && self.ffmpeg().is_none() {
+                    self.show_osd(format!("Video format: {label} -- no ffmpeg found"));
+                } else if self.recorder.is_some() {
+                    self.show_osd(format!("Video format: {label} (from the next recording)"));
+                } else {
+                    self.show_osd(format!("Video format: {label}"));
+                }
+                self.request_redraw();
+            }
             A::ToggleRecordInput => self.toggle_input_recording(),
             A::ToggleCardRecord => self.toggle_card_recording(),
             A::ShowCardMonitors => self.show_card_monitors(),

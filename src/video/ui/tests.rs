@@ -3824,6 +3824,7 @@ fn panels_render_into_their_rects() {
         warp_speed: WarpSpeed::Max,
         rewind: false,
         recording: false,
+        video_format: crate::config::VideoFormat::Avi,
         input_recording: false,
         card_outputs: false,
         card_recording: false,

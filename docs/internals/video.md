@@ -1085,7 +1085,9 @@ monitor's REC and SETUP buttons and its setup panel are drawn by the
 painter over the artwork in the 8x8 overlay font; the event loop hit-tests
 them from the same fractions of the artwork. Recordings go through the
 card output (`CardOutput`): the lossless AVI recorder runs on publish, and
-for an MP4 a thread runs ffmpeg on the AVI when the recording stops.
+for an MP4 a thread runs ffmpeg on the AVI when the recording stops
+(`recorder::mp4`, scaled to 480 square-pixel lines; the window's own
+recordings use the same module).
 
 The front panels (`video/window/monitor_panel.rs`) are hit-tested from
 button rectangles measured off the built-in artworks. The event loop
@@ -1810,6 +1812,24 @@ frames-to-audio-samples ratio, so a nominal "50 fps" label never drifts
 against PAL's true field rate and warp-speed captures play back at normal
 speed. The REC badge, status bar, OSD, and menus are drawn into the
 presentation texture after capture, so they never appear in the file.
+
+An [MP4 recording](../guide/ui.md#recording-mp4) (`recorder/mp4.rs`) is
+the same AVI, captured beside the target as `<name>.recording.avi` and
+encoded afterwards by the host's ffmpeg (found by `ffmpeg.rs`): there is
+no pure-Rust H.264 or AAC encoder, and the C ones would bring a C
+toolchain and codec licensing into every build. Capture therefore costs
+what an AVI does and stays on the emulated timeline; on Stop the window
+starts a `Conversion` (ffmpeg as a child process at nice 10, or
+`BELOW_NORMAL_PRIORITY_CLASS` on Windows) and polls it from the frame loop
+next to the GIF clip writer, flashing the outcome on the OSD. The filter
+doubles the picture with nearest-neighbour sampling, so each source pixel
+keeps a chroma sample of its own through 4:2:0 and the TV canvas's odd
+537 rows become even (libx264 refuses odd 4:2:0 heights), and converts and
+tags BT.709, the matrix players assume at that size. A conversion only
+trades the AVI for the MP4 once ffmpeg has succeeded and the MP4 exists;
+dropping a running one (quitting) detaches ffmpeg rather than killing it,
+so the MP4 still appears and the AVI stays. The Video Toaster's Program
+recordings use the same module with a 480-line Lanczos scale instead.
 
 ## GIF clips (`gifclip.rs`)
 

@@ -55,6 +55,7 @@ pub mod drive_sounds;
 pub mod emulator;
 pub mod envcfg;
 pub mod expect;
+pub mod ffmpeg;
 pub mod filesys;
 pub mod floppy;
 /// NewTek Video Toaster Flyer: the Zorro II card, emulated at its command

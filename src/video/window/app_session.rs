@@ -1108,58 +1108,184 @@ impl App {
         }
     }
 
+    /// Start Record Video into a new, time-stamped file in the recordings
+    /// folder, in the configured format. An MP4 needs ffmpeg; without one
+    /// the recording is an AVI, and says so.
     pub(super) fn start_recording(&mut self) {
-        self.start_recording_to(crate::recorder::auto_filename());
+        let mut path = crate::recorder::auto_filename();
+        let mut no_ffmpeg = false;
+        if self.video_format == crate::config::VideoFormat::Mp4 {
+            if self.ffmpeg().is_some() {
+                path.set_extension("mp4");
+            } else {
+                warn!(
+                    "no ffmpeg found to make an MP4 recording (install it, or set \
+                     [recording] ffmpeg); recording an AVI instead"
+                );
+                no_ffmpeg = true;
+            }
+        }
+        if self.start_recording_to(path.clone()) && no_ffmpeg {
+            self.show_osd(format!(
+                "Recording {} (no ffmpeg for MP4)",
+                display_file_name(&path)
+            ));
+        }
     }
 
-    pub(super) fn start_recording_to(&mut self, path: PathBuf) {
+    /// Start recording to `path`: as it is for an AVI, or for an MP4 (by
+    /// its name, see [`crate::recorder::mp4::is_mp4`]) into an AVI beside
+    /// it that becomes the MP4 when the recording stops. Whether it
+    /// started.
+    pub(super) fn start_recording_to(&mut self, path: PathBuf) -> bool {
+        let (capture, mp4) = if crate::recorder::mp4::is_mp4(&path) {
+            (crate::recorder::mp4::avi_beside(&path), Some(path.clone()))
+        } else {
+            (path.clone(), None)
+        };
         // The capture canvas: a recording is the aspect's own picture,
         // whatever the window is drawing (integer scaling of the tv aspect
         // draws from a square canvas the recording never sees).
         let rows = crate::video::capture_height();
-        match crate::recorder::VideoRecorder::create(&path, FB_WIDTH, rows) {
+        let started = match crate::recorder::VideoRecorder::create(&capture, FB_WIDTH, rows) {
             Ok(rec) => {
                 // The Paula tap collects the mixed stereo output from this
                 // point on; capture_recorder_output drains it every frame.
                 self.emu.bus_mut().paula.set_audio_capture_enabled(true);
-                info!("recording video+audio to {}", path.display());
+                if mp4.is_some() {
+                    info!(
+                        "recording video+audio to {} (captured into {})",
+                        path.display(),
+                        capture.display()
+                    );
+                } else {
+                    info!("recording video+audio to {}", path.display());
+                }
                 self.show_osd(format!("Recording {}", display_file_name(&path)));
                 self.recorder = Some(rec);
+                self.recording_mp4 = mp4;
+                true
             }
             Err(e) => {
                 warn!("recording start failed: {e:#}");
                 self.show_osd("Recording start failed (see log)");
+                false
             }
+        };
+        self.request_redraw();
+        started
+    }
+
+    pub(super) fn stop_recording(&mut self) {
+        if let Some(message) = self.finish_recording() {
+            self.show_osd(message);
         }
         self.request_redraw();
     }
 
-    pub(super) fn stop_recording(&mut self) {
-        let Some(mut rec) = self.recorder.take() else {
-            return;
-        };
+    /// Stop the active recording and finish its file: an AVI is complete
+    /// here; an MP4 recording's AVI is handed to ffmpeg, whose outcome
+    /// [`Self::poll_mp4_saves`] reports. The OSD line saying what
+    /// happened, or None when nothing was recording.
+    pub(super) fn finish_recording(&mut self) -> Option<String> {
+        let mut rec = self.recorder.take()?;
+        let mp4 = self.recording_mp4.take();
         let samples = self.emu.bus_mut().paula.take_captured_audio();
         self.emu.bus_mut().paula.set_audio_capture_enabled(false);
         rec.push_audio(&samples);
         let seconds = rec.recorded_seconds();
-        let path = rec.path().to_path_buf();
-        match rec.finish() {
-            Ok(()) => {
+        let avi = rec.path().to_path_buf();
+        let finished = rec.finish();
+        // Closed before ffmpeg reads it (and, once the MP4 is made,
+        // removes it).
+        drop(rec);
+        if let Err(e) = finished {
+            warn!("recording save failed ({}): {e:#}", avi.display());
+            return Some("Recording save failed (see log)".into());
+        }
+        let Some(mp4) = mp4 else {
+            info!(
+                "recording saved: {} ({seconds:.1}s of emulated time)",
+                avi.display()
+            );
+            return Some(format!("Saved {} ({seconds:.1}s)", display_file_name(&avi)));
+        };
+        let Some(ffmpeg) = self.ffmpeg() else {
+            warn!(
+                "no ffmpeg to make {}; the recording stays {} ({seconds:.1}s of emulated time)",
+                mp4.display(),
+                avi.display()
+            );
+            return Some(format!(
+                "Saved {} (no ffmpeg for MP4)",
+                display_file_name(&avi)
+            ));
+        };
+        let options = crate::recorder::mp4::Mp4Options::doubled();
+        match crate::recorder::mp4::Conversion::start(&ffmpeg, &avi, &mp4, &options) {
+            Ok(conversion) => {
                 info!(
-                    "recording saved: {} ({seconds:.1}s of emulated time)",
-                    path.display()
+                    "recording captured ({seconds:.1}s of emulated time); {} is making {}",
+                    ffmpeg.display(),
+                    mp4.display()
                 );
-                self.show_osd(format!(
-                    "Saved {} ({seconds:.1}s)",
-                    display_file_name(&path)
-                ));
+                self.mp4_saves.push((conversion, seconds));
+                Some(format!("Saving {}...", display_file_name(&mp4)))
             }
             Err(e) => {
-                warn!("recording save failed ({}): {e:#}", path.display());
-                self.show_osd("Recording save failed (see log)");
+                warn!(
+                    "making {}: {e:#}; the recording stays {}",
+                    mp4.display(),
+                    avi.display()
+                );
+                Some(format!(
+                    "MP4 failed, kept {} (see log)",
+                    display_file_name(&avi)
+                ))
             }
         }
-        self.request_redraw();
+    }
+
+    /// The ffmpeg MP4 recordings are made with, if there is one.
+    pub(super) fn ffmpeg(&self) -> Option<PathBuf> {
+        crate::ffmpeg::find(self.ffmpeg_path.as_deref(), &[])
+    }
+
+    /// Report the MP4 recordings ffmpeg has finished making since the
+    /// last call.
+    pub(super) fn poll_mp4_saves(&mut self) {
+        let mut i = 0;
+        while i < self.mp4_saves.len() {
+            let Some(outcome) = self.mp4_saves[i].0.poll() else {
+                i += 1;
+                continue;
+            };
+            let (conversion, seconds) = self.mp4_saves.remove(i);
+            match outcome {
+                Ok(()) => {
+                    info!(
+                        "recording saved: {} ({seconds:.1}s of emulated time)",
+                        conversion.mp4().display()
+                    );
+                    self.show_osd(format!(
+                        "Saved {} ({seconds:.1}s)",
+                        display_file_name(conversion.mp4())
+                    ));
+                }
+                Err(e) => {
+                    warn!(
+                        "making {}: {e:#}; the recording stays {}",
+                        conversion.mp4().display(),
+                        conversion.avi().display()
+                    );
+                    self.show_osd(format!(
+                        "MP4 failed, kept {} (see log)",
+                        display_file_name(conversion.avi())
+                    ));
+                }
+            }
+            self.request_redraw();
+        }
     }
 
     /// Feed the active recording: drain the audio captured during the

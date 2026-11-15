@@ -216,29 +216,10 @@ fn load_still(path: &Path) -> Result<Vec<u32>, String> {
     Ok(picture_from_rgba(img.as_raw(), w as usize, h as usize))
 }
 
-/// Where ffmpeg is, if anywhere.
+/// Where ffmpeg is, if anywhere: one in the media folder first, then
+/// wherever [`crate::ffmpeg::find`] looks.
 pub fn find_ffmpeg(media_root: &Path) -> Option<PathBuf> {
-    let exe = if cfg!(windows) {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
-    if let Some(p) = crate::envcfg::var_os("COPPERLINE_FFMPEG").map(PathBuf::from) {
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    let mut candidates = vec![media_root.join(exe)];
-    if let Some(dir) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
-    {
-        candidates.push(dir.join(exe));
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        candidates.extend(std::env::split_paths(&path).map(|d| d.join(exe)));
-    }
-    candidates.into_iter().find(|p| p.is_file())
+    crate::ffmpeg::find(None, &[media_root])
 }
 
 /// What a worker hands the card.

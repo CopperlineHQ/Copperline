@@ -7067,6 +7067,158 @@ fn recording_captures_emulated_frames_with_audio() {
     );
 }
 
+/// Step the fixture until it has rendered `frames` emulated frames,
+/// feeding the active recording (none are fed while `frames` is 0: that
+/// only waits for the first renderable frame).
+fn step_recorded_frames(app: &mut super::App, frames: u32) {
+    let mut rendered_frames = 0;
+    for _ in 0..(frames.max(1) * 2 + 4) {
+        app.emu.step_frame().expect("step frame");
+        let rendered = if app.render_worker.is_some() {
+            app.finish_render_for_current_frame()
+        } else {
+            app.render_emulated_frame_if_needed()
+        };
+        if frames == 0 {
+            if rendered {
+                return;
+            }
+            continue;
+        }
+        app.capture_recorder_output(rendered);
+        rendered_frames += u32::from(rendered);
+        if rendered_frames == frames {
+            return;
+        }
+    }
+    panic!("the fixture stopped producing renderable frames");
+}
+
+/// Poll the app's MP4 conversions until none is left running.
+fn wait_for_mp4_saves(app: &mut super::App) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while !app.mp4_saves.is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ffmpeg never finished"
+        );
+        app.poll_mp4_saves();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// An MP4 recording is captured into an AVI beside it, and on Stop the
+/// host's ffmpeg makes the MP4 from it in the background: H.264 at twice
+/// the captured picture (even rows, as 4:2:0 needs, from the TV aspect's
+/// odd 537), with the AVI removed once it is there.
+#[test]
+fn mp4_recording_is_made_from_its_avi_when_it_stops() {
+    let Some(ffmpeg) = crate::ffmpeg::find(None, &[]) else {
+        eprintln!("no ffmpeg on this host; skipping");
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app();
+    app.ffmpeg_path = Some(ffmpeg);
+    step_recorded_frames(&mut app, 0);
+    let mp4 = dir.path().join("rec.mp4");
+    let avi = crate::recorder::mp4::avi_beside(&mp4);
+    assert!(app.start_recording_to(mp4.clone()));
+    assert_eq!(app.recorder.as_ref().map(|r| r.path()), Some(avi.as_path()));
+    step_recorded_frames(&mut app, 5);
+    app.stop_recording();
+    assert!(app.recorder.is_none());
+    assert!(app.recording_mp4.is_none());
+    assert_eq!(app.mp4_saves.len(), 1, "ffmpeg is making the MP4");
+    assert_eq!(
+        app.active_osd_text().map(|(text, _)| text).as_deref(),
+        Some("Saving rec.mp4...")
+    );
+    wait_for_mp4_saves(&mut app);
+    let osd = app.active_osd_text().map(|(text, _)| text).unwrap();
+    if osd.starts_with("MP4 failed") && avi.is_file() {
+        // An ffmpeg without libx264 cannot make one: the host's, not this.
+        eprintln!("this host's ffmpeg made no MP4; skipping the file checks");
+        return;
+    }
+    assert!(osd.starts_with("Saved rec.mp4 ("), "{osd}");
+    let bytes = std::fs::read(&mp4).unwrap();
+    assert_eq!(&bytes[4..8], b"ftyp");
+    assert_eq!(
+        crate::recorder::mp4::h264_dimensions(&bytes),
+        Some((
+            2 * FB_WIDTH as u16,
+            2 * crate::video::capture_height() as u16
+        ))
+    );
+    assert!(!avi.exists(), "the AVI goes once the MP4 is there");
+}
+
+/// When ffmpeg fails, the recording is not lost: the AVI stays, the OSD
+/// says so, and nothing half-made is left under the MP4's name.
+#[cfg(unix)]
+#[test]
+fn a_failed_mp4_conversion_keeps_the_avi() {
+    if crate::envcfg::var_os("COPPERLINE_FFMPEG").is_some() {
+        return; // it would outrank the stand-in
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app();
+    app.ffmpeg_path = Some(crate::recorder::mp4::fake_ffmpeg(
+        dir.path(),
+        "for last; do :; done; echo partial > \"$last\"; echo 'no libx264' >&2; exit 1",
+    ));
+    step_recorded_frames(&mut app, 0);
+    let mp4 = dir.path().join("rec.mp4");
+    assert!(app.start_recording_to(mp4.clone()));
+    step_recorded_frames(&mut app, 3);
+    app.stop_recording();
+    wait_for_mp4_saves(&mut app);
+    assert_eq!(
+        app.active_osd_text().map(|(text, _)| text).as_deref(),
+        Some("MP4 failed, kept rec.recording.avi (see log)")
+    );
+    assert!(crate::recorder::mp4::avi_beside(&mp4).is_file());
+    assert!(!mp4.exists());
+}
+
+/// Quitting while recording finishes the recording as Stop would, and the
+/// ffmpeg making its MP4 carries on after the session is gone.
+#[cfg(unix)]
+#[test]
+fn quitting_while_recording_still_makes_the_mp4() {
+    if crate::envcfg::var_os("COPPERLINE_FFMPEG").is_some() {
+        return; // it would outrank the stand-in
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = test_app();
+    app.ffmpeg_path = Some(crate::recorder::mp4::fake_ffmpeg(
+        dir.path(),
+        "sleep 0.2; for last; do :; done; echo mp4 > \"$last\"",
+    ));
+    step_recorded_frames(&mut app, 0);
+    let mp4 = dir.path().join("rec.mp4");
+    assert!(app.start_recording_to(mp4.clone()));
+    step_recorded_frames(&mut app, 3);
+    drop(app);
+    let avi = crate::recorder::mp4::avi_beside(&mp4);
+    let data = std::fs::read(&avi).expect("the recording was finished");
+    assert_eq!(&data[0..4], b"RIFF");
+    assert_ne!(
+        u32::from_le_bytes(data[48..52].try_into().unwrap()),
+        0,
+        "the AVI holds the frames recorded"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while !mp4.is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "ffmpeg did not outlive the session"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 #[test]
 fn debug_layout_pauses_on_first_open_and_preserves_state_in_play() {
     let mut app = test_app();
