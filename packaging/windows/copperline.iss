@@ -77,3 +77,51 @@ Name: "{autodesktop}\Copperline"; Filename: "{app}\copperline.exe"; WorkingDir: 
 
 [Run]
 Filename: "{app}\copperline.exe"; Description: "Launch Copperline"; Flags: nowait postinstall skipifsilent
+
+[Code]
+var
+  DesktopShortcutInstalled: Boolean;
+
+// Something else can have a shortcut open at the moment the uninstaller
+// reaches it (Explorer, or a scanner reading the desktop), and an uninstall
+// leaves a file it cannot delete. Give the shortcut further attempts, for up
+// to ten seconds, once everything else has been removed.
+procedure DeleteShortcutWhenFree(const Path: String);
+var
+  Attempt: Integer;
+begin
+  for Attempt := 1 to 100 do
+  begin
+    if not FileExists(Path) then
+      Exit;
+    if DeleteFile(Path) then
+    begin
+      Log('Deleted on a later attempt: ' + Path);
+      Exit;
+    end;
+    Sleep(100);
+  end;
+  Log('Still in use, left in place: ' + Path);
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Tasks: String;
+begin
+  if CurUninstallStep = usUninstall then
+  begin
+    // The desktop shortcut is optional, and a shortcut of the same name that
+    // Setup did not create is not this uninstaller's to remove. The record
+    // of the chosen tasks goes with the uninstall entry, so read it first.
+    DesktopShortcutInstalled :=
+      RegQueryStringValue(HKA,
+        'Software\Microsoft\Windows\CurrentVersion\Uninstall\CopperlineHQ.Copperline_is1',
+        'Inno Setup: Selected Tasks', Tasks) and (Pos('desktopicon', Tasks) > 0);
+  end
+  else if CurUninstallStep = usPostUninstall then
+  begin
+    DeleteShortcutWhenFree(ExpandConstant('{autoprograms}\Copperline.lnk'));
+    if DesktopShortcutInstalled then
+      DeleteShortcutWhenFree(ExpandConstant('{autodesktop}\Copperline.lnk'));
+  end;
+end;
