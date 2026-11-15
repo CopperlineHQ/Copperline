@@ -21,14 +21,18 @@ updates:
       interval: weekly
     groups:
       # The debugger passes egui types between its winit and wgpu adapters,
-      # and shares pixels' wgpu device. Update this stack together, including
-      # patches, before the catch-all groups can split it into separate PRs.
+      # and shares pixels' wgpu device. The flyer-convert window's eframe
+      # pins its own egui and wgpu series, so it moves with them; the
+      # egui-* pattern does not match it. Update this stack together,
+      # including patches, before the catch-all groups can split it into
+      # separate PRs.
       desktop-renderer:
         patterns:
           - pixels
           - winit
           - egui
           - egui-*
+          - eframe
       patch-updates:
         update-types: ["patch"]
       shared-dependency-updates:
@@ -51,6 +55,13 @@ updates:
           - "version-update:semver-major"
           - "version-update:semver-minor"
       - dependency-name: egui-*
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+      # A minor eframe bump on its own adds a second egui and wgpu stack to
+      # every default build (converter-bin is a default feature) and splits
+      # the epaint_default_fonts version the license exception names.
+      - dependency-name: eframe
         update-types:
           - "version-update:semver-major"
           - "version-update:semver-minor"
