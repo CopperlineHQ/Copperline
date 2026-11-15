@@ -76,6 +76,10 @@ for the earlier release notes.
 - A ZIP-wrapped floppy image whose file name and extra field together run
   past 64 KiB no longer panics a build with overflow checks enabled; it is
   refused as release builds already refused it.
+- A high-density ADF in a ZIP written as a stream, with the entry's sizes
+  after its data rather than in its header, is read like a double-density
+  one. macOS Finder's Compress writes every archive that way, so an HD ADF
+  zipped on a Mac was refused with "invalid ADF file size in ZIP archive".
 - External floppy drives answer the /RDY ID probe while their motor is off,
   including before the first motor cycle, so boot-time probes can find DF1.
 - Covered or minimised windows no longer leak GPU staging memory.
