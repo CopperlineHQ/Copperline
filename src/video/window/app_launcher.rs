@@ -1615,6 +1615,11 @@ impl App {
                 if let Some(session) = session {
                     self.attach_netplay(session);
                 }
+                // The launcher has gone from over the display, so this is
+                // a moment to take the grab unasked, whether Run was
+                // clicked or pressed from a pad. Asked after netplay is
+                // attached, which decides the port the mouse drives.
+                self.apply_auto_mouse_capture();
                 Ok(())
             }
             Err(e) => {

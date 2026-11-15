@@ -1535,7 +1535,9 @@ motion is applied exactly as given.
 changes when the grab is taken: `auto` grabs whenever the window has the
 focus and on entering fullscreen, so no host cursor is ever loose over
 the display, and `manual` grabs only on the shortcut, leaving display
-clicks to go straight to the Amiga. See
+clicks to go straight to the Amiga. The default, `click`, waits for a
+click on the display, except fullscreen with the status bar hidden, where
+the display is all there is to click and it grabs as `auto` does. See
 [Mouse capture](configuration.md#mouse-capture).
 
 Enable *Middle to release* on the launcher's *Input* tab, or set

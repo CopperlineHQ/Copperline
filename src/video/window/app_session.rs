@@ -139,8 +139,9 @@ impl App {
                 "Fullscreen on ({HOST_SHORTCUT_MODIFIER_LABEL}+F restores)"
             ));
             // Fullscreen leaves no desktop to reach for, so auto mode takes
-            // the grab here as well as on focus: entering fullscreen does
-            // not itself change the focus, so no Focused event follows.
+            // the grab here as well as on focus (and click mode does when
+            // the status bar is hidden): entering fullscreen does not
+            // itself change the focus, so no Focused event follows.
             self.apply_auto_mouse_capture();
         }
     }

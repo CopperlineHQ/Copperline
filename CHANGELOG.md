@@ -39,6 +39,15 @@ for the earlier release notes.
 
 ### Changed
 
+- With the default `mouse_capture = "click"`, a fullscreen window that shows
+  only the display (status bar hidden, no keyboard, MT-32 or Coppersynth
+  strip) takes the mouse without a click, as `auto` does: at start-up, on
+  focus, on entering fullscreen or hiding the status bar, and when a menu or
+  panel closes. Every click there would land on the display anyway, so a
+  session started fullscreen no longer needs one before the Amiga pointer is
+  the only one on screen. Wherever a mode grabs unasked, a machine started
+  by clicking the launcher's Run now takes the grab, as one started from a
+  pad or the keyboard already did.
 - `[cpu] jit` runs the `[copperhf]` device driver and the `[[filesys]]`
   handlers at CPU speed: their boot ROMs are mapped as local memory, like
   Kickstart, instead of costing an expansion-bus access for every opcode.

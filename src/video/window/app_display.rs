@@ -818,6 +818,7 @@ impl App {
             self.show_osd(format!(
                 "Status bar hidden ({HOST_SHORTCUT_MODIFIER_LABEL}+Shift+F restores)"
             ));
+            self.capture_if_display_left_bare();
         } else {
             self.show_osd("Status bar restored");
         }

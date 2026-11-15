@@ -477,8 +477,9 @@ pub struct Config {
     pub mouse_sensitivity: u8,
     /// When the host mouse is grabbed (`[input] mouse_capture` /
     /// `--mouse-capture`). Defaults to [`MouseCapture::Click`], the
-    /// historical click-the-display behaviour; `auto` grabs on focus, which
-    /// suits a fullscreen session where no host cursor is wanted.
+    /// historical click-the-display behaviour, which grabs unasked only in
+    /// a fullscreen window showing nothing but the display; `auto` grabs on
+    /// focus, which suits any session where no host cursor is wanted.
     pub mouse_capture: MouseCapture,
     /// Release a captured host mouse with middle click (`[input]
     /// middle_click_release`). Off by default, so middle click reaches the guest.
@@ -982,7 +983,9 @@ impl JoystickInputMode {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MouseCapture {
     /// Clicking the display takes the grab (the default). That click is a
-    /// window action and is not passed to the Amiga.
+    /// window action and is not passed to the Amiga. A fullscreen window
+    /// with the status bar hidden, and no strip under the display, has
+    /// nothing else to click, so there the grab is taken as in `Auto`.
     #[default]
     Click,
     /// Grab as soon as the window has the focus, and again whenever it

@@ -65,16 +65,17 @@ impl App {
         }
     }
 
-    /// Take the grab if `[input] mouse_capture = "auto"` and the moment is
-    /// right for it: the window holds the focus, nothing else wants the
-    /// cursor, and there is a mouse on a port to drive.
+    /// Take the grab if the capture mode takes it without a click (see
+    /// `grabs_without_a_click`) and the moment is right for it: the window
+    /// holds the focus, nothing else wants the cursor, and there is a mouse
+    /// on a port to drive.
     ///
     /// Deliberately driven by discrete events (focus gain, entering
     /// fullscreen, the last panel closing) rather than polled per frame --
     /// a poll would re-take the grab the instant the operator released it
     /// with the shortcut, leaving no way to get the cursor back at all.
     pub(super) fn apply_auto_mouse_capture(&mut self) {
-        if self.mouse_capture != crate::config::MouseCapture::Auto
+        if !grabs_without_a_click(self.mouse_capture, self.fullscreen_display_is_bare())
             || self.mouse_captured
             || !self.main_window_focused
             || self.ui_wants_cursor()
@@ -83,7 +84,7 @@ impl App {
             return;
         }
         self.set_mouse_captured(true);
-        // Auto mode hides the host cursor without the operator having done
+        // This hides the host cursor without the operator having done
         // anything to ask for it, so say once how to get it back. Every
         // later focus gain re-grabs silently.
         if self.mouse_captured && !self.auto_capture_hint_shown {
@@ -91,6 +92,28 @@ impl App {
             self.show_osd(format!(
                 "Mouse captured ({HOST_SHORTCUT_MODIFIER_LABEL}+G releases)"
             ));
+        }
+    }
+
+    /// Whether the window is fullscreen with nothing in it but the
+    /// display: no status bar, and no keyboard, MT-32 or Coppersynth strip
+    /// under it. Every click in such a window lands on the display, so
+    /// click mode would take the grab on the first one anyway.
+    pub(super) fn fullscreen_display_is_bare(&self) -> bool {
+        self.render
+            .as_ref()
+            .is_some_and(|r| r.window.fullscreen().is_some())
+            && window_present_height() == present_height()
+    }
+
+    /// The status bar or the last strip under the display has just gone.
+    /// If that left a fullscreen window with only the display in it, this
+    /// is a moment to take the grab, as entering fullscreen is. Elsewhere
+    /// it is not one: auto mode grabs on focus, and taking the grab here
+    /// would undo a shortcut release just because the bar was hidden.
+    pub(super) fn capture_if_display_left_bare(&mut self) {
+        if self.fullscreen_display_is_bare() {
+            self.apply_auto_mouse_capture();
         }
     }
 
@@ -885,5 +908,28 @@ impl App {
             }
         }
         self.request_redraw();
+    }
+}
+
+/// Whether `mode` takes the grab by itself at the moments
+/// `apply_auto_mouse_capture` is asked (focus gain, entering fullscreen,
+/// a menu or panel closing, a machine starting), or waits for a click on
+/// the display or the shortcut.
+///
+/// Click mode waits for the click because the window has other things to
+/// click: the status bar and the strips under the display. A fullscreen
+/// window that shows only the display (`fullscreen_bare`) has none, so
+/// the first click would only take the grab and do nothing else; there
+/// click mode grabs as auto mode does, and a session started fullscreen
+/// with the status bar hidden does not need a click before the Amiga
+/// pointer is the only one on screen.
+pub(super) fn grabs_without_a_click(
+    mode: crate::config::MouseCapture,
+    fullscreen_bare: bool,
+) -> bool {
+    match mode {
+        crate::config::MouseCapture::Auto => true,
+        crate::config::MouseCapture::Click => fullscreen_bare,
+        crate::config::MouseCapture::Manual => false,
     }
 }
