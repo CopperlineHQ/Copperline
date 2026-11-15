@@ -4155,12 +4155,13 @@ impl App {
     }
 
     /// Whether work running off this thread is waiting for the event loop
-    /// to collect it: an image job, or an MP4 that ffmpeg is still making.
-    /// Neither wakes the loop when it finishes, so while one is pending the
-    /// loop has to keep polling, or a paused session would sit on the
-    /// outcome (and, for an MP4, the AVI it replaces) until the next event.
+    /// to collect it: an image job, a GIF clip being written, or an MP4
+    /// that ffmpeg is still making. None of them wakes the loop when it
+    /// finishes, so while one is pending the loop has to keep polling, or a
+    /// paused session would sit on the outcome (and, for an MP4, the AVI it
+    /// replaces) until the next event.
     pub(super) fn collecting_background_work(&self) -> bool {
-        self.image_job.is_some() || !self.mp4_saves.is_empty()
+        self.image_job.is_some() || self.clip_save.is_some() || !self.mp4_saves.is_empty()
     }
 
     /// Use original field pixels for screenshots and expectations.

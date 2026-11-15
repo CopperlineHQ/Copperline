@@ -7158,6 +7158,33 @@ fn mp4_recording_is_made_from_its_avi_when_it_stops() {
     assert!(!avi.exists(), "the AVI goes once the MP4 is there");
 }
 
+/// A GIF clip is written on a thread that wakes nothing when it is done:
+/// until its outcome is collected the event loop keeps polling, paused or
+/// not, so the "Saved" notice arrives with the file rather than with the
+/// next key press.
+#[test]
+fn a_gif_clip_being_written_keeps_the_event_loop_polling() {
+    let mut app = test_app();
+    app.paused = true;
+    assert!(!app.collecting_background_work());
+    let (tx, rx) = std::sync::mpsc::channel();
+    app.clip_save = Some(rx);
+    assert!(app.collecting_background_work());
+    app.poll_clip_save();
+    assert!(
+        app.collecting_background_work(),
+        "the clip is still being written"
+    );
+    tx.send(Ok((std::path::PathBuf::from("clip.gif"), 10, 1.0)))
+        .unwrap();
+    app.poll_clip_save();
+    assert!(!app.collecting_background_work());
+    assert_eq!(
+        app.active_osd_text().map(|(text, _)| text).as_deref(),
+        Some("Saved clip.gif (1.0s)")
+    );
+}
+
 /// When ffmpeg fails, the recording is not lost: the AVI stays, the OSD
 /// says so, and nothing half-made is left under the MP4's name.
 #[cfg(unix)]
