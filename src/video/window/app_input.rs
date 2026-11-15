@@ -635,6 +635,37 @@ impl App {
         }
     }
 
+    /// Let go of every key the host keyboard holds, Amiga keys and
+    /// keyboard-joystick controls alike, because the window has lost the
+    /// focus and their releases will be delivered to some other window.
+    ///
+    /// X11 and Windows already do this: winit sends a synthetic release for
+    /// each held key on focus loss. macOS sends no key releases, only a
+    /// `ModifiersChanged` with nothing held, and `update_host_modifiers`
+    /// maps that to Shift and Alt only. Cmd-Tab is where it shows: Cmd is
+    /// the Left Amiga key, so its press reaches the keyboard MCU, then the
+    /// switch takes the focus before the release arrives. Without this the
+    /// machine kept Left Amiga down after switching back, and Intuition
+    /// reads Left Amiga + select as a screen drag, so clicks on gadgets
+    /// stopped working.
+    ///
+    /// Only keys the operator's hand holds (`live_held_rawkeys`) are let
+    /// go. `held_rawkeys` also carries `--key-after`, `--script` and
+    /// control-protocol holds, which are timed in emulated time and end at
+    /// their own scheduled release whatever the window focus is doing.
+    pub(super) fn release_host_keys_on_focus_loss(&mut self) {
+        let live = self.live_held_rawkeys;
+        for (index, held) in live.into_iter().enumerate() {
+            if held {
+                self.release_amiga_rawkey_if_held(index as u8);
+            }
+        }
+        if self.keyboard_joy_held.iter().any(|held| held.any_held()) {
+            self.keyboard_joy_held = Default::default();
+            self.pump_joystick_input();
+        }
+    }
+
     /// Whether the machine is being told `rawkey` is down -- by the host
     /// keyboard, by the on-screen one, or by both.
     pub(super) fn amiga_rawkey_held(&self, rawkey: u8) -> bool {
