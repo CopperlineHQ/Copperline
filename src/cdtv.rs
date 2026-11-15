@@ -46,6 +46,11 @@
 //! drive does with SCOR (see `reset_subcode`). A frame is produced only
 //! for a sector that actually plays, so while the host mixer's ring is
 //! full and the play is held back, subcode is held back with it.
+//!
+//! The battery-backed bookmark RAM at $DC8000 (16 KiB) lives here too. It
+//! persists to a raw image file when one is configured (`[cd] nvram`),
+//! written a quarter of an emulated second after a change, on reset, and
+//! when the controller is dropped.
 
 use crate::cdrom::{to_bcd, CdImage, LEADIN_SECTORS, RAW_SECTOR_BYTES, SUBCODE_FRAME_BYTES};
 use crate::chipset::paula::CdAudioRing;
@@ -81,6 +86,34 @@ const CCK_PER_CD_FRAME: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 75;
 /// Colour clocks per subcode symbol: a sector's 98 symbols (two sync
 /// patterns and 96 data bytes) span one CD frame.
 const CCK_PER_SUBCODE_SYMBOL: u32 = CCK_PER_CD_FRAME / 98;
+/// Size of the battery-backed bookmark RAM, and of its backing file.
+pub const BOOKMARK_RAM_BYTES: usize = 16 * 1024;
+/// Whether a CDTV with no `[cd] nvram` of its own gets the default bookmark
+/// file. Off until a frontend asks for it, so only a real session ever
+/// reads or writes that file: tests and library users get a bookmark RAM
+/// that remembers nothing, which is also what `--factory` asks for, and two
+/// identical headless runs stay identical. A file the configuration names
+/// is used either way.
+static DEFAULT_BOOKMARK_FILE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Turn the default bookmark file on or off for machines configured from
+/// now on (see [`DEFAULT_BOOKMARK_FILE`]).
+pub fn set_default_bookmark_file(on: bool) {
+    DEFAULT_BOOKMARK_FILE.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Whether a CDTV with no `[cd] nvram` gets the default bookmark file.
+pub fn default_bookmark_file() -> bool {
+    DEFAULT_BOOKMARK_FILE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How long a change to the bookmark RAM waits before it is written to the
+/// backing file: a quarter of an emulated second. The RAM is plain SRAM with
+/// no transaction to mark the end of a save, so the file follows the first
+/// unwritten change after this long -- one host write for a burst of guest
+/// writes, and at most four a second from a guest that never stops.
+const BOOKMARK_FLUSH_CCK: u32 = crate::chipset::paula::PAULA_CLOCK_HZ / 4;
 
 fn lsn_to_msf(lsn: u32) -> u32 {
     let msf = lsn + LEADIN_SECTORS;
@@ -188,8 +221,22 @@ pub struct CdtvController {
     booted: bool,
 
     /// Battery-backed bookmark RAM at $DC8000 (16 KiB, mirrored across
-    /// the $DC8000-$DCFFFF window). Session-only; not yet persisted.
+    /// the $DC8000-$DCFFFF window).
     battram: Vec<u8>,
+    /// Backing file for the bookmark RAM (`[cd] nvram` on a CDTV): a raw
+    /// image of the 16 KiB. `None` keeps it session-only, like a player
+    /// with a flat battery. The file belongs to the running session, not
+    /// to the machine, so it is not part of a save state (see
+    /// [`Self::adopt_bookmark_file_from`]).
+    #[serde(skip)]
+    battram_path: Option<std::path::PathBuf>,
+    /// The bookmark RAM differs from what the backing file holds. Like
+    /// the file itself this is the session's, not the machine's.
+    #[serde(skip)]
+    battram_dirty: bool,
+    /// Colour clocks since the first change the file does not hold yet.
+    #[serde(skip)]
+    battram_dirty_cck: u32,
 
     /// A disc waiting in the tray: inserted (media-change STCH) once
     /// `insert_delay_cck` of emulated time has elapsed. Some discs only
@@ -259,7 +306,10 @@ impl CdtvController {
             lines_until_frame: 0,
             audio_counter_cck: 0,
             booted: false,
-            battram: vec![0u8; 16 * 1024],
+            battram: vec![0u8; BOOKMARK_RAM_BYTES],
+            battram_path: None,
+            battram_dirty: false,
+            battram_dirty_cck: 0,
             pending_disc: None,
             insert_delay_cck: -1,
         };
@@ -341,14 +391,25 @@ impl CdtvController {
     }
 
     /// Reset on system reset; keeps the drive state (mounted or still
-    /// pending disc) and the battery-backed bookmark RAM contents.
+    /// pending disc) and the battery-backed bookmark RAM contents. A
+    /// change the backing file does not hold yet is written first: the
+    /// guest that was saving is gone, so nothing more is coming.
     pub fn reset(&mut self) {
+        self.flush_bookmark_ram();
         let disc = self.disc.take();
         let pending = self.pending_disc.take();
         let delay = self.insert_delay_cck;
         let battram = std::mem::take(&mut self.battram);
+        // Taken, so the value this replaces has no file left to write its
+        // (now empty) RAM to when it drops.
+        let battram_path = self.battram_path.take();
+        let battram_dirty = self.battram_dirty;
+        let battram_dirty_cck = self.battram_dirty_cck;
         *self = Self::new();
         self.battram = battram;
+        self.battram_path = battram_path;
+        self.battram_dirty = battram_dirty;
+        self.battram_dirty_cck = battram_dirty_cck;
         if let Some(disc) = disc {
             self.insert_disc(disc);
         }
@@ -370,7 +431,146 @@ impl CdtvController {
         for i in 0..size as u32 {
             let shift = 8 * (size as u32 - 1 - i);
             let off = ((addr + i) as usize) & (self.battram.len() - 1);
-            self.battram[off] = (value >> shift) as u8;
+            let byte = (value >> shift) as u8;
+            // Only a real change dirties the file: the bookmark library
+            // rewrites cells with what they already hold.
+            if self.battram[off] != byte {
+                self.battram[off] = byte;
+                self.battram_dirty = true;
+            }
+        }
+    }
+
+    /// Persist the bookmark RAM to (and preload it from) `path`, a raw
+    /// image of the 16 KiB. A shorter file fills the start of the RAM and
+    /// leaves the rest clear (it grows to 16 KiB at the first save).
+    ///
+    /// A file that cannot be this RAM's image is left alone and the RAM
+    /// stays session-only: one that is there but cannot be read, whose
+    /// saves would be overwritten unloaded at the first change, and one
+    /// longer than the RAM, whose tail the first save would cut off.
+    pub fn set_bookmark_path(&mut self, path: std::path::PathBuf) {
+        match std::fs::read(&path) {
+            Ok(data) if data.len() > self.battram.len() => {
+                log::error!(
+                    "cdtv bookmark RAM: {} is {} bytes, more than the {} the bookmark RAM \
+                     holds; it is not a bookmark image and is left untouched, and nothing \
+                     will be saved this session",
+                    path.display(),
+                    data.len(),
+                    self.battram.len()
+                );
+                return;
+            }
+            Ok(data) => {
+                self.battram.fill(0);
+                self.battram[..data.len()].copy_from_slice(&data);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                log::warn!(
+                    "cdtv bookmark RAM: reading {}: {e}; not using it this session",
+                    path.display()
+                );
+                return;
+            }
+        }
+        self.battram_path = Some(path);
+        self.battram_dirty = false;
+        self.battram_dirty_cck = 0;
+    }
+
+    /// Whether the bookmark RAM is backed by a host file. Its changes
+    /// reach that file on their own schedule, which restoring a
+    /// speculative machine snapshot cannot undo.
+    pub fn persistent_bookmark_ram(&self) -> bool {
+        self.battram_path.is_some()
+    }
+
+    /// The bookmark RAM's contents.
+    pub fn bookmark_ram(&self) -> &[u8] {
+        &self.battram
+    }
+
+    /// Take over the running session's backing file after a state load:
+    /// `self` is the freshly restored controller, `live` the one it
+    /// replaces. The file is host configuration, so the session keeps the
+    /// one it was started with whatever machine the state was saved on,
+    /// and the restored RAM is what it must now hold -- the next flush
+    /// writes it. Anything `live` had not written yet belongs to the
+    /// timeline being abandoned and is dropped with it.
+    pub(crate) fn adopt_bookmark_file_from(&mut self, live: &mut CdtvController) {
+        self.battram_path = live.battram_path.take();
+        self.battram_dirty =
+            self.battram_path.is_some() && (live.battram_dirty || self.battram != live.battram);
+        self.battram_dirty_cck = 0;
+    }
+
+    /// Write the bookmark RAM to its backing file if it has changed. Runs
+    /// on its own a quarter of an emulated second after a change; a
+    /// frontend calls it before it builds another machine on the same
+    /// file, so the new one loads what this one saved.
+    pub fn flush_bookmark_ram(&mut self) {
+        if !self.battram_dirty {
+            return;
+        }
+        self.battram_dirty_cck = 0;
+        if let Some(path) = &self.battram_path {
+            if let Err(e) = Self::replace_file(path, &self.battram) {
+                // Stay dirty so the next interval retries: a transient
+                // host error must not lose a save until the guest happens
+                // to write the RAM again.
+                log::warn!("cdtv bookmark RAM: writing {}: {e}", path.display());
+                return;
+            }
+        }
+        self.battram_dirty = false;
+    }
+
+    /// Replace the file at `path` with `image` without ever leaving a
+    /// short one in its place: the image is written to a new file beside
+    /// it and renamed over it, so a crash or a full disk part-way leaves
+    /// the previous saves as they were. Nothing falls back to writing the
+    /// file in place; a failure is the caller's to retry.
+    ///
+    /// The new file is created exclusively under a name of its own
+    /// (`.NAME.copperline-XXXXXX`). A fixed name could already be there as
+    /// someone else's file, or as a link whose target would be written
+    /// through, and two sessions on one bookmark file would share it and
+    /// rename each other's unfinished writes into place.
+    fn replace_file(path: &std::path::Path, image: &[u8]) -> std::io::Result<()> {
+        // The directory is Copperline's own and may not exist yet; it is
+        // made here rather than at bind time so a player that never saves
+        // leaves no empty folder behind.
+        crate::paths::ensure_parent(path)?;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::io::Write;
+            let dir = match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => std::path::Path::new("."),
+            };
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let prefix = format!(".{name}.copperline-");
+            let mut staging = tempfile::Builder::new();
+            staging.prefix(&prefix);
+            // The mode an ordinary new file gets, not a temporary file's
+            // owner-only one: the umask still applies.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                staging.permissions(std::fs::Permissions::from_mode(0o666));
+            }
+            // Dropped on any failure below, which removes it.
+            let mut temp = staging.tempfile_in(dir)?;
+            temp.write_all(image)?;
+            temp.as_file().sync_all()?;
+            temp.persist(path).map(drop).map_err(|e| e.error)
+        }
+        // A browser build has no host files to write.
+        #[cfg(target_arch = "wasm32")]
+        {
+            std::fs::write(path, image)
         }
     }
 
@@ -1190,6 +1390,15 @@ impl CdtvController {
     // ----- periodic work ---------------------------------------------------
 
     pub fn tick(&mut self, cck: u32, cd_audio: &mut CdAudioRing) {
+        // The bookmark RAM sits on the motherboard, not behind the DMAC's
+        // autoconfig, so its backing file follows it whether or not the
+        // board has been configured yet.
+        if self.battram_dirty {
+            self.battram_dirty_cck = self.battram_dirty_cck.saturating_add(cck);
+            if self.battram_dirty_cck >= BOOKMARK_FLUSH_CCK {
+                self.flush_bookmark_ram();
+            }
+        }
         if self.configured_base.is_none() {
             return;
         }
@@ -1398,6 +1607,13 @@ impl CdtvController {
         self.play_position += 1;
         self.last_play_pos = self.play_position;
         self.start_subcode_frame(&frame);
+    }
+}
+
+/// A session that ends inside the flush interval still keeps its last save.
+impl Drop for CdtvController {
+    fn drop(&mut self) {
+        self.flush_bookmark_ram();
     }
 }
 
@@ -1978,5 +2194,363 @@ mod tests {
         let _ = std::fs::remove_file(&cue);
         let _ = std::fs::remove_file(&bin);
         let _ = std::fs::remove_file(&sub);
+    }
+
+    // ----- bookmark RAM backing file ---------------------------------------
+
+    /// A per-test backing path in the host temp directory, removed first so
+    /// a rerun never sees a previous run's file.
+    fn bookmark_file(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "copperline-cdtv-bookmark-{}-{name}.bin",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        path
+    }
+
+    /// A per-test folder for a backing file, emptied first.
+    fn bookmark_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-cdtv-bookmark-{}-{name}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The names in a folder, sorted.
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Advance the controller by `cck` colour clocks in line-sized ticks.
+    fn run_cck(cdtv: &mut CdtvController, cck: u32) {
+        let mut ring = CdAudioRing::default();
+        let mut left = cck;
+        while left > 0 {
+            let step = left.min(CCK_PER_LINE);
+            cdtv.tick(step, &mut ring);
+            left -= step;
+        }
+    }
+
+    #[test]
+    fn bookmark_ram_reaches_its_file_a_quarter_second_after_a_change() {
+        let path = bookmark_file("flush");
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        assert!(cdtv.persistent_bookmark_ram());
+
+        cdtv.battram_write(0x0010, 2, 0xC0DE);
+        // Mirrored across the window: $DCC000 is $DC8000 again.
+        cdtv.battram_write(0x4020, 1, 0x5A);
+        run_cck(&mut cdtv, BOOKMARK_FLUSH_CCK - CCK_PER_LINE);
+        assert!(!path.exists(), "written before the flush interval ran out");
+        run_cck(&mut cdtv, 2 * CCK_PER_LINE);
+        let file = std::fs::read(&path).unwrap();
+        assert_eq!(file.len(), BOOKMARK_RAM_BYTES);
+        assert_eq!(&file[0x10..0x12], &[0xC0, 0xDE]);
+        assert_eq!(file[0x20], 0x5A);
+        assert!(!cdtv.battram_dirty);
+
+        // A second machine started on the same file sees the save.
+        let mut resumed = CdtvController::new();
+        resumed.set_bookmark_path(path.clone());
+        assert_eq!(resumed.battram_read(0x0010, 2), 0xC0DE);
+        assert_eq!(resumed.battram_read(0x0020, 1), 0x5A);
+        drop(cdtv);
+        drop(resumed);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn bookmark_ram_flushes_before_the_board_is_configured() {
+        // The RAM is on the motherboard; the DMAC's autoconfig state has
+        // no say in whether a save is kept.
+        let path = bookmark_file("unconfigured");
+        let mut cdtv = CdtvController::new();
+        assert!(cdtv.configured_base.is_none());
+        cdtv.set_bookmark_path(path.clone());
+        cdtv.battram_write(0, 1, 0x42);
+        run_cck(&mut cdtv, BOOKMARK_FLUSH_CCK + CCK_PER_LINE);
+        assert_eq!(std::fs::read(&path).unwrap()[0], 0x42);
+        drop(cdtv);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rewriting_a_cell_with_its_own_value_writes_no_file() {
+        let path = bookmark_file("clean");
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        cdtv.battram_write(0x100, 4, 0);
+        run_cck(&mut cdtv, 2 * BOOKMARK_FLUSH_CCK);
+        cdtv.reset();
+        drop(cdtv);
+        assert!(!path.exists(), "an unchanged RAM created its backing file");
+    }
+
+    #[test]
+    fn a_session_only_bookmark_ram_writes_nothing() {
+        let mut cdtv = CdtvController::new();
+        assert!(!cdtv.persistent_bookmark_ram());
+        cdtv.battram_write(0, 1, 0x99);
+        run_cck(&mut cdtv, 2 * BOOKMARK_FLUSH_CCK);
+        assert_eq!(cdtv.battram_read(0, 1), 0x99);
+        assert!(!cdtv.battram_dirty, "nothing to retry without a file");
+    }
+
+    #[test]
+    fn reset_writes_a_pending_change_and_keeps_the_file_bound() {
+        let path = bookmark_file("reset");
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        cdtv.battram_write(0x200, 1, 0x77);
+        cdtv.reset();
+        // The whole RAM, not the empty buffer the reset swaps through.
+        let file = std::fs::read(&path).unwrap();
+        assert_eq!(file.len(), BOOKMARK_RAM_BYTES);
+        assert_eq!(file[0x200], 0x77);
+        assert_eq!(cdtv.battram_read(0x200, 1), 0x77);
+
+        // Still bound after the reset: the next change reaches the file.
+        cdtv.battram_write(0x201, 1, 0x78);
+        run_cck(&mut cdtv, BOOKMARK_FLUSH_CCK + CCK_PER_LINE);
+        assert_eq!(std::fs::read(&path).unwrap()[0x201], 0x78);
+        drop(cdtv);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn dropping_the_controller_writes_a_change_inside_the_flush_interval() {
+        let path = bookmark_file("drop");
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        cdtv.battram_write(0x3FFF, 1, 0xAB);
+        run_cck(&mut cdtv, CCK_PER_LINE);
+        assert!(!path.exists());
+        drop(cdtv);
+        assert_eq!(std::fs::read(&path).unwrap()[0x3FFF], 0xAB);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_short_bookmark_file_loads_and_a_long_one_is_left_untouched() {
+        let path = bookmark_file("sizes");
+        std::fs::write(&path, [1u8, 2, 3]).unwrap();
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        assert!(cdtv.persistent_bookmark_ram());
+        assert_eq!(cdtv.battram_read(0, 4), 0x0102_0300);
+        drop(cdtv);
+
+        // A file longer than the RAM is something else's, or a newer
+        // format: saving 16 KiB over it would cut its tail off. It is not
+        // loaded, not bound and not written, whatever the guest does.
+        let long = vec![0x11u8; 2 * BOOKMARK_RAM_BYTES];
+        std::fs::write(&path, &long).unwrap();
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        assert!(!cdtv.persistent_bookmark_ram());
+        assert_eq!(cdtv.battram_read(0, 1), 0);
+        cdtv.battram_write(0, 1, 0x99);
+        run_cck(&mut cdtv, 2 * BOOKMARK_FLUSH_CCK);
+        cdtv.reset();
+        drop(cdtv);
+        assert_eq!(std::fs::read(&path).unwrap(), long);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_save_replaces_the_file_whole_and_never_leaves_a_short_one() {
+        let dir = bookmark_dir("replace");
+        let path = dir.join("bookmark.bin");
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        cdtv.battram_write(0, 1, 0x41);
+        cdtv.flush_bookmark_ram();
+        assert_eq!(std::fs::read(&path).unwrap()[0], 0x41);
+        assert_eq!(names_in(&dir), ["bookmark.bin"], "nothing staged is left");
+
+        // The new image cannot be written beside the file (the folder
+        // takes no new files): the save fails, stays pending, and the
+        // previous image is still there in full.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |mode| std::fs::Permissions::from_mode(mode);
+            std::fs::set_permissions(&dir, mode(0o555)).unwrap();
+            // A privileged user creates files there whatever the mode
+            // says, and has nothing refused to check.
+            let probe = dir.join("probe");
+            let refused = std::fs::write(&probe, b"").is_err();
+            let _ = std::fs::remove_file(&probe);
+            if refused {
+                cdtv.battram_write(0, 1, 0x42);
+                cdtv.flush_bookmark_ram();
+                assert!(cdtv.battram_dirty);
+                let kept = std::fs::read(&path).unwrap();
+                assert_eq!((kept.len(), kept[0]), (BOOKMARK_RAM_BYTES, 0x41));
+            }
+
+            // Once it can be, the pending save lands.
+            std::fs::set_permissions(&dir, mode(0o755)).unwrap();
+            if refused {
+                cdtv.flush_bookmark_ram();
+                assert!(!cdtv.battram_dirty);
+                assert_eq!(std::fs::read(&path).unwrap()[0], 0x42);
+                assert_eq!(names_in(&dir), ["bookmark.bin"]);
+            }
+        }
+        drop(cdtv);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_bookmark_file_that_cannot_be_read_is_not_written_over() {
+        // A directory where the file should be: reading it fails, and not
+        // because it is missing. The RAM stays session-only, so the saves
+        // the unreadable file may hold are never replaced by a blank image.
+        let path = bookmark_file("unreadable");
+        std::fs::create_dir_all(&path).unwrap();
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        assert!(!cdtv.persistent_bookmark_ram());
+        cdtv.battram_write(0, 1, 0x7E);
+        run_cck(&mut cdtv, 2 * BOOKMARK_FLUSH_CCK);
+        drop(cdtv);
+        assert!(path.is_dir());
+        let _ = std::fs::remove_dir_all(&path);
+    }
+
+    #[test]
+    fn a_frontend_can_write_a_pending_change_out_at_once() {
+        // Before it builds another machine on the same file.
+        let path = bookmark_file("explicit-flush");
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        cdtv.battram_write(0x123, 1, 0x45);
+        assert!(!path.exists());
+        cdtv.flush_bookmark_ram();
+        let mut next = CdtvController::new();
+        next.set_bookmark_path(path.clone());
+        assert_eq!(next.battram_read(0x123, 1), 0x45);
+        drop(cdtv);
+        drop(next);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_failed_bookmark_write_is_retried_at_the_next_interval() {
+        // The file's folder does not exist yet when the path is bound (a
+        // missing file is a blank RAM); by the time of the write a regular
+        // file sits where the folder should go, so it cannot be made.
+        let blocker = bookmark_file("retry-blocker");
+        let path = blocker.join("cdtv-bookmark.bin");
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        assert!(cdtv.persistent_bookmark_ram());
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        cdtv.battram_write(0, 1, 0x61);
+        run_cck(&mut cdtv, BOOKMARK_FLUSH_CCK + CCK_PER_LINE);
+        assert!(cdtv.battram_dirty, "a failed write must stay pending");
+
+        // The obstacle goes away; the next interval writes the save.
+        std::fs::remove_file(&blocker).unwrap();
+        run_cck(&mut cdtv, BOOKMARK_FLUSH_CCK + CCK_PER_LINE);
+        assert!(!cdtv.battram_dirty);
+        assert_eq!(std::fs::read(&path).unwrap()[0], 0x61);
+        drop(cdtv);
+        let _ = std::fs::remove_dir_all(&blocker);
+    }
+
+    /// The flush stages the image in a file of its own making. A fixed
+    /// staging name beside the bookmark file could already be someone
+    /// else's file, or a link to one, and would be written through.
+    #[test]
+    fn a_bookmark_flush_leaves_a_sibling_named_like_a_staging_file_alone() {
+        let dir = bookmark_dir("staging");
+        let path = dir.join("bookmark.bin");
+        let sibling = dir.join("bookmark.bin.tmp");
+        std::fs::write(&sibling, b"someone else's").unwrap();
+        let mut cdtv = CdtvController::new();
+        cdtv.set_bookmark_path(path.clone());
+        cdtv.battram_write(0, 1, 0x61);
+        cdtv.flush_bookmark_ram();
+        assert!(!cdtv.battram_dirty);
+        assert_eq!(std::fs::read(&path).unwrap()[0], 0x61);
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"someone else's");
+        // Nothing staged is left behind.
+        assert_eq!(names_in(&dir), ["bookmark.bin", "bookmark.bin.tmp"]);
+
+        // The same name as a link: what it points at is not written, and
+        // the bookmark file does not become the link.
+        #[cfg(unix)]
+        {
+            let unrelated = dir.join("unrelated.txt");
+            std::fs::write(&unrelated, b"keep").unwrap();
+            std::fs::remove_file(&sibling).unwrap();
+            std::os::unix::fs::symlink(&unrelated, &sibling).unwrap();
+            cdtv.battram_write(0, 1, 0x62);
+            cdtv.flush_bookmark_ram();
+            assert!(!cdtv.battram_dirty);
+            assert_eq!(std::fs::read(&unrelated).unwrap(), b"keep");
+            assert!(std::fs::symlink_metadata(&path).unwrap().is_file());
+            assert_eq!(std::fs::read(&path).unwrap()[0], 0x62);
+        }
+        drop(cdtv);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_state_carries_the_bookmark_ram_but_not_its_file() {
+        let path = bookmark_file("state");
+        let mut saved = CdtvController::new();
+        saved.set_bookmark_path(path.clone());
+        saved.battram_write(0x40, 1, 0xA1);
+        let mut bytes = Vec::new();
+        crate::savestate::chunk::encode(&saved, &mut bytes).unwrap();
+        // Without the adoption step a restored controller has no file: a
+        // state loaded on another machine cannot write to this one's path.
+        let mut restored: CdtvController = crate::savestate::chunk::decode(&bytes).unwrap();
+        assert_eq!(restored.battram_read(0x40, 1), 0xA1);
+        assert!(!restored.persistent_bookmark_ram());
+
+        // The running session moved on after the state was taken...
+        saved.battram_write(0x40, 1, 0xB2);
+        run_cck(&mut saved, BOOKMARK_FLUSH_CCK + CCK_PER_LINE);
+        assert_eq!(std::fs::read(&path).unwrap()[0x40], 0xB2);
+        // ...and loading the state hands its file to the restored
+        // controller, which then holds the state's RAM again.
+        restored.adopt_bookmark_file_from(&mut saved);
+        assert!(restored.persistent_bookmark_ram());
+        assert!(!saved.persistent_bookmark_ram());
+        run_cck(&mut restored, BOOKMARK_FLUSH_CCK + CCK_PER_LINE);
+        assert_eq!(std::fs::read(&path).unwrap()[0x40], 0xA1);
+        drop(saved);
+        drop(restored);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn loading_a_state_that_matches_the_file_writes_nothing() {
+        let path = bookmark_file("state-same");
+        let mut live = CdtvController::new();
+        live.set_bookmark_path(path.clone());
+        let mut bytes = Vec::new();
+        crate::savestate::chunk::encode(&live, &mut bytes).unwrap();
+        let mut restored: CdtvController = crate::savestate::chunk::decode(&bytes).unwrap();
+        restored.adopt_bookmark_file_from(&mut live);
+        run_cck(&mut restored, 2 * BOOKMARK_FLUSH_CCK);
+        drop(live);
+        drop(restored);
+        assert!(!path.exists());
     }
 }
