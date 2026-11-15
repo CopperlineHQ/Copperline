@@ -9,8 +9,8 @@
 //! Amiga output (large static regions, few colours) and needs no codec
 //! dependency beyond the flate2 crate already used elsewhere. Audio is
 //! plain 16-bit PCM stereo at the mixer rate. The result plays in
-//! VLC/mpv/ffmpeg-based players; `ffmpeg -i capture.avi out.mp4`
-//! transcodes it for anything else.
+//! VLC/mpv/ffmpeg-based players; an MP4 recording ([`mp4`]) is this AVI
+//! made into H.264 and AAC by the host's ffmpeg once it stops.
 //!
 //! Frames are pushed on emulated-frame boundaries and audio is the exact
 //! mixer output for the same emulated interval, so A/V stay locked to the
@@ -25,6 +25,8 @@ use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::audio::MIX_SAMPLE_RATE;
+
+pub mod mp4;
 
 // ZMBV stream parameters. 16x16 blocks match DOSBox; format 8 is the
 // 32bpp (BGR0) pixel layout, the only one we emit.

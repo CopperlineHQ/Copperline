@@ -376,8 +376,8 @@ impl RawConfig {
 
     /// Layer menu settings changed in a full-build session over this
     /// configuration: the player's set ([`Self::merge_player_settings`])
-    /// plus the emulation, input and display settings only the full menu
-    /// offers. Fields the overlay leaves unset keep their value.
+    /// plus the emulation, input, display and recording settings only the
+    /// full menu offers. Fields the overlay leaves unset keep their value.
     #[cfg(feature = "frontend")]
     pub(crate) fn merge_menu_settings(&mut self, overlay: &RawConfig) {
         fn take<T: Clone>(base: &mut Option<T>, over: &Option<T>) {
@@ -406,6 +406,10 @@ impl RawConfig {
             &overlay.input.mouse_sensitivity,
         );
         take(&mut self.clipboard.share, &overlay.clipboard.share);
+        take(
+            &mut self.recording.video_format,
+            &overlay.recording.video_format,
+        );
     }
 
     /// The keys whose values differ between `self` and `before`, as a
@@ -1363,6 +1367,13 @@ pub(crate) struct RawRecording {
     /// Clip frame rate (default 0 = 25 on PAL, 30 on NTSC).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) clip_fps: Option<u32>,
+    /// What Record Video writes: "avi" (the default) or "mp4".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) video_format: Option<String>,
+    /// The ffmpeg an MP4 recording is made with, when the one on the
+    /// `PATH` is not the one to use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) ffmpeg: Option<String>,
     /// Retired preference, accepted so existing saved configs still load.
     #[serde(skip_serializing)]
     pub(crate) native_screenshot_button: Option<bool>,

@@ -1604,6 +1604,7 @@ fn run(args: Vec<String>, desktop: bool, error_dialog: &mut bool) -> Result<()> 
     #[cfg(target_os = "macos")]
     app.enable_document_opening(false);
     app.set_menu_settings_file(menu_settings);
+    app.set_video_recording(&cfg.recording);
     app.set_expect_screenshots(cli.expect_screenshot);
     app.set_native_screenshots(cli.native_screenshots);
     if let Some(marker) = run_done_marker {

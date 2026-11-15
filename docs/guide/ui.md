@@ -391,8 +391,8 @@ the next launch: Copperline writes it into the
 [saved default](#machine-configuration-screen) configuration as soon as it
 changes, creating that file if there is none yet. This covers the controller
 ports, the joystick input mode, autofire, mouse sensitivity, rewind, run
-ahead, the warp limit, floppy speed, clipboard sharing, and the Video and
-Audio settings (framing, aspect, scaling, shader and strength, tint, bezel,
+ahead, the warp limit, floppy speed, clipboard sharing, the video
+recording format, and the Video and Audio settings (framing, aspect, scaling, shader and strength, tint, bezel,
 screen centring, fullscreen, the status bar, the performance overlay, VSync,
 menu size, audio output and filter). Only the settings you change are
 written, so a value that comes from the machine profile -- the CD32 pad in a
@@ -717,6 +717,10 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
 - **Record Video** (also `Cmd+R` / `Alt+R`): starts a video-with-audio
   recording. While one runs the row reads **Stop Video Recording**, and it
   (or the shortcut again) stops it. See below.
+- **Video Format**: what Record Video writes, **MP4 (H.264, via ffmpeg)**
+  or **AVI (lossless)** (the default; `[recording] video_format`). A
+  change applies from the next recording. See
+  [MP4 recordings](#recording-mp4).
 - **Record Input** (also `Cmd+Shift+R` / `Alt+Shift+R`): records every
   input event that reaches the emulated machine. The row then reads **Stop
   Input Recording**; stopping writes a script file that `--script` replays
@@ -1205,7 +1209,8 @@ and crop details. Screenshots save to the [screenshots folder](#where-files-go).
 
 `Cmd+R` on macOS or `Alt+R` on Linux/Windows (or the menu's "Record Video")
 starts capturing the emulated display and sound to
-`copperline-video-<YYYYMMDDHHmmSS>.avi` in the
+`copperline-video-<YYYYMMDDHHmmSS>.avi` (or `.mp4`, see
+[MP4 recordings](#recording-mp4)) in the
 [recordings folder](#where-files-go); pressing it again stops and
 finalizes the file. A red REC badge sits in the display's top-right corner
 while a recording runs. Like the screenshot overlay, the badge, status
@@ -1215,8 +1220,8 @@ The file is an AVI with lossless ZMBV video (the DOSBox capture codec:
 zlib-compressed keyframes plus frame deltas, which keeps typical Amiga
 output to a few MB per minute) and uncompressed 16-bit stereo PCM audio
 at 44.1 kHz. It plays directly in VLC, mpv, and anything else built on
-ffmpeg; for other players, transcode with
-`ffmpeg -i copperline-video-<ts>.avi out.mp4`.
+ffmpeg, but not in QuickTime, a web browser, or most of the places a video
+is shared; an MP4 recording does.
 
 Frames and audio are captured on the emulated timeline, not the host
 clock: the recording stays in sync even when the host stutters, and a
@@ -1225,6 +1230,52 @@ track is tapped before the status bar's volume slider, so recordings
 keep full level regardless of the live output volume. Pausing (or
 powering off) suspends the capture; recording resumes when emulation
 continues.
+
+(recording-mp4)=
+### MP4 recordings
+
+With **Recording > Video Format > MP4** (or `[recording] video_format =
+"mp4"`), a recording is an MP4 with H.264 video and AAC sound, which plays
+almost anywhere. Copperline has no encoder of its own for those, so it
+records the AVI exactly as above (as
+`copperline-video-<YYYYMMDDHHmmSS>.recording.avi`) and, when the recording
+stops, hands it to **ffmpeg** in the background: the screen says
+"Saving ..." and then "Saved ..." once the MP4 is written, and the AVI is
+removed. Recording costs no more than an AVI recording does, since all the
+encoding happens after Stop, and ffmpeg runs at a lowered priority so the
+emulation keeps the host while it works.
+
+The MP4 shows the recorded picture at twice its size, every pixel doubled
+with nearest-neighbour sampling, so the picture stays sharp and a hires
+pixel keeps its own colour through H.264's 4:2:0 colour sampling (and the
+TV aspect's 537 rows become an even number, which 4:2:0 needs). It is
+encoded at CRF 18 with 192 kb/s AAC, in BT.709 colour, with its index at
+the front so it can play while it is still downloading.
+
+ffmpeg must be installed, built with libx264: the Homebrew, MacPorts and
+winget (`Gyan.FFmpeg`) builds are, as are most Linux distributions'
+(Fedora's default `ffmpeg-free` is not; RPM Fusion's `ffmpeg` is).
+Copperline uses the one `COPPERLINE_FFMPEG` names, else
+`[recording] ffmpeg`, else an `ffmpeg` beside Copperline, on the `PATH`,
+or in the usual package-manager folders (`/opt/homebrew/bin`,
+`/usr/local/bin` and `/opt/local/bin` on macOS; `/usr/local/bin` and
+`/usr/bin` on Linux), since an app started from the Dock or a desktop menu
+does not see the `PATH` a terminal does. If there is none, the recording
+is made as an AVI and the screen says "no ffmpeg for MP4". If ffmpeg
+fails, the AVI is kept, the screen says so, and the log has ffmpeg's
+reason. Quitting while recording, or while an MP4 is still being saved,
+leaves ffmpeg to finish it after Copperline has exited; the AVI then
+stays beside it.
+
+To make the same MP4 from an AVI recorded earlier:
+
+```bash
+ffmpeg -i copperline-video-<ts>.avi -vf "scale=iw*2:ih*2:flags=neighbor:out_color_matrix=bt709:out_range=tv,format=yuv420p,setsar=1,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv" -c:v libx264 -crf 18 -c:a aac -b:a 192k -movflags +faststart copperline-video-<ts>.mp4
+```
+
+A plain `ffmpeg -i copperline-video-<ts>.avi out.mp4` is not a substitute:
+for this RGB source ffmpeg picks H.264's 4:4:4 profile, which QuickTime,
+browsers and most video sites cannot play.
 
 (saving-a-gif-clip)=
 ## Saving a GIF clip

@@ -1774,6 +1774,17 @@ pub struct App {
     /// appended on emulated-frame boundaries, so captures stay in sync
     /// even under warp or host stutter.
     recorder: Option<crate::recorder::VideoRecorder>,
+    /// The MP4 the active recording becomes when it stops (it is captured
+    /// into an AVI beside it first); None for an AVI recording.
+    recording_mp4: Option<PathBuf>,
+    /// What Record Video writes (`[recording] video_format`, and the
+    /// Recording menu's Video Format).
+    video_format: crate::config::VideoFormat,
+    /// `[recording] ffmpeg`: the ffmpeg to make MP4s with, when set.
+    ffmpeg_path: Option<PathBuf>,
+    /// Stopped MP4 recordings ffmpeg is still making, with the emulated
+    /// seconds each holds: their outcomes flash on the OSD as they land.
+    mp4_saves: Vec<(crate::recorder::mp4::Conversion, f64)>,
     /// Windows for the video-slot card's own outputs (the Video Toaster's
     /// Preview and Program monitors).
     card_monitors: card_monitors::CardMonitors,
@@ -3186,6 +3197,10 @@ impl App {
             reported_double_fault: false,
             hunt: None,
             recorder: None,
+            recording_mp4: None,
+            video_format: crate::config::VideoFormat::default(),
+            ffmpeg_path: None,
+            mp4_saves: Vec::new(),
             card_monitors: card_monitors::CardMonitors::new(),
             record_fb: Vec::new(),
             record_scratch_fb: Vec::new(),
@@ -4132,6 +4147,23 @@ impl App {
         self.menu_settings_file = path;
     }
 
+    /// `[recording]`'s video settings: what Record Video writes, and the
+    /// ffmpeg an MP4 is made with.
+    pub fn set_video_recording(&mut self, recording: &crate::config::RecordingConfig) {
+        self.video_format = recording.video_format;
+        self.ffmpeg_path = recording.ffmpeg.clone();
+    }
+
+    /// Whether work running off this thread is waiting for the event loop
+    /// to collect it: an image job, a GIF clip being written, or an MP4
+    /// that ffmpeg is still making. None of them wakes the loop when it
+    /// finishes, so while one is pending the loop has to keep polling, or a
+    /// paused session would sit on the outcome (and, for an MP4, the AVI it
+    /// replaces) until the next event.
+    pub(super) fn collecting_background_work(&self) -> bool {
+        self.image_job.is_some() || self.clip_save.is_some() || !self.mp4_saves.is_empty()
+    }
+
     /// Use original field pixels for screenshots and expectations.
     pub fn set_native_screenshots(&mut self, native: bool) {
         self.native_screenshots = native;
@@ -4702,11 +4734,13 @@ impl App {
 
 impl Drop for App {
     /// Flush a whole-run `--record-input` recording on any exit path
-    /// (auto-screenshot exit, window close, shortcut quit). The interactive
-    /// recording toggle writes its file when stopped, so by the time the app
-    /// drops there is nothing left for it here.
+    /// (auto-screenshot exit, window close, shortcut quit), and finish a
+    /// video recording still running as Stop would. An MP4 still being made
+    /// (that one, or one stopped just before) is left to its ffmpeg, which
+    /// finishes it after the exit and leaves the AVI beside it.
     fn drop(&mut self) {
         self.save_egui_preferences();
+        let _ = self.finish_recording();
         // Same rule for a --coverage run: whatever ends the session writes
         // the counts collected so far.
         #[cfg(feature = "dap")]
@@ -6537,8 +6571,10 @@ impl ApplicationHandler for App {
         // or it would sit there until something else woke it.
         // So does a picker sheet: its answer is collected by this loop, and
         // with the machine held nothing else would wake it.
-        let writing_image =
-            self.image_job.is_some() || downloading || self.status_until.is_some() || picking;
+        let writing_image = self.collecting_background_work()
+            || downloading
+            || self.status_until.is_some()
+            || picking;
         // Likewise the caret: it has no event of its own either, and a panel
         // with a box open in it is otherwise perfectly still.
         let typing = self.blink_caret();
@@ -6848,6 +6884,7 @@ impl ApplicationHandler for App {
         self.capture_recorder_output(rendered);
         self.capture_clip_frame(rendered);
         self.poll_clip_save();
+        self.poll_mp4_saves();
         // Skipping request_redraw for headless capture avoids the vsync gate so
         // the run advances as fast as the host allows; emulated state is
         // identical either way. (`headless_capture` was resolved above, before
@@ -7381,6 +7418,7 @@ impl App {
             .filesys_board()
             .filter(|board| board.clipboard_fitted())
             .map(|board| board.clipboard_sharing());
+        raw.recording.video_format = Some(self.video_format.label().to_string());
         raw
     }
 

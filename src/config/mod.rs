@@ -1621,8 +1621,8 @@ pub struct LideConfig {
     pub spin_up: bool,
 }
 
-/// `[recording]`: GIF clip settings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `[recording]`: GIF clip and video recording settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingConfig {
     /// Emulated seconds of presented frames the window keeps (default
     /// 10, at most `gifclip::MAX_CLIP_SECONDS`); 0 disables the ring and
@@ -1631,6 +1631,11 @@ pub struct RecordingConfig {
     /// Clip frame rate, 1 to `gifclip::MAX_CLIP_FPS`; 0 (the default)
     /// picks 25 on PAL and 30 on NTSC.
     pub clip_fps: u32,
+    /// What Record Video writes.
+    pub video_format: VideoFormat,
+    /// The ffmpeg MP4 recordings are made with; None looks for one
+    /// (`crate::ffmpeg::find`).
+    pub ffmpeg: Option<PathBuf>,
 }
 
 impl Default for RecordingConfig {
@@ -1638,6 +1643,49 @@ impl Default for RecordingConfig {
         Self {
             clip_seconds: crate::gifclip::DEFAULT_CLIP_SECONDS,
             clip_fps: 0,
+            video_format: VideoFormat::default(),
+            ffmpeg: None,
+        }
+    }
+}
+
+/// The file Record Video writes (`[recording] video_format`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VideoFormat {
+    /// The recorder's own AVI: lossless ZMBV video and PCM sound, made as
+    /// the recording runs. The default.
+    #[default]
+    Avi,
+    /// H.264 and AAC in an MP4, made from that AVI by the host's ffmpeg
+    /// once the recording stops (`crate::recorder::mp4`).
+    Mp4,
+}
+
+impl VideoFormat {
+    /// Every format, in the order a picker offers them.
+    pub const MENU_ORDER: [VideoFormat; 2] = [VideoFormat::Mp4, VideoFormat::Avi];
+
+    /// The config name (round-trips through [`parse_video_format`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            VideoFormat::Avi => "avi",
+            VideoFormat::Mp4 => "mp4",
+        }
+    }
+
+    /// What a picker shows the user.
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            VideoFormat::Avi => "AVI (lossless)",
+            VideoFormat::Mp4 => "MP4 (H.264, via ffmpeg)",
+        }
+    }
+
+    /// The short form a menu row shows as its value.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            VideoFormat::Avi => "AVI",
+            VideoFormat::Mp4 => "MP4",
         }
     }
 }

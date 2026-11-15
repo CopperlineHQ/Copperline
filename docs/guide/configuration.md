@@ -996,7 +996,8 @@ subfolders on first use:
   host, headless or windowed. Stills (PNG, JPEG, BMP) need nothing
   else; video files are decoded by ffmpeg: the program the
   `COPPERLINE_FFMPEG` environment variable names, else `ffmpeg.exe` (or
-  `ffmpeg`) in the folder itself, beside Copperline, or on the `PATH`.
+  `ffmpeg`) in the folder itself, beside Copperline, on the `PATH`, or in
+  the usual package-manager folders (see [MP4 recordings](ui.md#recording-mp4)).
 - `Output`: recordings of the Program output (MP4 or AVI, see below).
 
 A video file's sound comes along with its picture and follows the switcher:
@@ -1977,8 +1978,10 @@ that much. Headless runs and `--audio-wav` captures are not affected.
 
 ```toml
 [recording]
-clip_seconds = 10   # emulated seconds kept for Save Clip as GIF; 0 = off
-clip_fps = 0        # GIF frame rate; 0 = 25 on PAL, 30 on NTSC
+clip_seconds = 10      # emulated seconds kept for Save Clip as GIF; 0 = off
+clip_fps = 0           # GIF frame rate; 0 = 25 on PAL, 30 on NTSC
+video_format = "avi"   # what Record Video writes: "avi" or "mp4"
+# ffmpeg = "/opt/ffmpeg/bin/ffmpeg"   # the ffmpeg MP4 recordings are made with
 ```
 
 The window keeps a rolling ring of the last `clip_seconds` (up to 120) of
@@ -1988,6 +1991,16 @@ rate every GIF clip is written at, the interactive one and headless
 `--gif-after` captures alike; the default `0` picks half the field rate,
 25 fps on PAL and 30 on NTSC. Clips land in the `[paths] recordings`
 folder.
+
+`video_format` is what [Record Video](ui.md#recording-video) writes:
+`"avi"` (the default), the recorder's lossless ZMBV and PCM AVI, or
+`"mp4"`, H.264 and AAC made from that AVI by ffmpeg once the recording
+stops (see [MP4 recordings](ui.md#recording-mp4)). The Recording menu's
+**Video Format** sets it too, and keeps the choice for the next launch.
+`ffmpeg` names the ffmpeg to make MP4s with, for one Copperline would not
+find by itself; left out (the default), it looks beside Copperline, on the
+`PATH` and in the usual package-manager folders. The `COPPERLINE_FFMPEG`
+environment variable outranks it for one run.
 
 The camera button and `Cmd+S` / `Alt+S` save the displayed picture with its
 current effects. Native screenshots use `Cmd+Option+S` on macOS or

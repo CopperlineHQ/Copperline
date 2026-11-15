@@ -132,6 +132,8 @@ src/
   expect.rs         # --expect-screenshot comparisons
   gifclip.rs        # animated GIF clip export
   recorder.rs       # video+audio capture (ZMBV/PCM AVI writer)
+  recorder/mp4.rs   # MP4 (H.264/AAC) made from that AVI by the host's ffmpeg
+  ffmpeg.rs         # finding the host's ffmpeg
   inputrec.rs       # live-input recording to the scripted-input format
   inputsched.rs     # deterministic input replay for reverse debugging
   savestate.rs      # whole-machine snapshot/restore (savestate/: chunked file format)

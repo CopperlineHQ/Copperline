@@ -876,15 +876,24 @@ video = "PAL"
 # vsync = true
 # hidpi_texture = true
 
-# [recording] -- GIF clip settings.
+# [recording] -- GIF clip and video recording settings.
 # The clip ring is behind Save Clip as GIF (Cmd/Alt+Shift+G); clip_fps also
 # applies to headless --gif-after captures.
 # clip_seconds: emulated seconds of the presented picture the window keeps
 # (default 10, up to 120); 0 switches the ring and the menu item off.
 # clip_fps: GIF frame rate, 1 to 60 (default 0 = 25 on PAL, 30 on NTSC).
+# video_format: what Record Video (Cmd/Alt+R) writes. "avi" (the default)
+# is lossless ZMBV video and PCM sound; "mp4" is H.264 and AAC, made from
+# that AVI by the host's ffmpeg (with libx264) when the recording stops.
+# Without an ffmpeg the recording stays an AVI.
+# ffmpeg: the ffmpeg to make MP4s with; left out, Copperline looks beside
+# itself, on the PATH and in the usual package-manager folders.
+# COPPERLINE_FFMPEG outranks it for one run.
 # [recording]
 # clip_seconds = 10
 # clip_fps = 0
+# video_format = "avi"
+# ffmpeg = "/opt/ffmpeg/bin/ffmpeg"
 
 
 [audio]

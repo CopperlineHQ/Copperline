@@ -1099,9 +1099,28 @@ impl TryFrom<RawConfig> for Config {
                     defaults.recording.clip_fps
                 }
             };
+            let video_format = match raw.recording.video_format.as_deref() {
+                None => defaults.recording.video_format,
+                Some(s) => match parse_video_format(s) {
+                    Ok(format) => format,
+                    Err(e) => {
+                        errors.push(e);
+                        defaults.recording.video_format
+                    }
+                },
+            };
+            let ffmpeg = raw
+                .recording
+                .ffmpeg
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(PathBuf::from);
             RecordingConfig {
                 clip_seconds,
                 clip_fps,
+                video_format,
+                ffmpeg,
             }
         };
 
@@ -1862,6 +1881,15 @@ pub(crate) fn parse_track_display(s: &str) -> Result<TrackDisplay> {
         other => {
             bail!("[display] track_display must be \"track\" or \"cylinder\", got \"{other}\"")
         }
+    }
+}
+
+/// Parse a `[recording] video_format` value.
+pub(crate) fn parse_video_format(s: &str) -> Result<VideoFormat> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "avi" => Ok(VideoFormat::Avi),
+        "mp4" => Ok(VideoFormat::Mp4),
+        other => bail!("[recording] video_format must be \"avi\" or \"mp4\", got \"{other}\""),
     }
 }
 

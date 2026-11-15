@@ -436,52 +436,6 @@ pub fn resample(src: &[(f32, f32)], n: usize) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// Turn a recording's AVI into an MP4 (H.264 with square pixels, AAC).
-fn make_mp4(
-    ffmpeg: &std::path::Path,
-    avi: &std::path::Path,
-    mp4: &std::path::Path,
-    width: u32,
-    high: bool,
-) -> anyhow::Result<()> {
-    let mut cmd = std::process::Command::new(ffmpeg);
-    cmd.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(avi)
-        .args([
-            "-vf",
-            &format!("scale={width}:480:flags=lanczos,setsar=1"),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            if high { "12" } else { "18" },
-            "-pix_fmt",
-            "yuv420p",
-            "-c:a",
-            "aac",
-            "-b:a",
-            if high { "320k" } else { "192k" },
-            "-movflags",
-            "+faststart",
-        ])
-        .arg(mp4)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // CREATE_NO_WINDOW: no console flashing up.
-        cmd.creation_flags(0x0800_0000);
-    }
-    let out = cmd.output()?;
-    if !out.status.success() {
-        anyhow::bail!("ffmpeg: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(())
-}
-
 /// Where an output's recording settings are kept: `.copperline` in the
 /// card's folder (beside the recordings folder).
 fn settings_file(record_dir: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
@@ -572,13 +526,6 @@ impl Default for RecordSettings {
             high_quality: false,
         }
     }
-}
-
-/// Whether `path` names an MP4 (or QuickTime) file.
-fn is_mp4(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "mp4" | "m4v" | "mov"))
 }
 
 #[derive(Default)]
@@ -746,9 +693,9 @@ impl CardOutput {
         if let Some(mut old) = st.recorder.take() {
             let _ = old.finish();
         }
-        let (avi, mp4) = if is_mp4(path) {
+        let (avi, mp4) = if crate::recorder::mp4::is_mp4(path) {
             (
-                path.with_extension("recording.avi"),
+                crate::recorder::mp4::avi_beside(path),
                 Some(path.to_path_buf()),
             )
         } else {
@@ -812,9 +759,9 @@ impl CardOutput {
         std::thread::Builder::new()
             .name("toaster-mp4".into())
             .spawn(move || {
-                match make_mp4(&ffmpeg, &avi, &target, width, high) {
+                let options = crate::recorder::mp4::Mp4Options::scaled(width, 480, high);
+                match crate::recorder::mp4::convert(&ffmpeg, &avi, &target, &options) {
                     Ok(()) => {
-                        let _ = std::fs::remove_file(&avi);
                         log::info!("{} recording saved: {}", out.name, target.display());
                     }
                     Err(e) => log::warn!(
@@ -928,10 +875,10 @@ mod tests {
             assert_eq!(saved, path);
             let bytes = std::fs::read(&path).unwrap();
             assert_eq!(&bytes[4..8], b"ftyp");
-            assert!(!path.with_extension("recording.avi").exists());
+            assert!(!crate::recorder::mp4::avi_beside(&path).exists());
         } else {
             // Without ffmpeg the AVI stays.
-            assert_eq!(saved, path.with_extension("recording.avi"));
+            assert_eq!(saved, crate::recorder::mp4::avi_beside(&path));
             assert!(saved.is_file());
         }
     }

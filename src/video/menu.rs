@@ -109,6 +109,8 @@ pub enum MenuAction {
 
     // Recording.
     ToggleRecord,
+    /// What the next Record Video writes.
+    SetVideoFormat(crate::config::VideoFormat),
     ToggleRecordInput,
     /// Start or stop recording the video-slot card's Program output.
     ToggleCardRecord,
@@ -487,6 +489,8 @@ pub struct MenuState<'a> {
     pub warp_speed: WarpSpeed,
     pub rewind: bool,
     pub recording: bool,
+    /// What Record Video writes (`[recording] video_format`).
+    pub video_format: crate::config::VideoFormat,
     pub input_recording: bool,
     /// The video-slot card has outputs of its own (the Toaster's monitors),
     /// and whether its Program output is being recorded.
@@ -1263,6 +1267,16 @@ fn recording_rows(s: &MenuState) -> Vec<MenuRow> {
             MenuAction::ShowCardMonitors,
         ));
     }
+    let formats = crate::config::VideoFormat::MENU_ORDER
+        .iter()
+        .map(|f| {
+            MenuRow::choice(
+                f.menu_label(),
+                MenuAction::SetVideoFormat(*f),
+                s.video_format == *f,
+            )
+        })
+        .collect();
     rows.extend(vec![
         MenuRow::action(
             if s.recording {
@@ -1272,6 +1286,7 @@ fn recording_rows(s: &MenuState) -> Vec<MenuRow> {
             },
             MenuAction::ToggleRecord,
         ),
+        MenuRow::submenu("Video Format", formats).with_value(s.video_format.short_label()),
         MenuRow::action(
             if s.input_recording {
                 "Stop Input Recording"
@@ -1491,6 +1506,7 @@ mod tests {
             warp_speed: WarpSpeed::Max,
             rewind: false,
             recording: false,
+            video_format: crate::config::VideoFormat::Avi,
             input_recording: false,
             card_outputs: false,
             card_recording: false,
@@ -1545,6 +1561,37 @@ mod tests {
 
     fn find<'a>(rows: &'a [MenuRow], label: &str) -> Option<&'a MenuRow> {
         rows.iter().find(|r| r.label == label)
+    }
+
+    /// Recording offers both video formats, the one in force marked and
+    /// named on the row, and picking one leaves the menu up.
+    #[test]
+    fn recording_offers_the_video_format() {
+        use crate::config::VideoFormat;
+        let slots = empty_slots();
+        let none: [String; 0] = [];
+        for format in VideoFormat::MENU_ORDER {
+            let mut s = state(&none, &none, &none, &none, &slots);
+            s.video_format = format;
+            let rows = build(&s);
+            let recording = find(&rows, "Recording")
+                .and_then(|r| r.children())
+                .expect("recording");
+            let row = find(recording, "Video Format").expect("video format");
+            assert_eq!(row.value.as_deref(), Some(format.short_label()));
+            let choices = row.children().expect("formats");
+            assert_eq!(choices.len(), VideoFormat::MENU_ORDER.len());
+            for (choice, f) in choices.iter().zip(VideoFormat::MENU_ORDER) {
+                assert_eq!(choice.label, f.menu_label());
+                assert_eq!(choice.menu_action(), Some(&MenuAction::SetVideoFormat(f)));
+                assert_eq!(choice.marked(), f == format, "{}", choice.label);
+                assert!(
+                    !choice.closes_menu(),
+                    "picking {} closed the menu",
+                    f.label()
+                );
+            }
+        }
     }
 
     /// A port with nothing on it contributes no category: an empty list is

@@ -4603,6 +4603,8 @@ fn recording_clip_settings_default_and_validate() -> Result<()> {
         RecordingConfig {
             clip_seconds: crate::gifclip::DEFAULT_CLIP_SECONDS,
             clip_fps: 0,
+            video_format: VideoFormat::Avi,
+            ffmpeg: None,
         }
     );
     let cfg = parse_config("[recording]\nclip_seconds = 30\nclip_fps = 15\n")?;
@@ -4630,6 +4632,28 @@ fn recording_clip_settings_default_and_validate() -> Result<()> {
         parse_config("[recording]\nclip_len = 3\n").is_err(),
         "unknown [recording] keys are rejected"
     );
+    Ok(())
+}
+
+#[test]
+fn recording_video_format_and_ffmpeg_parse_and_validate() -> Result<()> {
+    let cfg = parse_config("[recording]\nvideo_format = \"MP4\"\nffmpeg = \" /opt/ff/ffmpeg \"\n")?;
+    assert_eq!(cfg.recording.video_format, VideoFormat::Mp4);
+    assert_eq!(
+        cfg.recording.ffmpeg.as_deref(),
+        Some(Path::new("/opt/ff/ffmpeg"))
+    );
+    let cfg = parse_config("[recording]\nvideo_format = \"avi\"\nffmpeg = \"\"\n")?;
+    assert_eq!(cfg.recording.video_format, VideoFormat::Avi);
+    assert_eq!(
+        cfg.recording.ffmpeg, None,
+        "an empty path means look for one"
+    );
+    for format in VideoFormat::MENU_ORDER {
+        assert_eq!(parse_video_format(format.label())?, format);
+    }
+    let err = parse_config("[recording]\nvideo_format = \"mkv\"\n").unwrap_err();
+    assert!(format!("{err:#}").contains("video_format"), "{err:#}");
     Ok(())
 }
 
