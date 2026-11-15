@@ -7228,14 +7228,32 @@ fn quitting_while_recording_still_makes_the_mp4() {
     }
     let dir = tempfile::tempdir().unwrap();
     let mut app = test_app();
+    // The stand-in notes how far it got (and any signal that ended it),
+    // so a missing MP4 says whether ffmpeg ran at all.
+    let log = dir.path().join("ffmpeg.log");
     app.ffmpeg_path = Some(crate::recorder::mp4::fake_ffmpeg(
         dir.path(),
-        "sleep 0.2; for last; do :; done; echo mp4 > \"$last\"",
+        &format!(
+            "log='{}'\n\
+             for s in HUP INT QUIT PIPE TERM USR1 USR2; do trap \"echo signal $s >> '$log'; exit 1\" $s; done\n\
+             echo \"started: $*\" >> \"$log\"\n\
+             sleep 0.2\n\
+             for last; do :; done\n\
+             echo mp4 > \"$last\" || echo \"write failed: $last\" >> \"$log\"\n\
+             echo done >> \"$log\"",
+            log.display()
+        ),
     ));
     step_recorded_frames(&mut app, 0);
     let mp4 = dir.path().join("rec.mp4");
     assert!(app.start_recording_to(mp4.clone()));
+    assert_eq!(app.recording_mp4.as_deref(), Some(mp4.as_path()));
     step_recorded_frames(&mut app, 3);
+    assert!(
+        app.recorder.is_some(),
+        "still recording when the session ends"
+    );
+    assert!(app.ffmpeg().is_some());
     drop(app);
     let avi = crate::recorder::mp4::avi_beside(&mp4);
     let data = std::fs::read(&avi).expect("the recording was finished");
@@ -7249,10 +7267,18 @@ fn quitting_while_recording_still_makes_the_mp4() {
     while !mp4.is_file() {
         assert!(
             std::time::Instant::now() < deadline,
-            "ffmpeg did not outlive the session"
+            "ffmpeg did not outlive the session; its log: {:?}; files left: {:?}",
+            std::fs::read_to_string(&log).unwrap_or_else(|e| format!("none ({e})")),
+            std::fs::read_dir(dir.path())
+                .map(|d| d
+                    .filter_map(|e| e.ok().map(|e| e.file_name()))
+                    .collect::<Vec<_>>())
+                .unwrap_or_default()
         );
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+    let noted = std::fs::read_to_string(&log).unwrap();
+    assert!(noted.starts_with("started: "), "{noted:?}");
 }
 
 #[test]
