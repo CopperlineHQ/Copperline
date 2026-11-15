@@ -79,24 +79,20 @@ fn toml_path(path: &Path) -> String {
 /// the volume at all -- the marker file is written entirely by AROS's own
 /// boot shell once it reaches the Startup-Sequence.
 fn build_ofs_payload() -> Vec<u8> {
-    let src = std::env::temp_dir().join(format!(
-        "copperline-copperhf-mounter-src-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(src.join("S")).expect("create S/");
+    // A directory of this call's own, removed when `src` drops: the tests
+    // here run in parallel and several build a payload at once, so a name
+    // made from the process and the clock is not unique between them.
+    let src = tempfile::Builder::new()
+        .prefix("copperline-copperhf-mounter-src-")
+        .tempdir()
+        .expect("create the payload's source directory");
+    std::fs::create_dir_all(src.path().join("S")).expect("create S/");
     std::fs::write(
-        src.join("S").join("Startup-Sequence"),
+        src.path().join("S").join("Startup-Sequence"),
         format!("FailAt 21\nEcho >\"SYS:bootmark\" \"{MARKER}\"\n"),
     )
     .expect("write Startup-Sequence");
-    let image =
-        copperline::dirfs::build_image(&src, "COPPERHF", FileSystem::OFS).expect("build OFS");
-    std::fs::remove_dir_all(&src).ok();
-    image
+    copperline::dirfs::build_image(src.path(), "COPPERHF", FileSystem::OFS).expect("build OFS")
 }
 
 // --- Hand-built RDSK/PART, mirroring src/harddrive.rs ----------------------
@@ -496,4 +492,33 @@ fn aros_autoboots_from_four_char_partition_in_32bit_ram() {
 fn find_bootmark_is_false_on_a_pristine_unbooted_image() {
     assert!(!find_bootmark(&rdbless_image()));
     assert!(!find_bootmark(&rdb_image()));
+}
+
+/// The tests in this file run in parallel and each builds its own payload,
+/// so payloads built at the same instant must not share a source directory:
+/// one build clearing it away under another loses that one's
+/// Startup-Sequence, or the whole build.
+#[test]
+fn payloads_built_at_the_same_instant_each_hold_the_startup_sequence() {
+    const BUILDERS: usize = 8;
+    for _ in 0..25 {
+        let start = std::sync::Barrier::new(BUILDERS);
+        std::thread::scope(|scope| {
+            let builds: Vec<_> = (0..BUILDERS)
+                .map(|_| {
+                    scope.spawn(|| {
+                        start.wait();
+                        build_ofs_payload()
+                    })
+                })
+                .collect();
+            for build in builds {
+                let payload = build.join().expect("build a payload");
+                let root = ofs_root_block((payload.len() / SECTOR_SIZE) as u64);
+                let script = ofs_lookup(&payload, root, b"S")
+                    .and_then(|s| ofs_lookup(&payload, s, b"Startup-Sequence"));
+                assert!(script.is_some(), "a payload lost its Startup-Sequence");
+            }
+        });
+    }
 }
