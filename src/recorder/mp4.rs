@@ -318,14 +318,39 @@ pub(crate) fn h264_dimensions(mp4: &[u8]) -> Option<(u16, u16)> {
 }
 
 /// A stand-in ffmpeg for tests: a shell script in `dir` running `body`
-/// with ffmpeg's arguments.
+/// with ffmpeg's arguments, returned once it can be run. On Linux a
+/// fork made by another test while the script was being written holds
+/// a copy of its write handle until that child execs, and running the
+/// script before then fails with ETXTBSY ("Text file busy"). The
+/// script's own handle is closed before the first run is tried, so once
+/// one run gets past exec no copy is left to stop a later one.
 #[cfg(all(test, unix))]
 pub(crate) fn fake_ffmpeg(dir: &Path, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
+    const READY: &str = "--fake-ffmpeg-ready";
     let path = dir.join("ffmpeg");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\n[ \"$1\" = {READY} ] && exit 0\n{body}\n"),
+    )
+    .unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    path
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match Command::new(&path).arg(READY).status() {
+            Ok(status) => {
+                assert!(status.success(), "the fake ffmpeg's ready run: {status}");
+                return path;
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => panic!("running the fake ffmpeg {}: {e}", path.display()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -392,24 +417,11 @@ mod tests {
         assert_eq!(value_after(&args, "-f"), "mp4");
     }
 
-    /// [`Conversion::start`], retried while the script just written is
-    /// "busy": another test's fork can briefly hold its write handle.
+    /// [`Conversion::start`] with the options a recording uses.
     #[cfg(unix)]
     fn start(ffmpeg: &Path, avi: &Path, mp4: &Path) -> Conversion {
-        for _ in 0..50 {
-            match Conversion::start(ffmpeg, avi, mp4, &Mp4Options::doubled()) {
-                Ok(c) => return c,
-                Err(e)
-                    if e.root_cause()
-                        .downcast_ref::<std::io::Error>()
-                        .is_some_and(|io| io.kind() == std::io::ErrorKind::ExecutableFileBusy) =>
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                Err(e) => panic!("starting the fake ffmpeg: {e:#}"),
-            }
-        }
-        panic!("the fake ffmpeg stayed busy");
+        Conversion::start(ffmpeg, avi, mp4, &Mp4Options::doubled())
+            .expect("starting the fake ffmpeg")
     }
 
     #[cfg(unix)]
