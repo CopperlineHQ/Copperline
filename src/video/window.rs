@@ -4154,6 +4154,15 @@ impl App {
         self.ffmpeg_path = recording.ffmpeg.clone();
     }
 
+    /// Whether work running off this thread is waiting for the event loop
+    /// to collect it: an image job, or an MP4 that ffmpeg is still making.
+    /// Neither wakes the loop when it finishes, so while one is pending the
+    /// loop has to keep polling, or a paused session would sit on the
+    /// outcome (and, for an MP4, the AVI it replaces) until the next event.
+    pub(super) fn collecting_background_work(&self) -> bool {
+        self.image_job.is_some() || !self.mp4_saves.is_empty()
+    }
+
     /// Use original field pixels for screenshots and expectations.
     pub fn set_native_screenshots(&mut self, native: bool) {
         self.native_screenshots = native;
@@ -6561,8 +6570,10 @@ impl ApplicationHandler for App {
         // or it would sit there until something else woke it.
         // So does a picker sheet: its answer is collected by this loop, and
         // with the machine held nothing else would wake it.
-        let writing_image =
-            self.image_job.is_some() || downloading || self.status_until.is_some() || picking;
+        let writing_image = self.collecting_background_work()
+            || downloading
+            || self.status_until.is_some()
+            || picking;
         // Likewise the caret: it has no event of its own either, and a panel
         // with a box open in it is otherwise perfectly still.
         let typing = self.blink_caret();

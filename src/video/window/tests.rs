@@ -7130,6 +7130,10 @@ fn mp4_recording_is_made_from_its_avi_when_it_stops() {
     assert!(app.recorder.is_none());
     assert!(app.recording_mp4.is_none());
     assert_eq!(app.mp4_saves.len(), 1, "ffmpeg is making the MP4");
+    assert!(
+        app.collecting_background_work(),
+        "the event loop keeps polling until the MP4's outcome is collected"
+    );
     assert_eq!(
         app.active_osd_text().map(|(text, _)| text).as_deref(),
         Some("Saving rec.mp4...")
@@ -7173,7 +7177,12 @@ fn a_failed_mp4_conversion_keeps_the_avi() {
     assert!(app.start_recording_to(mp4.clone()));
     step_recorded_frames(&mut app, 3);
     app.stop_recording();
+    // ffmpeg wakes nothing when it exits, so until its outcome is
+    // collected the event loop must keep polling, paused or not.
+    app.paused = true;
+    assert!(app.collecting_background_work());
     wait_for_mp4_saves(&mut app);
+    assert!(!app.collecting_background_work());
     assert_eq!(
         app.active_osd_text().map(|(text, _)| text).as_deref(),
         Some("MP4 failed, kept rec.recording.avi (see log)")
