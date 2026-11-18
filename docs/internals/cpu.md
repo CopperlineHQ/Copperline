@@ -347,8 +347,8 @@ precise.
 
 ### CPU-core batch extensions
 
-Copperline requires `m68k` 0.15.0, the first release with the two batch
-extensions it depends on:
+`m68k` 0.15.0 was the first release with the two batch extensions
+Copperline depends on:
 [PR #222](https://github.com/benletchford/m68k-rs/pull/222) added the
 `AddressBus::batch_boundary` callback (and `wants_batch_boundaries`, which
 lets a host decline it for a batch) and
@@ -357,12 +357,12 @@ physical RAM/ROM regions (`FastMemRegion`). Every Cargo workspace resolves
 the same `m68k` source (see the lockfile check above).
 
 (cpu-core-conformance-fixes-awaiting-upstream)=
-### Pinned CPU core and conformance fixes
+### CPU core release and conformance fixes
 
-Copperline pins a revision based on upstream `master` from the
-[CopperlineHQ/m68k-rs fork](https://github.com/CopperlineHQ/m68k-rs/commit/d9de8e8ae147f38c650387566e89ad0ac6a3ff4a).
-It includes the upstream CPU, FPU and MMU conformance fixes described below.
-The fork adds faster indexed operations and memory accesses under translation.
+Copperline requires `m68k` 0.17.1, which carries the CPU, FPU and MMU
+conformance fixes described below. That release also adds faster indexed
+operations and memory accesses under translation
+([PR #264](https://github.com/benletchford/m68k-rs/pull/264)).
 A decoded batch can reuse a translated instruction page when a single fastmem
 region covers the whole page. A native trace can use a live 68040/68060 data
 ATC hit for a 4 KiB page in the primary window. A write that needs to set the
