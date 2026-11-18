@@ -11,6 +11,11 @@ yanked = "deny"
 # Each exception is dated, narrow, and explains why an upgrade cannot remove
 # it. Published vulnerabilities still fail the job by default.
 ignore = [
+    # 2026-11-18. All chrono releases are marked unmaintained. delharc 0.8
+    # requires it for LHA timestamps, and iroh's netwatch 0.19 enables it
+    # through wmi's default features on Windows. Remove this exception when
+    # both paths stop pulling in chrono. Review by 2027-02-18.
+    "RUSTSEC-2026-0543",
     # 2026-10-14: Wasmtime's component-model handle-table exhaustion does
     # not affect this build: Cargo.toml disables default features and enables
     # only cranelift/runtime, without component-model, even with the root's
