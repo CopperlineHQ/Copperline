@@ -5696,6 +5696,7 @@ fn cacr_040_layout(cpu_type: CpuType) -> bool {
 }
 
 impl AddressBus for CpuBus {
+    #[inline(always)]
     fn batch_boundary(&mut self, retired: u32, pc: u32, sr: u16) -> bool {
         self.note_jit_batch_boundary(retired, pc, sr)
     }
