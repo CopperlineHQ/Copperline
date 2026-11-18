@@ -11,6 +11,11 @@ yanked = "deny"
 # Each exception is dated, narrow, and explains why an upgrade cannot remove
 # it. Published vulnerabilities still fail the job by default.
 ignore = [
+    # 2026-11-18. All chrono releases are marked unmaintained. delharc 0.8
+    # requires it for LHA timestamps, and iroh's netwatch 0.19 enables it
+    # through wmi's default features on Windows. Remove this exception when
+    # both paths stop pulling in chrono. Review by 2027-02-18.
+    "RUSTSEC-2026-0543",
     # 2026-10-14: Wasmtime's component-model handle-table exhaustion does
     # not affect this build: Cargo.toml disables default features and enables
     # only cranelift/runtime, without component-model, even with the root's
@@ -94,8 +99,8 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # surface-acquire retry (parasyte/pixels#462, see Cargo.toml) until a release
 # includes it; drop it with the patch.
 allow-git = [
-    # CPU, FPU and MMU conformance fixes on top of m68k 0.16.0; switch back
-    # to the published crate once upstream releases them.
+    # The fork carries the translated-memory and indexed-operation changes
+    # submitted in benletchford/m68k-rs#264.
     "https://github.com/CopperlineHQ/m68k-rs",
     "https://github.com/CopperlineHQ/mt32-rs",
     "https://github.com/CopperlineHQ/Coppersynth",

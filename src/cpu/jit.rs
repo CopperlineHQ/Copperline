@@ -159,6 +159,7 @@ impl CpuBus {
     /// before touching hardware, and the host flushes the final batch count.
     /// This runs before every decoded instruction, so it compares cached state
     /// and touches the chipset only after something marked that state stale.
+    #[inline(always)]
     pub(super) fn note_jit_batch_boundary(&mut self, retired: u32, pc: u32, sr: u16) -> bool {
         let Some(batch) = self.jit_batch.as_mut() else {
             return false;
@@ -173,20 +174,39 @@ impl CpuBus {
         if timing.quiet && !self.jit_bus_boundary {
             return false;
         }
+        Self::pending_jit_boundary(
+            timing,
+            &self.bus,
+            self.jit_bus_boundary,
+            retired,
+            ((sr >> 8) & 7) as u8,
+        )
+    }
+
+    // Keep the quiet boundary inline in the core loop. Only this path needs
+    // the interrupt mask or the chipset state.
+    #[inline(never)]
+    fn pending_jit_boundary(
+        timing: &mut JitTiming,
+        bus: &Bus,
+        bus_boundary: bool,
+        retired: u32,
+        interrupt_mask: u8,
+    ) -> bool {
         // Always allow progress on entry, including a bring-up interrupt whose
         // vector has not been installed yet. The host applies that guard.
         if retired == 0 {
             return false;
         }
-        if self.jit_bus_boundary || timing.fetch_retired.is_some_and(|at| retired > at) {
+        if bus_boundary || timing.fetch_retired.is_some_and(|at| retired > at) {
             return true;
         }
         if timing.stop_state_stale {
-            (timing.irq_level, timing.host_stop) = jit_stop_state(&self.bus, timing.deadline);
+            (timing.irq_level, timing.host_stop) = jit_stop_state(bus, timing.deadline);
             timing.stop_state_stale = false;
         }
         timing.quiet = !timing.host_stop && timing.irq_level == 0 && timing.fetch_retired.is_none();
-        timing.host_stop || timing.irq_level > ((sr >> 8) & 7) as u8
+        timing.host_stop || timing.irq_level > interrupt_mask
     }
 
     pub(super) fn flush_jit_batch_prefix(&mut self) {

@@ -356,16 +356,17 @@ lets a host decline it for a batch) and
 physical RAM/ROM regions (`FastMemRegion`). Every Cargo workspace resolves
 the same `m68k` source (see the lockfile check above).
 
-### CPU-core conformance fixes awaiting upstream
+(cpu-core-conformance-fixes-awaiting-upstream)=
+### Pinned CPU core and conformance fixes
 
-Copperline currently pins `m68k` to a revision of the
-[CopperlineHQ/m68k-rs](https://github.com/CopperlineHQ/m68k-rs) fork
-(branch `copperline/040-fpsp`, which is `copperline/amitorture-fixes`
-plus the 68040 floating-point software-package traps described under
-[The 68040 FPU and 68040.library](#the-68040-fpu)): the published 0.16.0
-plus conformance fixes found with a bare-metal CPU test suite, one fix
-per commit so each can go upstream on its own. Copperline returns to the
-published crate once they are released.
+Copperline pins a revision based on upstream `master` from the
+[CopperlineHQ/m68k-rs fork](https://github.com/CopperlineHQ/m68k-rs/commit/d9de8e8ae147f38c650387566e89ad0ac6a3ff4a).
+It includes the upstream CPU, FPU and MMU conformance fixes described below.
+The fork adds faster indexed operations and memory accesses under translation.
+A decoded batch can reuse a translated instruction page when a single fastmem
+region covers the whole page. A native trace can use a live 68040/68060 data
+ATC hit for a 4 KiB page in the primary window. A write that needs to set the
+modified bit goes through the normal translation path.
 
 - **Integer core and exceptions.** DIVU/DIVS clear C on overflow and before
   a zero-divide exception. CAS and CAS2 set the flags of `<ea> - Dc`. An
@@ -408,14 +409,13 @@ published crate once they are released.
   pointer and long-descriptor limits are enforced, and PTEST level 0
   searches the ATC.
 
-Known gaps that remain in the fork: an enabled FPU exception is taken at
-the end of the instruction that raised it rather than held pending until
-the next FPU instruction; the 6888x and the 68060 never save a busy or
-exception frame; the 68040/68060 do not yet trap enabled exceptions on
-FMOVE to memory, nor overflow and underflow while they are disabled; an
-unnormalized operand with a nonzero mantissa is not normalized by the
-native arithmetic;
-PMOVE never raises the MMU configuration exception; a locked
+Register-destination arithmetic exceptions can stay pending until the next
+FPU instruction. The 68060 saves and restores its EXCP frame. With the guest
+software package enabled, the 68040 and 68060 trap arithmetic overflow and
+underflow even when their enable bits are clear. On both models, FMOVE to
+memory or a data register still completes without taking an arithmetic
+exception, and rounding to single or double precision retains the extended
+exponent range. PMOVE still omits the MMU configuration exception. A locked
 read-modify-write cycle (TAS against a 68030 TT register with RWM clear)
 is matched one bus cycle at a time.
 
@@ -686,10 +686,9 @@ over-pair): the sOEP EA subset and dual-memory rule are coarser than UM
 Table 10-1; the 96-byte IFU FIFO and AGU change/use stalls are not
 modelled; the store buffer is stored (CACR.ESB) but writes bill at bus
 rate; pairing across a folded branch is not modelled, and a branch
-folds only when a pairing window is open; the FSAVE EXCP frame is not
-generated (the softfloat FPU retires every operation completely); FPSR
-quotient-bit and denormal traps behave as on the other parts rather
-than through the 060's unsupported-data path.
+folds only when a pairing window is open. With the 68060 software package
+in the guest, a denormalized or unnormalized operand takes the
+unsupported-data-type exception and FSAVE records it in an EXCP frame.
 
 (the-68040-fpu)=
 ## The 68040 FPU and 68040.library
@@ -736,7 +735,8 @@ the result in WBTEMP for OVFL, UNFL and INEX).
 
 The frame layout follows the package's own equates and was checked
 against the displacements in `68040.library` 37.30. That library, opened
-on Kickstart 3.1, was then run through 792 floating-point cases (every
+on Kickstart 3.1, was run with the earlier `copperline/040-fpsp` core
+through 792 floating-point cases (every
 unimplemented instruction, packed conversions in and out, denormalized
 and unnormalized operands of each hardware instruction in every rounding
 mode and precision, FMOVE out of denormals) under `"trap"` and compared
@@ -750,15 +750,11 @@ an infinity's `$7FFF` (19), converts a denormal to the integer 0 in every
 rounding mode (9), and normalizes unnormalized operands, which the native
 arithmetic does not (16).
 
-Gaps. The 68040 holds a register-destination exception pending and takes
-it at the next floating-point instruction; the core takes it at the end
-of the instruction that raised it and stacks the next instruction's
-address, keeping the pending form only for restored frames. The 68040
-also traps overflow and underflow when they are disabled, and operand
-error and signalling NaN on an FMOVE to an integer, so that the package
-supplies the result; the core computes those results itself. The
-68LC040/68EC040's format $4 frame for floating-point instructions is not
-modelled (they take the plain Line-F frame). In `68040.library` 37.30
+The current core defers register-destination arithmetic exceptions until the
+next floating-point instruction. FSAVE can capture a pending exception before
+it is delivered. Arithmetic exceptions of FMOVE to memory or a data register
+remain unimplemented. The 68LC040/68EC040's format $4 frame for floating-point
+instructions is not modelled (they take the plain Line-F frame). In `68040.library` 37.30
 the unsupported-data-type handler stores an FMOVE.B/W/L of a denormal to
 a data register through a register table it indexes with the whole
 opcode word (the mask its operand-error handler applies is missing
