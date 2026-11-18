@@ -94,8 +94,8 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # surface-acquire retry (parasyte/pixels#462, see Cargo.toml) until a release
 # includes it; drop it with the patch.
 allow-git = [
-    # CPU, FPU and MMU conformance fixes on top of m68k 0.16.0; switch back
-    # to the published crate once upstream releases them.
+    # The fork carries the translated-memory and indexed-operation changes
+    # submitted in benletchford/m68k-rs#264.
     "https://github.com/CopperlineHQ/m68k-rs",
     "https://github.com/CopperlineHQ/mt32-rs",
     "https://github.com/CopperlineHQ/Coppersynth",
