@@ -243,8 +243,7 @@ whether you may redistribute it is yours to establish.
 
 The browser build has no CD drive, no host-directory volume and no memory
 overrides, so the packer refuses `cd` and `run` payloads, the CDTV and CD32
-models, and `[machine] chip`/`fast`/`slow` (note that `tools/publish-web` also
-does not yet list `A2000` in its accepted model table). It packs any other model but warns
+models, and `[machine] chip`/`fast`/`slow`. It packs any other model but warns
 outside the A500 and A1200, the two the hosted browser build vets against the
 AROS ROM. `[display] shader` and `bezel` are accepted and not drawn yet (the
 packer says so): the page shows the plain picture.

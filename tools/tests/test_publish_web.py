@@ -153,6 +153,8 @@ class Manifest(unittest.TestCase):
         self.reject(MANIFEST.replace('"A500"', '"A9000"'), "is not a Copperline machine")
         manifest = manifest_dict(MANIFEST.replace('"A500"', '"a500+"'))
         self.assertEqual(publish_web.normalize_model(manifest["machine"]["model"]), "A500PLUS")
+        a2000 = manifest_dict(MANIFEST.replace('"A500"', '"A2000"'))
+        self.assertEqual(publish_web.normalize_model(a2000["machine"]["model"]), "A2000")
 
     def test_payload_rules(self):
         self.reject(MANIFEST.replace('adf = "game.adf"', ""), "exactly one of cd, adf, or run")
