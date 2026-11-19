@@ -348,6 +348,11 @@
                 "type": "boolean",
                 "description": "When the program is not loaded yet, stop at its entry point once it is.",
                 "default": false
+              },
+              "windowed": {
+                "type": "boolean",
+                "description": "Whether the attached emulator runs windowed (--control-gui), so the adapter polls for pauses or resumes made in the window. Set to false for a headless --control session.",
+                "default": true
               }
             }
           }
