@@ -23,7 +23,7 @@ The installed `switcher.main` and `switcher.main.aa` were checked with byte patt
   * `LDCG` only *loads* the CG.
 * **The CG is entered by a second `FGC_SELECTK`/`FGC_SELECT` to the CG slice gadget once the CG is loaded.** Three things send it:
   * the **F9** key on the switcher window;
-  * the project editor's **Programs → ToasterCG** popup;
+  * the project editor's **Programs -> ToasterCG** popup;
   * an **EditSwit message `ES_ToasterCG`/`FGC_SELECT`** posted to `ToasterARexx.port`. A 176-byte helper is given in 1.4.
 * **CG_AREXX** is a *function host*. It is serviced only inside the CG's edit loop.
   * While the CG is on screen the switcher is **blocked** and does not read its own port.
@@ -90,7 +90,7 @@ So after `LDCG` (load), **one more SELECTK** enters the CG. None of the ARexx co
 * Items are `" "`, `LightWave`, `ToasterPaint`, `ToasterCG`, `ChromaFX`. The divider is trimmed when there are no custom items; the current item is 0 (1384-1399, 1448-1456).
 * Choosing ToasterCG sets `global_LoadSliceCommand = ES_ToasterCG` (1500).
 * The editor loop then runs `LoadSlice` (edit.c:1471-1475; graphichelp.c:1562-1580):
-  * `SendSwitcherReply(ES_ToasterCG, FGC_LOAD)` (pecomm.a `SendSliceCommand` 5757: load → `FGC_SelectKCommand` if not loaded);
+  * `SendSwitcherReply(ES_ToasterCG, FGC_LOAD)` (pecomm.a `SendSliceCommand` 5757: load -> `FGC_SelectKCommand` if not loaded);
   * hides the editor windows (`MakeLayout(EW_EMPTY...)`, `SwitcherSwitch(TRUE)`);
   * `PutSwitcher(ES_ToasterCG, FGC_SELECT)`, which becomes SELECTK when loaded, i.e. enter.
 * Holding Shift while choosing unloads the program instead.
@@ -99,15 +99,15 @@ So after `LDCG` (load), **one more SELECTK** enters the CG. None of the ARexx co
 
 * The project window opens at screen x=32, y=TopEdge+44 with TopEdge=0 (ED/editwindow.c:381-388; handlecommon.c:761).
 * The button strip sits at window y = Grid->Height+5 = 205 (Switcher/TOP_SMALL layout, project.c:1236-1239, 1299-1322). Gadget widths come from ED/ImageInfo.c.
-* Strip left to right: Delete 32 (56 wide), All 97 (35), Duplicate 132 (59), Tools 191 (59), Controls 251 (68), Play 328, PlayPart 369, Stop 411 (39), Save 459 (47), **Programs 515 (92×19)**, Views 608 (65).
-* **"Programs" in screen coordinates: x 547-639, y 249-267, centre ≈ (593, 258).** It is the second control from the right, just left of "Views", on the strip under the project grid.
+* Strip left to right: Delete 32 (56 wide), All 97 (35), Duplicate 132 (59), Tools 191 (59), Controls 251 (68), Play 328, PlayPart 369, Stop 411 (39), Save 459 (47), **Programs 515 (92x19)**, Views 608 (65).
+* **"Programs" in screen coordinates: x 547-639, y 249-267, centre ~ (593, 258).** It is the second control from the right, just left of "Views", on the strip under the project grid.
 
 **How to work the popup** (ED/popup.c):
 
 * The popup is a press-drag-release menu.
 * Item 0 is centred on the gadget's centre (`y = y0 - yMargin - itemH/2`, popup.c:300-307).
 * Item height = InterfaceLG font height 11 + textGap 2 = **13** (edit.c:362-364, EditWindow.h:76, popup.c:80-97, 267).
-* So **ToasterCG (item 3) is ≈ 39 px below the button centre, about (593, 297).**
+* So **ToasterCG (item 3) is ~ 39 px below the button centre, about (593, 297).**
 * Do: LMB down on the button, move down 39 px in several steps (it tracks MOUSEMOVE), then release. Any button event ends it (popup.c:540-640).
 * `input_mouse_to` takes *screenshot* pixels, so convert after finding "Programs" in a capture.
 
@@ -116,7 +116,7 @@ So after `LDCG` (load), **one more SELECTK** enters the CG. None of the ARexx co
 **How Edit drives the switcher.** Edit sends EditSwit messages to the port named `ToasterARexx.port` (ED/edit.c:992). The switcher tells them apart from RexxMsgs by `Cookie == $666` (OLDRX ProcessARexxMessage; editswit.h:296).
 
 * `ES_ToasterCG` = **38** (checked in the AA dispatch table: `Hand_ToasterCG` sits at index 38 after `Hand_DUMMY`).
-* `Hand_ToasterCG` → `SendSliceCommand(CGSLICEID, Data1)` (pecomm.a:5711-5718, 5757-5810).
+* `Hand_ToasterCG` -> `SendSliceCommand(CGSLICEID, Data1)` (pecomm.a:5711-5718, 5757-5810).
 * `FGC_LOAD` (0) loads; `FGC_SELECT` (2) enters if loaded (error 2 if not).
 * ARexx cannot PutMsg a raw message (rexxsupport has no PutMsg), so a helper is needed.
 
@@ -145,7 +145,7 @@ So after `LDCG` (load), **one more SELECTK** enters the CG. None of the ARexx co
 * `EXIT()` on CG_AREXX (CG/cgrexx.c:1596-1600) returns `REFRESH_EXIT`. The `DoCG` loop ends and `FreeToaster` puts the switcher back (CG/cg.a:931 onward). The switcher then replies, runs `DitchKey`, `SelectStdEfx` and `ReDoDisplay`, and starts serving its ARexx port again.
   * The link's `call EXIT()` should work.
   * If the ARexx keyword `EXIT` gets in the way, call `x = EXITCG()`. Matching uses only the first 4 characters (cgrexx.c:2004-2009).
-* Keyboard: **Esc** (raw $45) → `_CaseEscape` (CG/newrender.a:2357-2380). Probably "exit to switcher"; not checked further.
+* Keyboard: **Esc** (raw $45) -> `_CaseEscape` (CG/newrender.a:2357-2380). Probably "exit to switcher"; not checked further.
 * The CG stays loaded afterwards: CKCG=1 and its `CG_AREXX` port still exists. `DPCG` unloads it.
 
 ### 1.6 Knowing the CG is ready
@@ -156,7 +156,7 @@ So after `LDCG` (load), **one more SELECTK** enters the CG. None of the ARexx co
 * The macro calls CG functions from a process of its own, so it hangs if `ToasterARexx.port` or `PROJECT_REXX_PORT` is on the library list (2.1).
 * The macro is sent RXCOMM|NOIO to the **`AREXX`** port, which launches it asynchronously (installed CG $22b34c; source cgrexx.c:1837-1883). The CG is therefore already in its loop when the macro runs.
 * **Hook (optional, needs a new file in the guest):** create `S:CG/StartUp.rexx` that writes a flag such as `ToasterFiles:.copperline/cg-ready`. Then the host knows when it is safe to send CG commands.
-  * The CG-Config Alt-F1…F10 macros point at `REXX:CG/...` too and are equally absent. The scripts themselves are in `Toaster:Arexx/CG`.
+  * The CG-Config Alt-F1...F10 macros point at `REXX:CG/...` too and are equally absent. The scripts themselves are in `Toaster:Arexx/CG`.
 
 ---------------------------------------------------------------------------
 
@@ -195,12 +195,12 @@ Source is cgrexx.c; the doc is DOC/CGARexx.Doc.
 
 | Need | Call | Notes |
 |---|---|---|
-| Page number / type / line count | `GET_PAGE()`, `GET_PAGE('TYPE')` → `Empty Key Framestore Scroll Crawl`, `GET_PAGE('SIZE')` | 525-547 |
+| Page number / type / line count | `GET_PAGE()`, `GET_PAGE('TYPE')` -> `Empty Key Framestore Scroll Crawl`, `GET_PAGE('SIZE')` | 525-547 |
 | Go to page n | `SET_PAGE(n)` (0-99) | 1058-1068. Never sends a success reply, so expect an empty result; the switch happens on the next refresh. |
 | Make it a key page | `SET_PAGE('TYPE','K')` | 1026-1048. `SAVEPAGE` writes **nothing** for an Empty page (NewBook.c:1452-1497 has no default case) yet returns OK. |
 | Select / deselect | `PICKPAGE()`, `PICKPAGE('NOT')`, `PICKLINE()`, `PICKCHAR()` | 1298-1330 |
-| Load a font | `LOADFONT(path, height)` → "1"/"0" | `RexxAddFont` 1418-1464. A *newly* loaded font becomes the **default for typing**; an already-loaded one returns "0" and is not made default. |
-| List loaded fonts | `GET_FONT('NEXT')` repeatedly → `"name,height"` | 568-597. `GET_FONT('FIRST')` resets and always returns "" (bug). Use the returned name in SET_CHAR(FACE). |
+| Load a font | `LOADFONT(path, height)` -> "1"/"0" | `RexxAddFont` 1418-1464. A *newly* loaded font becomes the **default for typing**; an already-loaded one returns "0" and is not made default. |
+| List loaded fonts | `GET_FONT('NEXT')` repeatedly -> `"name,height"` | 568-597. `GET_FONT('FIRST')` resets and always returns "" (bug). Use the returned name in SET_CHAR(FACE). |
 | Default/selected font | `SET_CHAR('FACE', name, height)` or `SET_FONT(name, height)` | 889-903 (sets the default and the selected text), 1075-1090 (selected only) |
 | Face colour | `SET_CHAR('RGBA',r,g,b,a)`, `SET_CHAR('BOTR',...)`, `SET_CHAR('FILL',0/1)` (1 = top/bottom gradient) | 837-873 |
 | Outline | `SET_BORD('SIZE',n)` (0 = none), `SET_BORD('RGBA',r,g,b,a)` | 1179-1246 |
@@ -217,7 +217,7 @@ Source is cgrexx.c; the doc is DOC/CGARexx.Doc.
 **What `SAVEPAGE` writes for a Key page** (NewBook.c:1444-1497, MyCrUD 153-192, RAMCRuD 1283-1300). Compare `Toaster:CG/Keys/LowerThird2`:
 
 * `DoRenderDisk(path)` writes a framestore `FORM ILBM`:
-  * 768×400, `BMHD y=43`, ByteRun1;
+  * 768x400, `BMHD y=43`, ByteRun1;
   * **18 planes**, `PLTP` = 06/7..0 and 07/7..0 (composite FRAME0/FRAME1), then **0B/1, 0B/0** (a 2-bit **alpha**). Plane types are in `old/switcher/INC/frameio.i:43-55`.
   * Decoding LowerThird2 shows the alpha is 0 transparent, 3 opaque, 1-2 anti-aliasing.
 * Then two icon `FORM ILBM`s, each followed by a `FORM " PUS"` back-pointer.
@@ -225,7 +225,7 @@ Source is cgrexx.c; the doc is DOC/CGARexx.Doc.
   * `TYPE` = `KEYF`,0;
   * `LIBS` = $FFFFFCD0, `"effects.library"`;
   * `TAGS` = Duration 180, Speed 0, HoldFields 0, FadeOutDuration 0, then `TAG_Page` ($69) holding the CG page data (`ToasterBookFile`...), so the page can be edited again.
-* Then the final PUS. The PUS value = (PUS offset − FORM offset − 8).
+* Then the final PUS. The PUS value = (PUS offset - FORM offset - 8).
 * It also leaves `path.i` (the icon) next to the file.
 
 ### 2.3 Example (run as one `toaster_rexx` job while the CG is on screen)
@@ -292,8 +292,8 @@ The Y values are unverified. Key data covers frame lines 43-442, and lines dragg
 | FGC | Effect |
 |---|---|
 | SELECT | `FrameSelect` (610-866), below. A second SELECT on an already-selected crouton puts it on Preview. |
-| AUTO | Fade on (`FrameToMain` → `PutUpKey` + `HandleAlphaAutoOn`, 554-604) or fade off (`HandleAlphaAuto`), toggled by `FadeOffFlag`. Fade length from tag `FadeInDuration` (339-344), else the current speed. |
-| TAKE | Cut on (`CutFrameToMain` 510-552 → `CUTITONOFF`) or cut off (468-495). |
+| AUTO | Fade on (`FrameToMain` -> `PutUpKey` + `HandleAlphaAutoOn`, 554-604) or fade off (`HandleAlphaAuto`), toggled by `FadeOffFlag`. Fade length from tag `FadeInDuration` (339-344), else the current speed. |
+| TAKE | Cut on (`CutFrameToMain` 510-552 -> `CUTITONOFF`) or cut off (468-495). |
 | TBAR | `HandleAlphaTBar`, a manual fade (1423 onward). |
 | OBUTTON | `FrameOLay`. |
 | REMOVE | `KillAlphaKey` (390-395). |
@@ -301,9 +301,9 @@ The Y values are unverified. Key data covers frame lines 43-442, and lines dragg
 **What `FrameSelect` does:**
 
 * Turns live DVE off, freezes, and picks the DV bank not used by Main or Overlay (`OBR`).
-* `QueryFile` + `FrameLoadNew`: composite planes go to the bank and alpha planes to `TB_AlphaFastBM` (768×400, at most 4 planes).
+* `QueryFile` + `FrameLoadNew`: composite planes go to the bank and alpha planes to `TB_AlphaFastBM` (768x400, at most 4 planes).
 * Sets `KeyTop = bmh_Y`.
-* `FrameLoadNew` rejects non-composite files ("Frame corrupt", SW/frameslice.a:2718-2750). `bmh_Y≠0` triggers `KeyPageLoad`, which clears the bands (3047 onward). 400 is the only supported key height (`smartsend.i:32-33`).
+* `FrameLoadNew` rejects non-composite files ("Frame corrupt", SW/frameslice.a:2718-2750). `bmh_Y!=0` triggers `KeyPageLoad`, which clears the bands (3047 onward). 400 is the only supported key height (`smartsend.i:32-33`).
 
 **ARexx sequence** (switcher and project hosts in the library list, CG_AREXX not):
 
@@ -315,13 +315,13 @@ call Switcher('AUTO')                      /* fade off   (or Switcher('TAKE') = 
 ```
 
 * `CROUTONLOAD` = ED/ARexxPort.c:1220-1260. It needs the editor in a project view. `CROUTONPICK n` + `Switcher('DOEN')` also works for a crouton already in the project.
-* **Do not use `Switcher('FMLD', keyfile)` or `CROUTONRUN`** for keys. In 4.2, FMLD = LoadCrouton → Select → Auto → FreeCrouton (AA $1278e2; ES 8/13/14/7), the same as CROUTONRUN (ARexxPort.c:1317-1345). FreeCrouton → `RemoveTBFG` → FGC_REMOVE → `KillAlphaKey` takes the key straight down again. This is predicted, not tested.
+* **Do not use `Switcher('FMLD', keyfile)` or `CROUTONRUN`** for keys. In 4.2, FMLD = LoadCrouton -> Select -> Auto -> FreeCrouton (AA $1278e2; ES 8/13/14/7), the same as CROUTONRUN (ARexxPort.c:1317-1345). FreeCrouton -> `RemoveTBFG` -> FGC_REMOVE -> `KillAlphaKey` takes the key straight down again. This is predicted, not tested.
 
 **What the card sees** (cross-check video-path-spec.md section 6):
 
 * **AM** = Main (`Mask2AM`).
-* **BM** = the DV bank holding the fill: `ELHPUT_BM_R Mask2BM(OLaySec)` → DAC0/DAC1 (cgsupport.a:958-960; AlphaOnELH 1838-1865 has BM = OLay).
-* **CDS:** `PutUpKey` sets **DIB (5)** for ≤2 alpha planes or **DIBGR (4)** for 3-4 (962-966). The AA cut/fade paths then force **DIBGR** even for a 2-bit key: CUTITONOFF 1364-1410, HandleAlpha 1462-1530, "Not DIB, even though we're doing a 2 bit key". It is not PIXELSW.
+* **BM** = the DV bank holding the fill: `ELHPUT_BM_R Mask2BM(OLaySec)` -> DAC0/DAC1 (cgsupport.a:958-960; AlphaOnELH 1838-1865 has BM = OLay).
+* **CDS:** `PutUpKey` sets **DIB (5)** for <=2 alpha planes or **DIBGR (4)** for 3-4 (962-966). The AA cut/fade paths then force **DIBGR** even for a 2-bit key: CUTITONOFF 1364-1410, HandleAlpha 1462-1530, "Not DIB, even though we're doing a 2 bit key". It is not PIXELSW.
 * **CD** = $FF fully on, $00 off. During a fade it is `level | $C0` (HandleAlpha). Palettes `AAFadeDIB0..3` are picked by the fade level from the table at 3004-3008; full on selects `AAFadeDIB0` and the cut-off path selects `AAFadeDIB3`.
 * **The Amiga side** shows `TB_CurrentAlphaBM`: the 2 key planes, plus up to 5 interface planes on AA (`AAKeysI` table, 2832-2860).
 * **Where the alpha code lives:**
@@ -335,7 +335,7 @@ call Switcher('AUTO')                      /* fade off   (or Switcher('TAKE') = 
 
 **A. Luma-key a host RGB picture (all ARexx, no CG).**
 
-* `Switcher('LRGB', 'ToasterFiles:title.iff', 0|1)` loads an **IFF24** (plain 24-plane ILBM, ≤752×480, `CommonBufferWidth/Height`, `old/switcher/INC/commonrgb.i:33-34`) or a framestore. It encodes it with `SendRGBPicture` into DV1 (0) or DV2 (1).
+* `Switcher('LRGB', 'ToasterFiles:title.iff', 0|1)` loads an **IFF24** (plain 24-plane ILBM, <=752x480, `CommonBufferWidth/Height`, `old/switcher/INC/commonrgb.i:33-34`) or a framestore. It encodes it with `SendRGBPicture` into DV1 (0) or DV2 (1).
   * In 4.2 the bank argument appears to be used: it is saved in d3, and `SendRGBPicture` passes the saved d3 as d1 to LVO -$62a (AA `LoadRGBFILE` $1282a0, `SendRGBPicture` $139640).
   * It carries no alpha.
 * Then put DV1 on the Overlay row, `Switcher('ODV1')`, and key it with `Switcher('KBLK')` (black transparent) or `KWHT`. Trim with `Switcher('CLIP', n)`; turn off with `KOFF`.
@@ -344,11 +344,11 @@ call Switcher('AUTO')                      /* fade off   (or Switcher('TAKE') = 
 
 **B. Host-made `KEYF` crouton (anti-aliased, uses the stock key path in section 3).**
 
-The switcher only takes **composite** data, so let it do the RGB→composite step:
+The switcher only takes **composite** data, so let it do the RGB->composite step:
 
-1. Run `Switcher('LRGB', fill.iff, 0)`, then `Switcher('PDV1')`, then `Switcher('FMSV', 'ToasterFiles:fill')`. This saves a 4-field `FRAM` crouton: in 4.2 FMSV = ES_FoundFile 'FRAM' → `ReallyProcessSaveButton`, AA $127cbe; pecomm.a:2502-2535. The result is 768×480, 16 planes, PLTP 06/07, icons, CrUD.
+1. Run `Switcher('LRGB', fill.iff, 0)`, then `Switcher('PDV1')`, then `Switcher('FMSV', 'ToasterFiles:fill')`. This saves a 4-field `FRAM` crouton: in 4.2 FMSV = ES_FoundFile 'FRAM' -> `ReallyProcessSaveButton`, AA $127cbe; pecomm.a:2502-2535. The result is 768x480, 16 planes, PLTP 06/07, icons, CrUD.
 2. On the host, rewrite the first `FORM ILBM`:
-   * keep BODY rows **43…442**;
+   * keep BODY rows **43...442**;
    * append two planes per row (alpha bit1, then bit0; 96 bytes each, 0 = transparent, 3 = opaque);
    * BMHD: `h=400, y=43, nPlanes=18`;
    * PLTP: add `0b 01 0b 00` (size 36);

@@ -26,7 +26,9 @@ fields and never reach the Amiga. While the Amiga owns input, ordinary keys,
 including `Esc`, go to the guest.
 
 Host shortcuts also work while the debugger owns input. In a text field,
-macOS `Cmd+A` and `Cmd+Z` retain their Select All and Undo/Redo behaviour.
+macOS `Cmd+A` and `Cmd+Z` retain their Select All and Undo/Redo behaviour,
+and `Cmd+V` / `Alt+V` (Paste as Keystrokes) pastes into the focused field
+rather than sending keystrokes to the Amiga.
 
 (shared-inspector-window)=
 ## Inspectors
@@ -107,7 +109,7 @@ previous/next selection; Resources offers paging, previews, and
 Click a PC in **Most stalled PCs** to open the CPU disassembly there. Below the
 selected beam slot, **Inspect memory** opens the Memory tab, and a
 **Copper instruction** link pins the Copper listing at that instruction. The
-heat map's pinned cell also links to memory. **Follow Copper** returns the
+heatmap's pinned cell also links to memory. **Follow Copper** returns the
 listing to the live Copper. These links inspect the current machine at the
 recorded address; they do not restore historical memory or run the guest, and
 the analyzer's capture and selection remain available.
@@ -232,7 +234,7 @@ Edits are plain CPU-visible RAM writes with the semantics of the console's
 cycles are charged, no interrupt or DMA state moves, and the Break tab's
 memory watchpoints are rebaselined so the edit itself does not stop the
 machine. As with `mem.write`, a write is not part of the reverse-execution
-journal, so replaying backwards across it can diverge.
+journal, so replaying backward across it can diverge.
 
 ### IO Map
 
@@ -301,7 +303,8 @@ every breakpoint, watch, trap, and catch.
   (`DFF096`); the console's `RWATCH` also accepts register names. Halts whenever
   the CPU or the Copper writes to the register.
 - **MMIO:** CPU access watch over a byte range, `ADDR[:LEN] [READ|WRITE|ACCESS]`
-  (`LEN` in bytes, hex like every entry-box number, default 2; default class
+  (or colon-separated `ADDR:LEN:CLASS`, with `R`/`W`/`RW` short forms; `LEN`
+  in bytes, hex like every entry-box number, default 2; default class
   `ACCESS`), e.g. `B80000:40` for Akiko's 64 register bytes. Halts after the
   instruction whose data access touches the range, and the stop reports the
   access's address, size, value, direction, PC, frame, beam position, and colour
@@ -322,7 +325,7 @@ ignore count after the address:
 ADDR [LHS OP RHS] [IGN N]
 ```
 
-- **Operands:** Registers (`D0`-`D7`, `A0`-`A7`, `PC`, `SR`), memory words
+- **Operands:** Registers (`D0`-`D7`, `A0`-`A7`, `SP`, `PC`, `SR`), memory words
   (`M<hex>`, e.g. `MC00002`), or hex constants. A register name wins over a hex
   constant, so write the value `$D0` as `0D0`.
 - **Operators:** `EQ`, `NE`, `LT`, `GT`, `LE`, `GE`, `AND` (bitwise test).
@@ -428,6 +431,10 @@ slot.
   views: one bar per line, as long as the share of that line's colour clocks
   the CPU spent waiting, in the colour of the line's dominant denier -- a
   profile of where the frame chokes the CPU.
+
+In the default bus-ownership view, whenever the blitter was active during the
+frame, the right-hand counters column also reports the **Blitter grant**
+percentage and a **Blitter waits** breakdown by the DMA owners that delayed it.
 
 The console's `CPUWAIT` command prints the same summary for the traced frame,
 and a [profile capture](profiling) exports it per frame.

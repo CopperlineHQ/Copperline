@@ -33,9 +33,9 @@ From the command line:
 copperline --model A1200 --serial modem KICK31.ROM
 ```
 
-## Dialing outbound connections
+## Dialling outbound connections
 
-In your Amiga terminal software, use standard AT dialing commands:
+In your Amiga terminal software, use standard AT dialling commands:
 
 - `ATD<hostname>:<port>` or `ATDT<hostname>:<port>` (`ATDP` also works):
   Connects to a TCP endpoint (for example `ATDTbbs.example.com:23`). Without a
@@ -59,7 +59,7 @@ Result codes returned by the modem:
 - `OK` and `ERROR`, as usual. `ATV0` switches to numeric codes and `ATQ1`
   silences them.
 
-Dialing out resolves the host name and connects on the emulation thread
+Dialling out resolves the host name and connects on the emulation thread
 (with a five-second connect timeout), so emulation pauses briefly while the
 connection is made.
 
@@ -93,7 +93,7 @@ expect RFC 854 option negotiation:
 
 | Command | Description |
 |---|---|
-| `AT*B<baud>` | Set the rate reported in `CONNECT` responses (a standard rate from 75 to 230400); the serial line itself always runs at the guest's rate |
+| `AT*B<baud>[,<config>]` | Set the rate reported in `CONNECT` responses (a standard rate from 75 to 230400; an optional framing suffix such as `,8,N,1` is accepted and ignored); session-only (cleared by `AT&F`, untouched by `ATZ`); the serial line itself always runs at the guest's rate |
 | `AT*T0` / `AT*T1` | Disable / enable telnet NVT translation |
 | `AT*L<port>` | Move the inbound listener to a new port on the same interface (127.0.0.1 unless `listen` named another) |
 | `AT*P<port>` | Set the default port for dials that name no port |
@@ -104,8 +104,8 @@ expect RFC 854 option negotiation:
 `AT&W` saves the current settings, including an `AT*L` port, and `ATZ`
 reloads them; `AT&F` restores the factory defaults. The stored profile is
 `modem.profile` in the NVRAM folder (`[paths] nvram`). Keys set explicitly in
-`[serial]` take precedence over the stored profile at power-on, and
-`--factory` neither reads nor writes it.
+`[serial]` take precedence over the stored profile at power-on and across
+`ATZ` or reset, and `--factory` neither reads nor writes it.
 
 ## S-registers
 
@@ -125,7 +125,8 @@ Other S-registers read as `0` and ignore writes.
 
 - **DTR (`AT&D`):** Under `AT&D2` (default) and `AT&D3`, dropping DTR (for example
   by closing the terminal software or resetting the serial port) hangs up the
-  active call. `AT&D0` and `AT&D1` are accepted but not modelled.
+  active call. `AT&D0` ignores DTR drops; `AT&D1` is accepted but does not
+  escape to command mode.
 - **DCD (`AT&C`):** Carrier Detect follows the call: it is asserted while a
   connection is up (including after a `+++` escape to command mode) and drops
   when the call ends. `AT&C0` forces DCD permanently high.

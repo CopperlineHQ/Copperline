@@ -1,5 +1,10 @@
 # NewTek Video Toaster Flyer: emulation spec for Copperline
 
+> Status note: this is the pre-implementation reverse-engineering specification
+> for the Flyer high-level emulation. The board is now implemented in
+> `src/flyer/` (documented in `docs/internals/video.md` and
+> `docs/guide/configuration.md#video-slot`).
+
 Scope: the Flyer Zorro II card (1994-98) as the Video Toaster 4.2 software uses it in an
 A4000, and how to add it to Copperline next to the existing Toaster 4000 model. The spec
 is derived from NewTek's released sources and the installed 4.2 system. Nothing here was
@@ -50,7 +55,7 @@ four times **[H]**.
 Everything the Amiga software does to the Flyer goes through command codes in the shared SRAM.
 No Amiga code found writes Flyer chip registers directly; raw register access exists only as
 mailbox commands used by test and calibration tools. **High-level emulation (HLE) of the
-command set is therefore possible, and it is recommended (§6).**
+command set is therefore possible, and it is recommended (sec. 6).**
 
 ---------------------------------------------------------------------------
 
@@ -102,7 +107,7 @@ The FPGAs (`F/inc/chips.h:36-57`, configuration delays `F/src/hard.c:210-226`) *
 1 Skew (XC3030-class delay); 2 Timer/Router (ORCA 1C05); 3/4 P-coders (1C07); 5/6 M-coders
 (1C03); 7 DMA (1C07); 8 Audio-DMA (1C03); 9 Aligner (1C03). The "1C"/"2C"/"2CA"/"2CC" chip
 sets in the `.dat` files are ORCA 1C and 2C board generations, picked by serial number
-(§1.4) **[M]**.
+(sec. 1.4) **[M]**.
 
 The TI TPC1010 in the photos is antifuse, so it cannot be one of the downloadable FPGAs.
 It is probably the 3Port or the Zorro glue **[L]**.
@@ -164,7 +169,7 @@ behaves as follows (`A/src/flyerlib.asm`) **[H]**:
    1,000,000 loops (`:2954-2962`).
 7. `ProgramChips` (`:3125-3355`):
    - `LoadFlyerBin("Flyer.dat", chipID)` and `Firmware` again;
-   - `CacheTest` (§2.6);
+   - `CacheTest` (sec. 2.6);
    - for SK(1), TR(2), DMA(7), AUD(8), AL(9) (`:2773-2784`): load the chunk, check the
      `FlyerChipHeader` (`'FLYR'`, chipnum, defnum, rev, boardrev, id, speed, length;
      `A/inc/flyerprivate.i:345-354`), `SetClockGen(0, speed)` before DMA, then `PgmFPGA`;
@@ -204,7 +209,7 @@ load microcode from SCSI (a Phoenix path) **[H]**.
 | `+0` | opcode.w | bits 15-14 status: `00` blank, `01` NEW, `10` IN PROGRESS, `11` DONE; bits 13-0 opcode (`A/inc/flyerprivate.i:140-144`, `F/src/amishar.c:219,247,254-265`) |
 | `+2` | cont.b | Amiga->Flyer: 1 = go, 0 = abort, `$FF` = pause, 1 = resume (`flyerlib.asm:1307-1316,1802-1830`). Flyer->Amiga: 2 = started (`flyerlib.asm:1258-1280`, `F/src/amishar.c:1197`) |
 | `+3` | error.b | result (FERR_/ERR_ codes, identical numbering: `F/inc/Errors.h`, `A/inc/flyer.h:79-148`) |
-| `+4..+31` | args | per command (§2.4). Pointers are **SRAM offsets**. `+28.l` is the progress/status long, copied to `ClipAction.Status` by CheckAction (`flyerlib.asm:1380`) |
+| `+4..+31` | args | per command (sec. 2.4). Pointers are **SRAM offsets**. `+28.l` is the progress/status long, copied to `ClipAction.Status` by CheckAction (`flyerlib.asm:1380`) |
 
 Protocol **[H]**:
 
@@ -272,7 +277,7 @@ clips in ToasterPaint/LightWave") **[H]**.
 ### 2.4 Full command list
 
 Opcode = position in `A/inc/opcodes.i:55-165` = index into `F/src/amishar.c:2266-2375`
-**[H]**. Column "Use" says who calls it, and "HLE" gives the phase (§6) or what to do.
+**[H]**. Column "Use" says who calls it, and "HLE" gives the phase (sec. 6) or what to do.
 
 | op | name | firmware handler | slot args (after opcode/cont/err) | Use | HLE |
 |---|---|---|---|---|---|
@@ -337,7 +342,7 @@ Opcode = position in `A/inc/opcodes.i:55-165` = index into `F/src/amishar.c:2266
 | 62-65 | NEWSEQ/ADDSEQCLIP/ENDSEQ/PLAYSEQ | seq.c:230/418/857/966 | ADDSEQ: ClipAction; ENDSEQ: +4 doit, progress +28; PLAYSEQ: +4 basetime | **Editor sequence playback** | **P3** |
 | 66 | GETSETOPT | | +4 flags.l, +8 set | Editor setup (HQ5) | P1: persist |
 | 67 | LOCATEFLD | LocateField (acts.c:126) | ClipAction: VidStartField -> StartBlk (CFRM LBA) | OpenReadField, Get/PutFrameHeader | **P2** |
-| 68 | CACHETEST | amishar.c:2122 | handshake (§2.6) | InitFlyers | **P1** |
+| 68 | CACHETEST | amishar.c:2122 | handshake (sec. 2.6) | InitFlyers | **P1** |
 | 69-6B | FILEEXTEND/FILEHSREAD/FILEHSWRITE | | | newer FS/NewFileRead (not FS 1.05) | P2 |
 
 ### 2.5 What the 4.2 software calls, by task
@@ -381,7 +386,7 @@ opcodes above. **[H]** unless marked otherwise.
   3. Per event, ADDSEQCLIP: GoClock = offset in the sequence, Channel A/B, audio
      vol/pan/attack/decay, CAF_AUDENV. Then AUDEKEY / AddAudEnv for envelopes.
   4. ENDSEQ (async with progress; the Flyer builds A/B "heads" when needed).
-  5. `ES_StartSeq` -> switcher `SyncClocks` (§3.3).
+  5. `ES_StartSeq` -> switcher `SyncClocks` (sec. 3.3).
   6. `PlaySeq` (`E/src/toastsupport.a:749-811`): TB_TimeAtStart = (MasterTime+28) & ~3,
      then PLAYSEQ(basetime). The Amiga then runs the switcher events (TAKE/AUTO of
      VID3/VID4) at `TimeAtStart + ev_Time`, calling `FlyerMuxedIn` -> TOASTMUX first
@@ -391,7 +396,7 @@ opcodes above. **[H]** unless marked otherwise.
 - **Record**: RECMODE, INPUTSEL (`S/pecomm.a:4442`), CODECCTRL (gain/source/mix/meters),
   FLYRECORD (async, `E/src/flyer.c:346-405`), pause via cont = `$FF`/1, abort via cont = 0.
 - **Audio levels/pan**: per-clip ClipAction fields and AUDEKEY envelopes (DSP events,
-  §4.3); CHGAUDIO for live changes. The record level is CODECCTRL.
+  sec. 4.3); CHGAUDIO for live changes. The record level is CODECCTRL.
 - **Switcher integration**: only TOASTMUX + GETCLOCK + the Toaster's own buses. The
   Phoenix list mailbox (`SWITLIST`) is not used with the Toaster 4000 (PHXCODE only;
   `F/src/seq.c:1678-1680`, `F/src/ops.c:163-228`) **[H]**.
@@ -429,7 +434,7 @@ These have to be serviced inside the Amiga CPU's busy loop, with Amiga interrupt
   `DACACTRL/DACBCTRL`, `F/inc/chips.h:472-485`) **[H]**.
   The MB40968 is the DAC (one dual part or one per channel) **[L]**.
 - **Channel A -> Toaster VID3, channel B -> Toaster VID4.** `ToasterMux(in3, in4, prv)`
-  sets Skew `Route`. A nonzero in3/in4 puts the Flyer channel on that Toaster input;
+  sets Skew `Route`. A non-zero in3/in4 puts the Flyer channel on that Toaster input;
   0 passes the external input through (`SKRF_Sel3/Sel4`). preview = 0 passes the Toaster's
   Preview through; 1 shows the TBC/camcorder signal on Preview (`F/src/hard.c:845-865`,
   `F/inc/chips.h:415-461`; channel mapping `E/src/toastsupport.a:606-630,1095-1135`,
@@ -538,12 +543,12 @@ These have to be serviced inside the Amiga CPU's busy loop, with Amiga interrupt
   - CR0/CR1 = input source << 6 | (gain-1) & 15. Gain 0 means mute via the DSP MUTING bits.
     Sources (`A/inc/flyer.h:494-496`): 0 RCA line-in on the card's rear, 1 AUX1 header
     JP19, 2 LINE2 header JP1.
-  - CR2/3 = AUX1 mix and CR4/5 = AUX2 mix: 5-bit gain/attenuation, `$80` = mute (analog
+  - CR2/3 = AUX1 mix and CR4/5 = AUX2 mix: 5-bit gain/attenuation, `$80` = mute (analogue
     mix into the codec output).
   - Overrange via RDCODEC, cleared with `$8F00`; 8-bit meters via READMETERS.
   - Defaults: line 1, gain index 8 (+12 dB) (`F/inc/Audio.h:35-36`, `F/src/Audio.c:218`).
 - **Sample rate.** 735 samples per channel per field (DSP constant; `MONOAUDFIELD = 3`
-  blocks = 768 slots; `CF` §4) **[H]**. The audio synthesizer runs at 84,587,402 Hz
+  blocks = 768 slots; `CF` sec. 4) **[H]**. The audio synthesizer runs at 84,587,402 Hz
   (`F/src/main.c:131`) = 1920 x 44,055.94 (10 Hz synthesizer resolution) **[H value,
   M ratio]**. It is referenced to the genlocked 14.318 MHz, so audio is locked to video at
   exactly 735 samples per field, **fs = 735 x 60000/1001 = 44,055.94 Hz** **[M]**. The
@@ -553,7 +558,7 @@ These have to be serviced inside the Amiga CPU's busy loop, with Amiga interrupt
 
 - **Play**:
   1. Each clip frame (CFRM) holds per mono channel 4 fields x 3 blocks of 16-bit
-     big-endian samples, channel-major (`CF` §4).
+     big-endian samples, channel-major (`CF` sec. 4).
   2. The firmware DMAs one field's 3 blocks per active channel from DRAM to the DSP
      (`BeginAudioDMA`/`AudioDeviceProc`, DMA channel 3, `DMAREAD+ch`; `F/src/Audio.c:1506-1714`).
   3. The DSP mixes **8 mono channels** (`NUMAUDCHANS 8`), each with volume, pan and ramp,
@@ -611,7 +616,7 @@ These have to be serviced inside the Amiga CPU's busy loop, with Amiga interrupt
 ### 5.2 Flyer filesystem
 
 - The on-disk format (ROOT/FILE/FDIR headers, hash 100, one contiguous extent per file,
-  freelist, head lists, chip-patch area) is documented in `CF` §2.1 from `F/inc/filesys.h`
+  freelist, head lists, chip-patch area) is documented in `CF` sec. 2.1 from `F/inc/filesys.h`
   and `F/src/FILESYS.C` **[H]**.
 - AmigaDOS sees it only through flyer.library file operations:
   - FlyerFileSystem 1.05 (`A/src/flyerfs1.c`, `A/src/FlyerFS3.c`) maps DOS packets to
@@ -639,7 +644,7 @@ These have to be serviced inside the Amiga CPU's busy loop, with Amiga interrupt
 |---|---|---|
 | Missing pieces | none | the **boot EPROM** (vectors, `$0400` version, `$0420+` services, ColdBoot, download loop) is not in the release; the **HC05 genlock firmware** is absent; **no DSP source** (needs an ADSP-2115 core + AD1847 + SPORT model) |
 | Chips to model | none | 3x AM53CF96 (Copperline has only WD33C93 `C/src/scsi.rs` and NCR 53C710 `C/src/a4091.rs`), 3Port, DMA FPGA, Timer/Router field and line IRQs, VTASC coder FPGAs with DMA pacing and status, Skew/Aligner/FIR, DUART, EEPROM, clock gen |
-| CPU | — | `m68k::CpuCore::new()` is a plain struct over any `AddressBus` (`C/src/disasm.rs:164`, `C/crates/cputest-runner`), so a second instance is feasible **[M]** |
+| CPU | -- | `m68k::CpuCore::new()` is a plain struct over any `AddressBus` (`C/src/disasm.rs:164`, `C/crates/cputest-runner`), so a second instance is feasible **[M]** |
 | Storage | host folders + virtual LBAs | real Flyer-formatted SCSI images |
 | Effort | ~3-4 weeks to useful | 2-4 months; timing-sensitive, high risk |
 
@@ -650,8 +655,8 @@ Nothing makes HLE impossible **[M]**:
 - It never touches Flyer registers except through SBUSW/SBUSR/CPUW/CPUR/CALLMOD, which only
   test and calibration tools use.
 - Caveats:
-  - A consistent virtual LBA space is required (§5.2).
-  - Two handshakes need sub-millisecond service with Amiga interrupts off (§2.6).
+  - A consistent virtual LBA space is required (sec. 5.2).
+  - Two handshakes need sub-millisecond service with Amiga interrupts off (sec. 2.6).
   - CALLMOD (downloaded 68k test modules) cannot be supported.
   - FlyerHDTools, Drive2File and RecoverFiles expect real SCSI/FS block contents. Serve
     them synthesized blocks or errors.
@@ -672,7 +677,7 @@ Nothing makes HLE impossible **[M]**:
 - **Field timing**: `DeviceHost` exposes no beam (`C/src/zorro_device.rs:199-228`). Add a
   shared `FlyerLink` (Arc<Mutex<..>>) that the bus calls at each field boundary, where it
   already services the video slot (`C/src/bus.rs` ~6760-6790). Tick the field clock at a
-  fixed line, ~105 = 40% (§3.3); keep `% 4 == 0` on LOF + colour-frame field I.
+  fixed line, ~105 = 40% (sec. 3.3); keep `% 4 == 0` on LOF + colour-frame field I.
 - **Video into the Toaster**:
   - `Toaster::source_picture` takes `Mux::Vid(n)` from `video.input_picture(n)`
     (`C/src/toaster/mod.rs:800`). For n = 2/3, when `FlyerLink.mux3/mux4` is set, take
@@ -692,13 +697,13 @@ Nothing makes HLE impossible **[M]**:
   switching (a separate physical output). When the Flyer drives VID3/VID4, those inputs'
   host-folder sound should go silent.
 - **Host storage**: `C/src/toaster/media.rs:84-123` already creates `Amiga Toaster Files/Flyer`.
-  - Use subfolders `FA0`, `FB0`, `FC0` (a flat `Flyer/` = FA0) with the `CF` §2.3 layout:
+  - Use subfolders `FA0`, `FB0`, `FC0` (a flat `Flyer/` = FA0) with the `CF` sec. 2.3 layout:
     one file per clip, verbatim CLIP...tail bytes, plus `.flyervol`/`.flymeta` sidecars.
   - Default volume names `FlyerA0`, `FlyerB0`, `FlyerC0`; flags video+audio ready.
   - At mount, give each file a contiguous virtual LBA range with slack after it; map
     READ10/WRITE10 to file offsets.
   - Non-clip files (the switcher's `.i` icon files, project data) are ordinary files.
-  - Grips: nonzero opaque handles; 0 = root.
+  - Grips: non-zero opaque handles; 0 = root.
 - **DRAM**: a 4 MB `Vec<u8>` addressed in 512-byte blocks, for READ10/WRITE10 and CPUDMA
   only. The VTASCSRAM window is ordinary SRAM.
 - **Determinism**: no wall clock. Host file I/O is synchronous, or prefetched
@@ -720,7 +725,7 @@ Nothing makes HLE impossible **[M]**:
 | FIRMWARE | set "running"; DONE |
 | EEREAD | EEPROM table: `NVOL_MAJIC = $BEEF`; serial lo/hi giving a 1C-range serial (e.g. 4,000,000); calibration defaults; `F/inc/flyer.h:163-184` |
 | QUIT | DONE, then reset HLE state once the slot is cleared |
-| CACHETEST | §2.6 sequence |
+| CACHETEST | sec. 2.6 sequence |
 | PGMFPGA, SETCLOCKGEN, DSPBOOT, FLOOBY | accept |
 | NOMODE/PLAYMODE/RECMODE | mode state |
 | GETCLOCK | write the field clock at `+4` |
@@ -770,7 +775,7 @@ LED patterns end at "Completely configured".
   fields, applied at the top of field with one field of lead.
 - Clip audio is pulled per field from the clip's CFRM (`flyerclip` `Clip::audio`/chunk
   offsets).
-- Mix: L += s·v·(1-p), R += s·v·p, where p = pan/65535 and v = vol/65535 **[L: pan law]**.
+- Mix: L += s*v*(1-p), R += s*v*p, where p = pan/65535 and v = vol/65535 **[L: pan law]**.
 - Mute bits; output at 44,055.94 Hz, resampled to 44.1 kHz into Toaster program sound /
   host output.
 - CHGAUDIO, AUDEKEY/AddAudEnv.

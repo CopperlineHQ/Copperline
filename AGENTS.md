@@ -103,7 +103,10 @@ Alt+Shift+G saves the same kind of clip from a rolling ring of the last
 `clip_seconds` of the display.
 
 Audio: `--noaudio` runs silent; `--audio-wav PATH` captures the mixed output
-as a WAV in emulated time instead of playing it.
+as a WAV in emulated time instead of playing it, and `--audio-stems DIR`
+splits deterministic per-source/per-channel WAV stems. Interactive window
+recording (`Cmd+R` / `Alt+R`) writes lossless AVI by default or H.264/AAC MP4
+when `[recording] video_format = "mp4"` and host `ffmpeg` is available.
 
 Guest clock: `--rtc-time "2005-03-18 01:58:29"` (Unix seconds also accepted)
 fits a battery clock seeded to that instant, ticking in emulated time -- the
@@ -148,9 +151,9 @@ boards). `[parallel] device = "joystick-adapter"` (`--parallel
 joystick-adapter`) adds the four-player adapter's ports 3 and 4
 (`--port3`/`--port4`, `joystick`/`none`;
 default mouse + joystick, CD32 pad on the CD32 profile). The scripted-input
-flags' optional trailing `PORT` token (`1` or `2`) aims an event at either
-port; omitted, each flag keeps its traditional port, so existing scripts
-are unchanged.
+flags' optional trailing `PORT` token (`1` or `2`, or `1`-`4` for
+`--joy-after`) aims an event at that port; omitted, each flag keeps its
+traditional port, so existing scripts are unchanged.
 
 ## Save states
 
@@ -246,7 +249,8 @@ the loaded hunks.
 
 ```sh
 cargo test                        # unit suite, no external assets needed
-cargo fmt --check                 # expected clean, as in CI
+cargo test --profile ci --locked  # optimized native suite (golden renders, save-state checks)
+cargo fmt --all --check           # expected clean across root workspace, as in CI
 cargo clippy --all-targets --all-features --locked -- -D warnings
 ```
 
@@ -254,9 +258,11 @@ The asset-gated integration tests in `tests/` are `#[ignore]`d. Select the
 ones whose local ROMs and disks are installed, for example
 `cargo test --release --test image_regression kickstart_boot_screen -- --ignored`:
 an `image_regression` test fails when its assets are absent, while some older
-suites pass without running (`tests/README.md`). The standalone crates under
-`crates/` are not workspace members; CI checks their formatting from their
-own directories.
+suites pass without running (`tests/README.md`). The frontend crates
+(`copperline-libretro`, `copperline-player`, `copperline-web`) are root
+workspace members covered by `cargo fmt --all --check`; the excluded standalone
+crates under `crates/` (`cputest-runner`, `hostsocket-plugin`, `zz9k-plugin`)
+are checked from their own directories in CI.
 
 `main` is the development line and `v1` the 1.x maintenance branch. Base bug
 fixes, documentation corrections and packaging fixes on `v1`, which is merged
@@ -271,5 +277,5 @@ makes them: anything user-visible (config/CLI surface, UI, debugger knobs)
 updates the matching chapter in `docs/guide/` or `docs/debugger/`, and
 architecture or timing-model changes update `docs/internals/`. Copperline
 models Amiga hardware, not individual titles: fixes must describe
-68000/Agnus/Denise/Paula/CIA behavior, never branch on program identity.
+68000/Agnus/Denise/Paula/CIA behaviour, never branch on program identity.
 ROMs and disk images are local assets and are never committed.

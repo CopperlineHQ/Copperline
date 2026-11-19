@@ -3,7 +3,7 @@
 Copperline includes a headless debugger (`src/debugger.rs`) driven by
 `COPPERLINE_DBG_*` environment variables. It works in windowed sessions as
 well as windowless `--screenshot-after` and `--dump-frames` runs. Like every
-`COPPERLINE_*` variable, these are read once at start-up.
+`COPPERLINE_*` variable, these are read once at startup.
 
 Reports go through the standard `log` crate at info level. Set `RUST_LOG=info`
 (or `RUST_LOG=debug`) to see them:
@@ -43,13 +43,16 @@ Two exceptions apply:
 
 - When JIT is enabled (`[cpu] jit` / `--jit`), enabling any debug hook
   reverts the CPU to the precise per-instruction loop and logs a warning at
-  start-up. Compare debugged and undebugged runs with JIT disabled.
+  startup. Compare debugged and undebugged runs with JIT disabled.
 - Settings that change the machine (such as `COPPERLINE_IRQ_LATENCY_CCK`, a
   different CPU model, or injected input scripts) alter its behaviour by design.
-  So does `COPPERLINE_DBG_EXTCCK`, which sets the cost in hundredths of a colour
-  clock of a CPU word access to ROM or fast RAM (default 200); it is compiled
-  only into builds with the `internal-diagnostics` feature, and normal builds
-  ignore it.
+  So do the experimental timing and render overrides compiled only into builds
+  with the `internal-diagnostics` feature (ignored by normal builds):
+  `COPPERLINE_DBG_EXTCCK` (cost in hundredths of a colour clock of a CPU word
+  access to ROM or fast RAM, default 200), `COPPERLINE_EXP_MISS_LIMIT`,
+  `COPPERLINE_NO_BUS_ARB`, `COPPERLINE_NO_DISK_STALL`, `COPPERLINE_NO_SYNC_CCK`,
+  `COPPERLINE_DISK_SPEED_DIV` / `COPPERLINE_DISK_SPEED_AFTER`, and
+  `COPPERLINE_EXP_NO_SPRITE_RENDER`.
 
 ## Breakpoint and watchpoint variables
 
@@ -102,7 +105,7 @@ registers, the display state, and any `DUMP` regions. Hits count against
   DBG CD completed #4 toc x1 st $00: +5.00ms accept, +5.99ms exec, +9.81ms reply, +5968.97ms first, 81 units, +6282.87ms end t=9.114314 cck=32327513
   ```
 
-  The same records are the debugger window's [CD tab](window.md#debugger-cd-tab),
+  The same records are the Debug workspace's [CD tab](window.md#debugger-cd-tab),
   the console's `CDTRACE`, and the control protocol's `cd.trace` and `event.cd`.
 
 `COPPERLINE_DBG_MEMW=ADDR`
@@ -154,9 +157,10 @@ registers, the display state, and any `DUMP` regions. Hits count against
   writing PC.
 
 `COPPERLINE_DBG_BLIT=LO[:HI]`
-: Logs each blit started between `LO` and `HI` emulated seconds (`HI` defaults
-  to the end of the run) with its control words, D pointer and modulo, size,
-  and mode.
+: Logs each classic `BLTSIZE` (`$058`) blit started between `LO` and `HI`
+  emulated seconds (`HI` defaults to the end of the run) with its control
+  words, D pointer and modulo, size, and mode. ECS `BLTSIZH` starts are logged
+  by `COPPERLINE_DIAG_BLITREGS` below.
 
 `COPPERLINE_DBG_RAMDUMP=ADDR:LEN:FILE`
 : One-shot dump of `LEN` bytes (hex) from `ADDR` to `FILE` the first time the
@@ -215,8 +219,8 @@ hexadecimal with no prefix, and a prefixed value is read as zero.
 
 | Variable | Description |
 |---|---|
-| `COPPERLINE_DIAG_SLOTMAP` | Dumps the per-colour-clock chip-bus owner map for one frame's lines, once; `COPPERLINE_DIAG_SLOTMAP_AT=SECS` picks the frame and `COPPERLINE_DIAG_SLOTMAP_RANGE=V0:V1` (decimal) the lines. Without `_AT` the dump waits for a frame with heavy blitter use on lines 140-199, which may never come; without a valid `_RANGE` it covers lines 138-198 |
-| `COPPERLINE_DIAG_BLT_SLOTS` | Detailed blitter pipeline slot and bus ownership trace |
+| `COPPERLINE_DIAG_SLOTMAP` | Dumps the per-colour-clock chip-bus owner map for one frame's lines, once; `COPPERLINE_DIAG_SLOTMAP_AT=SECS` picks the frame and `COPPERLINE_DIAG_SLOTMAP_RANGE=V0:V1` (decimal) the lines. Without `_AT` the dump waits for a frame with heavy bitplane DMA (`> 50` bitplane slots on any line in 140-199), which may never come; without a valid `_RANGE` it covers lines 138-198 |
+| `COPPERLINE_DIAG_BLT_SLOTS` | Detailed blitter pipeline slot and bus ownership trace (printed directly to stderr) |
 | `COPPERLINE_DIAG_IPL` | Per-frame split of CPU cycles between main code and interrupt handlers |
 | `COPPERLINE_DIAG_PCSAMPLE` | Logs the PC and SR every 50 frames, to locate CPU hotspots |
 | `COPPERLINE_DIAG_PCHIST` | Counts executed instructions per PC over a 4-second emulated window starting at 38 s, then logs the 30 most frequent PCs with their share, cycles per instruction, and instruction words; `COPPERLINE_DIAG_PCHIST_START=SECS` moves the window start |
@@ -231,17 +235,17 @@ hexadecimal with no prefix, and a prefixed value is read as zero.
 | `COPPERLINE_DIAG_DISPLAY` | Display register change log |
 | `COPPERLINE_DIAG_BPLPT` | Logs each bitplane pointer low-word write with frame, beam position, source and Copper pointers |
 | `COPPERLINE_DIAG_AUTOCROP` | Logs the autocrop content rectangle every frame, and the window layout when it changes |
-| `COPPERLINE_DIAG_CAPROW` | Per-line bitplane capture state at DDF start |
-| `COPPERLINE_DIAG_PALETTE_ROW` | Logs beam-timed COLOR writes for selected scanlines |
-| `COPPERLINE_DIAG_PALSTORE` | Logs COLOR and BPLCON3 writes at register store application |
-| `COPPERLINE_DIAG_HAM_PIXELS` | Samples DMA playfield HAM pixels on a specified beam line |
-| `COPPERLINE_DIAG_MANUAL_BPL_PIXELS` | Samples CPU/Copper BPLDAT replay pixels on a beam line |
-| `COPPERLINE_DIAG_FRAME_PIXELS` | Samples final framebuffer pixels after rendering pipeline |
+| `COPPERLINE_DIAG_CAPROW[=all\|V\|START:END]` | Per-line bitplane capture state at DDF start (empty/`1`/`all` for every line, single beam line `V`, or inclusive range `START:END`) |
+| `COPPERLINE_DIAG_PALETTE_ROW[=all\|V\|START:END]` | Logs beam-timed `COLORxx` writes for selected scanlines |
+| `COPPERLINE_DIAG_PALSTORE` | Logs `COLORxx` and `BPLCON3` writes at register store application |
+| `COPPERLINE_DIAG_HAM_PIXELS=BEAM_Y,X_START,X_STOP[,STEP]` | Samples DMA playfield HAM pixels on a specified beam line |
+| `COPPERLINE_DIAG_MANUAL_BPL_PIXELS=BEAM_Y,X_START,X_STOP[,STEP]` | Samples CPU/Copper `BPLDAT` replay pixels on a beam line |
+| `COPPERLINE_DIAG_FRAME_PIXELS=BEAM_Y,X_START,X_STOP[,STEP]` | Samples final framebuffer pixels after rendering pipeline |
 | `COPPERLINE_DIAG_SPRITES` | Per-frame sprite DMA state, logged only between 44.44 and 44.52 emulated seconds (a fixed window left from one investigation) |
 | `COPPERLINE_DIAG_SPRCAP` | Logs captured sprite DMA lines |
-| `COPPERLINE_DIAG_MANUAL_SPRITES` | Logs manually replayed sprite intervals and register writes |
-| `COPPERLINE_DIAG_SPRITE_PIXELS` | Samples non-transparent sprite pixels on a beam line |
-| `COPPERLINE_DIAG_BLITREGS` | Logs the full blitter register set at blit starts |
+| `COPPERLINE_DIAG_MANUAL_SPRITES=all\|BEAM_Y` | Logs manually replayed sprite intervals and register writes |
+| `COPPERLINE_DIAG_SPRITE_PIXELS=BEAM_Y[,STEP]` | Samples non-transparent sprite pixels on a beam line (`STEP` defaults to 32) |
+| `COPPERLINE_DIAG_BLITREGS[=START[:END]]` | Logs the full blitter register set at classic `BLTSIZE` and ECS `BLTSIZH` blit starts between `START` and `END` emulated seconds (note that `=1` starts at 1.0 s; leave empty for 0.0 s onward) |
 | `COPPERLINE_TRACE_BLITTER=PATH` | Writes a JSON-lines trace of blit starts, completions, and `DMACONR` polls to `PATH` |
 | `COPPERLINE_DIAG_POLLSTATS` | Reports most-read CIA and custom registers on screenshots/dumps |
 | `COPPERLINE_DIAG_DISK` | Disk DMA state transitions and DSKLEN writes |
@@ -254,9 +258,19 @@ hexadecimal with no prefix, and a prefixed value is read as zero.
 | `COPPERLINE_DIAG_A2091` | A2091 SCSI DMAC and WD33C93 register access trace |
 | `COPPERLINE_DIAG_A4091` | A4091 NCR53C710 SCRIPTS instruction trace |
 | `COPPERLINE_DIAG_LIDE` / `COPPERLINE_DIAG_SF2000SD` | Lide IDE board and SF2000 SD controller register access trace |
+| `COPPERLINE_DIAG_PICASSO` | Picasso II / Graffity RTG register and switcher trace |
+| `COPPERLINE_DIAG_TOASTER=1\|fields\|perf` | Video Toaster 4000 video-slot diagnostics (`fields` dumps per-line headers; `perf` logs per-second compositor throughput) |
+| `COPPERLINE_DIAG_FLYER` | NewTek Video Flyer SCSI and clip-playback trace |
 | `COPPERLINE_DIAG_GAMEPAD` | Logs host gamepad connection and mapping events |
 | `COPPERLINE_DIAG_CURSOR` | Host cursor mapping diagnostics |
 | `COPPERLINE_DUMP_BLITMEM=LO:HI:START:END` | Dumps chip RAM `START`-`END` (bare hex, no prefix) on each `BLTSIZE` or `BLTSIZH` write between `LO` and `HI` emulated seconds, into `COPPERLINE_DUMP_BLITMEM_DIR` (default: a `copperline-blitdump` folder in the system temporary directory) |
 | `COPPERLINE_DUMP_BUS_ACCOUNTING` | Per-frame chip-bus slot accounting summary |
 | `COPPERLINE_DUMP_RENDER_META` | Logs render metadata for each frame `--dump-frames` writes; with `COPPERLINE_DUMP_RENDER_META_VERBOSE` also set, the frame's render-event list |
 | `COPPERLINE_SHOT_RAW=1` | Writes screenshots and frame dumps as the unscaled 716x570 woven framebuffer instead of the presented image |
+
+Subsystem-specific debug and pacing-profile variables (`COPPERLINE_MIDI_DEBUG`,
+`COPPERLINE_MT32_DEBUG`, `COPPERLINE_SAMPLER_DEBUG`, `COPPERLINE_NETPLAY_DEBUG`,
+`COPPERLINE_AUDIO_PROFILE`, `COPPERLINE_PRESENT_PROFILE`,
+`COPPERLINE_REAL_PACING_PROFILE`, `COPPERLINE_TRACE_DISPLAY_PLAN`) are
+documented alongside their respective subsystems or inspectable via source
+search.

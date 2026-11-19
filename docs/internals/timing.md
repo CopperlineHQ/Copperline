@@ -10,6 +10,7 @@ model is in [](cpu.md). Every rule here is backed by named regression tests
 plus `src/bus/tests.rs` and `src/video/bitplane/tests.rs`), and many by a
 golden probe render (see [](#cross-checking-against-hardware)).
 
+(custom-register-read-sampling)=
 ## Custom-register read sampling
 
 On the arbitrated 68000 path, CLXDAT is sampled and cleared at the start
@@ -160,7 +161,7 @@ survives it fetch, and those pointers stay one wide-fetch word ahead of the
 rest for the remainder of the display. Microcosm's CD32 status panel is the
 regression example: its Copper repoints seven bitplanes and drops DDFSTRT
 `$2C` to `$18` in one burst that overruns the line, committing the new value
-at hpos ~`$1E` on the panel's first line, which desynchronised BPL5 and BPL1
+at hpos ~`$1E` on the panel's first line, which desynchronized BPL5 and BPL1
 (lo-res slots 6 and 7) from the other five planes and speckled the whole
 panel. Covered by the `ddfprobe-ddfmiss` golden probe, verified against
 vAmiga 5.0b1's `A1200_2MB` AGA setup.
@@ -195,7 +196,7 @@ boundary for interrupt recognition. Read-only custom registers
 (INTREQ/INTENA/ADKCON/DSKLEN/AUDxxx/SERDAT) flush first, so a device always
 reflects time right up to the moment it is read or written. The CIA E-clock
 divider and every device tick are exact under batching, so observable timing
-is unchanged -- the accumulator is a host-CPU optimisation only, and it is
+is unchanged -- the accumulator is a host-CPU optimization only, and it is
 flushed to zero at every frame boundary (so it is never serialized into a
 save state).
 
@@ -220,8 +221,8 @@ the two BLTPRI settings match both hardware and WinUAE in masked state and
 elapsed colour clocks: 20,736 hardware trials total, with no mismatches. The
 priority-on busy and IRQ ROM source IDs are `93adfec44fe58ea38aba0e07e81f7949d1eaf519dc6bcc5914d10f2f5d2ccf1f`
 and `18786132832d8aab99388ce1a1c52fbd12ff01465f40a73d21c71799f07edd53`.
-The full capture provenance and scope are documented in the probe repository
-at `docs/rom-timing-isolation-2026-10-14.md`.
+The full capture provenance and scope are documented in the sibling
+`amiga-hardware-probes` repository at `docs/rom-timing-isolation-2026-10-14.md`.
 
 ### Sprite DMA control rewrites
 
@@ -393,12 +394,12 @@ ahead of ordinary COLORxx replay. Tests:
 `color_register_writes_use_final_output_position`.
 
 BPLCON0's HAM select rides that same colour-selection phase: it does not
-feed the bitplane shifter, it picks how the already-serialised index
+feed the bitplane shifter, it picks how the already-serialized index
 becomes a colour. A HAM change and a `COLORxx` write carried by the same
 chip-bus slot therefore reach the picture at the same pixel, so the
 renderer samples the HAM bit `DENISE_HAM_SELECT_PIPELINE_FB` framebuffer
 pixels left of the generic register domain the rest of BPLCON0 (plane
-count, resolution -- the fetch/serialiser side) is sampled in. vAmiga
+count, resolution -- the fetch/serializer side) is sampled in. vAmiga
 models the same relation from the other end: `Denise::setBPLCON0` records
 the change one colour clock after the bus slot and then backs it up by one
 colour clock, landing on the `pos.pixel()` that `Denise::pokeCOLORxx`
@@ -716,7 +717,7 @@ request the bus. The aligned One ROM busy, IRQ and memory observer captures
 match hardware, WinUAE and Copperline for both BLTPRI settings, across 3,456
 trials per observer and setting. The separate kind-22 BZERO matrix also matches
 the tested normal/fill readback; line-texture controls expose additional flag
-behavior that remains under investigation. The historical game-specific
+behaviour that remains under investigation. The historical game-specific
 examples are removed as evidence for the rule.
 
 A 68000 `TAS` read-modify-write is unsafe on chip RAM (the HRM warns
@@ -823,7 +824,7 @@ readback:
    against the combined A500 board/CPU STOP path, rather than a direct
    measurement of Paula's IPL pins. Later sources cannot postpone an earlier
    deadline. CPU mask/acknowledge writes update the bookkeeping; unmasking a
-   latched PORTS level retains its existing immediate behavior. A new
+   latched PORTS level retains its existing immediate behaviour. A new
    Copper-written PORTS request is a source assertion, not an INTENA unmask,
    and receives a recognition deadline.
 2. A running stock 68000 samples candidates at bus-access starts. Its ordinary
@@ -893,7 +894,7 @@ qualification. The [CPU-written request note](a500-cpu-software-irq-2026-10-19.m
 records A500 measurements of CPU INTREQ writes and INTENA unmasks of pending
 PORTS, EXTER and COPER requests.
 Paired A500 STOP/running/readback controls and remaining CIA request-visibility
-differences are recorded in the sibling probe repository at
+differences are recorded in the sibling `amiga-hardware-probes` repository at
 `docs/irq-stage-investigation-2026-10-19.md`. These measurements do not justify
 removing the six-clock default or claiming an isolated IPL-pin delay.
 
@@ -915,18 +916,19 @@ falling phase (two CCK after the rising-edge divider event). An assertion
 delayed by an ICR-read race uses the next rising phase instead. The common
 one-E delayed-output path also uses this phase for mask-enable, TOD, FLAG and
 serial assertions. Electrical phase measurements establish the timer and
-ICR-race behavior; applying the same phase to these other delayed sources is
+ICR-race behaviour; applying the same phase to these other delayed sources is
 an extrapolation, not an independently measured external-source latency.
 Settled SP/TOD/FLAG checks verify acknowledgement order only. This preserves
 the measured approximately six-CPU-clock difference between ordinary and
 race-delayed output, without delaying ICR flags by another whole E-clock.
 
-Paula receives the modeled output through a separate four-CCK input stage.
+Paula receives the modelled output through a separate four-CCK input stage.
 INTREQR remains clear before that stage completes. An ICR acknowledgement
 cancels an unforwarded assertion; once forwarded, Paula retains its own latch
 until INTREQ acknowledgement. A held input does not restart its input delay.
 Absolute event deadlines preserve these stages across batched device advances,
-and pending stages bound stopped-CPU advances.
+and pending stages bound stopped-CPU advances (alongside device-level IRQ
+horizons such as `Paula::next_audio_irq_cck`; see [](chipset.md)).
 
 The first CIA-fed request qualifies two CCK before the generic recognition
 reference: four CCK after raw-request visibility at the unchanged six-CCK
@@ -955,8 +957,8 @@ must be validated together.
 The sibling probe repository retains the exact ROMs' source fingerprints,
 original four-channel captures and comparison rules in
 `references/cia-recognition-20261024-v1/`. The masked read controls return clear
-in the approximately 1.06–3.53 CPU-clock /AS window after CIA /IRQ and set in the
-5.06–7.53 window. Physical /IPL follows /IRQ by about 8 CPU clocks. These are
+in the approximately 1.06-3.53 CPU-clock /AS window after CIA /IRQ and set in the
+5.06-7.53 window. Physical /IPL follows /IRQ by about 8 CPU clocks. These are
 observed bus intervals, not direct measurements of an internal CPU poll or an
 exact transistor-level Paula latch. Full beam/refresh cohorts remain incomplete;
 do not count observed-range agreement as an exact timing match.
@@ -990,8 +992,8 @@ byte of the ROM word at `$FFFFF0 + 2 * level`. Normal Kickstart's final
 eight words contain vector numbers 24 through 31. A custom ROM must supply
 these words; Copperline does not replace a missing word with an autovector
 or suppress delivery because a RAM handler is zero. The freezer cartridge
-retains its own acknowledge behavior. The accelerated CPU bus path retains
-autovector delivery. This ROM-data behavior was checked on the One ROM A500
+retains its own acknowledge behaviour. The accelerated CPU bus path retains
+autovector delivery. This ROM-data behaviour was checked on the One ROM A500
 by changing the level-1 word to select the installed vector-30 handler.
 The zero-footer measurement ROM now reproduces the physical machine's
 illegal-instruction fault at `$003020`, rather than completing its trials.
@@ -1054,7 +1056,7 @@ into one batch or individual edges. This is a batching consistency correction,
 not a new measurement of physical IRQ propagation or a latency recalibration.
 
 Physical A500 captures from 19 October 2026 additionally constrain the
-Timer-A PB6 and serial output behavior on both CIAs. Pulse mode idles low
+Timer-A PB6 and serial output behaviour on both CIAs. Pulse mode idles low
 and drives high for the underflow pulse, including when DDRB selects input.
 START initializes the toggle latch high. Adjacent zero-latch underflows
 merge into one asserted pulse and therefore produce only one toggle edge;
@@ -1062,7 +1064,7 @@ a gap rearms the next edge. High-byte one-shot auto-start also initializes
 the toggle latch. Automatic high-byte start can carry from the old stopped
 counter before the new count's underflow. A500 kind133 crosses old count 0/1/3/15
 with new latch 0/1/3/15 on both CIAs: an old zero produces two carries, while
-an old nonzero produces one. Explicit LOAD and stopped controls remain separate.
+an old non-zero produces one. Explicit LOAD and stopped controls remain separate.
 The earlier new-zero-only rule confused counter history with latch value.
 
 Serial output advances one bit per two Timer-A underflows and asserts SP
@@ -1087,7 +1089,7 @@ internal countdown or the continuous period of `latch + 1`. Counter
 inspection and fully stopped reads still expose the actual stored count.
 
 These details were isolated with One ROM on the real 512K-chip/512K-slow PAL
-A500 on 13–14 October 2026: independent reference timers were frozen before
+A500 on 13-14 October 2026: independent reference timers were frozen before
 reading, live reads were bracketed by a reference STOP, and timer B counted
 timer-A underflows. A dense 6240-trial live-read sweep fits the same
 E-clock-calibrated read curve on hardware and Copperline, including 60
@@ -1103,7 +1105,7 @@ NOP counts alone are insufficient.
 ICR's IR bit is a latch: clearing an interrupt mask does not clear a
 previously recorded enabled interrupt. Reading ICR acknowledges the latch.
 Re-enabling a still-pending source arms the IRQ pin even when IR was already
-set. The mask-clear captures constrain this readback behavior, rather than
+set. The mask-clear captures constrain this readback behaviour, rather than
 the electrical pin's precise deassertion edge.
 
 The hardware probe's CIA measurements include register programming, the
@@ -1122,9 +1124,9 @@ its priority, and BLTPRI disables this CPU starvation yield.
 
 One ROM measurements on the same A500 compared D-only, descending-fill and
 line blits with a stopped CPU, normal polling and BLTPRI polling (540 trials).
-For a 220-by-22-word D-only clear, normal polling measured 9923–9934 colour
+For a 220-by-22-word D-only clear, normal polling measured 9923-9934 colour
 clocks. Ignoring fixed-DMA misses during idle blitter phases produced
-9876–9890; counting them produces 9925–9935. The stopped-CPU and BLTPRI
+9876-9890; counting them produces 9925-9935. The stopped-CPU and BLTPRI
 controls are unchanged. These ranges include launch phase, register access
 and readback time; they are not a constant to add to a blit.
 
@@ -1142,7 +1144,7 @@ first. WinUAE Best Compatibility agrees with the hardware ordering.
 The earlier claim that 64 six-plane DIVU operations were 191 colour clocks
 early was derived from a defective test clock. The horizontal VHPOSR byte
 already counts colour clocks; multiplying it by two made the computed time
-jump backwards at a scanline boundary. The corrected test uses
+jump backward at a scanline boundary. The corrected test uses
 `227 * vertical + horizontal`. A NOP replaces the redundant doubling so the
 probe's own instruction size and cycle cost do not change. Raw beam endpoints
 and an independent CIA timer cross-check elapsed measurements. Launch phase
@@ -1165,7 +1167,7 @@ the engine can finish its final write while the interrupt countdown still has
 two clocks left. Bounding idle advances only by engine completion would then
 sleep past the source assertion even though running-CPU readback was correct.
 
-The native BLIT source phase is modeled three CCK before its INTREQR readback
+The native BLIT source phase is modelled three CCK before its INTREQR readback
 edge, rather than starting the full recognition interval after readback.
 The synchronized 896-row A500/WinUAE IRQ probe isolates this from identical
 Copper-generated BLIT/COPER/SOFT controls and RAM/ROM handler placement.
@@ -1225,7 +1227,7 @@ debits a per-frame instruction budget one of two ways, selected by
   tails, chip-bus grants and contention waits -- so the slice's elapsed bus
   CCK is the true hardware cost (`real_slice_accounting` in
   `src/emulator.rs`). Because the m68k core's 68000 cycle totals are exact
-  across its [SingleStepTests validation corpus](https://github.com/benletchford/m68k-rs/tree/m68k-v0.13.0#validation--testing),
+  across its [SingleStepTests validation corpus](https://github.com/benletchford/m68k-rs/tree/m68k-v0.17.1#validation--testing),
   this matches a stock PAL 68000.
 - `instructions`: a flat cycles-per-instruction quota
   (`COPPERLINE_REAL_CPU_CPI`, default 4.0), debited by retired
@@ -1430,4 +1432,4 @@ show STOP during the E-high transfer before falling-edge decrement/underflow
 commit; this preview does not apply during the LOAD hold. Internal carry and
 timer-A-to-timer-B cascade state are preserved. These constraints come from
 paired measurements of both CIAs, with explicit acknowledge, masked-source,
-zero/one/nonzero-latch and timing-gap controls in `amiga-hardware-probes`.
+zero/one/non-zero-latch and timing-gap controls in `amiga-hardware-probes`.

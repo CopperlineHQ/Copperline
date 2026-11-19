@@ -11,7 +11,7 @@ status line so the settings can be corrected. Command-line syntax errors
 and headless captures, benchmarks, debugger servers, and listing commands
 report to stderr without opening a dialog; their exit statuses are unchanged.
 
-The display defaults to buffered, synchronised presentation (strict FIFO
+The display defaults to buffered, synchronized presentation (strict FIFO
 vsync) on all desktop platforms. **Video Settings -> VSync** changes this
 immediately; it is also in the configuration screen's **A/V & Emu -> Display**
 category and saved as `[display] vsync`. PAL output is roughly 50 Hz, so
@@ -38,9 +38,9 @@ the performance overlay, whose FPS measures emulated frames.
 On Windows, if the default graphics backend selects a CPU software renderer,
 Copperline tries OpenGL and uses it when its adapter is not reported as a CPU
 renderer. This avoids a slow software DirectX path on systems with accelerated
-OpenGL, including some virtual machines. If OpenGL cannot initialise or also
+OpenGL, including some virtual machines. If OpenGL cannot initialize or also
 selects a CPU renderer, Copperline rebuilds the renderer using the original
-backend. If that also fails to initialise, it reports the startup error.
+backend. If that also fails to initialize, it reports the startup error.
 Setting `WGPU_BACKEND` or `WGPU_ADAPTER_NAME` disables this automatic fallback
 so explicit selections still apply. The startup log records any switch.
 
@@ -208,7 +208,7 @@ left to right it holds:
 - **Camera button**: saves a screenshot (same as `Cmd+S` on macOS or
   `Alt+S` on Linux/Windows).
 - **Pause / power / reboot buttons.** Pause freezes emulation while staying
-  powered; power cold-boots (reinitialising RAM with the Memory page's
+  powered; power cold-boots (reinitializing RAM with the Memory page's
   Power-on fill policy) or powers off back to the test screen; reboot is a
   warm reset.
 
@@ -392,7 +392,8 @@ the next launch: Copperline writes it into the
 changes, creating that file if there is none yet. This covers the controller
 ports, the joystick input mode, autofire, mouse sensitivity, rewind, run
 ahead, the warp limit, floppy speed, clipboard sharing, the video
-recording format, and the Video and Audio settings (framing, aspect, scaling, shader and strength, tint, bezel,
+recording format, and the Video and Audio settings (framing, aspect, scaling,
+auto-crop, shader and strength, tint, bezel,
 screen centring, fullscreen, the status bar, the performance overlay, VSync,
 menu size, audio output and filter). Only the settings you change are
 written, so a value that comes from the machine profile -- the CD32 pad in a
@@ -573,8 +574,8 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   status bar. Handy alongside fullscreen for a clean, chrome-free picture.
 - **Track Display**: what the status bar's floppy counter reads --
   **Track** (the track number) or **Cyl.Side** (cylinder and side, `40.1`).
-  The start-up choice is `[display] track_display` (see
-  [Configuration](configuration.md)).
+  Greyed out while the status bar is hidden. The start-up choice is
+  `[display] track_display` (see [Configuration](configuration.md)).
 - **Monitor Bezel**: which monitor front the picture sits inside instead
   of filling the window -- **Disabled**, **1084** (a two-tone cabinet with
   the tube sunk into its moulding, and the model badge, the Copperline name
@@ -595,7 +596,7 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   [performance overlay](#performance-overlay). Remembered like the other
   Video settings; the start-up value is `[display] perf_overlay` (see
   [Configuration](configuration.md)).
-- **VSync**: synchronise presentation to the monitor's vertical blank
+- **VSync**: synchronize presentation to the monitor's vertical blank
   (on by default). Turning it off requests presentation without waiting for
   vblank where the graphics backend supports it; this may reduce latency
   but can tear. It takes effect immediately and leaves the emulation speed
@@ -714,6 +715,11 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
 
 ### Recording
 
+- **Record Toaster Program** (shown only when a video-slot card with outputs
+  is fitted): starts recording the card's Program output; reads **Stop Toaster
+  Program Recording** while running.
+- **Show Toaster Monitors** (shown only when a video-slot card with outputs
+  is fitted): reopens closed Preview and Program monitor windows.
 - **Record Video** (also `Cmd+R` / `Alt+R`): starts a video-with-audio
   recording. While one runs the row reads **Stop Video Recording**, and it
   (or the shortcut again) stops it. See below.
@@ -829,8 +835,9 @@ The layout is:
 - **Category tabs** (left sidebar):
   - *System*: chipset and Agnus/Denise overrides, video standard,
     real-time clock, identify board, RTG card, and freezer cartridge.
-  - *CPU*: model, FPU, clock, caches, and the experimental JIT mode, which
-    is not cycle-exact (see `[cpu] jit` in [Configuration](configuration.md)).
+  - *CPU*: model, FPU, clock, caches, the experimental JIT mode, and JIT speed
+    (`fixed` or `fastest`, greyed until JIT is enabled; see `[cpu] jit` and
+    `[cpu] speed` in [Configuration](configuration.md)).
   - *Memory*: chip, fast and slow RAM; the cold power-on fill (zero,
     deterministic random, or a typed fixed 16-bit word); and motherboard,
     accelerator and Zorro III RAM.
@@ -1193,12 +1200,12 @@ after capture.
 ## Saving native screenshots
 
 Press `Cmd+Option+S` on macOS or `Ctrl+Alt+S` on Linux/Windows, or choose
-**Recording → Save Native Screenshot (1:1)**, to save the active playfield at
+**Recording -> Save Native Screenshot (1:1)**, to save the active playfield at
 its original pixel size, without the TV border, aspect correction, filtering,
 phosphor persistence or tint. Black pixels inside the playfield are kept.
 RTG screens save at the board's native resolution. Interlaced chipset screens
-save both fields woven at full height, so a 640×512 laced screen saves at
-640×512 (see [native headless captures](headless.md#capturing-screenshots)).
+save both fields woven at full height, so a 640x512 laced screen saves at
+640x512 (see [native headless captures](headless.md#capturing-screenshots)).
 
 `--native-screenshots` selects native scheduled captures and expectations.
 See [native headless captures](headless.md#capturing-screenshots) for resolution
@@ -1234,7 +1241,7 @@ continues.
 (recording-mp4)=
 ### MP4 recordings
 
-With **Recording > Video Format > MP4** (or `[recording] video_format =
+With **Recording -> Video Format -> MP4 (H.264, via ffmpeg)** (or `[recording] video_format =
 "mp4"`), a recording is an MP4 with H.264 video and AAC sound, which plays
 almost anywhere. Copperline has no encoder of its own for those, so it
 records the AVI exactly as above (as
@@ -1587,8 +1594,9 @@ changes when the grab is taken: `auto` grabs whenever the window has the
 focus and on entering fullscreen, so no host cursor is ever loose over
 the display, and `manual` grabs only on the shortcut, leaving display
 clicks to go straight to the Amiga. The default, `click`, waits for a
-click on the display, except fullscreen with the status bar hidden, where
-the display is all there is to click and it grabs as `auto` does. See
+click on the display, except in fullscreen when nothing sits below the display
+(status bar hidden and no keyboard or synth panel strip open), where the
+display is all there is to click and it grabs as `auto` does. See
 [Mouse capture](configuration.md#mouse-capture).
 
 Enable *Middle to release* on the launcher's *Input* tab, or set
@@ -1620,9 +1628,8 @@ control-protocol forms.
 Ports 3 and 4 are the sockets of the parallel-port **multitap**, also
 called the four-player joystick adapter. Set **I/O Ports -> Parallel Port ->
 Device** to **Multitap (4 joysticks)** in the launcher, or use
-`--parallel multitap` (the `joystick-adapter` name also works). Games
-such as Super Skidmarks, Kick Off 2 and Dyna Blaster read these sockets
-as two extra joysticks.
+`--parallel multitap` (the `joystick-adapter` name also works). Three- and
+four-player software reads these sockets as two extra joysticks.
 
 For four local USB/Bluetooth controllers, select **Joystick** for both
 native ports and use **gamepad** input mode:
@@ -1663,7 +1670,7 @@ two explicit input modes, and the active one is always shown by the gamepad
 / keyboard icon in the status bar (next to the volume control), so a "my
 keys aren't working" surprise can be spotted and fixed at a glance:
 
-- **gamepad** (the default): use only a recognised or
+- **gamepad** (the default): use only a recognized or
   [calibrated](#gamepad-calibration) gamepad; every keyboard key passes
   through to the Amiga. With no pad connected there is no joystick input.
   This is the no-surprise mode for interactive AmigaOS setup.

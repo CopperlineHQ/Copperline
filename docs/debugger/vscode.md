@@ -11,7 +11,7 @@ you want:
 
 | Integration | Use it for | Launch type |
 |---|---|---|
-| **Copperline Amiga Debug** | Source and instruction stepping, Step Back, variables, memory, chipset registers, native debugger windows, and `.cpuprofile` captures. | `copperline` |
+| **Copperline Amiga Debug** | Source and instruction stepping, Step Back, variables, memory, chipset registers, the native Debug workspace, and `.cpuprofile` captures. | `copperline` |
 | **Bartman's Amiga C/C++ extension, Copperline fork** | Its bundled compiler and patched GDB, source annotations, and the visual CPU/DMA, Copper, bitmap, and blitter profiler. | `amiga` |
 
 This chapter sets up Copperline's native extension. For the illustrated
@@ -183,8 +183,9 @@ and values differ from the generated graphics demo. It demonstrates the
 multi-file DWARF relocation support, including relocatable ELF builds.
 
 Expand **Custom Registers** for chipset state and hover a register for its
-access rules and bit fields. The debug toolbar also opens Copperline's
-native **Debugger**, **Console**, and **Frame Analyzer** windows.
+access rules and bitfields. The debug toolbar also opens Copperline's
+native **Debugger**, **Console**, and **Frame Analyzer** inspectors in the
+Debug workspace.
 
 ## Capture a CPU profile
 

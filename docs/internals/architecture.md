@@ -25,18 +25,23 @@ src/
                     #   copperline-ctl.rs: control-protocol client, MCP server, DAP adapter
                     #   copperline-import-uae.rs + import_uae/: UAE config importer
                     #   copperline-net-helper.rs: Linux bridge-networking helper
+                    #   flyerclip.rs: Video Flyer clip converter CLI (ctl-bin)
+                    #   flyer-convert.rs: Video Flyer clip batch converter (converter-bin)
   lib.rs            # library entry point shared by native and browser frontends
   config/           # TOML config + validation + machine profiles
-                    #   (mod.rs, raw.rs, validate.rs, resolve.rs, about.rs, tests.rs)
+                    #   (mod.rs, raw.rs, validate.rs, resolve.rs, about.rs,
+                    #    monitor.rs, window_title.rs, tests.rs)
   paths.rs          # host data directories (platform config dir, portable mode)
   pathconf.rs       # [paths]: output locations and media folders
   envcfg.rs         # cached COPPERLINE_* environment-variable snapshot
-  emulator.rs       # frame loop driving CPU, chipset, and host I/O
+  emulator.rs       # frame loop driving CPU, chipset, and host I/O (emulator/fastest.rs)
   warpboot.rs       # warp boot: run unpaced until a condition holds, then pace
   runprog.rs        # --run: boot straight into a host executable
   whdload.rs        # --whdload direct boot (package.rs, lha.rs: game packages)
   archive.rs        # shared LHA/ZIP output budgets and bounded streaming I/O
   gamelib/          # WHDLoad game library and OpenRetro database sync
+  http.rs           # shared blocking HTTP/TLS client for game-library and update-check
+  update.rs         # About-panel Check for updates (update-check feature)
   debugger.rs       # env-driven headless debugger
   waveform.rs       # trigger-based VCD chipset-signal capture (GTKWave)
   disasm.rs         # 68000 + Copper-list disassemblers
@@ -45,31 +50,34 @@ src/
   debuginfo/        # guest program debug information: hunk symbols, LINE hunks, DWARF, unwinding
   profile.rs        # profile.start capture and export (profile/: samples, lcov, reports)
   coverage.rs       # guest code-coverage histogram and coverage.bin sidecar
-  heatmap.rs        # memory heat map
+  heatmap.rs        # memory heatmap
   regcheck.rs       # custom-register access validator
   smc.rs            # self-modifying-code detector
-  blitviz.rs        # Frame Analyzer blitter visualisation helpers
+  diskfault.rs      # deterministic device-level block fault injection (disk.fault.*)
+  blitviz.rs        # Frame Analyzer blitter visualization helpers
   cdtrace.rs        # timestamped CD drive command trace
   customregs.rs     # custom-register reference table compiled from docs/reference
   amigaos.rs        # read-only exec.library structure walking for the debugger
                     #   (amigaos/: DOS ABI mirror, text dumps, ROM symbols)
-  uaelib.rs         # WinUAE-compatible uaelib trap at $F0FF60
-  cpu.rs            # m68k core wrapper and CPU-visible bus adapter
+  uaelib.rs         # WinUAE-compatible uaelib trap at $F0FF60 (uaelib/debug_port.rs)
+  cpu.rs            # m68k core wrapper and CPU-visible bus adapter (cpu/: jit.rs, ec030_acu.rs)
   cache.rs          # 68020/030/040 on-chip instruction/data cache model
   bus.rs            # shared RAM, ROM, chipset, CIA, RTC, and I/O state
   bus/              # size-split impl Bus continuations + the bus test suite
     custom_regs.rs  #   custom-chip register read/write dispatch
     dma_slots.rs    #   chip-bus slot arbitration + DMA scheduling
     ddf_line.rs     #   per-line DDF sequencer walk for slot planning
+    cia_irq.rs      #   CIA/Paula interrupt routing and edge latches
     collisions.rs   #   live (beam-timed) collision accumulation
     frame_capture.rs#   per-frame sprite/bitplane DMA + render capture
+    video_slot.rs   #   video-slot tap and genlock sync bridge
     wave.rs         #   waveform-capture signal sampling hooks
   memory.rs         # chip/slow RAM, ROM, extended ROM containers
   romsearch.rs      # locate the bundled AROS boot ROM and open CD32 FMV ROM
   romdb.rs          # Kickstart ROM identification by checksum
   romtags.rs        # cull ROM resident tags before Kickstart initializes them
   zorro.rs          # Zorro II/III autoconfig chain and boards
-  zorro_device.rs   # the functional-Zorro-board boundary (ZorroDevice trait)
+  zorro_device.rs   # the functional-Zorro-board boundary (ZorroDevice trait, zorro_device/state.rs)
   wasmboard.rs      # WASM plugin boards under wasmtime (wasm-boards feature)
   wasm_manifest.rs  # plugin manifest types shared with wasmtime-less builds
   floppy/           # timed disk DMA controller + disk image decoding
@@ -91,11 +99,12 @@ src/
   ide_zorro.rs      # lide.device-compatible Zorro II IDE boards
   a2091.rs          # A2091 SCSI controller board (DMAC + boot ROM)
   a4091.rs          # A4091 Zorro III SCSI-2 controller (NCR 53C710)
-  scsi.rs           # WD33C93A SBIC + SCSI-2 disk targets (scsi/cd.rs: CD-ROM target)
+  scsi.rs           # WD33C93A SBIC + SCSI-2 disk targets (scsi/: cd.rs, tape.rs)
   copperhf.rs       # virtual hardfile controller with ordered worker-thread I/O
   sdmac.rs          # A3000 Super DMAC fronting the WD33C93
   sf2000sd.rs       # SF2000 accelerator SD card controller (sdcard.rs: the card)
-  harddrive.rs      # shared hard-drive image backend (IDE + SCSI; harddrive/: CHD, sessions)
+  harddrive.rs      # shared hard-drive image backend (IDE + SCSI; harddrive/:
+                    #   chd.rs, vhd.rs, session.rs, mechanics.rs, profiles.rs)
   blockdev/         # physical host disks standing in for hard-drive images
   dirfs.rs          # host directory -> in-memory FFS/OFS partition image
   filesys.rs        # host directories mounted live as AmigaDOS volumes
@@ -107,6 +116,10 @@ src/
   picasso2.rs       # Picasso II/II+ RTG boards (picasso2/: CL-GD5426/5428 core)
   graffity.rs       # Graffity RTG boards (Zorro II and III)
   z3660.rs          # Z3660 RTG board
+  videoslot.rs      # video-slot device trait (VideoSlotDevice)
+  toaster/          # Video Toaster 4000 video-slot card (switcher, DVE, compositor, media)
+  flyer/            # NewTek Video Flyer Zorro board (dual-bus SCSI, clip playback, mailbox)
+  flyer_convert.rs  # Video Flyer clip import/export shared by flyerclip and MCP
   toccata.rs        # Toccata sound board (toccata/: AD1848 codec)
   mhi.rs            # MHI MPEG audio decoder board
   cartridge.rs      # freezer cartridge (HRTMon), entered by NMI
@@ -122,7 +135,7 @@ src/
   csynth/           # Coppersynth General MIDI synthesizer as a MIDI output
   parallel.rs       # Centronics parallel-port peripheral boundary
   sampler.rs        # parallel-port audio sampler
-  audio/            # AudioSink outputs, source/stem mux, resamplers, MPEG frame parsing
+  audio/            # AudioSink outputs, source/stem mux, resamplers, MPEG frame parsing, host fx
   priority.rs       # opt-in realtime-like thread scheduling (pacer + audio)
   gamepad.rs        # gilrs input: database layout + calibration override
   keymap.rs         # host-keyboard to game-port controller mapping
@@ -136,10 +149,14 @@ src/
   ffmpeg.rs         # finding the host's ffmpeg
   inputrec.rs       # live-input recording to the scripted-input format
   inputsched.rs     # deterministic input replay for reverse debugging
+  bytes_serde.rs    # bulk-slice byte serialization for large RAM/VRAM buffers
+  hash.rs           # shared FNV-1a and digest helpers
+  hostbind.rs       # process-wide tracker of host resources opened by config/state
   savestate.rs      # whole-machine snapshot/restore (savestate/: chunked file format)
   uss.rs            # WinUAE ASF/USS state import
   timetravel.rs     # reverse-debugging snapshot ring + replay
   netplay/          # GGPO-style netplay for two to four players
+  terminal/         # interactive --terminal frontend (Kitty graphics + keyboard protocols)
   verdict.rs        # the process exit status of a session
   crashlog.rs       # persistent crash reports from the panic hook
   winconsole.rs     # detects desktop launches and closes their console (Windows)
@@ -164,13 +181,15 @@ src/
     window.rs       # winit ApplicationHandler, render and present workers, window surface
     window/         # size-split App impl blocks + window submodules + its test suite:
                     #   app_*.rs (input, menus, session, display, panels, media,
-                    #   launcher, debugger, nav, netplay, states), present.rs,
-                    #   presenter.rs and scaler.rs (presentation), crt_shader.rs,
-                    #   bezel.rs, stickers.rs, rtg_texture.rs (GPU passes),
-                    #   egui_debugger.rs + egui_debugger/ (debugger workspace),
-                    #   console.rs, control.rs + gdb.rs (windowed CCP/GDB drains),
-                    #   statusbar.rs, host_input.rs, kbdpanel.rs, mt32panel.rs,
-                    #   csynthpanel.rs, native_dialog.rs, tests.rs
+                    #   launcher, debugger, nav, netplay, states, update), present.rs,
+                    #   presenter.rs, adapter.rs, scaler.rs, output_capture.rs, title.rs,
+                    #   crt_shader.rs, bezel.rs, stickers.rs, rtg_texture.rs, rtg_ui.rs,
+                    #   shaders/ (WGSL passes), card_monitors.rs, monitors.rs,
+                    #   monitor_panel.rs, monitor_sounds.rs, egui_debugger.rs +
+                    #   egui_debugger/ (Debug workspace), console.rs, control.rs + gdb.rs
+                    #   (windowed CCP/GDB drains), terminal.rs, statusbar.rs, host_input.rs,
+                    #   kbdpanel.rs, mt32panel.rs, csynthpanel.rs, macos_about.rs,
+                    #   macos_documents.rs, native_dialog.rs, tests.rs
     ui.rs           # pop-up menu, status-bar widgets, and overlay panels
     ui/             # configuration screen rows/library/dialogs, Load State browser
     menu.rs         # the pop-up menu's shape and actions
@@ -180,12 +199,13 @@ src/
     launcher.rs     # machine-configuration (launcher) editable model
     launcher/       # field metadata, value edits and config conversion
     font.rs         # 8x8 overlay font
-crates/copperline-web/      # standalone wasm-bindgen browser frontend (WebEmu + page glue)
-crates/copperline-libretro/ # standalone libretro C ABI frontend
-crates/copperline-player/   # standalone single-game player (player kit, see guide/publishing.md)
-crates/cputest-runner/      # WinUAE cputest instruction-suite runner for the m68k core
-crates/hostsocket-plugin/   # the bundled HostSocket board's WASM module
-crates/zz9k-plugin/         # the bundled zz9k board's WASM module
+crates/copperline-web/      # workspace member: wasm-bindgen browser frontend (WebEmu + page glue)
+crates/copperline-libretro/ # workspace member: libretro C ABI frontend
+crates/copperline-player/   # workspace member: single-game player (player kit, see guide/publishing.md)
+crates/flyerclip/           # path-dep library: VTASC/Video Flyer clip codec + FORMAT.md
+crates/cputest-runner/      # standalone crate: WinUAE cputest instruction-suite runner for m68k
+crates/hostsocket-plugin/   # standalone crate: bundled HostSocket board's WASM module
+crates/zz9k-plugin/         # standalone crate: bundled zz9k board's WASM module
 tests/              # self-contained integration tests and ignored local-asset tests
 timing-test/        # bootable cross-emulator timing-measurement disk + golden probes
 ```
@@ -359,7 +379,7 @@ measure GPU completion or display scanout.
 Every texture upload for a frame (the picture the scaler samples, the RTG
 board frame and its UI atlas) runs inside that draw callback, after the
 surface has been acquired. A wgpu queue write is staged until the next
-submit, and a skipped present has none: macOS reports a covered, minimised
+submit, and a skipped present has none: macOS reports a covered, minimized
 or other-Space window as occluded, and pixels returns that as `Ok(())`
 without submitting. Uploading before the acquire left one staged copy of
 the frame behind for every frame the window stayed hidden, so an RTG
@@ -385,8 +405,9 @@ latency-critical and can optionally be given above-normal scheduling priority
 `Bus` (`src/bus.rs`) owns all shared machine state: chip/slow/fast RAM and
 ROM (`Memory`), both CIAs, the RTC, all custom-chip state (Agnus, Copper,
 blitter, Paula, Denise), the floppy controller, the Zorro chain, and the
-optional Gayle, Akiko, and CDTV subsystems. Everything routes through it;
-there is exactly one owner for every register.
+optional Gayle, PCMCIA, Fat Gary/Ramsey/Super DMAC/A4000 IDE, Akiko, CDTV,
+uaelib, freezer cartridge, and video-slot subsystems. Everything routes
+through it; there is exactly one owner for every register.
 
 The CPU-visible memory map:
 
@@ -588,7 +609,7 @@ elements) limits also cover reset-created stores and host-initiated memory
 growth on restore. The limiter is host state, so this adds no serialized
 field or save-state format version. See [WASM boards](../zorro.md#wasm-plugin-boards).
 
-## envcfg: environment variables are start-up settings
+## envcfg: environment variables are startup settings
 
 All `COPPERLINE_*` knobs are read through `src/envcfg.rs`, which snapshots
 the entire environment once into a static map on first access. Hot paths
@@ -600,7 +621,7 @@ Three consequences for contributors:
 
 - Never call `std::env::var*` for a `COPPERLINE_*` knob -- use
   `envcfg::flag` / `envcfg::var`.
-- Values cannot change at runtime; every knob is a start-up setting.
+- Values cannot change at runtime; every knob is a startup setting.
 - On genuinely hot paths (per pixel, per colour clock, per device tick),
   even `envcfg::flag`/`envcfg::var` are too expensive: each call hashes the
   variable name to probe the snapshot map. Cache the value once through a

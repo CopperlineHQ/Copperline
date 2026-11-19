@@ -57,6 +57,7 @@ address each one gets:
 | A2065 Ethernet | `[a2065]` | II | 514 / `$70` | 64K |
 | Toccata sound board | `[toccata]` | II | 18260 (`$4754`) / 12 | 64K |
 | MHI MPEG audio decoder | `[mhi]` | II | 5192 / 7 | 64K |
+| NewTek Video Flyer | `[video_slot] flyer = true` | II | 2191 (`$088F`) / 0 | 256K |
 | Z3660 RTG | `[rtg] card = "z3660"` | III | 5195 (`$144B`) / 1 | 128M |
 | Picasso II / II+ | `[rtg] card = "picasso2"` / `"picasso2plus"` | II | 2167 / 11 + 12 | 1-2M + 64K |
 | Graffity [Zorro II] | `[rtg] card = "graffityz2"` | II | 2092 / 34 + 33 | 1-2M + 128K |
@@ -68,8 +69,9 @@ the first Zorro II placement, `$200000`. On a CDTV the DMAC (Commodore
 as on the real machine (see [below](#how-autoconfig-works-in-copperline)).
 The sections that follow describe the RAM, plugin, network, sound,
 crypto, and RTG boards; the storage controllers are covered in
-[](internals/peripherals), copperhf in [](internals/copperhf), and the
-manufacturer 5192 products in
+[](internals/peripherals), copperhf in [](internals/copperhf), the Video Flyer
+(paired with the Video Toaster 4000 video-slot card) in [](internals/video),
+and the manufacturer 5192 products in
 [The Copperline manufacturer ID](#the-copperline-manufacturer-id).
 
 ## Describing a board in TOML
@@ -366,7 +368,7 @@ so continuous traffic for unjoined groups cannot stall the emulated machine.
 This matters when testing IPv6 neighbour discovery: accepting every frame can
 hide an incorrectly programmed solicited-node multicast filter in a guest driver.
 Snapshots from before filtering was implemented retain their old receive
-behavior until the guest reinitializes the chip.
+behaviour until the guest reinitializes the chip.
 
 The loopback backend reflects the guest's own multicast frames. It is useful
 for SANA-II delivery tests, but can make IPv6 duplicate-address detection see
@@ -462,7 +464,7 @@ the mixer and stem-capture integration.
 `[mhi]` fits an in-tree virtual MPEG-1/2/2.5 Layer III audio decoder board
 (`src/mhi.rs`) that serves the Amiga MHI API through the ported
 `mhi_copperline.library` (`guest/mhi/`), rather than modelling any real
-physical hardware -- MHI-aware players such as AmigaAMP decode MP3 through
+physical hardware -- MHI-aware MP3 players decode through
 it exactly as they would through a real MHI decoder board or software MHI
 driver:
 
@@ -785,8 +787,11 @@ In-tree functional boards implement the `ZorroDevice` trait
    all of `BoardDevice`'s forwarding `match` arms (`read`, `write`,
    `peek_word`, `tick`, `int2_line`, `int6_line`, `take_activity`, `reset`,
    `kind`) for the new variant. `Bus` ticks every board at each timed-device
-   boundary, then samples its IRQ lines. A board may return early internally
-   when it has no work; the bus does not query board idle/deadline hooks.
+   boundary, then samples its IRQ lines. Timed boards with internal deadlines
+   can also override `ZorroDevice::next_event_cck` (and forward it in
+   `BoardDevice::next_event_cck`) so the bus's idle fast-forward wakes them
+   on time, and boards with side-effect-free ROM slices can implement
+   `plain_rom` for direct JIT/fast-path reads.
 2. Provide a `BoardSpec` constructor mirroring the existing ones, with the
    full field set. A functional board uses `backing: BoardBacking::Device(slot)`
    where this RAM example has `BoardBacking::Ram`:

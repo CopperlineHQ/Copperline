@@ -2,8 +2,9 @@
 abstract: |
   Copperline is an Amiga emulator (OCS, ECS, and AGA) written in Rust.
   This documentation covers running and configuring the emulator, setting up
-  machines from the A500 to the A4000 and CD32, using expansion boards,
-  running headless test sessions, and understanding the emulator's architecture.
+  machines from the A1000 and A500 to the A4000, CDTV, and CD32, using
+  expansion boards, running headless test sessions, and understanding the
+  emulator's architecture.
 ---
 
 # Copperline
@@ -65,11 +66,13 @@ Spaceballs' *State of the Art* (1992) running in Copperline.
 - [](debugger/control) -- JSON-RPC control protocol (`copperline-ctl`) for automation, with an MCP server mode for coding agents.
 - [](debugger/dap) -- DAP launch, attach, stepping, and debug-information reference.
 - [](debugger/diverge) -- A/B divergence finder: two builds or two configs in lockstep, narrowed to the first differing frame and instruction.
+- [](debugger/disk-fault) -- Deterministic disk-fault injection for testing guest storage error handling.
 - [](debugger/workflows) -- Worked debugging workflows that combine these tools.
 - [](internals/architecture) -- Source layout, frame loop, and host boundary.
 - [](internals/timing), [](internals/chipset), [](internals/video),
-  [](internals/audio), and [](internals/cpu) -- The timing model and the
-  chipset, video, audio, and CPU implementations.
+  [](internals/audio), [](internals/cpu), and [](internals/jit-performance) --
+  The timing model, chipset, video, audio, CPU implementations, and JIT
+  performance benchmarks.
 - [](internals/peripherals), [](internals/toccata), [](internals/mhi),
   [](internals/copperhf), [](internals/zz9k), [](internals/picasso2), and
   [](internals/graffity) -- Expansion hardware models and board protocols.

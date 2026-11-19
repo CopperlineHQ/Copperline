@@ -37,8 +37,8 @@ continuous line tests, kind42 still produced the same trial fields.
 The normal Kickstart firmware rebuilt with USB/host-control plugins is
 byte-identical to the prior 720,896-byte backup from 15 October (SHA-256
 `7faf644f3d33d97075f07d7ffc4c5ca89037e17238cc012ec07e825f1b85638f`).
-Loading that firmware and repeating the older procedure—hold reset,
-patch the live ROM, verify all 512 KiB, release reset—also produced
+Loading that firmware and repeating the older procedure -- hold reset,
+patch the live ROM, verify all 512 KiB, release reset -- also produced
 identical kind42 trial fields and 1,280 set BZERO samples. That packet,
 `captures/kind42-a500-live-poke/results.bin`, has SHA-256
 `f266485091270df01b2821919096a1dc55e0a2e95bdb74518e2bc17ef5ba6979`;
@@ -118,7 +118,7 @@ independent absolute timebase calibration.
 
 Three small diagnostic ROMs repeatedly restore the same two-pixel line
 configuration, launch it, and read DMACONR eight times consecutively from
-RAM code. Unlike kinds44/45, they do not synchronize to a frame phase.
+RAM code. Unlike kinds 44/45, they do not synchronize to a frame phase.
 The archive names are `build/scope_bzero_c0000_b0000_v4_20261016/`,
 `scope_bzero_cffff_b0000_v4_20261016/`, and
 `scope_bzero_c0000_bffff_v4_20261016/`. B DMA is disabled in all three;

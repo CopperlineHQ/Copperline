@@ -82,6 +82,12 @@ sector data passes through untouched -- Kickstart 3.1 expects exactly
 this. The absent-slave behaviour follows the WinUAE-verified model so
 device scans terminate correctly.
 
+When an ATA disk attaches, `AtaDrive::default_geometry` inspects the image's
+RDB header (`HardDriveImage::rdb_physical_geometry`) for valid ATA-addressable
+CHS geometry (1-16 heads, 1-255 sectors per track, cylinders fitting within
+the image) and falls back to 16 heads x 32 sectors per track when none is
+present.
+
 ### Gayle PCMCIA slot (`gayle.rs`, `pcmcia.rs`)
 
 Gayle's PCMCIA side is modelled from the Commodore register map as
@@ -381,8 +387,7 @@ LIMITS, READ(6), WRITE(6), WRITE FILEMARKS, SPACE (blocks, filemarks,
 end-of-data), INQUIRY, MODE SENSE(6)/MODE SELECT(6) with the block
 descriptor and the device configuration page, RESERVE/RELEASE, ERASE,
 LOAD/UNLOAD, SEND DIAGNOSTIC and PREVENT/ALLOW MEDIUM REMOVAL. Not
-modelled: setmarks, partitions, READ POSITION and LOCATE, an early-warning
-zone or a capacity limit on a directory cartridge, and tape motion --
+modelled: setmarks, partitions, READ POSITION and LOCATE, and tape motion --
 every command completes at once, like a disk target without drive
 mechanics.
 
@@ -609,7 +614,7 @@ part of the state (`docs/internals/savestate.md`).
 
 Microsoft's Virtual Hard Disk container, which WinUAE creates and attaches
 hardfiles in (as do Windows Disk Management, Virtual PC, VirtualBox and
-`qemu-img -f vpc`), is recognised by its 512-byte `conectix` footer --
+`qemu-img -f vpc`), is recognized by its 512-byte `conectix` footer --
 sniffed by content after the gzip and CHD checks, so a VHD named `.hdf`
 opens as one and a raw image named `.vhd` opens raw. The footer's disk
 type picks the layout:
@@ -1155,6 +1160,29 @@ wasm call approaches the plugin fuel budget. The register/opcode contract,
 the pinned zz9000-sdk revision, and every firmware-latitude choice are
 specified in [](zz9k.md).
 
+## Z3660 RTG board (`z3660.rs`)
+
+The `[z3660]` board presents the Z3660 accelerator's RTG core as a Zorro III
+autoconfig board (manufacturer `0x144B`, product `1`, 128 MiB window with the
+first 64 MiB backed as board RAM -- Picasso96 VRAM from `+0x200000` and the
+`GFXData` blit-parameter mailbox at `+0x3200000`). The 32-bit register file
+sits at window offsets `$100..$800` (mode/pan/sprite/vblank status, blitter
+DMA and accelerator doorbells, firmware version `1.6`, palette upload mailbox,
+and monitor switch). The core blitter operations (fill, copy, invert,
+template, pattern, line, and planar) execute into VRAM on the doorbell, the
+four MNTVA pixel formats (8-bit paletted, 15-bit, 16-bit 565, 32-bit) scan
+out with hardware sprite compositing when the driver switches to RTG, and
+synthetic 60 Hz vblank status pulses drive `WaitVerticalSync`. `ACC_OP`
+surface ops and exotic minterms remain stubbed.
+
+## Video Toaster 4000 and Video Flyer (`toaster/`, `flyer/`)
+
+The Video Toaster 4000 video-slot card (`[video_slot] card = "toaster"`) and
+its companion NewTek Video Flyer Zorro II board (`[video_slot] flyer = true`)
+are documented in the [video pipeline chapter](video.md) (see also the
+recovered hardware specifications under `docs/toaster/README.md` and the
+VTASC clip container format in `crates/flyerclip/FORMAT.md`).
+
 ## CDTV (`cdtv.rs`, `cdrom.rs`)
 
 The CDTV model pairs the DMAC (which autoconfigs ahead of the Zorro chain,
@@ -1544,11 +1572,11 @@ switched to it, whose release the window manager keeps) reaches the
 machine only once it is pressed again. Mouse deltas
 feed the mouse port's JOYxDAT quadrature counters (JOY0DAT for the usual
 port 1). Gamepads are read through `gilrs`
-with its bundled SDL controller database enabled: a recognised pad
+with its bundled SDL controller database enabled: a recognized pad
 resolves through a fixed standard layout, overridden per-UUID by the
 calibration described in [](../guide/ui), which records raw event codes
 (one per control, plus an optional alternate per direction so a stick
-and a d-pad can both steer) and is the only path for unrecognised pads.
+and a d-pad can both steer) and is the only path for unrecognized pads.
 A direction pair recorded on the two ends of one raw axis is reported
 as that stick's deflection as well, which is what the gamepad-mouse
 device paces the pointer by. On CD32 machines the pad

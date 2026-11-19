@@ -89,7 +89,7 @@ directory is rarely one you chose.
 
 | Paths | Media folder |
 |---|---|
-| `rom`, `extended_rom`, `fmv_rom`, `[scsi] rom`/`rom_odd`, `[lide] rom`/`rom_bank2`, `[sf2000sd] rom`, `[cartridge] rom` | `roms` |
+| `rom`, `extended_rom`, `fmv_rom`, `[scsi] rom`/`rom_odd`, `[lide] rom`/`rom_bank2`, `[sf2000sd] rom`, `[cartridge] rom`, `[whdload] kickstarts` | `roms` |
 | `[serial] mt32_control_rom`, `mt32_pcm_rom` | `roms/mt32`, then `roms` |
 | `[floppy.dfN]` images | `floppies` |
 | `[ide]`, `[scsi]`, `[lide]`, `[copperhf]` and `[sf2000sd]` drives | `harddrives`, then `cds` |
@@ -218,7 +218,10 @@ profile in a config file.
 The serial and parallel ports have further per-run flags -- `--midi-in`,
 `--midi-out`, `--mt32-control-rom`, `--mt32-pcm-rom`, `--mt32-panel`,
 `--sampler-audio-input`, and `--sampler-input-gain` -- described with their
-`[serial]` and `[parallel]` keys below.
+`[serial]` and `[parallel]` keys below. Non-configuration setup and session
+flags (such as `--run`, `--calibrate-gamepad`, `--install-net-helper`,
+`--profile-live-audio`, and the `--netplay-*` options) are covered in
+`copperline --help` and their matching guide chapters.
 
 ## Top level
 
@@ -251,7 +254,7 @@ hard-resets the machine. Machine profiles that need an extended ROM (CDTV,
 CD32) will tell you if it is missing.
 
 The Kickstart and extended-ROM keys accept images in either byte order.
-Besides plain CPU-order dumps, Copperline recognises the byte-swapped images
+Besides plain CPU-order dumps, Copperline recognizes the byte-swapped images
 prepared for EPROM programmers from their header and restores them on load,
 so either file boots identically. (The single-chip `.bin` ROM files in
 Hyperion's Kickstart 3.1.4/3.2 releases, such as
@@ -488,7 +491,7 @@ Ramsey memory controller (`mem_controller`), whose two registers answer at
 no Gayle IDE.
 
 - The **A3000** has its motherboard SCSI: a Super DMAC at `$DD0000` driving a
-  WD33C93, which Kickstart's own `scsi.device` initialises at boot. Attach
+  WD33C93, which Kickstart's own `scsi.device` initializes at boot. Attach
   drives to it with `[scsi] controller = "a3000"` (the default controller on
   an A3000; see the `[scsi]` section below).
 - The **A4000** has its motherboard IDE interface at `$DD2020`; attach drives
@@ -583,7 +586,7 @@ carried no information.)
 
 - `power_on = false` starts the machine powered off showing a test screen
   until you click the status-bar power button -- useful for arming video
-  capture first. The power button cold-boots (reinitialising RAM according to
+  capture first. The power button cold-boots (reinitializing RAM according to
   `[memory] init`).
 - `auto_launch = true` makes the launcher run this configuration as soon as
   it opens it, including when it is loaded from the launcher. Set in the
@@ -682,13 +685,14 @@ carried no information.)
 
   Run-ahead stays inactive when a speculative frame could observe or change
   host state that the snapshot cannot restore. This includes warp and
-  headless capture, RTG output, rewind/reverse debugging, debugger stops,
-  injected faults, validation/SMC/heat-map/frame-analyzer observers,
-  instruction or waveform traces, a connected control client, video
-  recording, loaded save states, live serial or parallel devices, writable
-  or physical floppy media, mounted CDs, hard-drive and host-directory
-  storage, host networking or plugin boards, MHI decoding, and a live or
-  persistent RTC/NVRAM. Offline WAV and stem capture are supported:
+  headless capture, `[cpu] speed = "fastest"`, RTG output, rewind/reverse
+  debugging, debugger stops, injected faults,
+  validation/SMC/heatmap/frame-analyzer observers, instruction or waveform
+  traces, a connected control client, video recording, loaded save states,
+  live serial or parallel devices, writable or physical floppy media, mounted
+  CDs, hard-drive, PCMCIA, physical host-disk, and host-directory storage,
+  host networking or plugin boards, MHI decoding, and a live or persistent
+  RTC/NVRAM. Offline WAV and stem capture are supported:
   speculative audio is discarded at the mixer before any sink receives it.
   The **Run Ahead** item under Emulation Settings adjusts the level live and
   reports the current blocking reason.
@@ -876,7 +880,7 @@ on work too -- or a plain byte count, and must be multiples of 4 KiB.
 `"zero"`, preserves Copperline's normal compatibility behaviour. `"random"`
 fills chip, slow, motherboard, accelerator, A1000 WCS, and RAM-backed Zorro
 boards with deterministic pseudo-random bytes, which helps expose guest code
-that reads memory before initialising it. The fixed default seed is identical
+that reads memory before initializing it. The fixed default seed is identical
 across hosts and repeated cold resets; `"random:SEED"` selects another decimal
 or `0x` hexadecimal 64-bit seed for test matrices. `"pattern:WORD"` instead
 repeats one decimal or `0x` hexadecimal 16-bit word in big-endian Amiga byte
@@ -963,6 +967,7 @@ genlock probe also finds the genlock, so the OS hides the programmable 31 kHz
 modes that a genlock cannot follow. A [video-slot card](../internals/video)
 that supplies its own sync sets this for as long as it is fitted.
 
+(video-slot)=
 ## `[video_slot]`
 
 ```toml
@@ -999,6 +1004,8 @@ subfolders on first use:
   `ffmpeg`) in the folder itself, beside Copperline, on the `PATH`, or in
   the usual package-manager folders (see [MP4 recordings](ui.md#recording-mp4)).
 - `Output`: recordings of the Program output (MP4 or AVI, see below).
+- `Flyer`: the Video Flyer's drives, `Flyer/FA0` and so on (see `flyer`
+  below).
 
 A video file's sound comes along with its picture and follows the switcher:
 what is on Program is what you hear, through the emulator's sound output,
@@ -1006,8 +1013,6 @@ mixed by how much of each input Program shows (a dissolve crossfades the
 sound, a wipe by area, framestores and mattes are silent). Recordings carry
 the same sound. The real card handles picture only; this stands in for the
 audio-follow-video mixer beside it.
-- `Flyer`: the Video Flyer's drives, `Flyer/FA0` and so on (see `flyer`
-  below).
 
 Until the switcher first drives the card, while the machine boots, both
 outputs are black and silent and the input folders are not read yet; the
@@ -1023,7 +1028,7 @@ menu switch the same settings live.
 
 With `monitors` on, the card's two outputs open as windows of their own,
 each on a picture monitor: **Preview** and **Program**. Closing one only
-hides it; **Recording > Show Toaster Monitors** brings both back.
+hides it; **Recording -> Show Toaster Monitors** brings both back.
 
 The monitors' front-panel buttons work, as on a studio monitor:
 
@@ -1053,7 +1058,7 @@ The settings are kept per monitor in the media folder's
 
 In the Program window, the **REC** button on the monitor's top edge (or
 `R`) starts and stops recording the Program output, picture and sound,
-into `Output` (its lamp lights red while it runs); **Recording > Record
+into `Output` (its lamp lights red while it runs); **Recording -> Record
 Toaster Program** does the same. **SETUP** beside it opens the
 recording setup over the picture: the format, MP4 (H.264 video with square
 pixels and AAC sound; the default) or the recorder's lossless AVI, the
@@ -1088,9 +1093,10 @@ Copperline's `assets/toaster`) started by `S:User-Startup`
 the Toaster software itself: the bridge drops ARexx jobs into the media
 folder's `.copperline` subfolder and the script runs them inside the Amiga
 (see [MCP server](#mcp-server) in the control-protocol reference: tools
-`toaster_switcher`, `toaster_project`, `toaster_rexx`, next to
-`toaster_status`, `toaster_capture`, `toaster_record` and
-`toaster_input`). A job puts the switcher's and the editor's ARexx hosts
+`toaster_switcher`, `toaster_project`, `toaster_program`, `toaster_rexx`,
+next to `toaster_status`, `toaster_capture`, `toaster_record`,
+`toaster_input`, and the Flyer clip tools `flyer_import`, `flyer_export`,
+`flyer_list`). A job puts the switcher's and the editor's ARexx hosts
 on ARexx's shared list of function hosts only while it runs: left there
 (an `addlib` with no `remlib`, in any script), they take the calls of the
 CG's own macros and hang them.
@@ -1102,7 +1108,8 @@ it starts with, and its Alt-F keys from `REXX:CG`), `Assign HIIP:
 Toaster:Programs/Hiip_Support` (the image loaders and savers) and, for
 ToasterPaint and older CG pages, `Assign ToasterFonts: Toaster:PSFonts`.
 
-**Flyer clips.** The `flyerclip` program (built with Copperline) converts
+**Flyer clips.** The `flyerclip` program (built from source and Homebrew
+with Copperline) converts
 between video files and NewTek Video Flyer clips, the Flyer's own format:
 VTASC-coded NTSC composite fields and 16-bit stereo sound
 (`crates/flyerclip`, transcribed from NewTek's Flyer sources; the format is
@@ -1124,8 +1131,9 @@ with 3:2 pulldown, 60 frame video keeps every frame), and the four fields
 of each colour frame take the lines of four pictures in turn. The sound is
 resampled to the Flyer's 44.056 kHz.
 
-**The clip converter.** `flyer-convert` (built with Copperline) is the same
-conversion in a window of its own, drawn in the Toaster's style. With a
+**The clip converter.** `flyer-convert` (built from source and Homebrew with
+Copperline; invoked standalone as `flyer-convert [--media DIR] [FILE|FOLDER...]`)
+is the same conversion in a window of its own, drawn in the Toaster's style. With a
 Flyer fitted, a windowed Copperline starts it beside the machine, pointed
 at `media` (`converter = false` stops that); it runs on its own, can stay
 open after the machine quits, and a second copy started while one runs
@@ -1265,11 +1273,12 @@ menu_scale = "1x"     # size of the pop-up menu: "1x" (default) or "2x"
 full_screen = false   # open borderless fullscreen at start (default false)
 maximized = false     # maximize with title bar and desktop taskbar (default false)
 monitor = "auto"      # host display: auto, primary, one-based number, or exact name
+# position = [100, 80] # window top-left in logical pixels relative to monitor
 window_scale = 1.0    # initial window width and height multiplier, 0.5-4.0
 # title = "{app} {version} · {machine} · {rom}"
 status_bar = true     # show the status bar at start (default true)
 track_display = "track"  # floppy counter: "track" (default) or "cylinder" (CYL.SIDE)
-vsync = true          # synchronise desktop presentation to vblank (default true)
+vsync = true          # synchronize desktop presentation to vblank (default true)
 hidpi_texture = true  # draw the presentation texture at device-pixel density (default true)
 ```
 
@@ -1278,11 +1287,11 @@ layout, set `title` with `{app}`, `{version}`, `{machine}` (or `{m}`), `{rom}`
 (or `{r}`), and `{hash}` (eight hexadecimal digits of the loaded ROM). Other
 text is literal; `{{` and `}}` insert braces. For example,
 `title = "Workbench test · {m} · {r}"` gives an instance a visible name.
-Known Kickstarts use their checksum-identified version; AROS and unrecognised
+Known Kickstarts use their checksum-identified version; AROS and unrecognized
 ROMs include the short hash. The title follows ROM changes and loaded states.
 
 `vsync` controls desktop presentation. On uses strict FIFO vsync to prevent
-tearing. Off requests unsynchronised presentation where the graphics backend
+tearing. Off requests unsynchronized presentation where the graphics backend
 supports it; it may reduce latency but can tear. **Video Settings -> VSync**
 changes it live without restarting or changing normal emulation speed. The
 choice carries into the configuration screen when saving a config. Headless
@@ -1625,7 +1634,7 @@ overrides the config for a single run.
 
 `perf_overlay` (default `false`) shows the performance overlay at start: a
 live readout of emulated fps, speed factor, per-frame emulation cost, host
-utilisation, audio health, and pacer slips in the top-right corner of the
+utilization, audio health, and pacer slips in the top-right corner of the
 display, one line per data point (see
 [the window chapter](ui.md#performance-overlay) for what each line means).
 Cmd+P (macOS) / Alt+P toggles it live
@@ -2155,7 +2164,7 @@ closes.
 Set `middle_click_release = true` to release capture with the middle mouse
 button. This is off by default, so middle click reaches the guest as usual.
 While captured, the release click is consumed and any held guest mouse
-buttons are released. An uncaptured middle click keeps its usual behavior.
+buttons are released. An uncaptured middle click keeps its usual behaviour.
 The launcher's *Input* tab has the same *Middle to release* setting.
 
 Uncaptured, host cursor motion over the display still drives the emulated
@@ -2265,7 +2274,7 @@ Paula's serial in/out is connected:
   the data stream.
   `[serial.phonebook]` maps a dialable number to a `host:port` (or a bare
   host, which dials the modem's default port), so an `ATD<number>` from a
-  terminal program's dialing directory resolves to a real address without
+  terminal program's dialling directory resolves to a real address without
   the guest ever typing one:
   ```toml
   [serial.phonebook]
@@ -2290,7 +2299,7 @@ Paula's serial in/out is connected:
   reset that ignores both.
 
   `session = "path"` replays a scripted dial-out session from a file
-  instead of dialing out over TCP. That makes a modem-using headless run
+  instead of dialling out over TCP. That makes a modem-using headless run
   or test case deterministic; live network traffic, like MIDI, is
   otherwise outside Copperline's replay guarantees. See
   [the modem chapter](modem.md#scripted-sessions) for the
@@ -2568,6 +2577,8 @@ profile = "A600"             # IDE needs a machine with an IDE port
 [ide]
 master = "AmigaSYS.hdf"      # raw flat HDF, read/write
 # slave = "scratch.hdz"      # gzip-compressed hardfile, writes not kept
+# timing = "period"          # period drive mechanics (see Drive timing)
+# spin_up = false            # also model power-on spin-up
 ```
 
 Images are opened read/write. Both kinds of HDF work directly:
@@ -2591,7 +2602,7 @@ geometry an ATA drive cannot present (more than 16 heads, or describing
 more sectors than the image holds), gets 16 heads x 32 sectors per track.
 
 A **gzip-compressed hardfile** attaches too -- the `.hdz` convention, or a
-plainly gzipped `.hdf`. Like the floppy formats it is recognised by content
+plainly gzipped `.hdf`. Like the floppy formats it is recognized by content
 and not by name, so the extension is free. Deflate cannot be read a sector
 at a time, so the image is unpacked into memory when the drive opens: the
 guest sees an ordinary writable disk of either kind above, but the writes
@@ -2603,7 +2614,7 @@ plain hardfile and attach it instead.
 A **CHD hard-disk image** attaches too: MAME's compressed CHD container as
 `chdman createhd -i disk.hdf -o disk.chd` writes it (v5, LZMA/Deflate-
 compressed hunks, `GDDD` geometry metadata; `chdman` ships in MAME's tools,
-`brew install rom-tools` on macOS). It is recognised by content like the
+`brew install rom-tools` on macOS). It is recognized by content like the
 gzip form, and both kinds of hardfile convert -- an RDB image stays an RDB
 image, a bare partition hardfile still gets its synthesized RDB. Sectors
 are decompressed on demand, so nothing is held in memory and the image can
@@ -2624,7 +2635,7 @@ chdman first.
 
 A **VHD** attaches too: the Microsoft Virtual Hard Disk container WinUAE
 creates hardfiles in (and Windows Disk Management, Virtual PC, VirtualBox
-and `qemu-img` write). It is recognised by content, like the forms above,
+and `qemu-img` write). It is recognized by content, like the forms above,
 and both kinds of hardfile work inside it. A **fixed** VHD is a raw image
 with a 512-byte footer on the end; the footer is not part of the disk the
 guest sees. A **dynamic** VHD only holds the parts of the disk that have
@@ -2741,7 +2752,8 @@ fits one of two card types:
 
 - **`card = "cf"`** -- a CompactFlash card, which is a PCMCIA ATA device.
   `path` is any image the `[ide]` drive backend accepts (an RDB HDF, a bare
-  partition hardfile, a `.hdz`, or a host directory). The card presents the
+  partition hardfile, a `.hdz`, a hard-disk `.chd`, a `.vhd`, or a host
+  directory). The card presents the
   CF register layout: memory-mapped at power-on, then contiguous I/O or
   PC-style primary/secondary I/O once a driver writes the card's
   Configuration Option Register -- the layouts the Aminet CF drivers
@@ -2790,6 +2802,7 @@ unit1 = "data.hdf"
 unit2 = "game.cue"           # .cue/.iso/.nrg/.chd attaches a CD-ROM drive
 # unit3..unit6 = ...
 # timing = "period"          # period drive mechanics (see Drive timing)
+# spin_up = false            # also model power-on spin-up
 ```
 
 The `[scsi]` section attaches a SCSI host adapter with up to **seven
@@ -2928,6 +2941,8 @@ register protocol, and the boot ROM's current behaviour in full.
 drive0 = "workbench.hdf"   # channel 0 master
 drive1 = "data.hdf"        # channel 0 slave
 # drive2, drive3           # channel 1 master/slave (ripple only)
+# timing = "period"        # period drive mechanics (see Drive timing)
+# spin_up = false          # also model power-on spin-up
 ```
 
 `[lide]` fits a Zorro II IDE board compatible with LIV2's open-source
@@ -3088,13 +3103,13 @@ Built-in drives (`copperline --list-drive-profiles` prints this table):
 | `conner-cp30104` | Conner CP30104, 120 MB 3.5" ATA, 1991 | 3400 | 19 | 1131 KB/s | 64 KB |
 | `wd-ac2120` | WD Caviar AC2120, 120 MB 3.5" ATA, 1992 | 3605 | 15 | 1.23-1.48 MB/s | 32 KB |
 | `quantum-fireball-1080at` | Quantum Fireball 1080AT, 1.08 GB 3.5" ATA, 1995 | 5400 | 12 | 4.1-8.2 MB/s | 128 KB |
-| `seagate-st125n` | Seagate ST125N, 21 MB 3.5" SCSI, 1987 | 3600 | 38 | 799 KB/s | none |
-| `seagate-st157n` | Seagate ST157N, 49 MB 3.5" SCSI, 1987 | 3600 | 38 | 799 KB/s | none |
+| `seagate-st125n` | Seagate ST125N, 21 MB 3.5" SCSI, 1987 | 3600 | 38 | 799 KB/s | 1 KB (no read-ahead) |
+| `seagate-st157n` | Seagate ST157N, 49 MB 3.5" SCSI, 1987 | 3600 | 38 | 799 KB/s | 1 KB (no read-ahead) |
 | `quantum-prodrive-40s` | Quantum ProDrive 40S, 42 MB 3.5" SCSI, 1988 | 3662 | 19 | 0.87-1.09 MB/s | 64 KB |
 | `quantum-prodrive-80s` | Quantum ProDrive 80S, 84 MB 3.5" SCSI, 1988 | 3662 | 19 | 0.87-1.09 MB/s | 64 KB |
 | `quantum-lps-52s` | Quantum ProDrive LPS 52S, 52 MB 3.5" SCSI, 1990 | 3660 | 17 | 1.03-1.59 MB/s | 64 KB |
 | `quantum-lps-105s` | Quantum ProDrive LPS 105S, 105 MB 3.5" SCSI, 1990 | 3660 | 17 | 1.03-1.59 MB/s | 64 KB |
-| `seagate-st31200n` | Seagate Hawk 1LP ST31200N, 1.05 GB 3.5" SCSI, 1995 | 5411 | 9.3 | 2.9-5.0 MB/s | 256 KB |
+| `seagate-st31200n` | Seagate Hawk 1LP ST31200N, 1.05 GB 3.5" SCSI, 1995 | 5411 | 9.3 | 2.9-5.0 MB/s | 240 KB (usable) |
 | `quantum-fireball-1080s` | Quantum Fireball 1080S, 1.08 GB 3.5" SCSI, 1995 | 5400 | 12 | 4.1-8.2 MB/s | 128 KB |
 
 Any profile works on any interface. A profile describes the mechanism, not
@@ -3161,7 +3176,7 @@ card = "workbench.hdf"
 controller: a 64K I/O window over an SPI-mode SD card that autoconfigures on
 the chain like `[lide]`'s boards. `card` takes the same bare-path/table
 drive form as `[copperhf]`'s units (RDB images, bare partition hardfiles,
-`.hdz`, host directories, and the
+`.hdz`, hard-disk `.chd`, `.vhd`, host directories, and the
 `{ path = "...", name = "...", bootpri = N, filesystem = "..." }` table) --
 **hard disks only**: unlike `[lide]`, a CD image path is rejected, since the
 controller speaks the SD card command set, not ATAPI/SCSI-CDROM.
@@ -3217,7 +3232,7 @@ the current run: `--host-disk DEVICE [ATTACH]` is read-write, while
 slot empty and the machine starts anyway.
 
 The disk this computer is running from is never offered and never opened,
-whatever is written here, and no RDB is synthesised over a disk that has
+whatever is written here, and no RDB is synthesized over a disk that has
 none. Opening a real disk asks for permission the first time, and the host's
 volumes on it are unmounted while the machine has it. Attach read-only the
 first time: [](host-disks.md) covers the whole of it.
@@ -3464,11 +3479,6 @@ holds, and where the buffer sits decides what that is. Lotus Esprit Turbo
 Challenge hangs on one layout where the data decodes as a `MOVE` to
 `INTENA` that clears the master interrupt enable. A host convenience should
 not change the guest's memory map unless asked to.
-
-Up to and including 0.20.0 `share` defaulted on for windowed sessions
-(the launcher's machines too), which is what made that Lotus hang look
-like an emulation bug. It is off everywhere now; turn it back on with
-`share = true` or `--clipboard`.
 
 Headless, `share = true` is still safe for determinism: the bridge is then
 reachable only through the control protocol's `clipboard.get`/`clipboard.set`
@@ -3954,7 +3964,7 @@ running software at any time.
   source (`hrtmon-rom/README.md`) under GPL-2.0-or-later. `"none"` (the
   default) leaves the slot empty.
 - `rom` replaces the bundled image with an HRTMon-compatible cartridge image
-  of your own, recognised by its `HRT!` tag at offset 0 or 4. It applies
+  of your own, recognized by its `HRT!` tag at offset 0 or 4. It applies
   only with `model = "hrtmon"`; setting it without a model is an error.
 
 `--cartridge hrtmon` fits the cartridge from the command line, and the
@@ -4014,7 +4024,7 @@ drive that could not serve it at that moment -- no media, or the motor
 still off, the class behind the classic loader dead-spins -- and a
 keyboard handshake pulse too narrow to count as one while the MCU was
 waiting for it, which costs a key and stalls input until the keyboard
-resynchronises after 143 ms. Each finding names the PC (or Copper
+resynchronizes after 143 ms. Each finding names the PC (or Copper
 address) that made the access and the beam position, is deduplicated by
 (kind, register, writer) with a repeat count, and is logged the first time
 it is seen. It also arms

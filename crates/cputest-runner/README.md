@@ -13,14 +13,14 @@ path filters. It combines:
   on 68020, 68030, 68040 and 68060, using full addressing extensions and
   32-bit addresses. It covers moves, indexed address calculation, bitfields,
   compare-and-swap, and long multiplication/division, including the 060's
-  exception behavior for unsupported instruction forms.
+  exception behaviour for unsupported instruction forms.
 - Asset-free 030/040/060 PMOVE/MOVEC privilege and MMU enable checks,
   page-table walks, PFLUSHA/ATC invalidation, write protection,
   invalid data/code pages, a translated guest load and write-fault frames.
 - A hot arithmetic/store loop compared against instruction stepping on all
   four models, also with translation enabled on 030/040/060 and after changing
   the hot instruction. Registers, flags, PC, stack banks and memory must agree.
-  The crate enables `m68k/jit` and runs on a native host; nonzero trace calls
+  The crate enables `m68k/jit` and runs on a native host; non-zero trace calls
   and retired instructions therefore prove Cranelift execution. Decoded
   fallback does not count. Without `jit`, these counters would also count
   portable traces, which is why the feature is mandatory here.

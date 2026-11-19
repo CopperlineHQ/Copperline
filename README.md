@@ -18,37 +18,19 @@ its own PDF manual.
 
 ## Features
 
-- **Chipset and machine models**: OCS, ECS, and AGA support with profiles from the A500 through the A4000, plus CDTV and CD32.
-- **Configurable CPU and memory**: Motorola 68000 through 68060, optional FPU and MMU support, and configurable Chip, Fast, and Slow RAM.
+- **Chipset and machine models**: OCS, ECS, and AGA support with profiles from the A1000 and A500 through the A4000 (including A500+, A2000, A600, A1200, A3000), plus CDTV and CD32.
+- **Configurable CPU and memory**: Motorola 68000 through 68060 (including EC variants), optional FPU and MMU support, and configurable Chip, Fast, Slow, motherboard, accelerator, and Zorro III RAM.
 - **Accelerated execution**: Optional 68020+ JIT, either at a fixed, reproducible clock or in a `fastest` mode that gives the CPU whatever host time the real-time chipset leaves. See [CPU configuration](docs/guide/configuration.md).
-- **Storage and media**: Floppy disk images (ADF, ADZ, DMS, IPF with deterministic weak-bit revolutions, SCP, and ZIP-packed ADF), physical floppy drives via Greaseweazle (FluxBridge), IDE (Gayle/A4000 and expansion boards), SCSI (A2091, A3000, A4091), virtual hard disks (`copperhf.device`), CD-ROM, SCSI tape drives backed by host files, and host directory mounts.
-- **Audio and video**: 4-channel Paula audio, RTG graphics cards (Picasso II/II+, Z3660), host MIDI in/out bridging, and built-in Roland MT-32 and General MIDI synthesis.
-- **Expansion and networking**: Zorro II/III autoconfig, A2065 Ethernet, host-backed bsdsocket.library, and sandboxed WebAssembly expansion plugins.
-- **Debugging**: CPU and chipset debugger, reverse stepping, live Kickstart/AROS symbols, frame and [instruction profiling](docs/debugger/profiling.md) with bounded sample buffering and overflow reporting, VCD waveforms, and source debugging through GDB or DAP. Both the native VS Code extension and the [Copperline fork of Bartman's extension](docs/debugger/vscode-bartman.md) are supported.
+- **Storage and media**: Floppy disk images (DD and HD ADF, ADZ, DMS, IPF with deterministic weak-bit revolutions, SCP, and ZIP-packed ADF), physical floppy drives via Greaseweazle (FluxBridge), IDE (Gayle, A4000, and lide boards), SCSI (A2091, A3000, A4091), virtual hard disks (`copperhf.device`), CHD and VHD hardfiles, PCMCIA CF/SRAM cards, SF2000 SD, CD-ROM (with CD32 FMV, CD32 NVRAM, and CDTV bookmark RAM), SCSI tape drives backed by host files, physical host disks, and live host directory mounts.
+- **Audio and video**: 4-channel Paula audio, Toccata 16-bit sound board, MHI MPEG audio decoder board, RTG graphics cards (Picasso II/II+, Graffity, Z3660), NewTek Video Toaster 4000 and Video Flyer emulation, Smart Framing with Autocrop and integer scaling (including native RTG integer scaling), AVI/MP4/GIF capture, host MIDI in/out bridging, and built-in Roland MT-32 and General MIDI (Coppersynth) synthesis.
+- **Expansion and networking**: Zorro II/III autoconfig, A2065 Ethernet, host-backed `bsdsocket.library` (HostSocket), ZZ9000 SDK crypto acceleration (`zz9k`), Hayes AT modem and host serial bridging, opt-in clipboard sharing, and sandboxed WebAssembly expansion plugins.
+- **Debugging**: Unified [Debug workspace](docs/debugger/window.md) (Debugger, Frame Analyzer, and Console beside the display in one desktop window, opened with `Cmd+B` / `Alt+B`), reverse stepping, live Kickstart/AROS symbols, frame and [instruction profiling](docs/debugger/profiling.md), VCD waveforms, disk-fault injection, A/B divergence finding, and source debugging through GDB or DAP. Both the native VS Code extension and the [Copperline fork of Bartman's extension](docs/debugger/vscode-bartman.md) are supported.
 - **Automation and replay**: [Save states](docs/guide/ui.md#save-states), [WinUAE state import](docs/guide/winuae-state.md), headless input scripts and captures, and a JSON-RPC control protocol. `copperline-ctl` also provides DAP (`--dap`) and MCP (`--mcp`) servers. GDB and TCP DAP listen on loopback unless `--allow-remote-debugging` is supplied; control tokens are handed off through an info file and kept out of logs.
 - **Freezer cartridge**: Action Replay-style cartridge support with bundled HRTMon (`--cartridge hrtmon`), allowing running software to be frozen into the monitor via the menu, a hotkey, headless `--freeze-after`, or the control protocol.
 - **Direct launching**: Boot directly into WHDLoad game packages (`--whdload`) or host-built Amiga executables (`--run`, including bare Kickstart 1.3), with a WinUAE-compatible `uaelib` trap allowing guest code to control warp speed, log debug messages, and register debug resources.
-- **WebAssembly build**: Run directly in modern web browsers at [copperline.dev/try](https://copperline.dev/try/).
-- **Libretro core**: [Run Amiga and CD32 software in RetroArch](docs/guide/libretro.md), with embedded AROS ROMs, WHDLoad, disk playlists, save states and RetroArch rollback netplay.
-
-**Video Settings -> Framing -> Smart** automatically corrects small horizontal
-display offsets. Combine it with **Autocrop** and **Integer** scaling to fit
-the detected display at the largest whole-pixel scale, including artwork
-outside the normal TV aperture. See [display configuration](docs/guide/configuration.md).
-RTG integer scaling fits the board's native resolution to the available display
-area: a 640x480 desktop reaches 2x on a 1920x1080 screen, with room for the status bar.
-The RTG picture stays at native pixel quality while menus and panels keep
-their usual proportions and translucency.
-
-The [Debug workspace](docs/debugger/window.md) puts the Amiga display beside
-its debugger, Frame Analyzer, and Console in one desktop window. Open
-**Debugger...** in the menu or press
-`Cmd+B` on macOS or `Alt+B` on Linux/Windows. Drag the display divider to resize
-the panes; the title bar's **Play** switch restores the display layout while
-keeping the inspectors and their state. Click the display to send input to the Amiga, and
-use `Cmd+G` / `Alt+G` to return input to the debugger. Monospace readouts use
-Hack with a slashed zero. Audio scopes stay beside fixed-height channel
-details as DMA and interrupt events change.
+- **WebAssembly and publishing**: Run directly in modern web browsers at [copperline.dev/try](https://copperline.dev/try/), or bundle standalone native and single-file web players with the [publishing kit](docs/guide/publishing.md).
+- **Libretro core**: [Run Amiga and CD32 software in RetroArch](docs/guide/libretro.md), with embedded AROS ROMs, WHDLoad, disk playlists, save states, and RetroArch rollback netplay.
+- **Terminal display**: Interactive sessions inside Kitty-protocol terminals (`--terminal`), including over SSH.
 
 ## Installation
 
@@ -140,47 +122,23 @@ CD images require a CD32/CDTV configuration. Desktop packages offer **Open with*
 see [Opening files](docs/guide/getting-started.md#opening-files) for registration
 and supported formats.
 
-Long options also accept `--model=A1200` or `--config=machine.toml`.
-For options with several arguments, `=` supplies the first:
-`--screenshot-after=10 out.png`. `--help` writes to stdout, and mistyped
-option names suggest a close match. Desktop launches show fatal session
-errors in a native dialog; terminal and headless commands report to stderr.
-
-For a build pipeline, use `copperline --run build/hello --window-scale 2` to
-start at twice the normal window width and height. `--maximized` opens a
-maximized window with its title bar and desktop taskbar visible;
-`--full-screen` opens borderless fullscreen.
-Use `--list-monitors` to list host displays and `--monitor 2` to open on the
-second display, or select *Host monitor* in the launcher's Display category.
-Use `--window-position 100 80` or the launcher's *Window position* field to
-place its top-left corner 100 by 80 logical pixels into that display.
-On Wayland, monitor selection applies to fullscreen; the compositor places
-ordinary windows.
+Long options also accept `=` syntax (such as `--model=A1200` or
+`--screenshot-after=10 out.png`), and window sizing and placement can be
+controlled with `--window-scale`, `--maximized`, `--full-screen`, `--monitor`,
+and `--window-position`. See [command-line overrides](docs/guide/configuration.md#command-line-overrides)
+for the complete flag reference.
 
 ### Essential keyboard shortcuts
 
 - **Quit**: `Cmd+Q` (macOS) / `Alt+Q` (Linux/Windows)
 - **Debugger**: `Cmd+B` (macOS) / `Alt+B` (Linux/Windows)
 - **Screenshot**: `Cmd+S` (macOS) / `Alt+S` (Linux/Windows) saves the displayed picture with its current effects.
-- **Native screenshot (1:1)**: `Cmd+Option+S` (macOS) / `Ctrl+Alt+S` (Linux/Windows)
+- **Native screenshot (1:1)**: `Cmd+Option+S` (macOS) / `Ctrl+Alt+S` (Linux/Windows) saves the original playfield pixels.
 - **Mouse capture**: `Cmd+G` (macOS) / `Alt+G` (Linux/Windows)
 - **Joystick toggle**: `Cmd+J` (macOS) / `Alt+J` (Linux/Windows) switches between physical gamepad and keyboard arrows.
 
-Captured mouse movement compensates for the picture's display scale, so
-enlarging the window or entering fullscreen does not amplify its speed.
-The conversion accounts for monitor DPI and uses native board pixels for RTG.
-Adjust the live mouse speed with `[input] mouse_sensitivity` or the launcher's
-*Input* tab.
-
-See the [UI guide](docs/guide/ui.md) for full interface details.
-
-The camera button captures the displayed picture, including scaling, shaders
-and the monitor bezel. Native screenshots save the original playfield pixels.
-The WHDLoad library and favourites support mouse-wheel and trackpad scrolling.
-An unreadable saved default configuration falls back to built-in settings.
-
-The desktop window title identifies the machine and boot ROM; `[display] title`
-in a TOML configuration can set a custom title format for multiple instances.
+See the [UI guide](docs/guide/ui.md) for the full menu, shortcut, mouse
+sensitivity, and status-bar reference.
 
 ## Configuration
 
@@ -210,19 +168,25 @@ See the [configuration guide](docs/guide/configuration.md) for the complete refe
 
 The manual is published at [copperline.dev/docs](https://copperline.dev/docs/) and available under `docs/`:
 
-- [Getting Started](docs/guide/getting-started.md) - Installation and setup
-- [Configuration](docs/guide/configuration.md) - Configuration file reference and CLI options
-- [User Interface](docs/guide/ui.md) - Windows, menus, and controls
-- [WHDLoad Support](docs/guide/whdload.md) - Direct WHDLoad package loading
+- [Getting Started](docs/guide/getting-started.md) - Installation, building from source, and first boot
+- [Configuration](docs/guide/configuration.md) - Configuration file reference, machine profiles, and CLI options
+- [Troubleshooting](docs/guide/troubleshooting.md) - Version matching, compatibility, and known limits
+- [User Interface](docs/guide/ui.md) - Windows, menus, recordings, shortcuts, and gamepad calibration
+- [Terminal Display](docs/guide/terminal.md) - Running interactively inside Kitty-protocol terminals
+- [WHDLoad Support](docs/guide/whdload.md) - Direct WHDLoad package loading and library management
 - [Direct Executable Launching](docs/guide/run.md) - Running cross-compiled Amiga binaries
 - [Floppy Hardware Bridge](docs/guide/fluxbridge.md) - Real floppy drives via Greaseweazle
-- [Rollback Netplay](docs/guide/netplay.md) - two-player sessions with mice, joysticks or CD32 pads, or three- and four-player sessions through the parallel-port adapter, using desktop GUI/CLI (direct IP or encrypted Internet invitations with automatic NAT traversal and relay fallback), or browser WebRTC with QR invitations. Both frontends transfer the host's ROMs, disks and machine settings and synchronize host floppy swaps. Up to eight spectators can watch through a separate invitation, joining even mid-game by replaying the host's confirmed history. Desktop also shares WHDLoad, `--run`, and IDE/SCSI/LIDE game volumes using temporary session storage, and preserves IPF protection-track timing during disk transfer. Mouse movement is combined per frame, and desktop corrections finish rendering so continuous movement keeps reaching the display. Detailed desktop transport logs are opt-in with `COPPERLINE_NETPLAY_DEBUG=1`.
-- [Headless Mode](docs/guide/headless.md) - Scripted runs and screenshot/frame dumps
-- [Debugging](docs/debugger/window.md) - In-window, headless, and GDB debugging
-- [VS Code](docs/debugger/vscode.md) - Setup and illustrated source debugging; [Bartman with Copperline](docs/debugger/vscode-bartman.md) covers fork installation and visual profiling
-- [Debug Adapter Protocol](docs/debugger/dap.md) - Launch, attach, and protocol reference for VS Code, nvim-dap, and other IDEs
-- [Control Protocol](docs/debugger/control.md) - JSON-RPC control interface (`copperline-ctl`)
-- [Internals](docs/internals/architecture.md) - Architecture, chipset, and timing models
+- [Real Hard Disks](docs/guide/host-disks.md) - Attaching physical host disks and storage cards
+- [MT-32](docs/guide/mt32.md), [Coppersynth](docs/guide/coppersynth.md), and [Modem](docs/guide/modem.md) - Built-in MIDI synthesizers and Hayes AT modem emulation
+- [UAE Import](docs/guide/import-uae.md) and [WinUAE States](docs/guide/winuae-state.md) - Importing existing configurations and save states
+- [Rollback Netplay](docs/guide/netplay.md) - Two- to four-player rollback sessions and spectators across desktop and browser, with automatic media sharing
+- [Headless Mode](docs/guide/headless.md) - Scripted runs, captures, and automated verification
+- [Browser](docs/guide/browser.md), [Libretro](docs/guide/libretro.md), and [Publishing](docs/guide/publishing.md) - WebAssembly frontend, RetroArch core, and standalone native/web player kits
+- [Zorro Board Plugins](docs/zorro.md) - Data-driven and WebAssembly expansion boards
+- [Debugging](docs/debugger/window.md) - Debug workspace, console, headless debugger, reverse stepping, waveforms, profiling, and GDB
+- [VS Code](docs/debugger/vscode.md) and [Bartman with Copperline](docs/debugger/vscode-bartman.md) - IDE source debugging and visual profiling
+- [Debug Adapter Protocol](docs/debugger/dap.md) and [Control Protocol](docs/debugger/control.md) - IDE DAP (`--dap`), JSON-RPC automation (`copperline-ctl`), and MCP (`--mcp`)
+- [Internals](docs/internals/architecture.md) - Architecture, chipset, timing, peripherals, and save-state format
 
 To build the documentation locally:
 
@@ -271,7 +235,6 @@ fails the check; raw samples and build provenance are retained.
 `cargo test --test fuzz_regressions` replays retained parser inputs without
 nightly or external media. [Fuzzing instructions](fuzz/README.md) cover the
 nine libFuzzer targets, brief PR smoke runs, and daily sustained campaigns.
-WHDLoad archive reads and extraction have [decompression limits](docs/guide/whdload.md).
 
 See [`tests/README.md`](tests/README.md) for details on asset paths and test configuration.
 

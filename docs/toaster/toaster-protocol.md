@@ -1,4 +1,4 @@
-# Video Toaster 4000 ↔ Amiga interface (recovered)
+# Video Toaster 4000 <-> Amiga interface (recovered)
 
 Recovered from NewTek's released switcher source (`AmigaVideoToasterComplete.zip`:
 `switcher/SRC/*.a`), the compiled objects in `open-video-toaster-src/switcher.zip`
@@ -14,10 +14,10 @@ Status: derived from code, not yet checked against hardware. Items marked
 
 | Direction | Channel | Notes |
 |---|---|---|
-| Amiga → card | Denise/Lisa digital RGB on the video slot | Everything: FPGA bitstreams, control registers, framestore writes, read requests |
-| Card → Amiga | CIA-A port B, `$BFE101` | Switcher sets DDRB (`$BFE301`) to input, polls with interrupts and DMA mostly off |
-| Card → Amiga | Genlock sync | Software sets `BPLCON0` ERSY and checks the beam still moves |
-| Amiga → card | CIA-B PRA bit 2 (`$BFD000`, parallel SEL) | Pulsed once after a successful FPGA load |
+| Amiga -> card | Denise/Lisa digital RGB on the video slot | Everything: FPGA bitstreams, control registers, framestore writes, read requests |
+| Card -> Amiga | CIA-A port B, `$BFE101` | Switcher sets DDRB (`$BFE301`) to input, polls with interrupts and DMA mostly off |
+| Card -> Amiga | Genlock sync | Software sets `BPLCON0` ERSY and checks the beam still moves |
+| Amiga -> card | CIA-B PRA bit 2 (`$BFD000`, parallel SEL) | Pulsed once after a successful FPGA load |
 
 The switcher never looks the card up in the expansion list. (`flyer.library`
 does find the Flyer by `FindConfigDev` manufacturer `$088F`.)
@@ -46,9 +46,9 @@ A pixel's 4-bit value is `R | G<<1 | B<<2 | I<<3` (= bitplane index for data).
 ## 3. Per-line headers (sprites 0 + 1, attached)
 
 Every control-carrying scan line starts with sprite 0 (+ attached sprite 1)
-at `HSTART $5B` (lo-res), sprite lines `$15`–`$105` (`SPRITE0CTRL241 =
+at `HSTART $5B` (lo-res), sprite lines `$15`-`$105` (`SPRITE0CTRL241 =
 $152D0603`, `SPRITE1CTRL241 = $152D0683`). The 16 header bits per line per
-input are the sprite data words; NewTek uses bits 15–8 (the first 8 lo-res
+input are the sprite data words; NewTek uses bits 15-8 (the first 8 lo-res
 pixels).
 
 On AGA the switcher complements sprite 1 in some lists and compensates with
@@ -57,14 +57,14 @@ On AGA the switcher complements sprite 1 in some lists and compensates with
 Header words per line: `R` (sprite 0 A), `G` (sprite 0 B), `B` (sprite 1 A),
 `I` (sprite 1 B).
 
-- **Line number** `L` (0–239): `B` bits 15–12 = L3–L0, `I` bits 15–12 = L7–L4
-  (`ror.l #4 / ror.w #4` encoding in `dswsub`, `FillSprite`). `L ≥ $F0` (I
+- **Line number** `L` (0-239): `B` bits 15-12 = L3-L0, `I` bits 15-12 = L7-L4
+  (`ror.l #4 / ror.w #4` encoding in `dswsub`, `FillSprite`). `L >= $F0` (I
   nibble `$F`) marks a non-data line: an extended header or a dummy
   (`$F000F000` = "not an ELH, dummy line 255").
-- **Extended header select** `E`: `R` bits 15–12. `%1111` = none
+- **Extended header select** `E`: `R` bits 15-12. `%1111` = none
   (`VTI_ENONE`); E0 `%1000`, E1 `%0100`, E2 `%1010`, E3 `%0110`, E4 `%1001`,
-  E5 `%0101`, E6 `%1011`, E7 `%0111`. E6 has 16 sub-pages E60–E6F in bits 11–8.
-- **Field** `F`: `G` bits 13–12. 0 = I, 1 = II, 2 = III, 3 = IV. III/IV are the
+  E5 `%0101`, E6 `%1011`, E7 `%0111`. E6 has 16 sub-pages E60-E6F in bits 11-8.
+- **Field** `F`: `G` bits 13-12. 0 = I, 1 = II, 2 = III, 3 = IV. III/IV are the
   colour-subcarrier-inverted ("complemented") fields.
 
 ### 3a. Write lines (framestore write; `DoSafeWrite`/`dswsub`, `tblI`, `tblII`)
@@ -79,13 +79,13 @@ Header words per line: `R` (sprite 0 A), `G` (sprite 0 B), `B` (sprite 1 A),
 | `$A000` / `$B000` | complemented, low nibble, field III / IV |
 
 `G` bit 15 = write, bit 14 = high nibble. Four consecutive lines (NH, NL, CH,
-CL) make one stored line. Toaster interlaced line number `n` (1–480 usable)
+CL) make one stored line. Toaster interlaced line number `n` (1-480 usable)
 = `2L + 1` for fields I/III, `2L` for fields II/IV (`lsr.w #1,d0 ; bcs field I`).
 
 The data is the line's hi-res pixels: one 4-bit nibble per pixel (plane 0 =
 LSB). 736 samples on ECS, 768 on AGA (`bm_BytesPerRow` 92/96). Stored sample
 = `NH<<4 | NL` (normal) and `CH<<4 | CL` (complemented). **Bank** (DV1/DV2) is
-set through the extended headers before the write (`dswsprchng`) — **open**:
+set through the extended headers before the write (`dswsprchng`) -- **open**:
 exact field.
 
 Write display: `DIWSTRT $155C`, `DDFSTRT $20`, `BPLCON0 $8204/$9204/$C204`
@@ -94,20 +94,20 @@ header sits left of the bitmap via the scroll ("put sprite left of bm").
 
 ### 3b. Read-request lines (`ReadScanLine`, `ReadPart1/2`, `FillSprite`)
 
-`B/I` = line number `L` (requested framestore line >> 1). `R` bits 14–13 =
-`DL`, the pixel within each quad to output (0–3; codes `%0000 %0010 %1100
+`B/I` = line number `L` (requested framestore line >> 1). `R` bits 14-13 =
+`DL`, the pixel within each quad to output (0-3; codes `%0000 %0010 %1100
 %1110`). `G` bit 13 = complemented, bit 12 = field II/IV. Reads come in groups
-of 8 lines: pixels 0–3 × normal/complemented.
+of 8 lines: pixels 0-3 x normal/complemented.
 
 ### 3c. Extended Line Headers (ELH)
 
-23 headers: EH0–EH5, EH60–EH6F, EH7, each four words (R, G, B, I), bits
-15–8 used. They hold the card's control state: preview/program/key muxes
-(`PV`, `LK`, `AM`, `BM`: VID1–4, DAC0/1, ENCODER, MAIN/EXT), mattes
+23 headers: EH0-EH5, EH60-EH6F, EH7, each four words (R, G, B, I), bits
+15-8 used. They hold the card's control state: preview/program/key muxes
+(`PV`, `LK`, `AM`, `BM`: VID1-4, DAC0/1, ENCODER, MAIN/EXT), mattes
 (`MA`, `MB`, `MP`), `CDS` (chroma/lum key), `DP`/`EP` (hue phase), `LKA`/`LKB`,
 `PED`, `GAIN`, and flag bits (`CERB`, `LCE`, `NOPAIRS`, `LKNOT`, `BRIDGE`,
 `LUT`, `SA`, `LKEC`, `LINP`, `ABSE`, `WERB`, `LINR`, `AFR`, `AFP`, `OBR`,
-`TERM1–4`, `USERON`, `MATTE`, `NOSNOW`, `NOKEYINVERT`, `NOKEYSHIFT`,
+`TERM1-4`, `USERON`, `MATTE`, `NOSNOW`, `NOKEYINVERT`, `NOKEYSHIFT`,
 `NOLOCK`, `PVMUTE`). Full bit map: `INC/elh.i`. They are sent as lines at
 the top/bottom of a field (`SendELHList2Toaster`, `MainBlankList = EH3,EH2,EH3`).
 
@@ -115,16 +115,16 @@ the top/bottom of a field (`SendELHList2Toaster`, `MainBlankList = EH3,EH2,EH3`)
 
 While reading, the Amiga displays a 2-plane "read preset" bitmap
 (`InitReadScanLine`). Every quad (4 hi-res pixels) carries an 8-bit **quad
-number** `Q`: across the quad's 4 pixels, `I` carries Q7–Q4 and `B` carries
-Q3–Q0, MSB first (`Bytes2BitMaps` + `InitBytes2BmLUT` store the complement;
+number** `Q`: across the quad's 4 pixels, `I` carries Q7-Q4 and `B` carries
+Q3-Q0, MSB first (`Bytes2BitMaps` + `InitBytes2BmLUT` store the complement;
 `ReadColorMap` inverts it back). Runs of `CaliQuadsPerGrab` quads repeat the
 same `Q`.
 
-The card puts framestore byte `[bank][line][4·Q + DL]` (normal or complemented
+The card puts framestore byte `[bank][line][4*Q + DL]` (normal or complemented
 per the header) on the parallel port while that quad is on screen. The CPU
 polls `$BFE101` at times taken from the calibration tables (`HardSets`
 `RSLTable7/10`: 7 or 10 grabs per line, `GrabCode` table, timed off
-`VHPOSR`), collects the bytes over `CaliGroupsOf8 × 8` lines, then `rearrange`s
+`VHPOSR`), collects the bytes over `CaliGroupsOf8 x 8` lines, then `rearrange`s
 them. **Open**: the card's pipeline delay between pixel and port output.
 
 ## 5. Startup checks and what makes them pass
@@ -132,19 +132,19 @@ them. **Open**: the card's pipeline delay between pixel and port output.
 From `switcher.a` (blocks under `IFND TOASTERLESS`):
 
 1. `LoadPatches` + `ProgramChips` (XProgram): FPGA bitstreams `vta`/`vti`
-   ("TPOG/MOM/XBOD" files) are drawn as bitplanes — clock on `I` (pattern
-   `$3333`), data1 on `B`, data2 on `R` — over a stretched frame (CPU rewrites
+   ("TPOG/MOM/XBOD" files) are drawn as bitplanes -- clock on `I` (pattern
+   `$3333`), data1 on `B`, data2 on `R` -- over a stretched frame (CPU rewrites
    `VHPOSW = $2400` on each copper interrupt so DMA keeps streaming). Then
-   `BPLCON0 = $0202` (ERSY), two `VHPOSR` reads a timer delay apart: equal ⇒
-   "no sync" ⇒ failure. Copperline ignores ERSY, so this passes as-is.
+   `BPLCON0 = $0202` (ERSY), two `VHPOSR` reads a timer delay apart: equal =>
+   "no sync" => failure. Copperline ignores ERSY, so this passes as-is.
 2. `SendELHList2Toaster(elhlistconf)`, `InstallToaster`.
-3. `CaliReadScanLine` → `TestReadScanLine`: writes a 736-byte ramp
-   (71…200…71…200…71…200…110) to bank 0 line 504 with `SendBytes2Toaster`,
+3. `CaliReadScanLine` -> `TestReadScanLine`: writes a 736-byte ramp
+   (71...200...71...200...71...200...110) to bank 0 line 504 with `SendBytes2Toaster`,
    reads it back with `ReadScanLine`, compares 501 bytes of both the normal
    and complemented copies. Retries other read tables, then a full calibration.
    **Failure here = "Video Toaster not responding"** (error 80).
 4. `TestMain2EXT`, `AutoCalibrate` (pedestal/gain/phase from the card's
-   digitised inputs), `TestVid1Camera`, AutoHue.
+   digitized inputs), `TestVid1Camera`, AutoHue.
 
 ## 6. Emulation notes (Copperline)
 
@@ -160,7 +160,7 @@ From `switcher.a` (blocks under `IFND TOASTERLESS`):
 
 | Topic | Where |
 |---|---|
-| Startup sequence | `switcher.a` ~1820–2470 |
+| Startup sequence | `switcher.a` ~1820-2470 |
 | FPGA load | `OBJ/XProgram.AA_o` (`ProgramChips`, `FillWithData`, `madelist`) |
 | Write | `cop.a` `DoSafeWrite`/`dswsub`/`dswsprchng`, `tblI/tblII`, `SafeWriteCopList1` (in `Switcher.main.AA`) |
 | Read | `autocal.a` `ReadScanLine`, `ReadPart1/2`, `InitReadScanLine`, `GrabCode`; `OBJ/grab.o` |

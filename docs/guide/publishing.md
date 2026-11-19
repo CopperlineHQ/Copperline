@@ -22,13 +22,13 @@ id = "skyhawks"              # Per-user settings/saves directory name
 version = "1.2"              # Optional release version (--version, bundle name)
 
 [payload]                    # Exactly one payload kind
-cd = "skyhawks.iso"          # CD image (ISO, CUE/BIN, CHD)
+cd = "skyhawks.iso"          # CD image (ISO, CUE/BIN, CHD, NRG)
 # adf = "skyhawks.adf"       # Floppy disk image for DF0
 # run = { files = "amiga", executable = "Skyhawks", args = "" }
 # sha256 = "..."             # Optional SHA-256 payload integrity check
 
 [machine]
-model = "CD32"               # A500, A500+, A2000, A600, A1200, A3000, A4000, A1000, CDTV, CD32
+model = "CD32"               # A1000, A500, A500OCS, A500+, A2000, A600, A1200, A3000, A4000, CDTV, CD32
 # chip = "2M"                # Optional memory overrides
 # fast = "8M"
 # slow = "512K"
@@ -108,9 +108,11 @@ reuses the player binary already built. Package outputs:
 - **`--portable`:** Adds a `portable.txt` beside the executable so all user
   settings and save data stay inside the bundle directory.
 
-The player is built without the control server and GDB stub, ignores every
-`COPPERLINE_*` environment variable, and disables the debugging,
-input-recording, performance-overlay and status-bar shortcuts.
+The player is built without the control server, GDB stub, and optional
+non-player peripheral features (WASM boards, host networking, MIDI/synths,
+MHI, FluxBridge, host serial, Internet netplay), ignores every
+`COPPERLINE_*` environment variable, and disables the debugging, freezer
+cartridge, input-recording, performance-overlay and status-bar shortcuts.
 
 ## User experience
 
@@ -241,7 +243,8 @@ whether you may redistribute it is yours to establish.
 
 The browser build has no CD drive, no host-directory volume and no memory
 overrides, so the packer refuses `cd` and `run` payloads, the CDTV and CD32
-models, and `[machine] chip`/`fast`/`slow`. It packs any other model but warns
+models, and `[machine] chip`/`fast`/`slow` (note that `tools/publish-web` also
+does not yet list `A2000` in its accepted model table). It packs any other model but warns
 outside the A500 and A1200, the two the hosted browser build vets against the
 AROS ROM. `[display] shader` and `bezel` are accepted and not drawn yet (the
 packer says so): the page shows the plain picture.
@@ -321,7 +324,8 @@ is stored, a loaded state takes its disk back, Erase saves stays erased, a
 Restart after a failure runs one frame loop). It has no layout, canvas or
 audio device, and imports the modules from `data:` instead of `blob:` URLs.
 The second covers those: it opens the file in a headless Chrome (`--chrome PATH` or
-`$CHROME` when it is not in a usual place), clicks Start, and additionally
+`$CHROME` when it is not in a usual place), accepts the same `--seconds` and
+`--min-colours` options, clicks Start, and additionally
 fails if the page requested anything but itself; give it an `http://` URL to
 check a hosted copy, and `--screenshot OUT.png` to keep the picture.
 

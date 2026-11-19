@@ -31,7 +31,7 @@ CPU dependency updates also run the standalone
 [CPU conformance gate](../crates/cputest-runner/README.md). Root `cargo test`
 does not execute that crate or the dependency's own tests. The gate needs no
 Amiga ROMs/disks and covers a fixed instruction subset on 68020/030/040/060,
-MMU translation and fault frames, and native JIT versus interpreter behavior.
+MMU translation and fault frames, and native JIT versus interpreter behaviour.
 
 The fast gate for a CPU, memory, bus, IRQ, or chipset change is:
 
@@ -39,7 +39,7 @@ The fast gate for a CPU, memory, bus, IRQ, or chipset change is:
 cargo test
 cargo build --release
 cargo test --release --test probe_golden
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 git diff --check
 ```
@@ -146,9 +146,9 @@ IDENTIFY PACKET DEVICE succeeds, PACKET data-in transfers follow) -- a
 firmware-compatibility check that a synthetic-host unit test cannot give,
 since it exercises Copperline's ATAPI protocol implementation against real
 third-party driver code rather than against our own assumptions about it.
-No bundled Amiga OS ships ATAPI support in its stock drivers (see
-AGENTS.md), so this cannot be a "guest mounts the CD" test without also
-bundling a period driver as an asset; `cdfs.rom` is exactly that. Needs a
+No bundled Amiga OS ships ATAPI support in its stock drivers, so this cannot
+be a "guest mounts the CD" test without also bundling a period driver as an
+asset; `cdfs.rom` is exactly that. Needs a
 local `lide.rom`, `cdfs.rom`, and a bootable hard-disk image under
 `test-assets/lide/`, plus a host ISO-authoring tool (`hdiutil` on macOS,
 `genisoimage`/`mkisofs` elsewhere); skips cleanly without any of these. The
@@ -254,7 +254,7 @@ control-line overlay, and a real `serial.device` actually driving them. It
 boots from a `[[filesys]]` mount holding the committed guest probe
 (`guest/modem-test/modemtest`, built like `guest/hostfs-test`'s), lets a
 real Startup-Sequence run it, and asserts the transcript it writes back:
-`ATZ` answered `OK`, `ATDT` dialing a one-shot local TCP peer this test
+`ATZ` answered `OK`, `ATDT` dialling a one-shot local TCP peer this test
 spins up on an ephemeral port, `CONNECT`, the peer's greeting arriving at
 the guest, and the guest's own line arriving at the peer.
 
@@ -321,11 +321,8 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
     but the only option that stages no extra binary onto the volume;
     machine shape matches `tests/image_regression.rs`'s own KICK13
     config (A500-shaped OCS/68000, no `[machine]` override needed). This
-    is also the **first** copperhf test to boot Kickstart 1.3 from a
-    copperhf unit at all, so a 1.3 failure here may be a genuine,
-    previously-unexercised bug in the V34 `AddDosNode`/`eb_MountList`
-    fallback path in `guest/copperhf/mounter.c` -- this machine has no
-    `KICK13.ROM`, so that path is reviewed but **locally unverified**.
+    exercises the V34 `AddDosNode`/`eb_MountList` fallback path in
+    `guest/copperhf/mounter.c`.
   - **FFS-from-LSEG**, Kickstart 3.1 plus a bundled-AROS variant
     (`aros_ffs_from_lseg_...`, still `#[ignore]`d for the FastFileSystem
     asset but needing no ROM -- AROS's dos.library starting a real
@@ -354,10 +351,9 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
     disk always loaded its handler off the RDB -- exactly this path,
     tagged plain DOS\1 (no DOS\3 trick needed, since nothing on 1.3
     short-circuits it). Verified by `assert_not_guru` (a screenshot
-    pixel-color check for the Guru Meditation screen's distinctive red,
-    since 1.3 has no ROM-resident `Echo` for the bootmark trick and no
-    golden was ever blessed for this case) rather than
-    `assert_golden`/bootmark.
+    pixel-colour check for the Guru Meditation screen's distinctive red) and
+    `assert_golden` against the committed golden render
+    `tests/golden/copperhf/kick13_ffs_from_lseg_boots_without_crashing.png`.
 
     **Investigation history (2026-09-14), kept for anyone who hits this
     again**: this test originally used `test-assets/copperhf/
@@ -418,13 +414,7 @@ files, alongside the earlier `tests/copperhf_device.rs` (M2),
     yet since it needs a hand-prepared Workbench install, not just a
     dropped-in asset file.
 
-  This machine has only `KICK31.ROM` locally: the 3.1 plain-OFS axes
-  above (`kick31_ofs_rdb_autoboots_and_writes_bootmark`/
-  `kick31_ofs_rdbless_autoboots_and_writes_bootmark`) actually run and
-  pass here. Every other test in this file (1.3, 3.2, FFS-from-LSEG,
-  PFS3) is missing its asset on this machine and is only verified to
-  **skip cleanly** -- run them for real once the assets below are
-  available:
+  Each test skips cleanly when its required assets are absent. Required assets:
 
   | Asset | Used by |
   | --- | --- |
@@ -598,25 +588,23 @@ tests; they follow the same "never committed" rule.
 
 ## Tracked binary fixtures
 
-The tracked `.bin` files are generated test programs, not ROM or disk images:
+The tracked `.bin`, guest-probe, and open-ROM fixtures are project-owned or
+open-source test and runtime artifacts, never copyrighted ROM or disk images
+(see `RELEASE.md` for the full tracked-binary audit):
 
-- `timing-test/*.bin` files (the boot block plus the `ddfprobe-*`,
-  `bltprobe-*`, `audprobe-*`, `clxprobe`, `regprobe-*`, and `sprprobe-*`
-  probe programs) are each built from the adjacent `.asm` source, and
-  `timing-test/golden/*.png` are their blessed reference renders (see
-  `timing-test/README.md` "CI golden renders").
-- `assets/services/services_rom.bin` is the guest-side host-filesystem
-  handler built from `guest/services/`.
-- `guest/zz9kprobe/zz9kprobe` is the zz9k crypto board's guest conformance
-  probe built from `guest/zz9kprobe/` (the vendored ZZ9000 SDK transport
-  plus the probe source); `tests/zz9k.rs` boots it on the bundled AROS ROM
-  with no external assets.
-- `guest/uaelib-test/uaelibtest` is the uaelib-trap probe (the
-  vscode-amiga-debug template's `warpmode`/`KPrintF`/`debug_*` helpers as
-  written) built from `guest/uaelib-test/`; `tests/image_regression.rs`
-  boots it with `--run` on the bundled AROS ROM, with no external assets.
-Run the tracked-file audit in `RELEASE.md` before publishing a rewritten
-public repository.
+- `timing-test/*.bin` probe programs (each built from its adjacent `.asm`
+  source) and `timing-test/golden/*.png` blessed reference renders (see
+  `timing-test/README.md`, "CI golden renders").
+- Bundled open ROMs and board artifacts under `assets/` (`aros/`, `fmv/`,
+  `services/`, `copperhf/`, `hrtmon/`, `a2091/`, `a4091/`, `lide/`,
+  `hostsocket/`, `zz9k/`).
+- Committed guest probes under `guest/` (`zz9kprobe`, `uaelib-test`,
+  `hostfs-test`, `clipboard-test`, `modem-test`, `a2091-test`, `tape-test`,
+  `hdbench`, `copperhf-test`, `osbench`) used by asset-free and asset-backed
+  integration tests.
+- Asset-free test fixtures under `tests/assets/whdload/TestGame.lha`,
+  `tests/fixtures/`, `tests/fuzz-regressions/archives/`, `fuzz/corpus/archives/`,
+  and `tests/golden/copperhf/*.png`.
 
 Unlike the suites above, `probe_golden.rs` (the golden-render suite for
 those probes) needs no external assets: it boots the bundled AROS ROM and
@@ -624,7 +612,7 @@ runs in CI on every push, including an NTSC A1200-profile sprite render.
 `hrtmon_freeze.rs` is similarly self-contained
 (using bundled AROS and the bundled HRTMon ROM) and runs in optimized builds
 (`cargo test --profile ci --test hrtmon_freeze`): it verifies
-freezer cartridge behavior both via the library interface and the
+freezer cartridge behaviour both via the library interface and the
 `--freeze-after` CLI flag, asserting the monitor's active status, screen
 output, and save state roundtripping.
 
@@ -640,5 +628,5 @@ cargo test --release --test audio_stems_determinism -- --ignored
 
 `vamiga_ts.rs` is a separate ignored suite driven by `COPPERLINE_VAMIGATS_*`
 env vars against a local [vAmigaTS](https://github.com/dirkwhoffmann/vAmigaTS)
-checkout plus a Kickstart 1.3 ROM. See the README "vAmigaTS compatibility
-runs" section.
+checkout plus a Kickstart 1.3 ROM. See `docs/guide/headless.md`
+("Automated compatibility testing (vAmigaTS)").

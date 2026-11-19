@@ -68,10 +68,10 @@ text or more cannot be profiled: the adapter reports an error and keeps the
 debug session.
 
 The same toolbar opens Copperline's native Debugger, Console, and Frame
-Analyzer windows (the custom `copperline/ui.show {"window"}` request). The
+Analyzer inspectors in the Debug workspace (the custom `copperline/ui.show {"window"}` request). The
 Debug sidebar's **Custom Registers** tree comes from the custom
 `copperline/chipset` request, the data behind the Chipset scope; hovering a
-register shows its shared access, chipset, and bit-field documentation. The
+register shows its shared access, chipset, and bitfield documentation. The
 command palette also provides **Init Amiga Project**, **Convert EXE to ADF**
 (`copperline-ctl exe2adf`), **Profile File Size** (`copperline-ctl
 size-report`), and **Show Coverage**. The project template detects Bartman's
@@ -125,7 +125,7 @@ configuration says. Arguments:
 | `ntsc` | Select NTSC timing when true, PAL when false (`--video`). |
 | `detach` | Start the guest executable asynchronously and close the boot CLI (`--run-detach`; Kickstart 2.0+ or AROS). |
 | `emulatorLog` | Mirror the launched emulator's stdout/stderr log into the Debug Console. |
-| `rtcTime` | `--rtc-time`: the guest clock's seed. Default: the launch time, pinned, so reverse execution replays exactly (a guest reading the host clock would diverge; see [Reverse debugging](reverse.md)). |
+| `rtcTime` | `--rtc-time`: the guest clock's seed. Default: seeded to the launch time (ticking in emulated time), so reverse execution replays deterministically without drifting against the host clock (see [Reverse debugging](reverse.md)). |
 | `extraArgs` | Further emulator flags, as an array. |
 | `headless` | No window (`--control`). |
 | `noAudio` | `--noaudio` for a windowed session. |
@@ -230,21 +230,21 @@ global(s), call-frame info`.
 | Exception breakpoints | `break.add {"kind": "catch"}`: bus error, address error, illegal instruction, zero divide, CHK/TRAPV, privilege violation, line-A, line-F, and TRAP #7. Address error, illegal instruction, and TRAP #7 are selected by default, and launch sessions arm them only after the target program loads so the OS boot does not stop first. |
 | Continue / Pause | `continue` / `pause`. |
 | Step Over / Into / Out | `step_over` / `step` / `step_out`, repeated until the source line changes (statement granularity) or once (instruction granularity). Step Out while the PC is in Kickstart uses `run_until {"pc_outside": true}` to return to program code. Stepping into code without lines runs it to its return. A line that outgrows 64 single steps (a loop) gets temporary breakpoints on the function's other lines and the return address instead. |
-| Step Back / Reverse Continue | `reverse_step` / `reverse_continue` from the snapshot ring (see [Reverse debugging](reverse.md)); Step Back also repeats until the line changes. The adapter takes a snapshot (`reverse_anchor`) at every stop a run ends in, so stepping back replays from there: the boot volume `--run` stages is a host directory mount, whose traffic a replay from an older snapshot could not reproduce. |
+| Step Back / Reverse Continue | `reverse_step` / `reverse_continue` from the snapshot ring (see [Reverse debugging](reverse.md)); Step Back also repeats until the line changes (bounded to 32 single reverse steps per request). The adapter takes a snapshot (`reverse_anchor`) at every stop a run ends in, so stepping back replays from there: the boot volume `--run` stages is a host directory mount, whose traffic a replay from an older snapshot could not reproduce. |
 | Call stack | Call-frame information when the DWARF has it, else a scan of the stack for return addresses that follow a `JSR`/`BSR`. Frames beyond the innermost are looked up at the call site. ROM frames use live names such as `[exec] AllocMem+$12`, derived from the running guest rather than a per-ROM symbol file. |
 | Scopes | Registers (D0-D7, A0-A7, PC, SR with its flags, plus FP0-FP7/FPCR/FPSR/FPIAR when an FPU is fitted), Locals, Globals, Chipset (every custom register and the beam position). |
 | Disassembly | `disasm`; each instruction text ends in its theoretical cycle count or range, while a precise profile measures additional contention actually encountered. |
 | Set variable | `regs.set` for the innermost frame's registers; `mem.write` for base-type variables and members. |
 | Evaluate / hover / watch | Registers, variables and symbols by name, numbers (`$DFF000`, `0x1234`, `%1010`), `+ - * /`, `[expr]` / `[expr].w` / `[expr].b` memory reads, `d0.w`. In the Debug Console, `!method {json}` sends a raw control-protocol request and prints the reply (`!status`, `!beam.get`, `!capture.screenshot {"path": "/tmp/s.png"}`). |
 | Memory view | `mem.read` / `mem.write` (base64). |
-| Disassembly view | `disasm`, with program symbols, source lines, and live ROM/LVO names; backwards disassembly anchors at the nearest program or ROM function start. |
+| Disassembly view | `disasm`, with program symbols, source lines, and live ROM/LVO names; backward disassembly anchors at the nearest program or ROM function start. |
 | Jump to cursor | `regs.set {"reg": "pc"}`. |
 | Debug Console output | Paula serial output as `stdout`; uaelib function 86 (`debug_log`, which the project template's `KPrintF()` calls), the optional `emulatorLog`, and the adapter's own notes as `console`. |
 | CPU profiling | Custom `copperline/profile {"frames": N}` -> precise `profile.start`, `step_frame` quanta until `profile.status` reports the N frames written (bounded; a quantum resumed after a breakpoint can end inside the same video frame), `profile.stop`, and a merged `.cpuprofile` path. |
 | Coverage | The `coverage` launch argument -> the emulator's `--coverage` run; the emulator writes the lcov file to that path when the program exits or the session ends. |
 | Modules / loaded sources | The program with its first hunk's address, and the source files its debug information names. |
 
-A stop from a breakpoint the debugger window set, or from a `catch`,
+A stop from a breakpoint set in the Debug workspace, or from a `catch`,
 `reg_watch`, beam trap or Copper breakpoint set through `!break.add`, is
 reported as a breakpoint with the machine's description. In a windowed
 session the IDE picks up a pause or resume made from the window within a

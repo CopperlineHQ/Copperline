@@ -191,15 +191,12 @@ A/B barrel-shifter carry is a datapath latch and survives BLTSIZE row
 boundaries; first/last masks, area-fill state, and modulos remain row
 scoped. ECS adds BLTSIZV/BLTSIZH for larger blits.
 
-Normal blits snapshot their A/B source words at BLTSIZE while C reads stay
-live. An ordered overlay records D writes so overlapping A/B reads can see
-the blit's own output. Ascending, zero-modulo transfers skip that overlay
-when the complete D byte span is disjoint from both enabled source spans
-and every span maps directly into populated chip RAM. Descending, strided,
-wrapping, aliased, or potentially overlapping transfers keep the general
-path. The snapshots, bus slots, and progressive D writes are unchanged.
-Save states retain the existing overlay fields: older active states with
-an overlay still resume, while new proven-disjoint blits save an empty one.
+A/B/C DMA reads chip RAM live at each granted slot, so concurrent CPU writes
+and earlier D-channel writes from an overlapping blit are visible to subsequent
+source fetches directly without a pre-read source snapshot or D overlay (see
+[Blitter timing](timing.md)). The legacy snapshot and overlay fields remain on
+the save-state struct only so older active saves still deserialize; new blits
+leave them empty.
 
 ## Paula (`paula.rs`)
 
@@ -277,6 +274,15 @@ The rest of Paula:
   unless the external button holds it low. POTGOR's production-Paula ID field
   is explicitly zero. Software that writes POTGO=$FFFF to read POTxDAT back as
   ~0 (e.g. the Bitmap Brothers input poll) depends on the output-high path.
+
+`JOY0DAT`/`JOY1DAT` (`$00A`/`$00C`) and `JOYTEST` (`$036`) sit on Denise's
+quadrature counters (owned by the controller-port state in `src/bus.rs`):
+`JOYTEST` loads bits 7-2 of all four counters simultaneously regardless of
+what device is plugged into each port, leaving bits 1-0 (the quadrature input
+pins, bits 9-8 and 1-0 of the 16-bit word) unaffected. Reading `JOYxDAT` on a
+joystick or CD32-pad port combines the switch-driven quadrature bits 1-0 with
+the retained counter bits 7-2; an analogue paddle port overlays its button
+bits on top of the counters.
 
 ## Denise (`denise.rs`)
 
@@ -556,8 +562,9 @@ the falling edge of `/SEL`, and the level of `MTR` while selected is ignored.
 Starting the motor requires asserting `/SEL` while `/MTR` is low; stopping
 requires `/MTR` to be high before and after the select transition (matching
 WinUAE and vAmiga hardware tests). External drives clock their drive ID shift
-registers off these select edges while the motor is stopped; `DF0:` contains
-no ID hardware. An external unit presents the current ID bit on `/RDY`
+registers off these select edges while the motor is stopped; a standard DD
+`DF0:` mechanism contains no ID hardware (an HD disk in `DF0:` shifts out the
+HD ID as described above). An external unit presents the current ID bit on `/RDY`
 whenever its motor is stopped -- from power-on, not only after the
 motor-on/off reset that begins an ID read -- and the register is circular, so
 clocking past the last bit brings the first one back round. A standard Amiga
@@ -591,10 +598,10 @@ memory-timing fidelity beyond what `timing-test/` measurements justify.
 
 ### A500 single/dual playfield collision checks
 
-Paired A500 measurements confirm sprite?PF1 matching differs: single-playfield
+Paired A500 measurements confirm sprite-PF1 matching differs: single-playfield
 mode also requires the even-plane match, while dual-playfield mode permits the
 odd match independently. The matrix found no corresponding mode difference in
-sprite?PF2 or PF?PF bit0. The active paired test pins sprite matching.
+sprite-PF2 or PF-PF bit0. The active paired test pins sprite matching.
 
 The consensus fixture `src/bus/tests/data/a500_playfield_modes.csv` comes from
 two independent 512-case PAL A500 runs, two repeats per condition. It covers two
@@ -630,6 +637,6 @@ timing differences. This correction does not claim complete AGA, hires, manual
 bitplane or sprite-edge timing coverage.
 
 Run the active paired regression with
-`python tools/cargo_report.py -- test --profile ci --locked --lib bus::tests::playfield_modes`.
+`cargo test --profile ci --locked --lib bus::tests::playfield_modes`.
 The paired PF-PF tests and the new gated hardware fixture are active. External
 ROM replay remains necessary to cover the CPU and DMA instruction paths.

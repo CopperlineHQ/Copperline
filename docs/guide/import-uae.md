@@ -42,34 +42,38 @@ annotated:
 
 | UAE setting | Copperline equivalent |
 |---|---|
-| Model, CPU and FPU, including the EC and LC parts (`cpu_model` with `cpu_24bit_addressing`, `fpu_model` and `mmu_model`) | `[machine] profile`, `[cpu]` model and FPU |
+| Model, CPU, FPU, and caches (`cpu_model` with `cpu_24bit_addressing`, `fpu_model`, `mmu_model`, `cpu_data_cache`, `cpu_no_unimplemented`) | `[machine] profile`, `[cpu]` model, FPU, `dcache`, and `unimplemented` |
 | JIT (`cachesize` > 0, 68020+) and "fastest possible" (`cpu_speed=max`) | `[cpu] jit`, `[cpu] speed = "fastest"` (approximated) |
 | Memory sizes (Chip, Slow, Fast, Z3, Motherboard) | `[memory]` sections |
 | Chipset revision, PAL/NTSC | `[chipset]` revision and video |
-| Kickstart ROM paths | `rom`, `extended_rom` |
-| Floppy drives and disk swap playlists | `[floppy]` and `[floppy.dfN] paths` |
+| Kickstart ROM path | `rom` |
+| Floppy drives, speed, and write-protect | `[floppy]` and `[floppy.dfN] path`, `write_protected` |
 | `filesystem2=` directory mounts | `[[filesys]]` directory mounts |
 | Built-in IDE (`ide0`, `ide1`) | `[ide] master`, `slave` |
-| Board IDE / SCSI hardfiles (`ide1_alfapower`, `scsiN`) | `[lide]` and `[scsi]` units |
+| Board IDE / SCSI hardfiles and ROMs (`ideN_alfapower`, `ideN_ripple`, `alfapower_rom_file`, `ripple_rom_file`, `scsiN`) | `[lide] board`/`rom`/`driveN` and `[scsi] unitN` |
 | Virtual `uaeN` hardfiles / FS-UAE's default hard-drive controller | `[copperhf] unitN` |
 | SCSI controllers (A2091, A4091, A3000) | `[scsi] controller` |
 | CD image (`cdimage0`) | `[cd] image` |
 | RTG board (Picasso II/II+, Graffity Z2/Z3 only) | `[rtg]` |
-| Toccata, RTC, `uae_hide_autoconfig` | `[toccata]`, `[machine] rtc`, `identify` |
+| Toccata, RTC, `rtc_file`, `scsidevice_disable`, `use_gui=no`, `uae_hide_autoconfig` | `[toccata]`, `[machine] rtc`/`battmem`/`rom_scsi_device_disable`, `[emulation] power_on`, `identify` |
+| Amiberry media paths (`amiberry.rom_path`, `floppy_path`, `hardfile_path`, `cd_path`) | `[paths]` |
 | Serial port (`TCP://host:port`, or a host device) | `[serial]` |
-| Audio channel modes and filters | `[audio]` settings |
+| Audio channel modes, stereo separation, output device, and filters | `[audio]` settings |
 | Floppy drive sounds (`floppyNsound`, `floppyNsoundext`, `floppy_volume`) | `[audio] floppy_sounds`, `floppy_sounds_set`, `floppy_sounds_volume` |
-| Input port assignments | `[input]` port configurations |
-| Fullscreen and status bar | `[display]` |
+| Input port assignments, four-player parallel adapter (`joyport2`/`joyport3`), and autofire | `[input]` port configurations, `autofire_hz`, and `[parallel] device = "joystick-adapter"` |
+| Fullscreen, scaling (`amiberry.scaling_method`), and status bar | `[display]` |
 
 The table describes the WinUAE/Amiberry mapper. The FS-UAE mapper covers the
 model, CPU (`cpu`, with `fpu` and `mmu`, including the EC and LC parts, and the
 raw `uae_cpu_model`, `uae_fpu_model`, `uae_mmu_model`,
 `uae_cpu_24bit_addressing` and `uae_cpu_type` overrides), memory (including
-`motherboard_ram` and an accelerator board's `accelerator_memory`), chipset and
-video standard, Kickstart, floppy drives and their sounds
-(`floppy_drive_N_sounds`), and hard drives; everything else in an FS-UAE file
-is listed as not translated.
+`zorro_iii_memory`, `motherboard_ram`, and an accelerator board's
+`accelerator_memory`), chipset and video standard, Kickstart, floppy drives
+(including `floppy_drive_speed`, `floppy_image_N` swap playlists on DF0, and
+`floppy_drive_N_sounds`), and hard drives (FS-UAE path variables such as
+`$HOME`/`$BASE`, host directories, and `/dev/` paths in `hard_drive_N` are
+flagged as approximated); everything else in an FS-UAE file is listed as not
+translated.
 
 FS-UAE's `amiga_model` presets translate to the matching machine profile with
 the hardware FS-UAE gives them: the plain `A1200` (and `A1200/3.0`) and `CD32`

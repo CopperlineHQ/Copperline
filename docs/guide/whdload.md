@@ -5,19 +5,21 @@ hard disk. Copperline launches WHDLoad packages directly, with no Workbench
 installation or hardfile to prepare.
 
 ```sh
-copperline --whdload "Turrican.lha"
+copperline --whdload "Game.lha"
+copperline "Game.lha"              # positional launch works too
 ```
 
 Packages can also be specified in configuration files:
 
 ```toml
 [whdload]
-game = "Turrican.lha"
+game = "Game.lha"
 kickstarts = "/data/amiga/kickstarts"
 ```
 
-You can also launch packages from the launcher's **WHDLoad** pages or by
-dropping an archive onto the running emulator window.
+You can also launch packages from the launcher's **WHDLoad** pages, pass an
+archive, unpacked directory, or `.slave` file positionally on the command line,
+or drop an archive or `.slave` file onto the running emulator window.
 
 Copperline stages two host directories and mounts them as live volumes: a boot
 volume (`WHDBoot:`) holding the WHDLoad program, a generated
@@ -61,8 +63,9 @@ Kickstart ROMs are proprietary, so Copperline does not bundle them:
 
 Point `kickstarts` (or the launcher's **Kickstart ROMs** row) at your ROM
 directory. Without it, Copperline looks in the directory of the configured
-`rom`, in `Kickstarts/` under the save-data directory, and in `Kickstarts/`
-beside the WHDLoad support archives. It identifies ROMs by their size and
+`rom` and in `Kickstarts/` under the save-data directory; in either case,
+`Kickstarts/` beside the WHDLoad support archives is also searched as a
+fallback. It identifies ROMs by their size and
 WHDLoad CRC-16 checksum, so file names do not matter. Byte-swapped dumps and
 Cloanto Amiga Forever images (encrypted `.rom` files with an accompanying
 `rom.key`) are supported. If a slave names a Kickstart image that none of
@@ -94,7 +97,7 @@ games) persist in the extracted copy. Each package gets a directory under
 `%USERPROFILE%\Documents\Copperline` on Windows, or the application folder in
 a [portable installation](ui.md#where-files-go)); `library` moves it
 elsewhere. The directory is named after the archive: without its extension
-for an `.lha`, with it for a `.zip`. It holds `game/`, the extracted package
+for an `.lha` or `.lzh`, with it for a `.zip`. It holds `game/`, the extracted package
 mounted as `WHDGame:`, and `boot/`, the boot volume regenerated on every
 launch. An installation that already keeps unpacked games directly under
 `whdload/`, as older versions did, carries on using that directory.
@@ -167,7 +170,7 @@ row. `--whdload` and `[whdload] game` still boot games either way.
 
 ```toml
 [whdload]
-game = "path/to/Game.lha"   # .lha, .zip, or directory
+game = "path/to/Game.lha"   # .lha, .lzh, .zip, or directory
 library = "..."             # save directory (default: <host data>/whdload/save)
 kickstarts = "..."          # Kickstart ROMs directory
 args = "..."                # additional WHDLoad arguments

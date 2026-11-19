@@ -133,8 +133,8 @@ Exit status: 0 when the sides are identical over the compared span, 1 when
 a divergence was found, 2 on error (a side failed to launch, a lockstep
 break, a non-deterministic run, or an interrupt). The emulator processes
 and the snapshot scratch directory are cleaned up on every exit path,
-including Ctrl-C; on an error the emulator logs are kept and their paths
-printed.
+including Ctrl-C; on a non-interrupt error the emulator logs are kept and their
+paths printed.
 
 ## Options
 

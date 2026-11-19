@@ -2,8 +2,12 @@
 
 Notes recovered from NewTek's released sources (switcher, CG, project
 editor, Flyer firmware and flyer.library) while emulating the Video
-Toaster 4000 and the Video Toaster Flyer in Copperline. Each claim carries
-a source reference and a confidence tag. Source paths use these roots:
+Toaster 4000 and the Video Toaster Flyer in Copperline. These are historical
+reverse-engineering working specs; the emulations themselves are now
+implemented in `src/toaster/` and `src/flyer/`, and helper scripts such as
+`dve-tools/` referenced in the notes are external analysis tools not shipped
+in this repository. Each claim carries a source reference and a confidence
+tag. Source paths use these roots:
 
 - `<vt-src>/`: the Video Toaster source release (AmigaVideoToasterComplete:
   `full/switcher`, `full/CG`, `old/...`), from

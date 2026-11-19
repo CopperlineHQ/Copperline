@@ -9,7 +9,7 @@ code against the same byte-for-byte reproducible fault sequence on every
 run, from a `copperline-ctl` script or an MCP-driving agent.
 
 This is a separate namespace from `fault.inject` (the CPU-bus fault
-family): `disk.fault.*` is medium/device behavior, never a guest-visible
+family): `disk.fault.*` is medium/device behaviour, never a guest-visible
 bus error.
 
 ## Targets
@@ -64,7 +64,8 @@ A policy is a named, ordered list of rules:
 }
 ```
 
-Several policies may be active on one target at once; they are
+Several policies may be active on one target at once (up to 16 policies per
+target, and up to 64 rules per policy); they are
 evaluated in installation order, and within a policy, rules are
 evaluated in list order. For a given request, the first matching rule
 whose `probability` test passes applies its action and stops
@@ -115,12 +116,11 @@ Rule fields (all but `action` optional):
   guest's buffer happened to contain.
 - `"reorder"`: hold the write in a bounded queue (`"window"`, `1..=64`)
   instead of committing it immediately; a read of a held sector still
-  sees it, as a write cache would. A flush (or `disk.fault.clear`)
-  releases the whole queue, in a seeded random order, not FIFO -- if the
-  same sector was held more than once, only the newest write for that
-  sector survives the release. A window overflow evicts one held write
-  at random and commits it for real immediately, rather than discarding
-  it.
+  sees it, as a write cache would. A guest flush releases the whole queue
+  in a seeded random order, not FIFO -- if the same sector was held more
+  than once, only the newest write for that sector survives the release.
+  A window overflow evicts one held write at random and commits it for
+  real immediately, rather than discarding it.
 - `"ignore"` (flush only): acknowledge `CMD_UPDATE`/SYNCHRONIZE CACHE
   without actually releasing any held reorder queue. `"then": "hold"`
   (default) keeps the queues for a later flush to release; `"then":
@@ -138,12 +138,15 @@ Rule fields (all but `action` optional):
   (MEDIUM ERROR / ABORTED COMMAND / NOT READY / DATA PROTECT), copperhf's
   `io_Error` (`TDERR_WriteProt` for `write_protect`, a generic failure
   otherwise).
-- `"delay"`: accumulates into `disk.fault.stats`' `delayed_ms`. On a
-  `scsi` target, this also adds the equivalent extra colour-clock delay
-  to the command's completion -- on every other target it currently
-  only shows up in the stats, with no added latency yet.
+- `"delay"`: accumulates `"ms"` (milliseconds, default 0) into
+  `disk.fault.stats`' `delayed_ms`. On a `scsi` target, this also adds the
+  equivalent extra colour-clock delay to the command's completion -- on
+  every other target it currently only shows up in the stats, with no added
+  latency yet.
 - `"cut"`: simulate a power cut. Every later request on this target
-  fails `not_ready` until an explicit `disk.fault.clear`, even across a
+  fails `not_ready` until an explicit `disk.fault.clear` clears the policy
+  that latched the cut (or clears the target / all targets; clearing an
+  unrelated policy by id leaves the cut latched), even across a
   `machine.reset` -- a reset must not quietly un-cut the drive. Discards
   every policy's held reorder writes and armed `stale` entries on this
   target (modelling the volatile write cache being lost), so a later
@@ -151,8 +154,8 @@ Rule fields (all but `action` optional):
 
 `on_clear` (policy-level, default `"release"`): what happens to a held
 reorder queue when this policy is cleared, or replaced by a `set` under
-the same id -- `"release"` replays the held writes onto the image in
-order (same effect as a flush), `"drop"` discards them.
+the same id -- `"release"` replays the policy's held writes onto the image
+in FIFO order, `"drop"` discards them.
 
 ## Control-protocol methods
 

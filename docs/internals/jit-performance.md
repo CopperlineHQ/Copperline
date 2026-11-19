@@ -69,7 +69,7 @@ slowdown. Improvements in one case cannot offset a regression in another.
 The threshold allows some shared-host jitter; absolute milliseconds from
 different hosts or workflow runs are not compared.
 
-Missing or malformed output, nonzero exit, a 120-second sample timeout,
+Missing or malformed output, non-zero exit, a 120-second sample timeout,
 incomplete emulated time, or mismatched emulated frame counts/presented
 counts/render checksums fails the case. A median absolute deviation above
 5% of the median paired ratio also fails, reporting unstable timing instead
@@ -252,4 +252,4 @@ boot and loading, but use a matching state for each machine configuration and
 record its provenance. Keep profiles separate from timed trials because sampling
 adds overhead. Attribute an improvement only after repeating the application
 and correctness checks; reducing setup work must preserve device deadlines,
-interrupt recognition, cache coherence and fresh-machine restore behavior.
+interrupt recognition, cache coherence and fresh-machine restore behaviour.

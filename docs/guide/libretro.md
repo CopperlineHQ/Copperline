@@ -104,7 +104,7 @@ gamepad-to-mouse controls.
 
 The core exposes four frontend controller ports. Ports 1 and 2 retain the
 native Amiga mapping above. Ports 3 and 4 are the parallel-port multitap's
-two joystick sockets, as used by Super Skidmarks and other four-player games.
+two joystick sockets, for three- and four-player games that support the adapter.
 In RetroArch's **Quick Menu -> Controls**, select **Parallel-port joystick
 (multitap)** for ports 3 and 4. Select **Amiga joystick / CD32 pad** for
 ports 1 and 2 to use four gamepads. The adapter sockets default to
@@ -293,9 +293,10 @@ libretro version must be recreated. They cannot be opened directly as desktop
 `.clstate` files.
 
 The frontend receives a fixed capacity for each loaded session, sized from the
-machine that was built: its memory and ROM images, chip RAM again for the frame
-capture the renderer keeps, an image for every disk slot, room for the chipset,
-and space for every sector of a WHDLoad volume to change. A stock A500 with one
+machine that was built: its memory and ROM images, twice chip RAM for the frame
+captures the renderer keeps, an image for every disk slot plus the active drive's
+image, room for the chipset, and space for every sector of a WHDLoad volume to
+change. A stock A500 with one
 floppy reserves about 14 MiB and an A1200 about 18 MiB, where every machine used
 to reserve 64 MiB. Unused bytes are zeroed and compress well in frontend files.
 RetroArch keeps several checkpoints for rollback and, in netplay, checksums a

@@ -1,5 +1,9 @@
 # ToasterCG key vs fill alignment on Copperline's Toaster
 
+> Status note: this investigation note diagnoses the pre-fix alignment bug;
+> EH0 `LUST` handling is now implemented in `src/toaster/` (see
+> `docs/internals/video.md`).
+
 ## Short answer
 
 * **The fill is off, not the key.** Every 768-wide framestore write lands
@@ -19,13 +23,13 @@
 
 ## 1. Measurements (all local files)
 
-| what | mapping (picture column c, 752-space; c = card pixel − 12) | evidence |
+| what | mapping (picture column c, 752-space; c = card pixel - 12) | evidence |
 |---|---|---|
-| **Fill** (DV bank from file) | **c = file x − 16** | Cross-correlation of p03 and p04 against the Title1/Title2 FRAME0 planes: peak d=16 on both. key6 against LowerThird2 text: 16–17 on every row. |
-| **Key** (Amiga alpha) | **c = alpha x** (±1) | s03 screenshot b0/b1 against Title1 alpha planes: screenshot x = alpha x − 4, which is canvas column x+12, card x+12, c = x. p03/p04 key-on mask against file alpha==3: peak d = 0/−1. |
-| Authored offset inside the files | alpha ≈ fill **+3** | Left edges of alpha minus fill (>135). Stock LowerThird2 text: +3 (42 of 46 edges). Title1: +2/+3. The CG-made file matches NewTek's own. |
-| **Net in the emulator** | key **≈19 px right** of the fill (16 + 3) | Row 318 of p03: the C stroke (file 280–283) is drawn at c=264–267 but the key starts at 283. White shows from 289, which is file 305 (the next stroke). Dark keyed fill shows 450–473: the fill's white ends at 465−16=449, and alpha 3 runs to 474. |
-| Side effect | the right-edge garbage stripe in key6 (c ≥ 736) is file pixels **752–767** | Those are past the 752-wide picture. The −16 shift pulls them into view. |
+| **Fill** (DV bank from file) | **c = file x - 16** | Cross-correlation of p03 and p04 against the Title1/Title2 FRAME0 planes: peak d=16 on both. key6 against LowerThird2 text: 16-17 on every row. |
+| **Key** (Amiga alpha) | **c = alpha x** (+/-1) | s03 screenshot b0/b1 against Title1 alpha planes: screenshot x = alpha x - 4, which is canvas column x+12, card x+12, c = x. p03/p04 key-on mask against file alpha==3: peak d = 0/-1. |
+| Authored offset inside the files | alpha ~ fill **+3** | Left edges of alpha minus fill (>135). Stock LowerThird2 text: +3 (42 of 46 edges). Title1: +2/+3. The CG-made file matches NewTek's own. |
+| **Net in the emulator** | key **~19 px right** of the fill (16 + 3) | Row 318 of p03: the C stroke (file 280-283) is drawn at c=264-267 but the key starts at 283. White shows from 289, which is file 305 (the next stroke). Dark keyed fill shows 450-473: the fill's white ends at 465-16=449, and alpha 3 runs to 474. |
+| Side effect | the right-edge garbage stripe in key6 (c >= 736) is file pixels **752-767** | Those are past the 752-wide picture. The -16 shift pulls them into view. |
 
 * **DIBGR decode is correct.** The title rows of s03 carry only codes 0, 7, 11
   and 15, which are alpha 0/1/2/3 (r1=g1=1 with b1b0 = 1/2/3) under
@@ -40,8 +44,8 @@
 
 1. **The load always zippers.** `FrameLoadNew` calls `DoSafeWrite` with
    `moveq #0,d5` (frameslice.a:2979-2981). `KeyPageLoad`/`SendBkBnd` do the
-   same (3161-3163). The comment there reads: "D5 is cleared for AA … force
-   zipper writing … bitmap needs to be 768 pixels wide".
+   same (3161-3163). The comment there reads: "D5 is cleared for AA ... force
+   zipper writing ... bitmap needs to be 768 pixels wide".
 2. **`DoSafeWrite` makes two passes** (cop.a:2570-2600). It runs
    `dswsub` with d7=0, then d7=1 when the row is over 92 bytes and d5=0.
 3. **The zipper pass shifts the Amiga picture and clears LUST.**
@@ -52,14 +56,14 @@
      (cop.a:3805-3808).
    * The bit: `VTB_LUST` = EH0 I bit 8, the same bit as NOPAIRS.
      old/switcher/INC/elh.i:44 says "LUST = left justify the write".
-4. **The zipper area** is bitmap pixels ≥ 732 (the "garbage beyond the 732nd
+4. **The zipper area** is bitmap pixels >= 732 (the "garbage beyond the 732nd
    pixel" comment), which is framestore quads 186-189 (dve-spec 2.3). With
    LUST=0 the card stores the scrolled picture **16 samples right**, so
    bitmap pixel b still lands at sample b+12.
 5. **Copperline's handling.** `store_write_line` (mod.rs:460-500) stores
    sample p from card pixel p whatever LUST says. The zipper pass therefore
-   leaves sample p = bitmap pixel p+4, so file x ends up at sample x−4,
-   which is c = x−16. This matches the measured fill offset.
+   leaves sample p = bitmap pixel p+4, so file x ends up at sample x-4,
+   which is c = x-16. This matches the measured fill offset.
 6. **Why the read self-test and the `PIXEL0_LORES` calibration are not
    affected.** `TestReadScanLine` writes through `SendBytes2Toaster` with
    `moveq #1,d4 ;no zipper write` (autocal.a), a single LUST=1 pass.
@@ -89,7 +93,7 @@
 const ZIPPER_SHIFT: usize = 16;
 ```
 
-In `store_write_line`, replace the body from `let bank = …` through the
+In `store_write_line`, replace the body from `let bank = ...` through the
 `col` computation:
 
 ```rust
@@ -109,15 +113,15 @@ In `store_write_line`, replace the body from `let bank = …` through the
             let Ok(col) = usize::try_from(x0 + src as i64 * step) else {
                 continue;
             };
-            // … rest unchanged (row.get(col), lines_of, nibble merge)
+            // ... rest unchanged (row.get(col), lines_of, nibble merge)
 ```
 
 **Why this is safe.**
 
 * The zipper pass now rewrites samples 28..767 with exactly what pass 1
-  stored (bitmap p−12), so it is idempotent.
+  stored (bitmap p-12), so it is idempotent.
 * It does not touch samples < 28. Writing those would put header-sprite
-  pixels into picture columns 8–15.
+  pixels into picture columns 8-15.
 * `LUST=1` lines (every other write, the self-test, and the test helper
   `write_line` with `i: 0x0F00`) behave exactly as before.
 * A one-line alternative is to skip `LUST`-clear write lines in `take_line`.
@@ -130,7 +134,7 @@ In `store_write_line`, replace the body from `let bank = …` through the
 * What remains is the files' own +3 px alpha offset, the same on stock and
   CG-made pages. Do not compensate for it. There is no source evidence for a
   key/fill pipeline delay.
-* The c ≥ 736 garbage stripe disappears.
+* The c >= 736 garbage stripe disappears.
 * Stills now round-trip in place through `FMSV` (readback: sample 12 = file
   pixel 0) and reload.
 
@@ -164,7 +168,7 @@ All of these read the Amiga through the same origin (`amiga_row` /
 `pixel0_column` + `PICTURE_X0`), and that origin is right. None of them has
 its own key/fill offset. The fix corrects the one thing they share: any DV
 bank loaded from a file (`FrameLoadNew`, `LRGB`/`SendRGBPicture`, CG renders
-via `DoSafeWrite`) was shown 16 px left, with file pixels 752–767 at the
+via `DoSafeWrite`) was shown 16 px left, with file pixels 752-767 at the
 right edge.
 
 | mode | status |

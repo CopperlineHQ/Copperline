@@ -28,7 +28,7 @@ The A500 hardware-review boundary probes are registered in
 `tests/probe_golden.rs`, with their source and assembled binaries committed:
 
 - `a500-blit-boundaries`: raw DMACONR, destination words and beam samples
-  after 0–7 NOP gaps. Separate rows exercise D-only startup, zero-result A-to-D
+  after 0-7 NOP gaps. Separate rows exercise D-only startup, zero-result A-to-D
   copies, and descending two-word destination restores under BLTPRI.
 - `a500-display-boundaries`: paired single/dual-playfield early CLXDAT reads
   and clears, BPL2PTL writes around initial fetch, and CPU beam reads across
@@ -37,9 +37,9 @@ The A500 hardware-review boundary probes are registered in
 Both load at `$30000`, disable interrupts, and render raw result bits as pixels.
 Their goldens protect the emulator's snapshots; they do not turn a screenshot
 into a hardware timing reference. Corresponding versioned A500 measurements
-and qualification rules remain in `amiga-hardware-probes/references/` and its
-`docs/pr-810-review.md`. Assemble with the existing vasm workflow; use
-`-m68000 -no-opt` to preserve the explicit instruction gaps.
+and qualification rules live in the external `amiga-hardware-probes` repository
+(with summaries in `docs/internals/a500-*.md`). Assemble with the existing vasm
+workflow; use `-m68000 -no-opt` to preserve the explicit instruction gaps.
 
 `cia-movem-irq.asm` is an asset-free CPU/CIA interrupt regression fixture,
 loaded directly by `cpu::tests::cia_timer_irqs_preserve_movem_sample_phase`.
@@ -49,7 +49,7 @@ through balanced MOVEM save/restore lists. Sixteen relative timer-start phases
 check interrupt counts and the complete 600-byte sample buffer's checksum.
 This reproduces the interrupt-sensitive pattern used by Voyage's startup
 without including its code, disk, or a Kickstart ROM. The expected values are
-emulator regression snapshots, not hardware captures. Phases 0 and 11–15 were
+emulator regression snapshots, not hardware captures. Phases 0 and 11-15 were
 re-snapshotted after the staged CIA request model was introduced; the remaining
 phases retain their earlier references. Run it with:
 
@@ -62,7 +62,7 @@ The assembled fixture is committed so the test needs no assembler.
 
 `a500-cia-request.asm` boots without external assets in `probe_golden`. It
 samples raw INTREQR, timer-A PB6 output, ICR and beam on both CIAs after
-0–15 NOP gaps, with CPU interrupts and display DMA disabled during sampling.
+0-15 NOP gaps, with CPU interrupts and display DMA disabled during sampling.
 The committed image is an emulator regression snapshot of the staged model,
 not a hardware capture of this fixture. Electrical timer/race measurements
 and unmeasured external-source phase assumptions are described in
@@ -171,7 +171,7 @@ cargo test --release --locked --no-default-features --lib indexed_cache_lookup_b
 ```
 
 They report timings and output hashes for dense/sparse attached sprites and
-constant/changing-scroll color-cache lookups. Carry the same benchmark code onto
+constant/changing-scroll colour-cache lookups. Carry the same benchmark code onto
 both revisions when comparing, and use the same compiler and feature set. Their
 results measure isolated renderer work, including row preparation or frame-local
 cache allocation, rather than complete frames. Fixture setup and output checks
@@ -264,7 +264,7 @@ where real hardware and FS-UAE disagree, real hardware wins:
 
 Most values are the elapsed CIA E-clock ticks for the test (8192 iterations
 for the fixed-count rows); rows 19, 20, 22 and 27 are raw VHPOSR beam positions
-and rows 23-26 are beam color-clock counts. A faithful emulator models a
+and rows 23-26 are beam colour-clock counts. A faithful emulator models a
 fixed CPU-cycle / E-clock ratio, so identical CPU work should give identical
 ticks everywhere.
 
@@ -335,7 +335,7 @@ reads `$6409` on an A1200 at 14 MHz, `$640C` at the 7 MHz reference clock.)
 None of rows 0-22 run an active blitter, yet whether a beam-raced blitter draw
 keeps **ahead of the display beam** is what decides if a triple-buffered vector
 effect shows or blanks: the buffer Agnus fetches for display must already be
-finished. These rows record, in **raster color clocks** (`vpos*227 + hpos`), how
+finished. These rows record, in **raster colour clocks** (`vpos*227 + hpos`), how
 far the beam advances while one fixed blit shape runs to completion (polling
 DMACONR BBUSY). Rows 23-25 have display DMA off (pure blitter cycle cost vs the
 beam); row 26 reruns the area fill with a 3-bitplane display active and BLTPRI
@@ -572,7 +572,7 @@ whole bar word). Hardware timing fixes can move the bootblock handoff phase
 too. Re-bless and review the diff after either kind of change.
 
 Two later probes depend on the handoff in the same way. `a500-cia-request`
-records the beam position after each E-clock-synchronised CIA sample, and
+records the beam position after each E-clock-synchronized CIA sample, and
 its ICR column includes CIA-A timer B, which the probe never programs and
 the ROM leaves running. `jit-bus-boundary` places its markers by native
 delay loops whose phase against the beam follows the handoff instant. With
@@ -675,11 +675,17 @@ while vAmiga 5.0b1 paints magenta and white inside the staircase blocks
 (3.9% / 0.5% of the lower band) where the photograph has none. The local
 vAmiga build reproduces the suite's committed `fmode10_aga.raw`
 byte-for-byte, so that is the reference's own behaviour, not a build
-artefact.
+artifact.
 
-Covered: `timing-test` (all 32 timing rows as rendered hex), `ddfprobe`
+Covered: `timing-test` (all 32 timing rows as rendered hex; companion probes
+`fwdprobe`, `bfprobe`, and `rdprobe` isolate 68020 branch alignment, bit-field
+costs, and read-timing behaviour), `ddfprobe`
 (DDF placement sweep), `ddfprobe-diw1` (DIW edge), `ddfprobe-toggle`
-(per-line BPLCON0 toggling), `ddfprobe-cc`/`-cc3`/`-cc4` (raced
+(per-line BPLCON0 toggling), `bplprobe-dat` (manual `BPL1DAT` serialization
+placement on Denise's 16-pixel word grid vs the DIW border with bitplane DMA
+off -- the Hamazing Hexagon copper-chunky regression class),
+`ddfprobe-agahwstop` (AGA hardwired `$D8` DDF stop under `BEAMCON0` vs
+`HARDDIS` -- the Pacmania AGA regression class), `ddfprobe-cc`/`-cc3`/`-cc4` (raced
 copper-chunky COLOR00 trains vs bitplane fetch), `ddfprobe-sprbar`/
 `-sprbar2` (manual/DMA sprite serializer positions -- the gen-x masking-bar
 regression), `ddfprobe-sotb`/`-sotb2` (post-WAIT COLOR00 landing against
@@ -732,7 +738,7 @@ FS-UAE-verified on the equivalent live display constellation),
 DDFSTRT behind the beam before the position it replaces has fired drops the
 whole line -- the blank middle band -- while rewriting it after the flop has
 set leaves the run alone; restarting from the moved comparator instead
-truncates the first fetch unit and desynchronises the planes whose lo-res
+truncates the first fetch unit and desynchronizes the planes whose lo-res
 slot survives it, the Microcosm CD32 status-panel regression class;
 vAmiga-verified on its 5.0b1 `A1200_2MB` AGA setup, which matches the
 render exactly),
@@ -755,7 +761,7 @@ bar is long; a drain that never takes a yielded cycle stalls the writes
 for the whole blit and collapses it to the BLTPRI-set bar; not
 cross-checked against vAmiga, which has no 68020 bus model),
 `posprobe-v8` (131072 long reads of VPOSR:VHPOSR at a walking phase; the
-count of samples whose line number runs backwards, as a bar and a binary
+count of samples whose line number runs backward, as a bar and a binary
 word -- V8 and V7-V0 are one counter, so the count is the number of frames
 spanned plus the tears of the long read's own two word cycles; a model
 that steps V8 three colour clocks after the low byte adds about ten more

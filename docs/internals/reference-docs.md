@@ -44,8 +44,23 @@ material lives in the repository:
   Homebrew, AppImage, Windows, the macOS disk image, and the
   libretro cores.
 
-`CREDITS.md` and `FUNDING.md`
-: Contributors and sponsors, and where project funding goes.
+`CREDITS.md`, `CHANGELOG.md`, and `FUNDING.md`
+: Contributors and sponsors, the release changelog (also rendered in
+  [](../changelog.md)), and where project funding goes.
+
+`docs/internals/jit-performance.md`
+: Reproducible performance measurement methodology and the CI AROS
+  performance gate ([Measuring performance](jit-performance.md)).
+
+`docs/toaster/README.md` and `crates/flyerclip/FORMAT.md`
+: Recovered hardware specifications for the Video Toaster 4000 video-slot card
+  and NewTek Video Flyer (DVE, video path, key alignment, protocol), and the
+  VTASC / Flyer clip container format reference.
+
+`docs/internals/a500-*.md` and `docs/internals/m68000-divider-review-2026-10-15.md`
+: Hardware-measurement notes from real PAL A500 probe campaigns (CPU/bus
+  timing, divider review, IRQ focus, blitter/Copper/refresh arbitration,
+  CIA output/serial timing, bitplane pointer collisions).
 
 `copperline.example.toml`
 : The commented configuration reference, the companion to

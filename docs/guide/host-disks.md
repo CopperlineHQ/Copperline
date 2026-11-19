@@ -37,8 +37,8 @@ Safety protections:
 
 1. Go to **Storage -> Host Disk**.
 2. Tick the disk's **Enable** box and click its **Attach** cell to choose the
-   attachment point. **R/W** is ticked by default; untick it to keep the guest
-   from writing to the disk.
+   attachment point. **R/W** is unticked (read-only) by default; tick it to
+   allow the guest to write to the disk.
 3. Press **Mount**, and approve the operating system's permission prompt if
    one appears.
 
@@ -158,6 +158,6 @@ On Linux and Windows, several disks attached together share one prompt.
    not attached; close whatever is using it and try again. Linux unmounts
    through `udisksctl`; on a system without udisks2, unmount the volumes by
    hand first.
-3. **Flushing writes:** Each IDE or SCSI write command is flushed to the medium
+3. **Flushing writes:** Each IDE, SCSI, or PCMCIA write command is flushed to the medium
    before the guest sees it complete, so a finished write is on the disk. A USB
    bridge with no flush command is noted once in the log.
