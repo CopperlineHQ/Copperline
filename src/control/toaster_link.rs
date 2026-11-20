@@ -291,9 +291,7 @@ fn done_name(id: u64) -> String {
     format!("done-{id}.txt")
 }
 
-/// How long a finished job's result may wait to be collected. A caller
-/// still waiting collects within a poll of the guest finishing, so a
-/// result this old belongs to a caller that has given up.
+/// How long to keep an uncollected result after the guest publishes it.
 pub const STALE_RESULT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Hand `script` to the guest as job `id`, first removing stale results.
@@ -323,48 +321,33 @@ pub fn collect(dir: &Path, id: u64) -> Option<JobResult> {
     })
 }
 
-/// Remove results no caller collected: `done-ID.txt` older than
-/// `max_age` with its `out-ID.txt`, and an `out-ID.txt` that old whose job
-/// is neither running nor done. Jobs still waiting to be taken or running
-/// are left alone, as is anything younger (another bridge on the same
-/// folder may be about to collect it). Returns the files removed.
+/// Remove completed results after their `done-ID.txt` has aged by
+/// `max_age`. The guest can delete `run-ID.rexx` before publishing
+/// `done-ID.txt`, so even an old `out-ID.txt` without either marker may
+/// still be part of a job a caller is waiting for. Returns the files removed.
 pub fn sweep(dir: &Path, max_age: std::time::Duration) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return 0;
     };
-    let names: Vec<String> = entries
-        .filter_map(|e| e.ok()?.file_name().into_string().ok())
-        .collect();
-    let old = |name: &str| {
-        std::fs::metadata(dir.join(name))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age >= max_age)
-    };
-    let id_of = |name: &str, prefix: &str| -> Option<u64> {
-        name.strip_prefix(prefix)?
+    let finished_id = |entry: std::io::Result<std::fs::DirEntry>| -> Option<u64> {
+        let name = entry.ok()?.file_name().into_string().ok()?;
+        name.strip_prefix("done-")?
             .strip_suffix(".txt")?
             .parse()
             .ok()
     };
-    let has = |name: String| names.contains(&name);
     let mut removed = 0;
-    let mut remove = |name: &str| {
-        if std::fs::remove_file(dir.join(name)).is_ok() {
+    for id in entries.filter_map(finished_id) {
+        let done = dir.join(done_name(id));
+        let expired = std::fs::metadata(&done)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if expired && std::fs::remove_file(done).is_ok() {
             removed += 1;
-        }
-    };
-    for name in &names {
-        if let Some(id) = id_of(name, "done-") {
-            if old(name) {
-                remove(name);
-                remove(&out_name(id));
-            }
-        } else if let Some(id) = id_of(name, "out-") {
-            let live = has(format!("run-{id}.rexx")) || has(done_name(id));
-            if !live && old(name) {
-                remove(name);
+            if std::fs::remove_file(dir.join(out_name(id))).is_ok() {
+                removed += 1;
             }
         }
     }
@@ -492,7 +475,7 @@ mod tests {
         for name in [
             "done-1.txt",
             "out-1.txt", // finished, never collected
-            "out-2.txt", // orphaned output, no job
+            "out-2.txt", // no published result
             "run-3.rexx",
             "out-3.txt",  // still running
             "job-4.rexx", // not yet taken
@@ -501,18 +484,56 @@ mod tests {
         }
         // Everything is younger than any sensible age: nothing goes.
         assert_eq!(sweep(link, STALE_RESULT), 0);
-        assert_eq!(sweep(link, std::time::Duration::ZERO), 3);
+        age_file(&link.join("done-1.txt"));
+        age_file(&link.join("out-2.txt"));
+        age_file(&link.join("out-3.txt"));
+        assert_eq!(sweep(link, STALE_RESULT), 2);
         let mut left: Vec<String> = std::fs::read_dir(link)
             .unwrap()
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         left.sort();
-        assert_eq!(left, ["job-4.rexx", "out-3.txt", "run-3.rexx"]);
+        assert_eq!(left, ["job-4.rexx", "out-2.txt", "out-3.txt", "run-3.rexx"]);
+    }
+
+    fn age_file(path: &Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - STALE_RESULT * 2)
+            .unwrap();
     }
 
     #[test]
-    fn the_guest_script_walks_the_listing_by_position() {
-        // PARSE VAR on the remainder is quadratic in the folder's size.
+    fn another_submission_preserves_output_during_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path();
+        submit(link, 1, "say 'started'").unwrap();
+        std::fs::rename(link.join("job-1.rexx"), link.join("run-1.rexx")).unwrap();
+        std::fs::write(link.join("out-1.txt"), "started\n").unwrap();
+        age_file(&link.join("out-1.txt"));
+
+        // The guest can stop here after RX returns and before it publishes done.
+        std::fs::remove_file(link.join("run-1.rexx")).unwrap();
+        submit(link, 2, "say 'other job'").unwrap();
+        std::fs::write(link.join("done-1.tmp"), "0\n").unwrap();
+        std::fs::rename(link.join("done-1.tmp"), link.join("done-1.txt")).unwrap();
+        submit(link, 3, "say 'third job'").unwrap();
+
+        assert_eq!(
+            collect(link, 1),
+            Some(JobResult {
+                rc: 0,
+                output: "started".into()
+            })
+        );
+    }
+
+    #[test]
+    fn the_guest_script_avoids_copying_the_listing_tail() {
+        // Source guard against the quadratic PARSE VAR loop. The directory
+        // walk itself needs an ARexx guest to test its behaviour.
         assert!(!GUEST_SCRIPT.contains("PARSE VAR files"));
         assert!(GUEST_SCRIPT.contains("POS('/', files, p)"));
     }
