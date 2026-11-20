@@ -10,7 +10,7 @@
 //! compares it pixel-for-pixel against the committed reference under
 //! `timing-test/golden/`.
 //!
-//! Exception: four probes depend on the state the ROM hands to the
+//! Exception: ten probes depend on the state the ROM hands to the
 //! bootblock. The two that render live E-clock-referenced counts
 //! (`timing-test`, `bltprobe-pace`) see the E-clock and DMA-cadence phase
 //! relative to the beam vary with boot duration, shifting the displayed
@@ -18,8 +18,14 @@
 //! E-clock-synchronised CIA accesses, and its ICR samples include CIA-A
 //! timer B, which the probe never programs and the ROM leaves running.
 //! `jit-bus-boundary` draws markers whose position against the beam also
-//! follows the handoff instant. Refreshing the bundled AROS ROM can move any
-//! of these four goldens and requires a re-bless.
+//! follows the handoff instant. Six more measure from wherever they start
+//! against the beam: `bltprobe-post` (blit polls left, against the display
+//! fetch), `posprobe-v8` (frame wraps spanned), `a500-display-boundaries`
+//! (raw beam samples), and `irqprobe-window`, `memprobe-chipmirror` and
+//! `memprobe-chipmirror-ecs` (CPU-painted stripe edges). Refreshing the
+//! bundled AROS ROM can move any of these ten goldens and requires a
+//! re-bless; timing-test/README.md ("CI golden renders") records how each
+//! move was checked.
 //!
 //! The emulator core is deterministic, so any pixel difference is a real
 //! behaviour change. When a change is intentional (a hardware-model fix that

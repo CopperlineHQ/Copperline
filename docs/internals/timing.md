@@ -1408,7 +1408,11 @@ the AGA sprite-width staircase (a model regression, not a hardware capture).
 The two probes that display live E-clock-referenced counts (`timing-test`
 itself and `bltprobe-pace`) also move whenever the bundled AROS ROM is
 refreshed, because their phase depends on how long the ROM takes to boot.
-`a500-cia-request` and `jit-bus-boundary` can move for the same reason.
+`a500-cia-request` and `jit-bus-boundary` can move for the same reason,
+and so can six probes that measure against the beam from where they start:
+`bltprobe-post`, `posprobe-v8`, `a500-display-boundaries`,
+`irqprobe-window`, `memprobe-chipmirror` and `memprobe-chipmirror-ecs`
+(all six moved with the 2026-11-20 refresh).
 `timing-test/README.md` ("CI golden renders") has the details, including
 the vAmiga cross-checks behind individual probes.
 
