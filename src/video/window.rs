@@ -5462,6 +5462,9 @@ impl ApplicationHandler for App {
                     // The button that was holding a keycap will lift over
                     // some other window, where no MouseInput reaches us.
                     self.release_keyboard_panel_key();
+                    // The same goes for host keys: on macOS a Cmd-Tab away
+                    // would otherwise leave Left Amiga held in the guest.
+                    self.release_host_keys_on_focus_loss();
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
