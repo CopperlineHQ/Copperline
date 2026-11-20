@@ -248,7 +248,10 @@ already added, and what the script `say`s comes back). They need the card's
 folder mounted in the Amiga (`[video_slot] volume = "ToasterFiles"`) and
 `S:Copperline-Link.rexx` running there; the bridge writes jobs into the
 folder's `.copperline` subfolder and collects the answers, so it must run on
-the emulator's computer.
+the emulator's computer. When the next job is sent, the bridge removes
+uncollected answers whose completion marker is at least 30 seconds old.
+It leaves output without a completion marker alone because the guest may
+still be finishing the job.
 
 `toaster_program {"program", "command", "args"}` reaches the rest of the
 Toaster suite the same way, each program through its own ARexx port:

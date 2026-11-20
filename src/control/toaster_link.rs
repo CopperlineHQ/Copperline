@@ -21,6 +21,11 @@
 //!   through a temporary name);
 //! - host reads `done-ID.txt` and `out-ID.txt` and deletes both.
 //!
+//! A caller that gave up waiting (a timeout after the guest took the job)
+//! never collects its result, so before each job the host also removes
+//! results nobody has collected for [`STALE_RESULT`]: left in place they
+//! pile up, and the guest lists the whole folder on every poll.
+//!
 //! The guest polls five times a second, so a job starts within about
 //! 0.2 s of emulated time. Jobs run side by side, so one that never
 //! returns (a call to a program that does not answer its port) costs the
@@ -283,9 +288,13 @@ fn done_name(id: u64) -> String {
     format!("done-{id}.txt")
 }
 
-/// Hand `script` to the guest as job `id`.
+/// How long to keep an uncollected result after the guest publishes it.
+pub const STALE_RESULT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Hand `script` to the guest as job `id`, first removing stale results.
 pub fn submit(dir: &Path, id: u64, script: &str) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
+    sweep(dir, STALE_RESULT);
     let tmp = dir.join(format!("job-{id}.tmp"));
     // Amiga line ends; the guest reads the script as it is.
     std::fs::write(&tmp, script.replace("\r\n", "\n"))?;
@@ -307,6 +316,39 @@ pub fn collect(dir: &Path, id: u64) -> Option<JobResult> {
         rc: rc_text.trim().parse().unwrap_or(-1),
         output: output.trim_end().to_string(),
     })
+}
+
+/// Remove completed results after their `done-ID.txt` has aged by
+/// `max_age`. The guest can delete `run-ID.rexx` before publishing
+/// `done-ID.txt`, so even an old `out-ID.txt` without either marker may
+/// still be part of a job a caller is waiting for. Returns the files removed.
+pub fn sweep(dir: &Path, max_age: std::time::Duration) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let finished_id = |entry: std::io::Result<std::fs::DirEntry>| -> Option<u64> {
+        let name = entry.ok()?.file_name().into_string().ok()?;
+        name.strip_prefix("done-")?
+            .strip_suffix(".txt")?
+            .parse()
+            .ok()
+    };
+    let mut removed = 0;
+    for id in entries.filter_map(finished_id) {
+        let done = dir.join(done_name(id));
+        let expired = std::fs::metadata(&done)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if expired && std::fs::remove_file(done).is_ok() {
+            removed += 1;
+            if std::fs::remove_file(dir.join(out_name(id))).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
 }
 
 /// Take back a job the guest never picked up (on a timeout), so it does
@@ -426,6 +468,76 @@ mod tests {
         let off = paint.find("call copperline_done").unwrap();
         assert!(off < paint.find("Run >NIL:").unwrap());
         assert!(paint.contains("call remlib('ToasterARexx.port')"));
+    }
+
+    #[test]
+    fn results_nobody_collected_are_swept() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path();
+        for name in [
+            "done-1.txt",
+            "out-1.txt", // finished, never collected
+            "out-2.txt", // no published result
+            "run-3.rexx",
+            "out-3.txt",  // still running
+            "job-4.rexx", // not yet taken
+        ] {
+            std::fs::write(link.join(name), "0\n").unwrap();
+        }
+        // Everything is younger than any sensible age: nothing goes.
+        assert_eq!(sweep(link, STALE_RESULT), 0);
+        age_file(&link.join("done-1.txt"));
+        age_file(&link.join("out-2.txt"));
+        age_file(&link.join("out-3.txt"));
+        assert_eq!(sweep(link, STALE_RESULT), 2);
+        let mut left: Vec<String> = std::fs::read_dir(link)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["job-4.rexx", "out-2.txt", "out-3.txt", "run-3.rexx"]);
+    }
+
+    fn age_file(path: &Path) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() - STALE_RESULT * 2)
+            .unwrap();
+    }
+
+    #[test]
+    fn another_submission_preserves_output_during_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path();
+        submit(link, 1, "say 'started'").unwrap();
+        std::fs::rename(link.join("job-1.rexx"), link.join("run-1.rexx")).unwrap();
+        std::fs::write(link.join("out-1.txt"), "started\n").unwrap();
+        age_file(&link.join("out-1.txt"));
+
+        // The guest can stop here after RX returns and before it publishes done.
+        std::fs::remove_file(link.join("run-1.rexx")).unwrap();
+        submit(link, 2, "say 'other job'").unwrap();
+        std::fs::write(link.join("done-1.tmp"), "0\n").unwrap();
+        std::fs::rename(link.join("done-1.tmp"), link.join("done-1.txt")).unwrap();
+        submit(link, 3, "say 'third job'").unwrap();
+
+        assert_eq!(
+            collect(link, 1),
+            Some(JobResult {
+                rc: 0,
+                output: "started".into()
+            })
+        );
+    }
+
+    #[test]
+    fn the_guest_script_avoids_copying_the_listing_tail() {
+        // Source guard against the quadratic PARSE VAR loop. The directory
+        // walk itself needs an ARexx guest to test its behaviour.
+        assert!(!GUEST_SCRIPT.contains("PARSE VAR files"));
+        assert!(GUEST_SCRIPT.contains("POS('/', files, p)"));
     }
 
     #[test]
