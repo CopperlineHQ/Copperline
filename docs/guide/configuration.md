@@ -89,7 +89,7 @@ directory is rarely one you chose.
 
 | Paths | Media folder |
 |---|---|
-| `rom`, `extended_rom`, `fmv_rom`, `[scsi] rom`/`rom_odd`, `[lide] rom`/`rom_bank2`, `[sf2000sd] rom`, `[cartridge] rom`, `[whdload] kickstarts` | `roms` |
+| `rom`, `extended_rom`, `fmv_rom`, `[scsi] rom`/`rom_odd`, `[lide] rom`/`rom_bank2`, `[sf2000sd] rom`, `[cartridge] rom` | `roms` |
 | `[serial] mt32_control_rom`, `mt32_pcm_rom` | `roms/mt32`, then `roms` |
 | `[floppy.dfN]` images | `floppies` |
 | `[ide]`, `[scsi]`, `[lide]`, `[copperhf]` and `[sf2000sd]` drives | `harddrives`, then `cds` |
@@ -689,7 +689,8 @@ carried no information.)
   debugging, debugger stops, injected faults,
   validation/SMC/heatmap/frame-analyzer observers, instruction or waveform
   traces, a connected control client, video recording, loaded save states,
-  live serial or parallel devices, writable or physical floppy media, mounted
+  live serial or parallel devices, a video-slot card (Video Toaster),
+  writable or physical floppy media, mounted
   CDs, hard-drive, PCMCIA, physical host-disk, and host-directory storage,
   host networking or plugin boards, MHI decoding, and a live or persistent
   RTC/NVRAM. Offline WAV and stem capture are supported:
@@ -2578,7 +2579,7 @@ profile = "A600"             # IDE needs a machine with an IDE port
 master = "AmigaSYS.hdf"      # raw flat HDF, read/write
 # slave = "scratch.hdz"      # gzip-compressed hardfile, writes not kept
 # timing = "period"          # period drive mechanics (see Drive timing)
-# spin_up = false            # also model power-on spin-up
+# spin_up = true             # also model power-on spin-up
 ```
 
 Images are opened read/write. Both kinds of HDF work directly:
@@ -2802,7 +2803,7 @@ unit1 = "data.hdf"
 unit2 = "game.cue"           # .cue/.iso/.nrg/.chd attaches a CD-ROM drive
 # unit3..unit6 = ...
 # timing = "period"          # period drive mechanics (see Drive timing)
-# spin_up = false            # also model power-on spin-up
+# spin_up = true             # also model power-on spin-up
 ```
 
 The `[scsi]` section attaches a SCSI host adapter with up to **seven
@@ -2942,7 +2943,7 @@ drive0 = "workbench.hdf"   # channel 0 master
 drive1 = "data.hdf"        # channel 0 slave
 # drive2, drive3           # channel 1 master/slave (ripple only)
 # timing = "period"        # period drive mechanics (see Drive timing)
-# spin_up = false          # also model power-on spin-up
+# spin_up = true           # also model power-on spin-up
 ```
 
 `[lide]` fits a Zorro II IDE board compatible with LIV2's open-source
@@ -3081,7 +3082,7 @@ owner reports and reviews:
 | A4000 (`[ide]`) | `seagate-st3144a` | the early A4000/040's 120 MB drive |
 | A3000 (`[scsi]`, `controller = "a3000"`) | `quantum-lps-52s` | the A3000's 52 MB Quantum |
 | A2091 in an A2000 or another big-box machine (`[scsi]`) | `quantum-lps-52s` | the A2000HD's 52 MB Quantum |
-| A2091 on an A500, A500+, A1000 or CDTV (`[scsi]`) | `seagate-st125n` | the A590 side-car's 20 MB Seagate |
+| A2091 on an A500, A500OCS, A500+, A1000 or CDTV (`[scsi]`) | `seagate-st125n` | the A590 side-car's 20 MB Seagate |
 | A4091 (`[scsi]`, `controller = "a4091"`) | `seagate-st31200n` | a 1 GB SCSI-2 drive, the class the A4000T shipped with |
 | any machine (`[lide]`) | `wd-ac2120` | a period 3.5" IDE drive |
 

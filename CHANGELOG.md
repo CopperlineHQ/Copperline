@@ -65,6 +65,13 @@ for the earlier release notes.
 
 ### Fixed
 
+- `A500OCS` with `[scsi] timing = "period"` now selects the A590 sidecar's
+  `seagate-st125n` period drive profile, matching `A500`, `A500+`, `A1000`,
+  and `CDTV` rather than falling through to the big-box A2000HD profile.
+- `tools/publish-web` now accepts `A2000` in its model list, matching
+  `copperline-player` and the browser build.
+- The VS Code extension's `attach` launch schema now exposes the `windowed`
+  boolean option (default `true`) supported by `copperline-ctl --dap`.
 - `copperhf.device` implements `AbortIO`. A held `TD_ADDCHANGEINT` is
   released with `IOERR_ABORTED`, so a task that exits without
   `TD_REMCHANGEINT` no longer waits forever, and a read or board-answered

@@ -28,8 +28,8 @@ interval taken from `COPPERLINE_DBG_RR_BUDGET_MB` and
 `COPPERLINE_DBG_RR_INTERVAL` (see [Reverse debugging](reverse.md)).
 
 The headless server owns the machine, so `--control` cannot be combined with
-`--gdb`/`--gdb-gui`, `--terminal`, netplay (`--net-host`/`--net-join`/
-`--net-spectate`), `--benchmark-until`, the capture flags
+`--gdb`/`--gdb-gui`, `--terminal`, netplay (`--netplay-host`/`--netplay-join`/
+`--netplay-watch`/`--netplay-bind`/`--netplay-peer`), `--benchmark-until`, the capture flags
 (`--screenshot-after`, `--expect-screenshot`, `--save-state-after`,
 `--dump-frames`, `--gif-after`), `--profile-live-audio`, scheduled input,
 scheduled floppy or CD changes, or `--exit-on-return`; use the matching

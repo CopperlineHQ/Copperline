@@ -790,7 +790,7 @@ protocol content above.
   `param_tone_cbr64_mono.mp3` for the seek and parameter integration
   tests below. Unlike the local assets the M2 integration tests use
   (`test-assets/mhi-devkit/`, the Aminet MHI developer kit's `MHIplay`,
-  and a tone MP3 under `test-assets/mp3/`; see `tests/README.md`),
+  and a tone MP3 under `test-assets/mp3/`; see the module doc in `tests/mhi.rs`),
   these are Copperline's own generated output, not third-party binaries,
   so the "ROMs and disk images are local assets and are never committed"
   rule does not apply. `src/mhi.rs`'s

@@ -29,7 +29,7 @@ colour clocks:
   68000/68010/68EC020, 32-bit for 68020/68EC030/68030/68EC040/68040/68EC060/68060.
 
 Selectable models: 68000, 68010, 68EC020, 68020, 68EC030, 68030, 68EC040,
-68040, 68EC060, 68060 (disabling `[cpu] fpu = false` on a 68040 or 68060
+68040, 68EC060, 68060 (setting `[cpu] fpu = false` on a 68040 or 68060
 models the FPU-less 68LC040/68LC060).
 
 `[cpu] fpu` fits a 68881/68882 to any 020 or 030; it is on by default
@@ -1106,12 +1106,14 @@ displacement and sent execution mid-instruction).
 
 `PTEST` (68040) walks the addressed page, fills in the physical address and
 MMUSR attribute and status bits (G, U1/U0, S, CM, M, W, R, T, B), and updates
-descriptor U/M history and the ATC. The 68030 `PTEST` performs a real level-limited walk in the
-extension word's function-code space and composes the 16-bit MMUSR (B, S, W
--- reported for read tests too -- I, T, and the level count N); with the A
-bit it hands back the physical address of the last descriptor examined,
-which is how mmu.library's fault handler locates the shared descriptor slot
-to materialize.
+descriptor U/M history and the ATC. The 68030 `PTEST` searches the TT
+registers and ATC at level 0 (`T`, `I`, `W`, `M`), or performs a real
+level-limited table walk in the extension word's function-code space at
+levels 1-7 and composes the 16-bit MMUSR (`B`, `L`, `S`, `W` -- reported for
+read tests too -- `I`, `M`, and the level count `N`); with the `A` bit it
+hands back the physical address of the last descriptor examined, which is
+how mmu.library's fault handler locates the shared descriptor slot to
+materialize.
 
 68030 faults push the long bus-cycle fault frame (format $B, 46 words):
 SSW (DF/RW/SIZ/FC for data faults, FB|RB with the stage B address for

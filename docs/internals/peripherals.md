@@ -1162,9 +1162,11 @@ specified in [](zz9k.md).
 
 ## Z3660 RTG board (`z3660.rs`)
 
-The `[z3660]` board presents the Z3660 accelerator's RTG core as a Zorro III
-autoconfig board (manufacturer `0x144B`, product `1`, 128 MiB window with the
-first 64 MiB backed as board RAM -- Picasso96 VRAM from `+0x200000` and the
+Fitted with `[rtg] card = "z3660"` (and fitted by default on the `A3000` and
+`A4000` profiles, whose stock CPUs have a 32-bit address bus), the Z3660
+board presents the Z3660 accelerator's RTG core as a Zorro III autoconfig
+board (manufacturer `0x144B`, product `1`, 128 MiB window with the first
+64 MiB backed as board RAM -- Picasso96 VRAM from `+0x200000` and the
 `GFXData` blit-parameter mailbox at `+0x3200000`). The 32-bit register file
 sits at window offsets `$100..$800` (mode/pan/sprite/vblank status, blitter
 DMA and accelerator doorbells, firmware version `1.6`, palette upload mailbox,

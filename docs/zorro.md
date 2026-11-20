@@ -791,7 +791,8 @@ In-tree functional boards implement the `ZorroDevice` trait
    can also override `ZorroDevice::next_event_cck` (and forward it in
    `BoardDevice::next_event_cck`) so the bus's idle fast-forward wakes them
    on time, and boards with side-effect-free ROM slices can implement
-   `plain_rom` for direct JIT/fast-path reads.
+   `ZorroDevice::plain_rom` (and forward it in `BoardDevice::plain_rom`) for
+   direct JIT/fast-path reads.
 2. Provide a `BoardSpec` constructor mirroring the existing ones, with the
    full field set. A functional board uses `backing: BoardBacking::Device(slot)`
    where this RAM example has `BoardBacking::Ram`:

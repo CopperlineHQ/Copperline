@@ -355,11 +355,14 @@ slow = "512K"
 #   size = "64M"
 #   manufacturer = 0x07DB
 #   product = 0x20
-# A "wasm" board's manifest can declare settings; override them per board
-# with config = { key = value, ... }.
 # [[zorro]]
 # metadata = "boards/megaram.toml"
-# config = { mode = "fast" }   # WASM plugin boards: setting overrides
+#
+# A "wasm" plugin board's manifest can declare settings; override them per
+# board with config = { key = value, ... } (ignored by plain RAM boards):
+# [[zorro]]
+# metadata = "boards/my-wasm-board.toml"
+# config = { mode = "fast" }
 
 
 # A2065 Ethernet board (Am7990 LANCE, driven by the SANA-II a2065.device).
