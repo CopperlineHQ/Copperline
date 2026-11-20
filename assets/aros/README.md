@@ -747,6 +747,11 @@ cleanly on macOS):
     make kernel-link-amiga-m68k
     # ROMs land in bin/amiga-m68k/gen/boot/aros-amiga-m68k-{rom,ext}.bin
 
+Installing new images here also means pinning their SHA-256 digests in
+`tools/performance/baseline.json` (`rom_sha256`): the AROS performance gate
+boots both its baseline and candidate binaries on these images and refuses
+to run against unpinned ones.
+
 A build that carries an unmerged pull request merges its head into master
 in the source tree first, so the provenance above is a commit pair anyone
 can reproduce:
