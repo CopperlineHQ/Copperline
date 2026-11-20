@@ -81,7 +81,7 @@ window, which would change its autoconfig identity.
 
 - **`VERSION`** (`0x00`, RO) -- the register-protocol version this board
   implements: `2`. The guest library accepts version 1 or newer when
-  finding the board and checks `CAPS` for optional behavior. See
+  finding the board and checks `CAPS` for optional behaviour. See
   [Versioning](#mhi-versioning).
 - **`CAPS`** (`0x02`, RO) -- a bitmask of the MPEG formats and bitrate
   modes this board's decoder accepts. Bit layout:
@@ -141,9 +141,9 @@ window, which would change its autoconfig identity.
   | Value | Command | Effect |
   |---|---|---|
   | `0` | (no-op) | Ignored; reserved so an accidental zero write is inert |
-  | `1` | `PLAY` | `STOPPED`/`PAUSED` &rarr; `PLAYING`. From `STOPPED`, playback (and bitstream consumption) starts at the head of the queue if non-empty, or the board immediately reports `OUT_OF_DATA` if the queue is empty. From `PAUSED`, resumes exactly where it left off. No-op from `PLAYING`/`OUT_OF_DATA`. |
-  | `2` | `PAUSE` | `PLAYING` &rarr; `PAUSED`. Halts bitstream consumption and audio output; the queue is untouched and the decoder's cross-frame state is preserved, so `PLAY` resumes mid-stream with no audible gap or restart. No-op from any other state (in particular, `PAUSE` from `OUT_OF_DATA` or `STOPPED` does nothing -- MHI's own `MHIPause` is only meaningful while playing). |
-  | `3` | `STOP` | Any state &rarr; `STOPPED`. **Discards every queued descriptor**, whether or not decoding has reached it (`QUEUE_COUNT` &rarr; 0), and resets `COMPLETED_COUNT` to 0. **Also resets the decoder's cross-frame state** (bit reservoir, MDCT/QMF overlap) -- a fresh transport session starts with a fresh decoder, not one still carrying the discarded stream's reservoir into whatever plays next. This matches `MHIStop`'s documented semantics exactly ("stop all decoding... all buffers in the queue are flushed") -- the guest library performs no separate flush step, and this is also exactly what a seeking player's `MHIStop` &rarr; reposition &rarr; `MHIQueueBuffer` sequence needs: nothing from the pre-seek stream can bleed into the post-seek decode (see [Seek-entry hardening](#seek-entry-hardening)). |
+  | `1` | `PLAY` | `STOPPED`/`PAUSED` -> `PLAYING`. From `STOPPED`, playback (and bitstream consumption) starts at the head of the queue if non-empty, or the board immediately reports `OUT_OF_DATA` if the queue is empty. From `PAUSED`, resumes exactly where it left off. No-op from `PLAYING`/`OUT_OF_DATA`. |
+  | `2` | `PAUSE` | `PLAYING` -> `PAUSED`. Halts bitstream consumption and audio output; the queue is untouched and the decoder's cross-frame state is preserved, so `PLAY` resumes mid-stream with no audible gap or restart. No-op from any other state (in particular, `PAUSE` from `OUT_OF_DATA` or `STOPPED` does nothing -- MHI's own `MHIPause` is only meaningful while playing). |
+  | `3` | `STOP` | Any state -> `STOPPED`. **Discards every queued descriptor**, whether or not decoding has reached it (`QUEUE_COUNT` -> 0), and resets `COMPLETED_COUNT` to 0. **Also resets the decoder's cross-frame state** (bit reservoir, MDCT/QMF overlap) -- a fresh transport session starts with a fresh decoder, not one still carrying the discarded stream's reservoir into whatever plays next. This matches `MHIStop`'s documented semantics exactly ("stop all decoding... all buffers in the queue are flushed") -- the guest library performs no separate flush step, and this is also exactly what a seeking player's `MHIStop` -> reposition -> `MHIQueueBuffer` sequence needs: nothing from the pre-seek stream can bleed into the post-seek decode (see [Seek-entry hardening](#seek-entry-hardening)). |
 
   Values above `3` are reserved and behave as the no-op.
 
@@ -267,7 +267,7 @@ records:
 (param-latches)=
 ### Param latches
 
-MHI's tone/volume/panning controls (`MHISetParam`) are modeled as a
+MHI's tone/volume/panning controls (`MHISetParam`) are modelled as a
 two-register **select/value mailbox** rather than one register per
 parameter -- MHI defines a long tail of them (`MHIP_BAND1`..`MHIP_BAND10`
 for a 10-band EQ, on top of volume/panning/bass/mid/treble/crossmixing/
@@ -306,7 +306,7 @@ regardless of how many parameters the guest library ends up exposing.
   avoids).
 
   In version 1, writes only store the value. Version 2 applies the latches
-  to PCM and advertises that behavior through `CAPS` bit 6.
+  to PCM and advertises that behaviour through `CAPS` bit 6.
 
 (m4-the-dsp-chain)=
 #### DSP chain
@@ -432,7 +432,7 @@ decodes even addresses.
 
 - **Word access** (`move.w`) is the primary and recommended access size,
   and is what the guest library uses exclusively.
-- **Byte access** (`move.b`) is honored for compatibility: the high byte
+- **Byte access** (`move.b`) is honoured for compatibility: the high byte
   of a register is at its listed offset, the low byte at offset+1
   (big-endian, matching 68k byte order), and a byte write only changes
   that half of the register. There is no latch-on-low-byte behaviour;
@@ -790,7 +790,7 @@ protocol content above.
   `param_tone_cbr64_mono.mp3` for the seek and parameter integration
   tests below. Unlike the local assets the M2 integration tests use
   (`test-assets/mhi-devkit/`, the Aminet MHI developer kit's `MHIplay`,
-  and a tone MP3 under `test-assets/mp3/`; see `test-assets/mhi/NOTES.md`),
+  and a tone MP3 under `test-assets/mp3/`; see the module doc in `tests/mhi.rs`),
   these are Copperline's own generated output, not third-party binaries,
   so the "ROMs and disk images are local assets and are never committed"
   rule does not apply. `src/mhi.rs`'s

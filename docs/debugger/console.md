@@ -41,8 +41,8 @@ Input navigation:
   keep the inspectors open.
 
 Commands are case-insensitive. Addresses and data values are hexadecimal
-(optional `$` or `0x` prefix); raster beam coordinates (VPOS, HPOS) and the
-counts noted below are decimal.
+(an optional `$` prefix; `RWATCH`, `MWATCH`, and `CUSTOM` also accept `0x`);
+raster beam coordinates (VPOS, HPOS) and the counts noted below are decimal.
 
 ## Command reference
 
@@ -78,7 +78,7 @@ in `INTENA`) stays stopped after two video frames of waiting.
 | `BREAK ADDR [COND] [IGN N]` (or `B`) | Toggle a PC breakpoint, with an optional condition and ignore count in the [Break tab's syntax](window.md#debugger-breakpoints) |
 | `WATCH ADDR [CLASS] [PC=ADDR]` (or `W`) | Toggle a watchpoint on the word at `ADDR`. `CLASS` limits it to one writer: `CPU`, `BLITTER`, `DISK`, `COPPER`, or a DMA channel (`BPL1`..`BPL8`, `SPR0`..`SPR7`, `AUD0`..`AUD3`). `PC=ADDR` limits it to CPU writes made by the instruction at that address |
 | `RWATCH NAME\|OFFSET` (or `RW`) | Toggle a custom register write watch (e.g. `RWATCH DMACON` or `RWATCH 96`) |
-| `MWATCH ADDR[:LEN] [READ\|WRITE\|ACCESS]` (or `MW`) | Toggle an MMIO (CPU access) watch over `LEN` bytes (hex, default 2) at `ADDR`: stops after any CPU data access to the range in the class (default `ACCESS`), reporting size, value, direction, PC, frame, beam position, and colour clock. Works on device registers such as Akiko's (`MWATCH B80000:40`), which a value-comparing `WATCH` cannot see; see [MMIO watches](window.md#debugger-breakpoints) |
+| `MWATCH ADDR[:LEN] [READ\|WRITE\|ACCESS]` (or `MW`) | Toggle an MMIO (CPU access) watch over `LEN` bytes (hex, default 2) at `ADDR` (colon-separated `ADDR:LEN:CLASS` and `R`/`W`/`RW` short forms are also accepted): stops after any CPU data access to the range in the class (default `ACCESS`), reporting size, value, direction, PC, frame, beam position, and colour clock. Works on device registers such as Akiko's (`MWATCH B80000:40`), which a value-comparing `WATCH` cannot see; see [MMIO watches](window.md#debugger-breakpoints) |
 | `BTRAP V [H]` | Toggle a raster beam trap at decimal coordinates (VPOS, HPOS) |
 | `CBREAK ADDR` | Toggle a Copper breakpoint at a Copper-list address |
 | `CATCH IRQ N \| TRAP N \| VEC N` | Toggle an exception catch: interrupt level 1-7, `TRAP #0`-`#15`, or vector 2-255 (decimal) |
@@ -97,7 +97,7 @@ in `INTENA`) stays stopped after two video frames of waiting.
 | `CUSTOM [REG]` | Display the chipset summary, or one register (by name or offset) with its access/chipset documentation and decoded fields |
 | `BLITS` | List all blits referenced by the traced frame, including stable ID, cross-frame beam span, direction/fill/line mode, channels, pointers/modulos, shifts/masks/minterm, and clocks used versus stalled (requires Frame Analyzer) |
 | `CPUWAIT` | Summarize the traced frame's CPU chip-bus waits: waited clocks by denier (bitplane, Copper, blitter with BLTPRI clear or set, ...) and by access kind, and the instructions that waited longest (requires Frame Analyzer; see [the CPU wait view](window.md#frame-analyzer-pane)) |
-| `FIND HEXBYTES [START]` | Search CPU-visible memory (RAM and ROM) for a byte sequence, from `START` (default 0) and wrapping round |
+| `FIND HEXBYTES [START]` | Search CPU-visible memory (RAM and ROM) for a byte sequence, from `START` (default 0) and wrapping round; prefix `START` with `$` (for example `FIND 4E75 $10000`), because a bare even-length hex token is appended to `HEXBYTES` instead |
 | `WRITER ADDR` | Replay retained snapshots to the last observed change of the word at `ADDR`; moves execution back to that point |
 | `CDTRACE [N]` | List the CD drive's last `N` commands (default 16), oldest first: emulated issue time, decoded kind, sector range, speed, reply status, and each later step as milliseconds after issue, with the outcome (CD32 Akiko; see [the CD tab](window.md#debugger-cd-tab)) |
 | `DBGRES` | List debug resources (bitmaps, palettes, copper lists) registered by guest code via the uaelib trap (distinct from `RESOURCES`, which lists Exec OS resource nodes) |
@@ -110,7 +110,7 @@ in `INTENA`) stays stopped after two video frames of waiting.
 | `TRACE START [PATH]` | Log the disassembly of every executed instruction to `PATH` (default: a `copperline-trace-*.txt` file in the [traces folder](../guide/ui.md#where-files-go)), up to 1,000,000 lines |
 | `TRACE STOP` | Stop instruction trace logging |
 | `TRACE` | Report the running trace's file and line count |
-| `WAVE START [ARGS]` (or `WAVEFORM`) | Arm a VCD logic analyser capture (see [](waveform.md)) |
+| `WAVE START [ARGS]` (or `WAVEFORM`) | Arm a VCD logic analyzer capture (see [](waveform.md)) |
 | `WAVE STOP` | Stop VCD capture |
 | `WAVE` | Report the VCD capture's state |
 | `HELP` (or `?`) | Display command summary |

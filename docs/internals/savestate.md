@@ -31,7 +31,7 @@ What is captured:
 | Component | Contents |
 |---|---|
 | `CpuCore` | registers, SR flags, prefetch queue, pending interrupt/stop state, MMU/CACR state, cycle-timing configuration, `cpu_type` and address mask |
-| `MachineRuntimeState` | the `M68kMachine` fields outside the core: `last_cacr`, `sync_cck_on`, `cpu_clocks_per_cck`, `cpu_clock_carry`, and `jit_window_bank` (the fast-RAM bank the JIT fastmem window covers while code runs outside fast RAM; it decides which fast-RAM accesses allocate cache lines, and saves without it read `None`) |
+| `MachineRuntimeState` | the `M68kMachine` fields outside the core: `last_cacr`, `sync_cck_on`, `cpu_clocks_per_cck`, `cpu_clock_carry`, `stop_poll_phase`, `jit_window_bank` (the fast-RAM bank the JIT fastmem window covers while code runs outside fast RAM; it decides which fast-RAM accesses allocate cache lines, and saves without it read `None`), and the live CPU interrupt-sampling latches (`sampled_irq_level`, `ipl_sample_held`, `ipl_latched_level`) |
 | `icache` / `dcache` | the CPU cache models (`Option<Box<CpuCache>>`, `None` when absent or opted out). When the state carries `None`, load keeps the running machine's cache model, if it has one, and re-derives its enable and freeze bits from the restored CACR |
 | `Bus` | chip, slow, motherboard, and accelerator RAM, ROM and extended ROM, Zorro boards (including their RAM), both CIAs, RTC, Agnus/Copper/Denise/Paula/blitter state, floppy controller with in-memory disk images, Gayle IDE and its PCMCIA card (an SRAM card's contents included), A2091 SCSI, Akiko/CDTV with NVRAM, beam-event capture buffers, DMA pointers, interrupt latches, and the bus-arbitration counters |
 
@@ -45,11 +45,13 @@ Deliberately excluded, with the mechanism in parentheses:
   uninterrupted. A sink with a live connection (a host serial port) is
   told of the timeline jump, drops what it had queued from the abandoned
   one, and is handed the restored CIA-B `/DTR`/`/RTS` and SERPER rate. The
-  same call carries over the parallel-port device, Paula's capture and
-  scope taps, the CCP bus-event queue and CD command trace, and the floppy
-  drive-speed setting. It first reattaches any A2065 network backend and
-  reacquires saved host disks, so a failure there leaves the running
-  machine untouched.
+  same call carries over the parallel-port device, the Video Flyer board's
+  `FlyerLink` to the Toaster card, the CDTV bookmark RAM's backing file
+  (`adopt_bookmark_file_from`), Paula's capture and scope taps, the CCP
+  bus-event queue and CD command trace, the floppy drive-speed setting, and
+  the `keep_ram_addresses` allocation-preservation policy used by libretro
+  memory maps. It first reattaches any A2065 network backend and reacquires
+  saved host disks, so a failure there leaves the running machine untouched.
 - **The video-slot card as an object**: the session's card (its compose
   thread, outputs and input files) stays with the session, like the
   parallel peripheral. What the card holds is not excluded: the bus
@@ -57,10 +59,10 @@ Deliberately excluded, with the mechanism in parentheses:
   call hands a loaded state's bytes to the live card (`load_state`), or
   resets it to power-on when the state carries none. See
   [the video-slot tap](video.md).
-- **Host preferences**: Paula's output volume, channel mode, stereo
-  separation, and filter override (`#[serde(skip)]`; volume and
-  separation default to full scale, so a Paula decoded on its own is
-  neither muted nor mono). `Bus::adopt_host_resources` copies them from
+- **Host preferences**: Paula's output volume, video-slot audio volume
+  (`video_slot_volume`), channel mode, stereo separation, and filter override
+  (`#[serde(skip)]`; volume, video-slot gain, and separation default to full
+  scale, so a Paula decoded on its own is neither muted nor mono). `Bus::adopt_host_resources` copies them from
   the live Paula onto the restored one, so no restore changes them: not a
   state load, a rewind, a run-ahead rewind, or a netplay rollback. Being
   outside the payload also keeps them out of netplay's checkpoint
@@ -169,11 +171,12 @@ files during deserialization. Missing or moved images cause a load-time error:
 
 - `HardDriveImage` (shared by IDE, SCSI, and copperhf) serializes as
   `HardDriveImageState { path, memory, total_sectors, rdb_overlay,
-  overlay_write_warned, scsi_bus, host_device, session, chd_overlay }`. A
-  file-backed image stores `memory: None` and reopens `path` read/write on
-  load; an in-memory directory-built volume stores the whole image in
-  `memory`, so writes it holds only in memory survive the round trip. The
-  synthesized-RDB overlay for bare hardfiles is embedded either way.
+  overlay_write_warned, scsi_bus, host_device, session, chd_overlay,
+  fault }`. A file-backed image stores `memory: None` and reopens `path`
+  read/write on load; an in-memory directory-built volume stores the whole
+  image in `memory`, so writes it holds only in memory survive the round trip.
+  The synthesized-RDB overlay for bare hardfiles and any installed
+  `disk.fault.*` policy state (`fault`) are embedded either way.
   Consequence: HDF *file contents* are not part of the state -- guest
   writes made after the snapshot are still visible after restoring.
 - A CHD hard-disk image (`harddrive/chd.rs`) is the exception: it reopens
@@ -190,10 +193,19 @@ files during deserialization. Missing or moved images cause a load-time error:
   sectors and a digest of its base image in `session`. The base itself is
   not in the state and must already be loaded in the same process, so such
   a state restores only there.
-- `CdImageState::Bin { sources, tracks, extents, total_sectors }` stores
-  the source descriptions needed to reopen BIN/WAVE/MP3, ISO, and NRG data.
-  `CdImageState::Chd { path }` stores the CHD path and rebuilds the CHD
-  backend on load. Both reopen media read-only.
+- `CdImageState::Bin { sources, tracks, extents, total_sectors, fault,
+  subcode }` stores the source descriptions and optional `.sub` subcode path
+  needed to reopen BIN/WAVE/MP3, ISO, and NRG data, plus any installed
+  `disk.fault.*` state. `CdImageState::Chd { path, fault }` stores the CHD
+  path and fault state and rebuilds the CHD backend on load. Both reopen
+  media read-only.
+- A SCSI tape drive (`src/scsi/tape.rs`) serializes as `TapeState { path,
+  cartridge, names, write_protected, capacity, loaded, block_len,
+  last_block_len, file, offset, buffered_mode, sense }`. On load it reopens
+  the cartridge at `path` (single file or directory) as currently present on
+  the host and reconciles the saved head position against the cartridge's
+  files, warning and clamping to the nearest valid position if the cartridge
+  changed externally.
 - A physical disk stores its identifier, fingerprint, and write-access
   setting in `host_device`. Deserialization creates a pending device;
   the host-disk reopen path then checks its identity and access rules.
@@ -208,19 +220,20 @@ writes included.
 ### Host bindings a state carries
 
 Reopening by path means a state file names host resources, and a load opens
-what it names: hard-drive, CD and file-backed floppy image paths (a
-file-backed floppy writes the guest's changes back to its path), each
-`[[filesys]]` mount's `MountSpec` (path and `readonly`), a WebAssembly
-board's module path and manifest (capabilities, network backend, resource
-files), and an A2065's `NetConfig`. Only the `uaelib` host file root is
-carried over from the running session instead. State files are therefore
+what it names: hard-drive, CD, SCSI tape cartridge, and file-backed floppy
+image paths (a file-backed floppy writes the guest's changes back to its
+path), each `[[filesys]]` mount's `MountSpec` (path and `readonly`), a
+WebAssembly board's module path and manifest (capabilities, network backend,
+resource files), and an A2065's `NetConfig`. Only the `uaelib` host file root
+is carried over from the running session instead. State files are therefore
 trusted like configuration files (`SECURITY.md`).
 
 `hostbind` keeps a process-wide set of the host resources the configuration,
 command line or UI opened, recorded where each is opened
 (`HardDriveImage::open_inner` and `open_device`, `cdrom::Source::open` and
-`CdImage::load_chd`, `FloppyImage` with a file backing,
-`FilesysBoard::set_mounts`, `WasmBoard::from_file`, `A2065::new`). The
+`CdImage::load_chd`, `ScsiTape` via `hostbind::Kind::Tape`, `FloppyImage`
+with a file backing, `FilesysBoard::set_mounts`, `WasmBoard::from_file`,
+`A2065::new`). The
 restore paths ask it about each resource a state names -- during
 deserialization for images and plugins, in `Bus::adopt_host_resources` for
 floppies and mounts -- and log one warning per resource the session had not
@@ -408,12 +421,12 @@ reverse-debugging ring and run-ahead (`emulator.rs`), where speed matters
 and only the build that wrote a blob ever reads it. Memory buffers (chip,
 slow, motherboard and accelerator RAM, the ROMs, Zorro board RAM, the
 frame's chip RAM copies, the RTG boards' VRAM, the A2065's and CD32 FMV
-cartridge's RAM, the Flyer's SRAM and DRAM) are serialised with
+cartridge's RAM, the Flyer's SRAM and DRAM) are serialized with
 `bytes_serde`, which writes them with `serialize_bytes`: bincode then
 copies each in one go instead of a call per byte. That matters for the
 ring a control client arms (a snapshot every five frames): an A4000 with
 its 64 MB Z3660 VRAM, 18 MB of RAM and a Flyer spent most of its host
-time serialising byte by byte. The snapshot buffer is allocated at the
+time serializing byte by byte. The snapshot buffer is allocated at the
 last snapshot's size, so a capture is one pass of copying rather than a
 chain of reallocations. The encoding is the one
 serde's `Vec<u8>` had (bincode: a length and the bytes; the file dialect:
@@ -424,11 +437,11 @@ the rollback latches (the Bus rollback state and the CPU's sampled
 interrupt level). `write_chunks` is the file-format twin; all of them go
 through the same `adopt_state` tail on restore.
 
-A file state carries the CPU's interrupt sample too (`sampled_irq_level`
-and `ipl_sample_held` in `MachineRuntimeState`) and the last value driven on
-the chip data bus (`Bus::data_bus`): both are live at the instruction
-boundary a state is taken on, where the next boundary compares the live
-interrupt level against the sample and an open-bus read returns the bus
+A file state carries the CPU's interrupt sample too (`sampled_irq_level`,
+`ipl_sample_held`, and `ipl_latched_level` in `MachineRuntimeState`) and the
+last value driven on the chip data bus (`Bus::data_bus`): both are live at the
+instruction boundary a state is taken on, where the next boundary compares the
+live interrupt level against the sample and an open-bus read returns the bus
 value. States written before these fields existed resume with the reset
 values. The Bus rollback state's presentation fields stay out of file
 states, which block rendering of the partly reconstructed field instead.
@@ -681,10 +694,10 @@ The same host boundary as save states applies, plus the requirement that
   when `--rtc-time` already makes the clock deterministic.
 - Directory-backed (host-folder) filesystems stamp guest-visible host
   datestamps with no fixed-time override -- avoid for reverse replay.
-- HDF and CD images reopen by path and are externally mutable, so a guest
-  write to an HDF after a snapshot is not rolled back by restoring it.
-  Floppy contents and a CHD hard disk's write overlay are in the state and
-  safe.
+- HDF, CD, and SCSI tape cartridge paths reopen from the host and are
+  externally mutable, so a guest write to an HDF or tape cartridge after a
+  snapshot is not rolled back by restoring it. Floppy contents and a CHD
+  hard disk's write overlay are in the state and safe.
 - Physical media and live network, serial, MIDI, or sampler input cannot
   be reproduced from the snapshot alone.
 - Host clipboard sharing (`[clipboard] share`) injects host text when a

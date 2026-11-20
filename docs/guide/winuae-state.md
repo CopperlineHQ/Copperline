@@ -21,9 +21,9 @@ Copperline's 512 KiB ROM window.
 Copperline discards one reconstructed video frame automatically. Scheduled
 times then follow Copperline's new emulated timeline, which already includes
 that frame, not the source emulator's timestamps. `--load-uss` cannot be
-combined with `--load-state`, `--run` or `--whdload`. An explicit
-configuration can supply matching disk images and host preferences, but the
-USS hardware configuration takes precedence.
+combined with `--load-state`, `--run`, `--whdload`, or positional disk images.
+An explicit configuration can supply matching disk images and host
+preferences, but the USS hardware configuration takes precedence.
 
 `copperline-ctl profile` accepts 1-100 frames and writes a native capture
 with screenshots, DMA slots and instruction/register samples. Add
@@ -40,8 +40,8 @@ operation.
 | USS state | Import behaviour |
 |---|---|
 | ASF framing, plain/zlib chunks | Length and aggregate limits checked; truncated data and duplicate mandatory chunks rejected. |
-| CPU | 68000-68060 registers, SR, USP/ISP/MSP, VBR and cache controls; 68EC020 address width retained. Active MMU, FPU chunks and halted CPUs rejected. Cache contents/prefetch are reconstructed. |
-| CHIP | Compact and full register layouts; custom latches, Copper lists, bitplane pointers, blitter configuration, interrupt/DMA controls and disk pointer/sync. Active blits and disk DMA rejected. |
+| CPU | 68000-68060 registers, SR, USP/ISP/MSP, VBR and cache controls; 68EC020 address width retained. Active MMU, FPU chunks, 24-bit addressing on 68030+, and halted CPUs rejected. Cache contents/prefetch are reconstructed. |
+| CHIP, DISK | Compact and full register layouts; custom latches, Copper lists, bitplane pointers, blitter configuration, interrupt/DMA controls and disk pointer/sync. Active blits and disk DMA rejected. |
 | CHPX | Validated boot-ROM overlay flags; other emulator-specific machine preferences are not restored. |
 | AGAC, SPR0-7, AUD0-3 | 24-bit palette, sprite pointers/position/data/arming, audio pointers/lengths/period/volume and current sample state. Shift pipelines are approximate. |
 | CIAA/B | Ports, timer counters/latches, control registers, interrupt state and TOD/alarm/latch; supports older 30-byte and extended chunks. |

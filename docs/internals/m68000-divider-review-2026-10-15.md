@@ -148,10 +148,10 @@ capture has 655 among 1,685. Pair counts differ because unsafe beam samples
 and unequal launches are excluded independently for each capture.
 
 The six-bitplane, 64-division loops agree across all three systems: normal
-DIVU 4763–4767 colour clocks, worst-case DIVU 5102, and DIVS 5249–5257,
+DIVU 4763-4767 colour clocks, worst-case DIVU 5102, and DIVS 5249-5257,
 including loop and readback overhead. These figures are saved measurements,
 not newly rerun results. See `a500-timing-measurements-2026-10-14.md` and the
-probe repository's `docs/rom-timing-isolation-2026-10-14.md`.
+sibling `amiga-hardware-probes` repository's `docs/rom-timing-isolation-2026-10-14.md`.
 
 The original probe's aligned DIVS kernel uses dividend `$12345678` and divisor
 `$789a`. Its original DIVS/IRQ kernel also uses a positive divisor. Neither covers the

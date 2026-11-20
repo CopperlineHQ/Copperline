@@ -48,7 +48,7 @@ draining, the earliest pending records are kept and later samples are dropped
 until the buffer is drained. Copperline logs one warning per capture.
 `profile.status`, the `profile.stop` result, and `profile.json` expose
 `samples_buffer_limit` and the cumulative `samples_dropped` count; sampled
-`profile.jsonl` records also carry the cumulative drop count. A nonzero count
+`profile.jsonl` records also carry the cumulative drop count. A non-zero count
 means the instruction profile is incomplete, including its timing totals.
 The count survives buffer drains and the frame limit stopping the sampler;
 starting a new capture resets it. Bartman binary export fails on overflow
@@ -103,7 +103,7 @@ One JSON object per committed frame:
 | `instantaneous_slots` | When `"slots": true` and zero-time floppy turbo DMA occurred: ordered `{vpos, hpos, ...record}` entries that cannot share the one-record-per-clock sidecar slot. |
 | `screenshot`, `digest` | When `"screenshots": "every"`: frame screenshot PNG filename and FNV-1a64 hash digest. |
 | `samples`, `samples_meta` | With `"samples": true`, the filenames of this frame's compact instruction stream and Copperline timing metadata. |
-| `sample_count`, `samples_total`, `irq_cck` | Encoded samples in this frame, cumulative encoded samples, and interrupt-dispatch colour clocks in this frame. |
+| `sample_count`, `samples_total`, `samples_dropped`, `irq_cck` | Encoded samples in this frame, cumulative encoded samples, cumulative dropped samples when the sampling buffer overflowed, and interrupt-dispatch colour clocks in this frame. |
 
 `stall_pcs` names the instruction that was executing when each wait began.
 On the precise CPU loop that is the current instruction; under `[cpu] jit`

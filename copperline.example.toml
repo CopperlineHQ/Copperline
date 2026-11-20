@@ -7,7 +7,7 @@
 
 # Kickstart ROM image: 512 KiB, or a 256 KiB Kickstart 1.x part (the A1000
 # profile takes its 64 KiB bootstrap ROM here instead). Byte-swapped EPROM
-# images are recognised and accepted too. Omit this field (and pass no ROM
+# images are recognized and accepted too. Omit this field (and pass no ROM
 # argument) to boot the bundled AROS open-source Kickstart replacement,
 # which ships with Copperline as the default boot ROM.
 # Left commented out so this example boots as-is: with no ROM named, the
@@ -106,7 +106,7 @@ pacing_budget = "cycles"
 # many emulated frames per presented frame, making warp roughly the limit
 # times the refresh rate (host CPU permitting). One of "2x", "4x", "8x",
 # "16x", or "max" (default; run flat out). With VSync off, presentation
-# frequency depends on host throughput. Adjust it live from Warp Settings >
+# frequency depends on host throughput. Adjust it live from Warp Settings ->
 # Warp Limit or Cmd+Shift+W / Alt+Shift+W.
 # warp_speed = "max"
 
@@ -156,7 +156,7 @@ pacing_budget = "cycles"
 # needs roughly (run_ahead_frames + 1)x realtime headroom; start with 1.
 # Host-coupled devices and diagnostics that cannot be rewound make the setting
 # temporarily inactive, with the reason shown in the Run Ahead menu's OSD.
-# 0..4; adjust live from Emulation Settings > Run Ahead.
+# 0..4; adjust live from Emulation Settings -> Run Ahead.
 # run_ahead_frames = 0
 
 
@@ -232,9 +232,9 @@ model = "68000"
 # Without any [machine] section the default machine is that same Rev 6A
 # A500 (ECS 8372A Agnus, OCS 8362 Denise, 512 KiB chip + 512 KiB trapdoor
 # slow RAM) -- the most common and most-targeted Amiga.
-# The big-box profiles (A3000, A4000) are new and incomplete, but both boot,
-# each off its own built-in disk controller: put drives on the A3000's SCSI
-# with [scsi], and on the A4000's IDE with [ide].
+# The big-box profiles (A3000, A4000) fit Ramsey, the RP5C01 clock and
+# battery RAM, Z3660 RTG, and their built-in disk controllers: put drives on
+# the A3000's SCSI with [scsi], and on the A4000's IDE with [ide].
 # rom_scsi_device_disable skips the ROM's scsi.device. It defaults to true
 # when the machine's built-in disk controller has no drives configured (an
 # A600/A1200/A4000 with no [ide] drives, an A3000 with no [scsi] units): the
@@ -355,10 +355,14 @@ slow = "512K"
 #   size = "64M"
 #   manufacturer = 0x07DB
 #   product = 0x20
-# A "wasm" board's manifest can declare settings; override them per board
-# with config = { key = value, ... }.
 # [[zorro]]
 # metadata = "boards/megaram.toml"
+#
+# A "wasm" plugin board's manifest can declare settings; override them per
+# board with config = { key = value, ... } (ignored by plain RAM boards):
+# [[zorro]]
+# metadata = "boards/my-wasm-board.toml"
+# config = { mode = "fast" }
 
 
 # A2065 Ethernet board (Am7990 LANCE, driven by the SANA-II a2065.device).
@@ -610,7 +614,9 @@ video = "PAL"
 # 4000 (A4000; the Toaster software is not included). It supplies sync like
 # a genlock while fitted. `media` is its host folder: Input 1-4 (video files
 # or stills to play into each input), Output (Program recordings) and Flyer.
-# The card's Preview and Program outputs open as monitor windows.
+# The card's Preview and Program outputs open as monitor windows. `volume`
+# also mounts `media` inside the Amiga as a non-booting host volume (needed
+# for the Toaster's file requesters and the MCP control link).
 # `flyer = true` also fits a NewTek Video Flyer beside the Toaster; a
 # windowed machine with a Flyer also opens the clip converter window
 # (`flyer-convert`) unless `converter = false`.
@@ -619,6 +625,7 @@ video = "PAL"
 # media = "Amiga Toaster Files"
 # monitors = true
 # preview_overlay = false
+# volume = "ToasterFiles"
 # flyer = false
 # converter = true
 
@@ -630,12 +637,12 @@ video = "PAL"
 # compressed hardfile (.hdz, or a gzipped .hdf: it is the content that decides,
 # not the name) is unpacked into memory at open time, so the guest may write to
 # it but nothing goes back to the compressed file. A CHD hard-disk image (as
-# `chdman createhd -i disk.hdf -o disk.chd` writes, recognised by content too)
+# `chdman createhd -i disk.hdf -o disk.chd` writes, recognized by content too)
 # is decompressed a sector at a time and never written: guest writes go to a
 # copy-on-write overlay beside it, disk.chd.wov, which persists across
 # sessions (delete it to return to the pristine image). If the overlay cannot
 # be created the disk attaches write-protected. A VHD (fixed or dynamic, the
-# container WinUAE creates hardfiles in; recognised by content) is read and
+# container WinUAE creates hardfiles in; recognized by content) is read and
 # written in place like an HDF. A path may also name a host
 # directory, mounted as an in-memory FFS or OFS volume (guest writes are
 # likewise not synced back to the host).
@@ -667,6 +674,13 @@ video = "PAL"
 # slave = "data.hdf"
 # master = { path = "workbench.hdf", bootpri = 6 }
 # master = { path = "/host/Games", filesystem = "ofs" }
+#
+# Custom drive timing profile (overrides or extends built-in drive profiles;
+# see docs/guide/configuration.md, "Drive timing" for all fields):
+# [[drive_profile]]
+# id = "quick-conner"
+# base = "conner-cp2064"
+# seek_ms = [4, 15, 30]
 
 
 # The A600/A1200 PCMCIA (credit-card) slot, wired through Gayle. One card:
@@ -744,7 +758,7 @@ video = "PAL"
 # fits it, windowed or headless (headless it is reachable through the
 # control protocol's clipboard.get/set, not the host clipboard, so the run
 # stays deterministic). Also --clipboard / --no-clipboard, and Input
-# Settings > Share Clipboard at runtime.
+# Settings -> Share Clipboard at runtime.
 # [clipboard]
 # share = true
 
@@ -761,7 +775,7 @@ video = "PAL"
 # off the default view, like the CD32 boot logo's leading serif); glass
 # nudged past the captured raster shows black. TV mode only (full
 # overscan already shows everything); captures follow the knobs, and
-# Video Settings > Screen Centring steps them live.
+# Video Settings -> Screen Centring steps them live.
 # pixel_aspect: "tv" (default; the
 # non-square pixel aspect of a 4:3 CRT) or "square" (one host row per
 # scanline, so a 320x256 lo-res screen is an exact 640x512 -- handy for
@@ -810,7 +824,7 @@ video = "PAL"
 # while a bezel is; interactive screenshots include them.
 # perf_overlay: show the performance overlay at start (default false; also
 # --perf-overlay, and Cmd/Alt+P toggles it live): emulated fps, speed
-# factor, per-frame emulation cost, host utilisation, audio health, and
+# factor, per-frame emulation cost, host utilization, audio health, and
 # pacer slips in the top-right of the display. Interactive screenshots include
 # it; scheduled captures and recordings omit it.
 # tint: screen tint over the window image. "none" (default, full colour),
@@ -836,11 +850,11 @@ video = "PAL"
 # --show-status-bar / --hide-status-bar, and Cmd/Alt+Shift+F toggles it live).
 # track_display: what the status bar's floppy counter reads. "track"
 # (default) is the track number; "cylinder" is CYL.SIDE, e.g. 40.1 for
-# track 81. Video Settings > Track Display changes it live.
+# track 81. Video Settings -> Track Display changes it live.
 # menu_scale: how large the pop-up menu is drawn. "1x" (default) or "2x";
-# also --menu-scale, and Video Settings > Menu Size changes it live.
-# vsync: synchronise desktop presentation to vblank (default true).
-# Video Settings > VSync changes it live. Off may reduce latency but can
+# also --menu-scale, and Video Settings -> Menu Size changes it live.
+# vsync: synchronize desktop presentation to vblank (default true).
+# Video Settings -> VSync changes it live. Off may reduce latency but can
 # tear; normal emulation speed is unchanged. PAL on a fixed 60/120 Hz screen
 # can still have an uneven cadence with vsync on.
 # hidpi_texture: draw the presentation texture at the display's device-pixel
@@ -1039,7 +1053,7 @@ floppy_sounds_volume = 100
 
 # Release capture with middle click. Off by default, so middle click reaches
 # the guest. The release click is consumed while captured; uncaptured clicks
-# keep their usual behavior. Also the launcher's Input tab.
+# keep their usual behaviour. Also the launcher's Input tab.
 # middle_click_release = false
 
 # Autofire: pulse a HELD fire button this many times per second (0 = off, the
@@ -1102,7 +1116,7 @@ floppy_sounds_volume = 100
 #             [serial.phonebook] maps a dialable number to a host:port (or
 #             a bare host, which dials the modem's default port);
 #             config-file only, no launcher row. session replays a scripted dial-out session
-#             from a file instead of dialing out over TCP -- the
+#             from a file instead of dialling out over TCP -- the
 #             determinism story for a modem-using headless run or test
 #             case (docs/guide/modem.md#scripted-sessions has the file
 #             format); cannot be combined with listen.
@@ -1273,6 +1287,17 @@ floppy_sounds_volume = 100
 # Attach read-only first; the "Real hard disks" chapter of the guide says
 # why, and what a correct read-only attach looks like.
 #
+# [[host_disk]]
+# device = "sdb"                 # the name --list-disks prints
+# fingerprint = "v1-..."        # launcher-generated; do not copy between disks
+# attach = "ide-master"          # ide-master (default), ide-slave, lide0-master,
+#                                 # lide0-slave, lide1-master, lide1-slave, scsi0..scsi6,
+#                                 # or pcmcia (a CF card in the A600/A1200 slot)
+# read_only = true               # the default; false explicitly allows writes
+
+
+# SCSI tape drives -------------------------------------------------------
+#
 # A SCSI tape drive on the [scsi] controller (a [[tape]] entry alone fits
 # the default controller, as a unit does). The cartridge is a host
 # directory -- one host file per tape file, in name order, so tar archives
@@ -1289,11 +1314,3 @@ floppy_sounds_volume = 100
 # kind = "directory"       # or "file"; default: whatever path is
 # capacity = "150M"        # default: no end
 # write_protect = true     # the cartridge's write-protect tab
-#
-# [[host_disk]]
-# device = "sdb"                 # the name --list-disks prints
-# fingerprint = "v1-..."        # launcher-generated; do not copy between disks
-# attach = "ide-master"          # ide-master (default), ide-slave, lide0-master,
-#                                 # lide0-slave, lide1-master, lide1-slave, scsi0..scsi6,
-#                                 # or pcmcia (a CF card in the A600/A1200 slot)
-# read_only = true               # the default; false explicitly allows writes

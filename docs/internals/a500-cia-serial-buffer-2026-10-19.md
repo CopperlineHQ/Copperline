@@ -45,6 +45,6 @@ single-edge execution. MyST is unavailable locally; documentation builds were
 not run.
 
 All 11 earlier CIA/IRQ/bus/blitter regression packets and the 1920-case CPU/DMA
-neighbor are byte-identical to the accepted4038ec64 baseline. Thus the buffered
+neighbour are byte-identical to the accepted `4038ec64` baseline. Thus the buffered
 write repairs do not change those established timing constraints. The 13 active
 boundary differences and the first-byte boundary differences remain open.

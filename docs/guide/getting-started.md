@@ -15,6 +15,8 @@ system requirements, installation, building from source, and initial setup.
 - **Linux build dependencies:** `sudo dnf install alsa-lib-devel systemd-devel gcc`
   on Fedora, or `sudo apt install libasound2-dev libudev-dev pkg-config gcc` on
   Debian/Ubuntu.
+- **Windows ARM64 source builds:** LLVM `clang` on `PATH` for Internet netplay's
+  crypto backend (or disable `netplay-internet`).
 - **Boot ROM:** Copperline includes the open-source [AROS](http://www.aros.org/)
   Kickstart replacement and boots it by default. It also runs real Kickstart
   ROMs (1.x through 3.2, plus the CDTV and CD32 extended ROMs) and
@@ -146,7 +148,10 @@ converter](import-uae.md). Where they land depends on the package:
 | AppImage | The separate `Copperline-X.Y.Z-<arch>-tools.tar.gz` release asset. Unpack it anywhere; set `COPPERLINE_BIN` to the AppImage path so `copperline-ctl` can launch the emulator. |
 
 `copperline-ctl` launches the `copperline` beside it when one is there; the
-[DAP chapter](../debugger/dap.md) lists the full lookup order.
+[DAP chapter](../debugger/dap.md) lists the full lookup order. Source and
+Homebrew builds also install `flyerclip` and `flyer-convert` (for
+`[video_slot]` Video Flyer clips) and `copperline-net-helper` (for bridged
+networking on Linux).
 
 ## Building from source
 
@@ -182,7 +187,8 @@ features to keep; the [FluxBridge](fluxbridge.md), [MT-32](mt32.md), and
 | `wasm-boards` | yes | WebAssembly [Zorro board plugins](../zorro.md). |
 | `cpu-jit` | yes | Native code generation for `[cpu] jit`. |
 | `control` | yes | The [control protocol](../debugger/control.md) server (`--control`, `--control-gui`). |
-| `ctl-bin` | yes | The `copperline-ctl` binary, with its MCP and DAP modes. |
+| `ctl-bin` | yes | The `copperline-ctl` binary (with its MCP and DAP modes) and the `flyerclip` Video Flyer clip tool. |
+| `converter-bin` | yes | The standalone `flyer-convert` Video Flyer clip converter window. |
 | `gdb` | yes | The [GDB remote stub](../debugger/gdb.md). |
 | `dap` | yes | The [Debug Adapter Protocol](../debugger/dap.md) adapter and the guest debug-information reader. |
 | `import-uae-bin` | yes | The [`copperline-import-uae`](import-uae.md) converter. |
@@ -317,7 +323,7 @@ copperline --model CD32 disc.cue
 
 | File | Startup action |
 | --- | --- |
-| ADF, ADZ, DMS, IPF, SCP, `.adf.gz`, floppy ZIP | First image in DF0; further images join its swap playlist |
+| ADF, ADZ, DMS, IPF, SCP, `.gz` (for example `.adf.gz`), floppy ZIP | First image in DF0; further images join its swap playlist |
 | `.lha`, `.lzh`, a ZIP containing a WHDLoad slave, `.slave`/`.slav`, extracted game directory | Direct WHDLoad boot, with the same support archives and Kickstart requirements as `--whdload` |
 | `.cue`, `.iso`, `.nrg`, CD CHD | Disc in the selected CD32/CDTV machine's built-in drive |
 | `.toml` | Configuration, equivalent to `--config FILE` |
@@ -344,7 +350,7 @@ configurations for the selected user/all-users installation. Uninstall removes
 Copperline's entries and preserves other applications' defaults. Portable ZIPs
 do not change file associations.
 
-The macOS application advertises the same file types in Finder. **Open with →
+The macOS application advertises the same file types in Finder. **Open with ->
 Copperline** uses the positional-file startup path. Opening another document
 starts a separate session, preserving an existing guest or edited launcher.
 An untouched startup window closes when it hands the initial document to its

@@ -5,10 +5,11 @@ The documentation under this directory is written in
 
 ## Dependencies
 
-- [Node.js](https://nodejs.org/) (CI uses Node 24) and the MyST CLI:
+- [Node.js](https://nodejs.org/) (CI uses Node 24) and the MyST CLI (CI pins
+  `mystmd@1.12.0`):
 
   ```sh
-  npm install -g mystmd
+  npm install -g mystmd@1.12.0
   ```
 
 - [Python 3.11 or later](https://www.python.org/) for version metadata and the
@@ -71,7 +72,7 @@ The helper runs `myst build --pdf` (passing on its own arguments, such as
 tables, and compiles them with `typst`. This avoids the legacy `tablex`
 helper's layout-convergence failures and incorrect page counts in long
 manuals. It also corrects menu arrows emitted as literal `arrow.r` text by
-MyST 1.10. Markdown sources and the downloaded templates are left unchanged.
+MyST 1.10+. Markdown sources and the downloaded templates are left unchanged.
 New tablex features fail the build until an equivalent native mapping is added.
 A slash directly before emphasis (such as `menu/**Open with**`) also fails
 the build: MyST emits it unescaped as `/*`, which Typst reads as a block

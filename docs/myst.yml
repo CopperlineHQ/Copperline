@@ -8,7 +8,7 @@ project:
   id: copperline-docs
   title: Copperline
   description: A cycle-driven Amiga emulator in Rust
-  keywords: [amiga, emulator, ocs, ecs, rust]
+  keywords: [amiga, emulator, ocs, ecs, aga, rust]
   # --check-links + --strict fails the CI docs build when a linked site is
   # unreachable. archive.org has outages regularly enough that it broke an
   # unrelated PR; exempt it from link resolution (the link stays in the
@@ -203,7 +203,7 @@ site:
   parts:
     banner: _version.md
     toc_footer: _version.md
-    # The MyST 1.10 book-theme uses the earlier name for this part.
+    # Older book-theme versions (including MyST 1.10/1.12) use the earlier name for this part.
     primary_sidebar_footer: _version.md
   options:
     favicon: ../assets/brand/copperline.ico

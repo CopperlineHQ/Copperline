@@ -59,15 +59,15 @@ This captures the original rendered pixels before TV framing, aspect
 correction, filtering, deinterlacing, phosphor persistence or tint. The crop
 follows the active playfield's display-window envelope, removing the
 surrounding border without trimming black pixels inside the picture.
-A standard 320×256 lo-res playfield saves at 320×256; a 640×256 hi-res
-playfield at 640×256. Mixed-resolution frames keep the finest programmed
+A standard 320x256 lo-res playfield saves at 320x256; a 640x256 hi-res
+playfield at 640x256. Mixed-resolution frames keep the finest programmed
 pitch, and finer sprite or Copper detail is retained if collapsing repeated
 columns would lose it. Super-hi-res samples remain separate. The crop is
 limited to the raster Copperline captures; a frame without a playfield keeps
 the full field. RTG output uses the board's native width and height.
 
 Interlaced chipset output saves both fields woven at full height: a
-640×512 hi-res laced screen saves at 640×512, each field's lines on
+640x512 hi-res laced screen saves at 640x512, each field's lines on
 alternate rows. Fields are placed by the long-field flag (LOF), the long
 field on the even rows, as the display hardware places them, so software
 that pairs its per-field images without reading LOF shows the one-line
@@ -174,7 +174,7 @@ composes with `--load-state`, `--script` and the scheduled-input flags:
 resuming a 120 s state, `--gif-after 125 clip.gif` starts five seconds
 in. Because frames are taken on the emulated timeline, the same run
 produces a byte-identical GIF every time. `--gif-after` cannot be combined
-with `--benchmark-until`, `--gdb` or `--control`.
+with `--benchmark-until`, `--gdb`, `--control`, or netplay.
 
 (save-states-headless)=
 ## Save states in headless runs
@@ -403,7 +403,7 @@ To record an interactive session to a script file:
 
 - Press `Cmd+Shift+R` (macOS) or `Alt+Shift+R` (Linux/Windows) in the
   emulator window to start, and again to stop. The script is written as
-  `copperline-input-<YYYYMMDDHHmmSS>.clscript` in the recordings folder
+  `copperline-input-<YYYYMMDDHHMMSS>.clscript` in the recordings folder
   (see [Recording input](ui.md#recording-input)).
 - Or launch with `--record-input /tmp/session.clscript`, which records the
   whole run and writes the file on exit.
@@ -423,6 +423,8 @@ that one run writes and the next reads:
 | CDTV bookmark RAM | `cdtv-bookmark.bin`, not used under `--factory` | `--factory`, or `[cd] nvram = ""`, or a scratch file of your own |
 | CD32 save EEPROM | `cd32-nvram.bin`, used under `--factory` too | `[cd] nvram` set to a fresh scratch file |
 | RP5C01 battery RAM (A3000/A4000) | `battmem.nvram`, used under `--factory` too | `[machine] battmem = ""` |
+| Coppersynth settings | `coppersynth.nvram`, not used under `--factory` | `--factory` |
+| Hayes modem stored profile | `modem.profile`, not used under `--factory` | `--factory` |
 
 A file named in the configuration is always used, so a test that wants a
 particular starting state can supply one and delete it afterwards.
@@ -486,8 +488,9 @@ p50/p90/p99/max host time per frame, and every frame that took longer than
 
 `--benchmark-until` cannot be combined with scheduled screenshots or
 expectations, frame dumps, GIF clips, save-state writes, scheduled input,
-scheduled floppy or CD inserts, input recording, `--exit-on-return`,
-`--profile-live-audio`, `--gdb` or `--control`.
+scheduled floppy or CD changes, input recording, `--exit-on-return`,
+`--profile-live-audio`, `--gdb`, `--gdb-gui`, `--control`, `--control-gui`,
+`--terminal`, or netplay.
 
 For a smaller executable that measures only the core, or the core plus CPU
 rendering, build the standalone benchmark:

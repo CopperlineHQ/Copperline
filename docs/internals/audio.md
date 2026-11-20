@@ -5,10 +5,12 @@
 routes the master mix and individual sources to playback or WAV capture.
 `src/audio/resample.rs` holds the windowed-sinc `Resampler` (for sources
 with their own sample rate, such as the MT-32 engine or a Toccata codec)
-and the `Decimator` described below, and `src/audio/mpeg.rs` pre-parses
+and the `Decimator` described below, `src/audio/mpeg.rs` pre-parses
 MPEG Layer III frame headers for the [MHI](mhi.md) board and for cue-sheet
-MP3 tracks (`src/cdrom/mp3.rs`). Mixing, LED
-filtering, volume, and stereo width are applied in
+MP3 tracks (`src/cdrom/mp3.rs`), and `src/audio/fx.rs` plays short host-only
+sound effects (such as monitor power switches) directly to the live output,
+bypassing the emulated lead buffer, WAV capture, stems, and save states.
+Mixing, LED filtering, volume, and stereo width are applied in
 `Paula::push_mixed_frame` (`src/chipset/paula.rs`).
 
 ## Getting Paula onto the host grid
@@ -95,10 +97,10 @@ reconstruction filter overshoots its own DAC the same way; this is just
 where a line input would have to be set.
 
 Everything line-mixed alongside Paula (drive sounds, CD-DA, an in-process
-synth, Toccata, MHI) is added after this scaling and keeps its level
-relative to a Paula channel. Their sum with Paula is not separately limited,
-so a CD32 playing a full-scale CD track under a full-scale module can still
-ask for more than full scale.
+synth, Toccata, MHI, and any video-slot card audio) is added after this
+scaling and keeps its level relative to a Paula channel. Their sum with Paula
+is not separately limited, so a CD32 playing a full-scale CD track under a
+full-scale module can still ask for more than full scale.
 
 ### The LED filter sits after all of this
 
@@ -121,21 +123,22 @@ output (`NullSink`, `--noaudio`). Optional stem writers capture the source
 taps alongside it.
 
 `CpalSink` (desktop `frontend` builds only) queues the 44.1 kHz mixer
-frames on a lock-free ring that the pacer keeps about 150 ms ahead of the
-device. The cpal callback drains it and converts to the output device's
-own rate by linear interpolation (`CpalResampler`). That conversion is
-host-side only: WAV capture and stems always record the mixer grid.
+frames on a lock-free ring that the pacer keeps `[audio] live_lead_ms`
+ahead of the device (50-1000 ms, default 150 ms). The cpal callback drains
+it and converts to the output device's own rate by linear interpolation
+(`CpalResampler`). That conversion is host-side only: WAV capture and stems
+always record the mixer grid.
 
 ## The taps
 
-`push_mixed_frame` pushes these named sources (seven names in all, of
+`push_mixed_frame` pushes these named sources (eight names in all, of
 which `mt32` and `coppersynth` share one tap), each at the point in the
 signal chain described below. That is not necessarily the point that ends
 up in the master mix; see each entry:
 
 | Source | Tap point | Notes |
 |---|---|---|
-| `paula` | Post-LED-filter, pre-drive/CD/MT-32/Coppersynth/Toccata/MHI | The pure Paula-channel sum |
+| `paula` | Post-LED-filter, pre-drive/CD/MT-32/Coppersynth/Toccata/MHI/videoslot | The pure Paula-channel sum |
 | `paula` sub-channels `0`..`3` | Each channel's `Decimator` output, scaled by `PAULA_MIX_SCALE` | **Not** LED-filtered -- real hardware's filter sits after the channel mixer's summation, so a per-channel stem naturally excludes it |
 | `drivesounds` | The synthesized drive-noise sample | Mono; written to a stem as `(sample, sample)` |
 | `cdda` | Post `cd_muted` gate | Reflects audible content -- unlike the debugger's CD scope tap, which stays pre-mute for visibility |
@@ -143,6 +146,7 @@ up in the master mix; see each entry:
 | `coppersynth` | The in-process Coppersynth frame | Same tap and `synth_silent` latch as `mt32` -- the serial sink carries one synth at a time, and the stem is named for whichever it is |
 | `toccata` | One frame popped from `ToccataAudioRing` | Already resampled to the mixer rate by the board's own tick; see [](toccata.md) |
 | `mhi` | One frame popped from `MhiAudioRing` | Already resampled to the mixer rate by the board's own tick; see [](mhi.md) |
+| `videoslot` | One frame popped from `VideoSlotAudioRing`, scaled by `video_slot_volume` | Audio from a fitted video-slot card (such as Video Toaster / Video Flyer clip audio) |
 
 The **master** signal (`push_master`) is the final `out_left`/`out_right`
 after master volume and stereo width. Live playback and `--audio-wav`
@@ -177,10 +181,11 @@ stem capture replaces live output.
 - `coppersynth` registers when selected and the build includes the feature.
 - `toccata` and `mhi` register when their boards are configured.
 
-With `--load-state`, all seven sources register because restored hardware
-can differ from the startup configuration. Unused sources produce silent
-files. Registration does not change during capture: adding a source later
-will not create a missing stem writer.
+With `--load-state`, all seven classic sources above register because
+restored hardware can differ from the startup configuration (`videoslot` is
+not registered as an automatic `--audio-stems` source). Unused sources produce
+silent files. Registration does not change during capture: adding a source
+later will not create a missing stem writer.
 
 (audio-determinism)=
 ## Determinism
@@ -195,10 +200,11 @@ runs. Reproducibility still depends on repeatable source input; see the
 (audio-save-states)=
 ## Save states
 
-`Paula::audio: AudioMux` is skipped by serde because it is host output.
+`Paula::audio: AudioMux` is skipped by serde because it is host output, as are
+host preferences such as `Paula::video_slot_volume` (`#[serde(skip)]`).
 `Bus::adopt_host_resources` moves the live mux, including open stem writers,
-onto the restored Bus. A capture therefore continues in the same files
-across a save-state load.
+and copies host preferences onto the restored Bus. A capture therefore
+continues in the same files across a save-state load.
 
 The decimation state does ride the state: `channel_area`/`area_cck` carry
 the partly integrated oversample interval, and each `Decimator` carries its

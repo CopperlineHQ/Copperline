@@ -93,7 +93,7 @@ rollback. See [browser netplay setup](netplay.md#browser-netplay) for the steps,
 controller mapping, relay troubleshooting and restrictions.
 
 Netplay requires WebRTC data channels as well as WebAssembly. It works on a
-static site; room invitations use a separate signaling service, while manual
+static site; room invitations use a separate signalling service, while manual
 codes need no server. A desktop peer cannot join a browser session. Save
 states, media changes, serial connections and pause are unavailable until
 disconnect.
@@ -255,14 +255,17 @@ requestAnimationFrame(renderLoop);
 Other methods cover the rest of the page:
 
 - Machine and pacing: `reset()` (cold reset), `resync_clock()` (after a pause),
-  `emulated_seconds()`, `machine_model()`, `video_standard()`, `machine_summary()`, and
+  `emulated_seconds()`, `last_run_core_ms()`, `last_run_render_ms()`,
+  `machine_model()`, `video_standard()`, `machine_summary()`, and
   the static `models()`, `video_standards()`, `floppy_formats()` and `build_info()`.
 - Presentation: `set_tv_centre(h, v)`, `set_monitor_bezel(drawn)`,
-  `set_deinterlace(on)`, `set_phosphor(fraction)` (0 to 0.95), `presentation_revision()`
+  `set_deinterlace(on)`, `deinterlace_enabled()`, `set_phosphor(fraction)` (0 to 0.95),
+  `phosphor()`, `presentation_revision()`
   and `present_crt_lines()` (for a page-side CRT shader).
 - Audio and drives: `set_volume_percent(n)`, `set_mono_audio(on)`,
-  `set_floppy_sounds(on)`, `set_floppy_sounds_volume(n)`, `set_floppy_speed(percent)`
-  (100/200/400/800, or 0 for turbo), `drive_connected(drive)`, `disk_name(drive)` and
+  `audio_pending()`, `set_floppy_sounds(on)`, `set_floppy_sounds_volume(n)`,
+  `set_floppy_speed(percent)` (100/200/400/800, or 0 for turbo),
+  `floppy_speed()`, `drive_connected(drive)`, `disk_name(drive)` and
   `floppy_write_protected(drive)`.
 - Front panel: `power_led()`, `fdd_led()`, `fdd_track()`, `hdd_led()`, `cd_led()` and
   `caps_lock_led()`.
@@ -324,7 +327,8 @@ This preserves the page's first-gamepad mapping.
 `WebEmu.netplay_packet_layout()` returns `[protocol, maxBytes, headerBytes,
 inputBytes]` for glue compatibility checks. Floppy sound enablement and level
 must match before startup; their setters fail during a session. Output volume
-and mono/stereo presentation remain local.
+and mono/stereo presentation remain local in `WebEmu` (the hosted `try.js`
+page propagates and locks the host's `#mono-audio` choice for the room).
 
 Machine/media/state operations, including controller fitting and floppy speed,
 fail while a session exists. Serial input is ignored, and so is mouse input
@@ -336,8 +340,8 @@ Spectating uses the same shape. A host that will admit spectators calls
 `netplay_enable_spectators()` straight after `start_netplay`, before the first
 run, so the confirmed history is kept from frame zero; `netplay_identity()`
 returns the fingerprint a spectator must reproduce, and each spectator reads
-the history through `spectator_feed_open()`, `spectator_feed_take(id, maxBytes)`
-and `spectator_feed_close(id)`. A browser host refuses new spectators once it
+the history through `spectator_feed_open()`, `spectator_feed_take(id, maxBytes)`,
+`spectator_feed_frames()`, and `spectator_feed_close(id)`. A browser host refuses new spectators once it
 retains more than 64 MiB of history. A spectator page loads the host's media
 into a fresh `WebEmu`, calls `start_spectating(controller)`, sends
 `spectate_identity()` to the host, and feeds the host's stream to
@@ -358,6 +362,7 @@ When using the bundled `try.js` harness, standard UI elements can be connected b
 - `#autocrop`: `<input type="checkbox">` for the autocrop presentation. A shell can ship
   both with the `hidden` attribute; the glue un-hides them on a bundle that supports them.
 - `#df0list` / `#kicklist`: `<select>` elements populated from remote disk/ROM manifests.
+- `#bezel-stickers`: optional `<script type="application/json">` decal placement manifest for the monitor bezel.
 - `#pause`, `#screenshot`, `#keyboard`: Action button triggers.
 
 (browser-page-config)=

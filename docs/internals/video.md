@@ -232,7 +232,7 @@ counter's $1C7 wrap that never matches -- is not gated on the left by the
 DIWSTRT position at all: setting an already-set flip-flop is a no-op on
 hardware, and data fetched left of the DIWSTRT position is visible at its
 fetch-derived beam position (vAmigaTS Agnus/DIW/OLDDIW diw10 A500 photos
-prove the carried flip-flop; `timing-test/ddfprobe-diw1` is the golden
+prove the carried flip-flop; `timing-test/ddfprobe-diw1.asm` is the golden
 render probe). Chambers of Shaolin's Grandslam intro relies on this:
 DIWSTRT H $C0 with DIWSTOP H $1D8 (unreachable) leaves the flip-flop
 permanently open, and the logo fetched from the standard DDF $38 window
@@ -750,23 +750,24 @@ session's card through `load_state`. A state that carries none (it was
 saved without that card, or before cards were saved) puts the card back as
 it powers on, so nothing of the session that was left stays in it. Saving
 leaves the card as it was. The Toaster saves its framestore banks, header
-latches, pictures digitised but not yet encoded, field phase, last Program
+latches, pictures digitized but not yet encoded, field phase, last Program
 frame and the frames' sound not yet handed to Paula (`SavedToaster` in
 `toaster/mod.rs`); the host files on its inputs play on from where they
 are, and its outputs show the next frame composed.
 
 That state is about 3 MB for a card the switcher drives (the two banks,
 1.5 MB, and the last Program frame, 1.4 MB) and up to 6 MB while both banks
-hold a digitised picture not yet encoded; a card nothing has written to
+hold a digitized picture not yet encoded; a card nothing has written to
 saves no banks. Every state write carries it, in-memory snapshots included,
 so with a card fitted the rewind and reverse-debugging rings hold that much
 less history per snapshot, and each snapshot first waits for the compose
 thread to finish the fields it has in hand (two at most).
 
-### The Video Toaster (`toaster.rs`)
+### The Video Toaster (`toaster/mod.rs`)
 
 `[video_slot] card = "toaster"` fits the one card so far. The NewTek
-protocol it decodes is written up at the top of `toaster.rs`; the parts
+protocol it decodes is written up at the top of `toaster/mod.rs` and in the
+recovered hardware specifications under `docs/toaster/README.md`; the parts
 pinned against the real 4.2 switcher are:
 
 - Every line's first sixteen lo-res pixels from comparator position `$5C`
@@ -800,8 +801,8 @@ with this and comes up on its main screen.
 #### The video side (`toaster/regs.rs`, `video.rs`, `composite.rs`, `media.rs`)
 
 The extended headers are latched registers (`Regs`), set to the switcher's
-own start-up values (`VTSetUp`) at power-on. The outputs follow the
-switcher's model of the card: one A/B fader. Program = A·(1−k) + B·k with A
+own startup values (`VTSetUp`) at power-on. The outputs follow the
+switcher's model of the card: one A/B fader. Program = A*(1-k) + B*k with A
 the `AM` mux and B the `BM` mux (EH2), Preview = the `PV` mux (EH1; position
 7 = a copy of Program). Mux positions 0-3 are the inputs, 4/5 framestore
 banks 0/1 played back ("DV1", "DV2"), 6 the encoder (the matte generator
@@ -817,13 +818,13 @@ CD) and the genlock transparency for `PIXELSW`. The animated wipes
 set by each pixel that carries the genlock T bit and held along the line
 until the next. The matte colour is EH3's
 MA/MB/MP code: the eight BKG colours exactly, others by the generator's
-model (luma from (MA+MB)/2, chroma from |MA−MB|, hue 11.25° per MP step).
+model (luma from (MA+MB)/2, chroma from |MA-MB|, hue 11.25 deg per MP step).
 
 `G` bit 15 on a non-header line is `CERB`, "record this line". In write
 mode (EH0 `WERB` set, `ABSE` clear) the line's data is the Amiga's, as
 above (EH0 `LUST` clear stores it 16 samples right: the second pass of the
 switcher's AA "zipper" write, which scrolls its bitmap 16 hi-res pixels
-left, so a framestore or key page loaded from disk lines up with its key); otherwise the card digitises the `IS` input into bank `OBR`: every
+left, so a framestore or key page loaded from disk lines up with its key); otherwise the card digitizes the `IS` input into bank `OBR`: every
 field while live (`ABSE` set), four fields for a grab. Live, bank 0 plays
 the input straight through.
 
@@ -833,7 +834,7 @@ subcarrier-complemented second copy (`composite.rs`, measured off the
 subcarrier inversion), decoded to RGB by summing and differencing the two
 copies. Pictures are 752 x 480 from card pixel 12 and framestore line 1,
 the window the switcher's framestore loads use. Inputs are encoded the
-same way when digitised, so a grab reads back to the switcher as real
+same way when digitized, so a grab reads back to the switcher as real
 samples.
 
 Inputs come from the host folder (`media.rs`): a worker thread per input
@@ -843,7 +844,7 @@ sends exactly one message per emulated frame, whatever the input holds (a
 video frame with its sound, a still again, no signal), and
 `InputFeed::advance` waits for it: what an input shows on a given frame is
 a count of frames, never of host time, so decoder speed and scheduling do
-not reach the card's output or a digitised framestore. A still's hold is
+not reach the card's output or a digitized framestore. A still's hold is
 150 frames. Only what is in the folder is read on the host's clock (a
 host event, like changing a disk). The next file's ffmpeg is started
 while the current one plays, so a change of file does not wait on a
@@ -867,7 +868,7 @@ Painting the card's view of a field (`render_wide`, about 7 ms on a
 2.3 GHz Xeon), reading its headers, decoding framestore banks, keying,
 mixing and publishing took 15-30 ms of the emulation thread per frame,
 more with a digital effect (another 6 ms a field of composite encoding
-for as long as the switcher leaves the digitiser live afterwards), which
+for as long as the switcher leaves the digitizer live afterwards), which
 is a large part of what made a transition cost more than a cut; the rest
 is the switcher's own chip-bus traffic while an effect runs, which the
 machine pays as the real one did. `Toaster` is now a handle: the card proper
@@ -919,7 +920,7 @@ it, so a card driven that way behaves as it always did.
 Three more things cut what the thread does per frame. The framestore
 banks' decoded pictures are kept across frames and dropped only when the
 bank is written (`Video::invalidate`), so a digital effect flying a still
-framestore decodes it once, not every frame. A picture the card digitises
+framestore decodes it once, not every frame. A picture the card digitizes
 (`CERB` lines outside a write: a grab, or the live input every field after
 a digital effect) is kept as the picture and encoded into the bank only
 when something reads it -- the port, a bank decode, a write to the bank
@@ -931,8 +932,8 @@ composite encode. And the per-pixel passes reuse their buffers
 a digital effect's map a quad at a time (`DveMap::apply`). A video
 file's sound is decoded by a second ffmpeg (stereo s16le at the mixer's
 44.1 kHz, 1001/30000 s per frame) and travels with each picture; Program's
-sound is the sum of the inputs by how much of each it shows (A·(1−k̄) +
-B·k̄, latch wipes by pixel share, a key's `LK` source, a live bank 0 by its
+sound is the sum of the inputs by how much of each it shows (A*(1-mean(k)) +
+B*mean(k), latch wipes by pixel share, a key's `LK` source, a live bank 0 by its
 `IS` input; framestores and the matte are silent). It goes to Paula's mixer
 as a `videoslot` source and into the Program recording. The emulator counts
 colour clocks at the PAL rate for every machine, so an Amiga NTSC frame
@@ -948,17 +949,17 @@ itself: each picture line's header carries the source line number L
 B/I data lines a source quad number Q (the quad labels of read-back, I high
 nibble and B low, first pixel most significant). Picture row y (field line
 fl = y+1, parity fl&1, Amiga line 21+(fl>>1)) shows framestore row
-2L+parity−1; card pixel p shows sample 4·Q(p>>2) + (p&3). Q below 192
+2L+parity-1; card pixel p shows sample 4*Q(p>>2) + (p&3). Q below 192
 addresses a quad, $E8-$EF are the eight `_BCPalette` colours and the rest
 black. The same codes drive `QUAF` (key 0 on $FF, CD elsewhere) and
-`TRANSQUAD` (Q ≥ $F8 with the pixel's bit of Q's low nibble set: CD), so a
+`TRANSQUAD` (Q >= $F8 with the pixel's bit of Q's low nibble set: CD), so a
 digital effect is a frame of quad addresses the switcher builds in chip
 RAM, with A on background, B the moved framestore and the key from the
 same map. The map applies to every framestore bus except a live bank 0
 on `IS`.
 
-Not modelled yet: the LUT (`LUT` on: colour and posterise effects),
-PED/GAIN/phase trims, and the blanking interval of digitised lines (the
+Not modelled yet: the LUT (`LUT` on: colour and posterize effects),
+PED/GAIN/phase trims, and the blanking interval of digitized lines (the
 AutoHue camera test reads the colour burst there).
 
 #### The Video Flyer (`flyer/`)
@@ -1051,7 +1052,7 @@ would wait in (`Outcome::Waiting`) stay in progress and are tried again
 after every field (`Firmware::retry_waiting`).
 
 The DSP model mixes its channels at 735 samples a field (44,055.94 Hz,
-locked to video): left `s·v·(1−p)`, right `s·v·p`, with `v` the volume
+locked to video): left `s*v*(1-p)`, right `s*v*p`, with `v` the volume
 (`$FFFF` = 1) and `p` the pan (the API word with its top bit flipped, 0 =
 left), each ramped across the field. The Toaster takes the fields of
 sound since its last frame and stretches them to the frame's length in
@@ -1625,7 +1626,7 @@ monitor handles at window creation, launcher Run and fullscreen entry, so
 disconnected displays fall back to automatic placement. The launcher keeps
 its enumerated labels separately from serialized configuration and saves a
 unique name where possible. Window placement accounts for negative monitor
-origins and per-display DPI. When moving an existing window, centering uses
+origins and per-display DPI. When moving an existing window, centring uses
 its logical size scaled for the destination display, accounting for the
 resize caused by the DPI change. macOS uses logical desktop coordinates
 when moving between displays. Explicit window coordinates are logical offsets
@@ -1852,7 +1853,7 @@ has 256 colours or fewer, the RGBA pixels otherwise. The interactive
 however long it stays on screen (the next stored frame ends it), keeps
 the frame that was showing when the clip's time window opens, with its time
 clamped to the window's start, and evicts the oldest frames past a 256 MiB byte
-budget; a timestamp that moves backwards (state load, reset) restarts it.
+budget; a timestamp that moves backward (state load, reset) restarts it.
 
 `GifWriter` streams frames through the `gif` crate as a looping GIF89a
 with a local colour table per frame; a frame kept as RGBA is reduced with

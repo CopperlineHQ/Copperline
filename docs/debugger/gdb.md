@@ -19,6 +19,7 @@ exposing it to an untrusted network.
 
 `--gdb` runs headless: the stub takes control of the machine, halts at reset,
 and advances unthrottled. It cannot be combined with an interactive window,
+`--terminal`, `--control`, `--control-gui`, `--profile-live-audio`,
 the scheduled capture flags (`--screenshot-after`, `--expect-screenshot`,
 `--save-state-after`, `--dump-frames`, `--gif-after`), scheduled input,
 scheduled floppy or CD inserts, `--record-input`, `--exit-on-return`, or
@@ -55,8 +56,8 @@ session:
   control-protocol resume outstanding at the same time gets its stop reply
   too, and a stop the control client causes (its `pause`, a `run_until`
   target) completes the GDB `continue` with a plain `T05` and a console line
-  naming the reason. Local debugger breakpoints open the internal debugger
-  window only when neither client had a resume pending; a plain pause from
+  naming the reason. Local debugger breakpoints open the Debug workspace
+  only when neither client had a resume pending; a plain pause from
   the window just pauses (and completes any outstanding resume).
 - Anything that repositions the machine -- reverse execution
   (`reverse-step`, `reverse-continue`), resuming or stepping at an address
@@ -64,7 +65,7 @@ session:
   control-protocol resume is outstanding: pause first. Plain `continue`,
   `stepi`, memory and other register writes stay allowed.
 - `--run` break-at-entry functions identically to headless `--gdb`.
-- `--gdb-gui` cannot be combined with `--gdb`, `--control`, or
+- `--gdb-gui` cannot be combined with `--gdb`, `--control`, `--terminal`, or
   `--benchmark-until`. It can share the window with `--control-gui`: a GDB
   frontend for source-level debugging and a control-protocol client for
   observation and control attach to one session (see
@@ -94,8 +95,10 @@ The target starts halted at reset. The stub supports:
   not exposed)
 - Memory read and write operations
 - Breakpoints plus write (`Z2`), read (`Z3`), and access (`Z4`) watchpoints.
-  A watchpoint covers at most 4096 bytes and a connection holds at most 32;
-  a request beyond either is answered with an error
+  Each packet covers at most 4096 bytes and a connection holds at most 32;
+  a request beyond either is answered with an error. In `--gdb-gui` (and for
+  read/access watches in headless `--gdb`), the machine's word-watch store
+  monitors at most eight distinct memory words in total
 - Single-stepping and continuation; forced PC writes discard stale instruction prefetch
 - `stepi` on a CPU parked in `STOP` carries it to the interrupt that wakes it
   and retires the handler's first instruction, rather than reporting a stop at

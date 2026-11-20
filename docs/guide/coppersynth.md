@@ -53,11 +53,12 @@ To use another SoundFont (an `.sf2` file, or a `.zip` holding one):
   SoundFont -> Load...** in the pop-up menu, during a session. **Reset** in
   the same submenu returns to the built-in bank.
 
-With no `coppersynth_soundfont` set, Coppersynth looks for a replacement
-bank in the file or directory named by `COPPERLINE_SOUNDFONT`, then for
-`GeneralUser-GS.zip` or `GeneralUser-GS.sf2` next to the executable or in a
-`share/copperline` directory beside or above it, and otherwise uses the
-built-in bank.
+With no `coppersynth_soundfont` set, a non-empty `COPPERLINE_SOUNDFONT`
+environment variable overrides the search (pointing at an `.sf2`/`.zip` file,
+or a directory containing `GeneralUser-GS.sf2`) and fails if the file is
+missing. Otherwise Coppersynth looks for `GeneralUser-GS.zip` or
+`GeneralUser-GS.sf2` next to the executable or in a `share/copperline`
+directory beside or above it, and falls back to the built-in bank.
 
 ## MT-32 translation mode
 
@@ -144,5 +145,5 @@ To exclude Coppersynth when compiling from source, leave out the
 
 ```sh
 cargo build --release --no-default-features \
-  --features "midi,frontend,wasm-boards,control,ctl-bin,import-uae-bin,net-nat,net-bridge,fluxbridge,mt32,cpu-jit,profile-stats,game-library,mhi,cd-mp3,cd32-fmv,gdb,dap,netplay-internet,host-serial"
+  --features "midi,frontend,wasm-boards,control,ctl-bin,converter-bin,import-uae-bin,net-nat,net-bridge,fluxbridge,mt32,cpu-jit,profile-stats,game-library,update-check,mhi,cd-mp3,cd32-fmv,gdb,dap,netplay-internet,host-serial"
 ```

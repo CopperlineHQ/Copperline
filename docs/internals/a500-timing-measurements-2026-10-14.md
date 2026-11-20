@@ -57,8 +57,8 @@ they do not establish correctness of every other bit in DMACONR/INTREQR.
 The additional BZERO sweep tests the defined DMACONR mask `$67ff` explicitly.
 
 In the six-plane, 64-iteration aligned kernels, all three systems measure
-normal DIVU at 4763–4767 CCK, worst-case DIVU at 5102, and DIVS at
-5249–5257. These include shared loop and readback overhead. The old claim of
+normal DIVU at 4763-4767 CCK, worst-case DIVU at 5102, and DIVS at
+5249-5257. These include shared loop and readback overhead. The old claim of
 191 CCK early execution came from a defective beam conversion that doubled
 HPOS, plus unmatched launch phases. It is superseded, not a remaining
 191-clock CPU defect. The corrected legacy table's hardware 4891 versus
@@ -130,7 +130,7 @@ byte-for-byte, including IRQ beam and saved exception PC. The follow-up below
 extends phase and contention coverage beyond this exact test matrix.
 
 For broader coverage, extend kind 23 with at least sixteen
-source horizontal phases, 0–31 NOP positions before STOP and an EXG phase flip.
+source horizontal phases, 0-31 NOP positions before STOP and an EXG phase flip.
 Keep native D-only, AD copy, descending fill and line controls, plus Copper
 BLIT/COPER/SOFT using the same IRQ levels and byte-identical RAM/ROM handlers.
 Add one-word/two-word sizes and deliberate final-D contention from bitplanes
@@ -197,7 +197,7 @@ Capture folders are under the sibling `amiga-hardware-probes/captures` directory
 Immutable ROM/source bundles are under Copperline's ignored
 `tmp/timing-isolation`. The probe repository contains the builders, runner,
 checksum parser and portable comparison tests. Its detailed report is
-`docs/rom-timing-isolation-2026-10-14.md`.
+`amiga-hardware-probes/docs/rom-timing-isolation-2026-10-14.md`.
 
 | Bundle | Source ID | Hardware capture |
 | --- | --- | --- |

@@ -1,11 +1,11 @@
 # Bitplane pointer writes during the Agnus DMA counter update
 
-A500 kinds72/73 use PF1/PF2 CLXDAT matching as a digital witness for retargeting
+A500 kinds 72/73 use PF1/PF2 CLXDAT matching as a digital witness for retargeting
 a zero-filled bitplane to ones. Kind73 samples again after the following full
 scanline, distinguishing a genuinely lost pointer write from early collision
 visibility. Both live captures restore OneROM and verify reset release; all
 constant positive/negative controls pass. CPU/Copper writers, both BPL2 pointer
-halves and BPL1PTL provide neighboring controls.
+halves and BPL1PTL provide neighbouring controls.
 
 Copper BPL2 writes lose at B2,BA,C2,CA,D2 CCK; BPL1's holes shift four CCK.
 Both BPL2 halves have the same holes. These positions precede the selected

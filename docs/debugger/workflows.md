@@ -1,6 +1,6 @@
 # Debugging workflows
 
-This chapter shows common debugging workflows that combine the [debugger window](window),
+This chapter shows common debugging workflows that combine the [Debug workspace](window),
 [console](console), Frame Analyzer, [reverse execution](reverse), [headless options](headless),
 [GDB remote stub](gdb), and the [A/B divergence finder](diverge).
 
@@ -113,7 +113,7 @@ emulated state that differs before reading any code:
    different colour clock) points at bus arbitration or instruction
    timing.
 3. **Inspect the point on either side:** Open the same state in the
-   [debugger window](window) or over the [control protocol](control),
+   [Debug workspace](window) or over the [control protocol](control),
    `run_until {"frame": F}` to the reported frame, then `step` to the
    reported instruction and use `custom.writer`, `frame.slots` or the
    Frame Analyzer to see what the two builds did differently there.

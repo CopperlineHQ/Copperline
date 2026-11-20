@@ -22,13 +22,14 @@ at a time. The windowed server answers a second connection with one JSON
 error line and closes it; the headless server accepts the next connection
 only after the current client disconnects, keeping the machine paused in
 between. `shutdown` ends the process. The headless server runs
-unpaced, keeps a PC history, and arms reverse execution at start-up (the
+unpaced, keeps a PC history, and arms reverse execution at startup (the
 windowed server does both when a client connects), with the budget and snapshot
 interval taken from `COPPERLINE_DBG_RR_BUDGET_MB` and
 `COPPERLINE_DBG_RR_INTERVAL` (see [Reverse debugging](reverse.md)).
 
 The headless server owns the machine, so `--control` cannot be combined with
-`--gdb`/`--gdb-gui`, `--benchmark-until`, the capture flags
+`--gdb`/`--gdb-gui`, `--terminal`, netplay (`--netplay-host`/`--netplay-join`/
+`--netplay-watch`/`--netplay-bind`/`--netplay-peer`), `--benchmark-until`, the capture flags
 (`--screenshot-after`, `--expect-screenshot`, `--save-state-after`,
 `--dump-frames`, `--gif-after`), `--profile-live-audio`, scheduled input,
 scheduled floppy or CD changes, or `--exit-on-return`; use the matching
@@ -43,11 +44,11 @@ the control client did not request arrives as `event.stopped`, and
 `continue` is outstanding (`pause` first). Either client's pause ends the
 other's run with reason `pause`.
 
-On start-up the server prints its endpoint and info-file path to stderr as
+On startup the server prints its endpoint and info-file path to stderr as
 one line (`copperline-control: listen=ADDR info=PATH proto=1`). It never
 prints the token. The token is a fresh 128-bit value from the operating
 system's cryptographic random source; if that source fails, the server
-does not start. `--control-token TOKEN` pins a nonempty token, which is
+does not start. `--control-token TOKEN` pins a non-empty token, which is
 visible in the process list, so prefer `--control-info FILE` for handoff.
 The JSON file contains:
 
@@ -97,7 +98,7 @@ copperline-ctl state-info /tmp/at120.clstate --thumbnail /tmp/at120.png
 ```
 
 Replies print to stdout as one JSON object per line, and notifications
-(`event.*`) print as they arrive. A one-shot request exits with a nonzero
+(`event.*`) print as they arrive. A one-shot request exits with a non-zero
 status when the reply is a JSON-RPC error. The REPL reads one
 `METHOD [JSON-PARAMS]` per line and skips blank lines and `#` comments;
 `--repl` with a method on the command line is refused.
@@ -238,34 +239,40 @@ the fields the machine has produced, so on a paused machine they are
 exact to the emulated frame) and `toaster.input` (hold an
 input to one host file instead of its folder).
 
-Three more tools belong to the MCP bridge and run inside the Amiga, through
-the Toaster's own ARexx ports: `toaster_switcher {"command", "args"}` (a
-switcher command: `M001`, `P002`, `TAKE`, `AUTO`, `TBAR 256`, `STAT
-MAIN`...), `toaster_project {"function", "args"}` (a project-editor
-function: `CROUTONLOAD`, `CROUTONPICK`, `PROJECTLOAD`, `PROJECTSAVE`...) and
-`toaster_rexx {"script"}` (any ARexx; the Toaster's function hosts are
-already added, and what the script `say`s comes back). They need the card's
-folder mounted in the Amiga (`[video_slot] volume = "ToasterFiles"`) and
-`S:Copperline-Link.rexx` running there; the bridge writes jobs into the
-folder's `.copperline` subfolder and collects the answers, so it must run on
-the emulator's computer. When the next job is sent, the bridge removes
-uncollected answers whose completion marker is at least 30 seconds old.
-It leaves output without a completion marker alone because the guest may
-still be finishing the job.
+Four more tools belong to the MCP bridge and run inside the Amiga, through
+the Toaster's own ARexx ports:
 
-`toaster_program {"program", "command", "args"}` reaches the rest of the
-Toaster suite the same way, each program through its own ARexx port:
-`switcher`, `project` (the project editor, which also carries the Flyer's
-functions), `cg` (ToasterCG), `paint` (ToasterPaint), `lightwave` and
-`modeler`. `command: "open"` loads CG, Paint or LightWave through the
-switcher (and enters Paint); any other command is the program's own, as its
-ARexx document in `Toaster:Programs/Documentation/Arexx` lists them.
+- `toaster_switcher {"command", "args", "timeout_ms"}`: a switcher command
+  (`M001`, `P002`, `TAKE`, `AUTO`, `TBAR 256`, `STAT MAIN`...).
+- `toaster_project {"function", "args", "timeout_ms"}`: a project-editor
+  function (`CROUTONLOAD`, `CROUTONPICK`, `PROJECTLOAD`, `PROJECTSAVE`...).
+- `toaster_program {"program", "command", "args", "timeout_ms"}`: reaches the
+  rest of the Toaster suite through each program's own ARexx port: `switcher`,
+  `project` (the project editor, which also carries the Flyer's functions),
+  `cg` (ToasterCG), `paint` (ToasterPaint), `lightwave`, and `modeler`.
+  `command: "open"` loads CG, Paint, or LightWave through the switcher (and
+  enters Paint); any other command is the program's own, as listed in
+  `Toaster:Programs/Documentation/Arexx`.
+- `toaster_rexx {"script", "timeout_ms"}`: any ARexx script; the Toaster's
+  function hosts are already added, and what the script `say`s comes back.
 
-`flyer_import`, `flyer_export` and `flyer_list` convert between video files
-and Video Flyer clips on the Flyer's drives (`Flyer/FA0` and so on in the
-card's folder; the `flyerclip` program's conversions); they run in the bridge and need ffmpeg, not a
-session. A paused machine is run forward until the job is
-done; each job waits up to `timeout_ms` (default 60000).
+These four tools need the card's folder mounted in the Amiga
+(`[video_slot] volume = "ToasterFiles"`) and `S:Copperline-Link.rexx` running
+there; the bridge writes jobs into the folder's `.copperline` subfolder and
+collects the answers, so it must run on the emulator's computer. When the next
+job is sent, the bridge removes uncollected answers whose completion marker is
+at least 30 seconds old. It leaves output without a completion marker alone
+because the guest may still be finishing the job. A paused machine is run
+forward until the job finishes; each job waits up to `timeout_ms` host
+milliseconds (default 60000, maximum 600000).
+
+Three additional bridge tools manage Video Flyer clips on the Flyer's drives
+(`Flyer/FA0` and so on in the card's folder, using the same conversions as
+`flyerclip`): `flyer_import {"source", "clip", "grade": "std"|"hq5"|"hq6",
+"audio", "seconds"}` and `flyer_export {"clip", "output"}` convert between
+host video files and Flyer clips on this computer (both need `ffmpeg`, not a
+running emulator session), while `flyer_list {}` lists the clips on the Flyer
+drives and needs neither `ffmpeg` nor a session.
 
 To drive a windowed session, start Copperline with a control server and an
 info file, then attach:
@@ -443,7 +450,7 @@ bounded outbound queue has lost; the unsubscribed `event.warp` and
   `warpmode()` request with `paced` always false.
 - **`event.stopped`:** Sent without a subscription, by a windowed session
   only, when the machine stops for a reason this client did not ask for (a
-  breakpoint set in the debugger window, a pause made there, another
+  breakpoint set in the Debug workspace, a pause made there, another
   client's stop) while it has no resume pending. The payload is the stop
   event a resume verb would have returned.
 
@@ -493,7 +500,7 @@ fails with code `-32006`.
 
 - `reverse_step {"n": 1}`: Step backward by instruction.
 - `reverse_frame`: Step backward by video frame.
-- `reverse_continue`: Run backward to the most recent earlier stop of any armed kind (breakpoint, watch, register watch, beam trap, Copper breakpoint, exception or task catch); PC breakpoint conditions are not evaluated on the way back. With no such stop in the recorded history it fails with `-32006`.
+- `reverse_continue`: Run backward to the most recent earlier stop of any armed kind (breakpoint, watch, register watch, MMIO watch, beam trap, Copper breakpoint, exception or task catch); PC breakpoint conditions are not evaluated on the way back. With no such stop in the recorded history it fails with `-32006`.
 - `reverse_anchor`: Snapshot the machine into the reverse-debug ring at the current position, so the reverse verbs replay from here rather than from an older frame boundary. Take one at a stop you will step back from if the guest has used a host directory mount or a disk image since the last snapshot: a restore does not roll back that host-side state, so a replay from before it diverges (the DAP adapter takes one at every run stop).
 - `last_writer {"addr": "..."}`: Find the instruction that last wrote the memory at `addr` by replaying the recorded history. The reply's `outcome` is `found`, `never_written`, or `beyond_history`; `record` holds the write (`addr`, `old`, `new`, `pc`, `pos`, `cck`, `frame`) and `position` where the machine was left (at the write when found).
 
@@ -609,8 +616,8 @@ fails with code `-32006`.
 
 Instruction profiles retain at most 262,144 pending samples. `profile.status`
 and `profile.stop` report `samples_buffer_limit` and cumulative
-`samples_dropped`; a nonzero count marks an incomplete instruction capture.
-See [profiling limits](profiling.md) for overflow behavior and debugger stepping.
+`samples_dropped`; a non-zero count marks an incomplete instruction capture.
+See [profiling limits](profiling.md) for overflow behaviour and debugger stepping.
 - `chipset.validate {"enabled": ..., "clear": ...}` / `chipset.report`: Arm or query custom register access validator.
 - `smc.detect {"enabled": ..., "clear": ...}` / `smc.report`: Arm or query self-modifying code detector.
 - `fault.inject {"addr": ..., "len": ..., "on": "read"|"write"|"both", "count": ...}`: Make accesses to `len` bytes at `addr` (default 2) raise a bus error in the guest: reads, writes, or both (the default), for the next `count` matching accesses (default: every access). Returns the fault's id.
@@ -618,8 +625,8 @@ See [profiling limits](profiling.md) for overflow behavior and debugger stepping
 - `disk.fault.set {"target": {...}, "policy": {...}, "seed": ..., "id": "..."}`: Install a deterministic device-level fault policy (dropped/torn/reordered writes, ignored flushes, stale/corrupt reads, media errors, delays, simulated power-cuts) on an image-backed block target -- `{"kind": "copperhf"|"pcmcia"|"ide"|"scsi", "unit": N}`, `{"kind": "floppy", "drive": N}`, or `{"kind": "cd"}`. A separate namespace from `fault.inject`: this is device-medium behaviour, not a guest bus error. Returns the policy's id; with `id` given, replaces that policy in place. See [Device-level fault injection](disk-fault.md) for the full target/rule/action schema, determinism guarantees, and the `id`-requires-`target` rule `disk.fault.clear` enforces below.
 - `disk.fault.clear {"id": "...", "target": {...}}`: Clear by id (`target` required), every policy on a target, or (with neither given) every policy on every target. A `release` policy's held reorder-queue writes land on the image in order; `drop` discards them.
 - `disk.fault.list {"target": {...}}` / `disk.fault.stats {"target": {...}}` / `disk.fault.reset_stats {"target": {...}}`: List installed policies (with each rule's `hits` count), read cumulative per-target fault stats, or zero them. `target` is optional for `list` and required for the other two. Replies: `set` returns `{"id"}` (`seed` defaults to 0); `clear` returns `{"cleared": [ids]}`; `list` returns `{"faults": [...]}`, each entry with `id`, `target`, `policy` (`on_clear` and `rules`), `seed` and `hits` (one count per rule); `stats` returns `requests`, `reads`, `writes`, `flushes`, `trims`, `dropped`, `torn`, `reordered`, `flush_ignored`, `stale_served`, `corrupted`, `errored`, `delayed_ms` and `cut`; `reset_stats` returns `{}`. A `stats` or `reset_stats` target with no matching device is an invalid-params error.
-- `memory.heatmap {"enabled": ..., "base": ..., "span": ...}`: Enable (the default) or disable the memory heat map over `base` to `base + span` (default: the whole 24-bit, 16 MB space). The map is a 256 by 256 grid of cells, each remembering which engine (CPU read or write, blitter, Copper, disk, bitplane, sprite, or audio DMA) last touched it.
-- `memory.heatmap.report {"path": "..."}`: Report the heat map's window and `census`, the number of recently touched cells per engine; with `path`, also write the grid as a PNG.
+- `memory.heatmap {"enabled": ..., "base": ..., "span": ...}`: Enable (the default) or disable the memory heatmap over `base` to `base + span` (default: the whole 24-bit, 16 MB space). The map is a 256 by 256 grid of cells, each remembering which engine (CPU read or write, blitter, Copper, disk, bitplane, sprite, or audio DMA) last touched it.
+- `memory.heatmap.report {"path": "..."}`: Report the heatmap's window and `census`, the number of recently touched cells per engine; with `path`, also write the grid as a PNG.
 - `debug.resources`: List bitmaps, palettes, and copper lists registered by guest software via the [uaelib trap](../guide/run.md#uaelib-trap).
 - `debug.resource.export {"address": ..., "path": "...png"}`: Export a registered bitmap or palette through the same decoder as the Resources tab.
 - `debug.idle`: Query guest idle time statistics reported via uaelib idle markers.
@@ -638,8 +645,8 @@ See [profiling limits](profiling.md) for overflow behavior and debugger stepping
   - `catch`: the CPU taking exception `vector`.
   - `loadseg`: AmigaDOS loading a program, optionally only one whose `name` matches (case-insensitive).
 - `break.remove {"id": ...}`: Remove breakpoint by ID.
-- `break.list`: List all active breakpoints, `pc` breakpoints with their `hits` counts; points set from the debugger window appear without ids.
-- `break.clear`: Remove every breakpoint, watchpoint, beam trap and Copper breakpoint, including those set in the debugger window, not only this connection's. A disconnecting client's own breakpoints are removed automatically; the window's are left alone then.
+- `break.list`: List all active breakpoints, `pc` breakpoints with their `hits` counts; points set from the Debug workspace appear without ids.
+- `break.clear`: Remove every breakpoint, watchpoint, beam trap and Copper breakpoint, including those set in the Debug workspace, not only this connection's. A disconnecting client's own breakpoints are removed automatically; the window's are left alone then.
 
 ### Input injection
 
@@ -712,6 +719,12 @@ pretty-printed JSON with the same fields.
   input and overlay coordinates continue to use the default capture's raster.
 - `capture.digest`: Return FNV-1a hash digest of current frame.
 - `capture.region_digest {"x": ..., "y": ..., "w": ..., "h": ...}`: Return the FNV-1a hash of the `w` by `h` rectangle at (`x`, `y`) (default 0, 0), in `capture.screenshot` coordinates; a rectangle outside the frame is an error.
+
+### Video Toaster
+- `toaster.status`: Report the Video Toaster card in `[video_slot]`: Program sources (`program.a`, `program.b`), fader position (`program.fader`, 0-255) and mix mode (`program.mode`), `preview` source, framestore input, matte, video inputs 1-4 (host folder, files, pinned file, active playback), `media_root`, and any active recording. Fails when no card is fitted.
+- `toaster.capture {"output": "program"|"preview"|"both", "path": "..."}`: Save the Toaster's Program and/or Preview output (default `"both"`, 640x480 square pixels) as PNG (`-program` and `-preview` are appended to `path` when `"both"` is requested; without `path` files go to the screenshots folder). Over MCP, the PNGs are attached as image blocks.
+- `toaster.record {"action": "start"|"stop"|"status", "output": "program"|"preview", "path": "..."}`: Start or stop AVI recording of a Toaster output (`output` defaults to `"program"`, `action` to `"status"`), or query recording status. Both `start` and `stop` drain fields the machine has produced so recordings align to the emulated frame; without `path`, `start` writes a timestamped `.avi` into the card's `Output` folder.
+- `toaster.input {"input": 1|2|3|4, "file": "..."}`: Hold video input 1-4 to a single host still or video file (`ffmpeg`-readable) instead of its folder; omit `file` or pass `null` to return to the folder.
 
 ### Streaming events
 - `events.subscribe {"events": [...], "frame_interval": ..., "frame_digest": ..., "mmio": [...]}`: Subscribe to event families: `frame`, `serial`, `interrupt`, `media`, `debug`, `bus`, `mmio`, and `cd` (see [Streaming observability](#streaming-observability)). `frame_interval` is 1 (the default) to 1,000,000.

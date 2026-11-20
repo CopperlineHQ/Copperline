@@ -48,7 +48,7 @@ waveform.status
 waveform.stop
 ```
 
-### Debugger window (`Cmd+B` / `Alt+B`)
+### Debug workspace (`Cmd+B` / `Alt+B`)
 
 On the **Wave** tab, type the same order-free arguments as `WAVE START` into the
 address/command field (or leave it empty for the defaults), then click **Arm**.
@@ -58,7 +58,7 @@ Every interface uses the same defaults:
 - Trigger: `now` (immediately upon arming)
 - Duration: `1f` (one video frame)
 - Signals: `all`
-- Output file (console, debugger window, and control protocol):
+- Output file (console, Debug workspace, and control protocol):
   `copperline-wave-<timestamp>.vcd` in the
   [traces folder](../guide/ui.md#where-files-go)
 

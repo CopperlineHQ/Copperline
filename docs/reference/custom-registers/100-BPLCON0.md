@@ -19,5 +19,5 @@ Selects resolution, bitplane count, HAM, dual playfields, and beam controls.
 - Bit 4: BPU3, bitplane count bit 3 (AGA).
 - Bit 3: LPEN, light-pen latch enable.
 - Bit 2: LACE, interlace.
-- Bit 1: ERSY, external resynchronization; Copperline freezes the VPOSR/VHPOSR readback while it is set.
+- Bit 1: ERSY, external resynchronization; Copperline freezes the VPOSR/VHPOSR readback while it is set unless a genlock sync source (`[chipset] genlock` or a sync-supplying video-slot card) is present.
 - Bit 0: ECSENA, enable the BPLCON3 border and genlock controls (ECS/AGA).

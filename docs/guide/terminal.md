@@ -60,9 +60,9 @@ typing starts about a third of a second after the paste, once the paste
 shortcut's own modifier keys are up again, and a single paste is limited to
 64 KiB (the status line says when one was cut short).
 
-On a terminal without the keyboard protocol, Alt+`[` and Alt+`O` send the two
-bytes that also begin a control sequence. Copperline takes them for the keys
-when nothing follows within a twentieth of a second.
+On a terminal without the keyboard protocol, Alt+`[`, Alt+`O`, and Alt+`_`
+send the two bytes that also begin a control sequence. Copperline takes them
+for the keys when nothing follows within a twentieth of a second.
 
 The terminal's pointer moves the Amiga mouse by the distance it travels over the
 picture, as an uncaptured window does. The terminal cannot capture the pointer,
@@ -85,7 +85,7 @@ The Amiga keyboard has no F12, so F12 is the host key. Press F12, then:
 | `w` | Warp on or off |
 | `r` | Reset (Ctrl+Amiga+Amiga) |
 | `s` | Save a screenshot to the screenshot directory |
-| `Esc` | Back, without a command |
+| `Esc` or `F12` | Back, without a command |
 
 The status line at the bottom shows the emulated time, whether the machine is
 running, paused or warping, the frame rate and bandwidth of the picture, and
@@ -103,7 +103,7 @@ connection closed. Copperline then leaves as it does for a quit and exits
 with status 128 plus the signal number (143 for SIGTERM). That holds while
 the session is still starting, too: a signal ends it even if the terminal's
 output is stopped (Ctrl+S, or a link that has stopped draining), and a
-terminal that takes no output for ten seconds at start-up ends the session
+terminal that takes no output for ten seconds at startup ends the session
 with an error. It likewise ends, with an error, when the terminal stops
 accepting output or goes away, and when a capture flag has written its
 capture.
@@ -117,11 +117,14 @@ after `kill -9`, type `reset` and press Enter to get the terminal back.
 
 ## Log output and sound
 
-While Copperline owns the terminal, its log goes to a file instead of the
-screen: `copperline-terminal-PID.log` in the temporary directory, or the path
-given with `--terminal-log PATH`. The path is printed when the session ends.
-The default file is always a new one, readable only by you: if a file of that
-name is already there, a number is added to the name instead of the file
+While Copperline owns the terminal, any output stream still attached to the
+terminal is redirected to a log file instead of the screen:
+`copperline-terminal-PID.log` in the temporary directory, or the path
+given with `--terminal-log PATH`. If stdout and stderr are already redirected
+away from the terminal (for example `2>run.log`), those redirections are kept
+and no log file is created. Otherwise the path is printed when the session
+ends. The default file is always a new one, readable only by you: if a file of
+that name is already there, a number is added to the name instead of the file
 being reused. A file named with `--terminal-log` is replaced.
 
 Sound plays on the machine Copperline runs on, as in a window. On a remote

@@ -22,7 +22,7 @@ drive support, leave out the `fluxbridge` feature (see
 
 ```sh
 cargo build --release --no-default-features \
-  --features "midi,frontend,wasm-boards,control,ctl-bin,import-uae-bin,net-nat,net-bridge,mt32,coppersynth,cpu-jit,profile-stats,game-library,mhi,cd-mp3,cd32-fmv,gdb,dap,netplay-internet,host-serial"
+  --features "midi,frontend,wasm-boards,control,ctl-bin,converter-bin,import-uae-bin,net-nat,net-bridge,mt32,coppersynth,cpu-jit,profile-stats,game-library,update-check,mhi,cd-mp3,cd32-fmv,gdb,dap,netplay-internet,host-serial"
 ```
 
 ## Configuration
@@ -51,7 +51,7 @@ copperline --model A500 --floppy-bridge df0 greaseweazle kickstart.rom
 
 | Command-line flag | Configuration key | Description |
 |---|---|---|
-| `--floppy-bridge DFN NAME` | `bridge` | Interface driving the bay (`greaseweazle` or `off`) |
+| `--floppy-bridge DFN NAME` | `bridge` | Interface driving the bay (`greaseweazle`, `gw`, or `off`) |
 | `--floppy-bridge-port DFN PORT` | `bridge_port` | Serial device path (default: auto-detect) |
 | `--floppy-bridge-cable DFN SEL` | `bridge_cable` | Cable drive select (`a`, `b`, `0`..`3`) |
 | `--floppy-bridge-mode DFN MODE` | `bridge_mode` | Read mode (`normal`, `compatible`, `stalling`) |
@@ -87,8 +87,7 @@ formatted as double-density.
   waiting for the index pulse. A revolution captured off-index is joined where
   the recording repeats, and FluxBridge checks the join and the AmigaDOS track
   checksums before the track is kept in memory; an unverified capture is used
-  for one pass only and then read again. (`fast`, the upstream name for this
-  mode, is also accepted.)
+  for one pass only and then read again.
 - **`compatible`:** Captures from one index pulse to the next. Waiting for the
   index costs a little time, but non-standard and copy-protected tracks are
   reproduced exactly as recorded.
@@ -114,7 +113,7 @@ Writing to a physical disk needs both of these:
 
 1. The disk's own write-protect tab must be set to writable.
 2. The configuration must set `write_protected = false` (or pass
-   `--floppy-bridge-writable`).
+   `--floppy-bridge-writable DFN`).
 
 Writes go straight to the physical disk as it turns, without the emulated
 machine waiting for them. A write of a full revolution can start at any
@@ -124,7 +123,8 @@ index pulse is refused, because the interface cannot place it accurately.
 ## Operational differences from disk images
 
 - **Physical disk swapping:** Insert and eject disks in the drive itself.
-  The status bar shows the drive's status and write-protection state.
+  The status bar shows the drive's activity LED and track counter (swap and
+  eject are disabled for bridged drives).
 - **Drive sound effects:** Copperline's floppy drive sounds are off for bridged
   drives, since the real drive makes its own noise.
 - **Emulation pacing:** A machine with a physical drive always runs at real

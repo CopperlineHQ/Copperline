@@ -88,8 +88,10 @@ Amiga OFS disk images with their volume names and boot priorities. Available
 motherboard IDE slots are used first, then SCSI slots. Configured IDE/SCSI/LIDE
 images keep their controller. The host exports complete virtual sectors,
 including any synthesized partition metadata, so the receiver never has to
-interpret host directory paths. The asynchronous `copperhf` controller and CD
-backends are excluded from netplay.
+interpret host directory paths. The asynchronous `copperhf` controller, CD
+backends, SCSI tape drives, PCMCIA slot, MHI, Toccata, SF2000 SD, and
+persistent NVRAM/battery-backed RAM files (`battmem_path`, `cd32_nvram_path`,
+`cdtv_bookmark_path`) are excluded from netplay.
 
 Synthesized RDB headers mark the final LUN without claiming to be the final
 target, allowing the ROM boot driver to discover subsequent IDE/SCSI volumes.
@@ -129,7 +131,7 @@ an HTTPS relay, attempts NAT traversal, and uses direct paths when available.
 The relay-only option removes IP transports entirely. Public relay addresses
 come from iroh's production relay map; a custom relay replaces that map. The
 minimal endpoint preset avoids public address lookup/publishing and automatic
-router port mapping. No browser signaling or TURN credentials are involved.
+router port mapping. No browser signalling or TURN credentials are involved.
 
 Inputs use unordered, unreliable QUIC datagrams. The shared protocol continues
 to own retransmission, acknowledgement and rollback. Receive/send queues each
@@ -224,11 +226,13 @@ marks the earliest dirty frame. The engine restores that frame's snapshot,
 removes the abandoned history, and re-executes through the current frame
 with corrected input and fresh snapshots.
 
-Snapshots reuse the machine serializer with an internal prefix for the open-bus
-value and display latches omitted from file save states. The netplay restore
-preserves captured video buffers; the ordinary file loader deliberately discards
-them, which is unsuitable for immediate rollback. This internal prefix changes
-neither the file save-state format nor its version. Rendering during netplay is
+Snapshots reuse the machine serializer with an internal rollback prefix for
+the transient display/presentation latches (`Bus::RollbackState`) omitted
+from file save states (while `Bus::data_bus` and the CPU interrupt-sampling
+latches are serialized in both file states and rollback checkpoints). The
+netplay restore preserves captured video buffers; the ordinary file loader
+deliberately discards them, which is unsuitable for immediate rollback. This
+internal prefix changes neither the file save-state format nor its version. Rendering during netplay is
 presentation-only, including the synchronous fallback. Replay is unpaced and
 suppresses live audio and speculative host output.
 It does not increment committed-frame statistics. The desktop renderer's
@@ -304,10 +308,13 @@ accidentally continue a failed session as local play.
 ## Browser transport and lifecycle
 
 `Connection<T: Transport>` owns the handshake, rollback and timeout logic.
-Same-process checkpoints include the CPU adapter's sampled interrupt level and
-microcode poll hold. Restoring the chipset without these latches can recognize
-an interrupt one instruction early after replay. They remain outside file save
-states; the rollback prefix and initial fingerprint change with the build.
+Same-process checkpoints carry the rollback prefix (`Bus::RollbackState`
+display latches alongside the CPU adapter's sampled interrupt level and
+microcode poll hold). Restoring the chipset without those CPU latches can
+recognize an interrupt one instruction early after replay; the CPU latches
+and `Bus::data_bus` are now also serialized in file save states, while the
+transient display latches stay rollback-only and the rollback prefix and
+initial fingerprint change with the build.
 On the desktop, `Session` (`desktop.rs`) wraps the connection with setup,
 media and spectator handling. `ConnectionOptions` selects direct UDP
 `Options`, Internet invitation settings, or their spectator counterparts
@@ -331,7 +338,7 @@ server cannot invalidate routes gathered from other servers. An empty candidate
 set still fails setup, and diagnostics record a gathering-deadline event.
 `netplay-room.js` sends these codes through the configured service; the host polls
 for an answer every 1.5 seconds until joined, cancelled or expired. Manual
-copy/paste remains available under Advanced and needs no signaling service.
+copy/paste remains available under Advanced and needs no signalling service.
 Neither path trickles candidates.
 
 `services/netplay` implements the Cloudflare Worker and SQLite Durable Object
@@ -372,7 +379,7 @@ sender waits for buffer drainage above 256 KiB. The receiver validates metadata
 before allocating, verifies every digest and acknowledges completion before
 the host boots. A 30-second inactivity timer and a three-minute overall deadline
 bound setup. Cancellation rejects pending operations and discards partial data.
-Media stays off the signaling service; a TURN relay carries encrypted peer traffic.
+Media stays off the signalling service; a TURN relay carries encrypted peer traffic.
 
 `netplay-swap.js` negotiates `swaps: "disk-v1"` and an ordered, reliable
 `copperline-disks-v1` channel. Only the host initiates transactions. Each peer
@@ -517,14 +524,14 @@ spectators can arrive at any time. Manual-code sessions have no room service
 and no spectators. The panel shows the spectator invitation with its own QR
 beside the player one until player 2 connects, then alone.
 
-Spectator signaling runs the other way round. Each spectator reserves a
+Spectator signalling runs the other way round. Each spectator reserves a
 place (`/join`, which also issues its TURN credentials), offers over
 `copperline-watch-v1` (ordered, reliable) plus the existing setup channel,
 and polls for its answer every 2.5 seconds, backing off on HTTP 429. The
 host polls `/offers` every two seconds while its machine runs, which also
 extends the room's expiry. It answers each offer up to the places it holds
 and refuses the rest (`/refuse`), since the service counts only places still
-in signaling; a fetched answer frees the place. An expired room closes the
+in signalling; a fetched answer frees the place. An expired room closes the
 hub, which withdraws the invitation from the panel while the spectators
 already admitted keep watching.
 
@@ -559,7 +566,8 @@ they survive machine replacement. Static validation (`validate_config`)
 runs before construction. Among other host dependencies, it rejects
 parallel-port host peripherals other than the passive four-player adapter,
 including the sampler the frontend attaches later; the Toccata board, whose
-serialized resampler map is not canonical; and the SF2000 SD controller,
+serialized resampler map is not canonical; MHI; PCMCIA cards; SCSI tape
+drives; persistent NVRAM/bookmark paths; and the SF2000 SD controller,
 whose board and ROM the setup manifest cannot carry. The session creates the
 native transport before replacing the live machine, so a validation or
 immediate bind failure leaves that machine intact and reports the error in
@@ -578,7 +586,7 @@ the caller normally.
 
 The regression suite covers:
 
-- Zero and nonzero input delay, held-state prediction with zero predicted
+- Zero and non-zero input delay, held-state prediction with zero predicted
   mouse motion, batched late arrivals, duplicate inputs, bounded stalls,
   recovery, and once-only local sampling, including pending mouse movement
   accumulated across stalls.
@@ -616,7 +624,7 @@ The regression suite covers:
   admission by capability; the launcher's Watch role and spectator code; the
   CLI flags; and a GUI spectator that joins late through the launcher,
   catches up unpaced and re-paces.
-- Browser packet queue bounds, signaling validation, data-channel options,
+- Browser packet queue bounds, signalling validation, data-channel options,
   cancellation and backpressure. The release WASM smoke runs paired A500/PAL and
   A1200/NTSC machines through 120 confirmed/checksummed frames under loss,
   duplication, reordering and asymmetric pauses. Different volume, overscan and

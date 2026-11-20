@@ -3,7 +3,7 @@
 ## The wrapper and the bus adapter
 
 `M68kMachine` (`src/cpu.rs`) wraps the published pure-Rust
-[`m68k` 0.13 core](https://docs.rs/crate/m68k/0.13.0). The core sees
+[`m68k` 0.17.1 core](https://docs.rs/crate/m68k/0.17.1). The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
 every CPU-visible access -- RAM, ROM, custom registers, CIA, RTC,
 autoconfig, Gayle, Akiko -- routes into the shared `Bus` and is billed in
@@ -26,15 +26,17 @@ colour clocks:
   CD32 boot, which is why the earlier per-byte slow-class billing started
   the boot show visibly late.
 - Addresses are masked to the model's bus width: 24-bit for
-  68000/68010/68EC020, 32-bit for 68020/030/040/060.
+  68000/68010/68EC020, 32-bit for 68020/68EC030/68030/68EC040/68040/68EC060/68060.
 
-Selectable models: 68000, 68010, 68EC020, 68020, 68030, 68040, 68060.
+Selectable models: 68000, 68010, 68EC020, 68020, 68EC030, 68030, 68EC040,
+68040, 68EC060, 68060 (setting `[cpu] fpu = false` on a 68040 or 68060
+models the FPU-less 68LC040/68LC060).
 
 `[cpu] fpu` fits a 68881/68882 to any 020 or 030; it is on by default
 for the 68040 and 68060, whose FPU is on-die. The `m68k` core executes
 the 6888x instruction set in true 80-bit extended precision via a
 pure-Rust software floating-point engine
-([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/fpu/softfloat.rs)).
+([`softfloat.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/src/fpu/softfloat.rs)).
 It models arithmetic (add, sub, mul, div, sqrt, and the single-accuracy
 FSGLMUL/FSGLDIV, which round the mantissa to 24 bits but keep the
 extended exponent range -- gcc -m68040 emits them for `float` arithmetic,
@@ -46,7 +48,7 @@ FBcc/FScc/FDBcc/FTRAPcc, the control registers, the FPCR rounding
 mode/precision, the FPSR exception/accrued bytes, and the FSAVE/FRESTORE
 state frames. The state frame is NULL after reset and, once the FPU has
 been touched, the CPU's own IDLE frame: the 68881-style $18-byte frame on
-020/030 systems, the 68040's version-$41, $28-byte frame on the 040, and
+020/030 systems, the 68040's four-byte ($4100) idle frame on the 040, and
 three long words on the 060 (see [The 68060](#the-68060)).
 Guests validate the size byte, and Linux/m68k's sigreturn kills a process
 whose saved FPU frame carries a foreign size. FMOD/FREM compute the exact
@@ -57,12 +59,12 @@ The transcendentals (FSIN/FCOS/FTAN, FASIN/FACOS/FATAN, the hyperbolics,
 FETOX/FETOXM1/FTWOTOX/FTENTOX, FLOGN/FLOGNP1/FLOG2/FLOG10) and FSINCOS run
 in extended precision too: a double-`FloatX80` ("double-double",
 ~128-bit) layer
-([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/fpu/dd.rs))
+([`dd.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/src/fpu/dd.rs))
 evaluates Taylor/atanh series over reduced ranges and rounds the result
 to extended under the FPCR mode, setting INEX and the domain flags
 (OPERR/DZ). Accuracy is validated against an arbitrary-precision oracle
 (the pure-Rust `astro-float`, a dev-only dependency;
-[`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/tests/fpu_accuracy.rs)):
+[`fpu_accuracy.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/tests/fpu_accuracy.rs)):
 every function is within 1 ULP across a wide sweep and all four rounding
 modes, and round-to-nearest is correctly rounded in practice. The results
 are not chip-bit-exact -- the real 6888x uses its own CORDIC/polynomial
@@ -70,7 +72,7 @@ microcode, and on a bare 68040 these instructions trap to a software FPSP.
 
 The 68000's per-instruction cycle counts in the `m68k` core have been
 corrected to exact totals across the SingleStepTests 68000 cycle corpus
-([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.13.0#validation--testing)),
+([validation details](https://github.com/benletchford/m68k-rs/tree/m68k-v0.17.1#validation--testing)),
 which is what makes cycle-budgeted pacing trustworthy. Instruction
 semantics are also checked against Toni Wilen's WinUAE cputest suites
 (generated register and memory states): `crates/cputest-runner` drives the
@@ -177,9 +179,12 @@ The timing contract is deliberately approximate
   `AddressBus::batch_boundary`, which only records the count: no device
   advances while the batch runs from local memory. Because it runs before
   every decoded instruction, the hook compares a cached interrupt level and
-  stop condition against the SR mask; only a shared-bus access or a prefix
-  flush, the sole ways the interrupt state can change mid-batch, makes it
-  read the chipset again. `CpuBus` bills the
+  stop condition against the SR mask; when no interrupt is pending, no host
+  stop is active, and no shared-bus fetch is waiting to complete, a fast
+  `JitTiming::quiet` flag lets the inline boundary hook check only whether a
+  shared-bus access occurred. Only a shared-bus access or a prefix flush, the
+  sole ways the interrupt state can change mid-batch, clears `quiet` and makes
+  it read the chipset again. `CpuBus` bills the
   completed prefix when something could observe it -- before a chip-bus or
   device access, a cache-control operation or RESET -- and the host bills
   the rest when the batch returns. A chip-bus or device access ends the
@@ -249,7 +254,7 @@ cached. Code inside any region is coherent the moment it changes, whether
 the guest rewrites it or a device DMAs it there (LoadSeg through copperhf):
 compiled traces compare their code bytes on every entry, and no cache line
 can hold the old bytes. All regions are withheld while something must see
-every plain fast-RAM access: memory-write debug hooks, the heat map, SMC
+every plain fast-RAM access: memory-write debug hooks, the heatmap, SMC
 detection, and injected bus faults force each access back onto the bus.
 Arming any per-instruction debug or diagnostic hook (breakpoints, watches,
 traces, `COPPERLINE_DBG_*`) drops the whole slice back to the precise loop,
@@ -260,7 +265,7 @@ own (`CpuBus::jit_local_read`, `jit_local_write`): while a batch runs,
 `CpuBus` keeps descriptors of the regions it offered and serves a read,
 fetch or RAM write inside one straight from memory. Nothing is skipped that
 the batch contract uses, since such an access bills no bus time, finds no
-cache line, has no watch, heat map or fault injection to pass (their
+cache line, has no watch, heatmap or fault injection to pass (their
 presence withholds the regions) and takes no interrupt sample (the batch
 path reads the live level). About one instruction in eight of compiled C
 still goes through the bus this way, so the ordinary decode of every such
@@ -429,7 +434,7 @@ before a save or rollback can happen.
 
 The 68000's two-word instruction prefetch queue (IRD/IRC) is modelled in
 the `m68k` core
-([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/cpu.rs)):
+([`prefetch_queue`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/src/core/cpu.rs)):
 the next opcode is fetched before the current instruction finishes, so
 self-modifying code that overwrites the *next* instruction executes the
 stale pre-write word (real MC68000 Class 1 SMC behaviour), while a taken
@@ -510,13 +515,13 @@ DBcc loop mode: a DBcc that branches -4 back to a loopable one-word
 instruction holds the body/DBcc pair in the prefetch queue and re-executes
 it with no instruction fetches until the condition turns true, the counter
 expires, or an exception intervenes (`loop_mode` in
-[`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/cpu.rs);
+[`core/cpu.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/src/core/cpu.rs);
 the loopable set and the DBcc entry/exit arms live in
-[`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/decode.rs)).
+[`core/decode.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/src/core/decode.rs)).
 A looping DBcc iteration costs 6 internal clocks and touches the bus only
 for the body's operands, which is what makes tight copy/clear loops
 measurably faster on a real 68010.
-[`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/tests/loop_mode_timing_tests.rs)
+[`loop_mode_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/tests/loop_mode_timing_tests.rs)
 pins engagement, the 68000's non-engagement, and the no-fetch iteration
 cost.
 
@@ -540,7 +545,7 @@ privilege violation stacking the STOP itself, so the handler's RTE
 re-executes it; a pending trace (T set in the SR the instruction started
 with) has priority and recovers from the stop, while a T bit loaded *by*
 STOP does not fire while stopped.
-[`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/tests/stop_and_68010_timing_tests.rs)
+[`stop_and_68010_timing_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/tests/stop_and_68010_timing_tests.rs)
 pins all of these.
 
 ## Caches
@@ -659,7 +664,7 @@ walker and TC[15] enable; PTEST is gone (undefined F-line) and PLPAR/PLPAW trans
 an address into An, faulting with the format $4 frame.
 
 **Timing.**
-[`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/timing_060.rs)
+[`timing_060.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/src/core/timing_060.rs)
 replaces the 020+ scaling formula for the 060: every opcode word
 classifies (a build-once 64K table over a pure function) into the
 MC68060UM Chapter 10 dispatch classes with a pOEP cycle cost -- most
@@ -770,7 +775,7 @@ instruction cache, a three-stage pipeline, execution overlap, dynamic bus
 sizing, and alignment-dependent transfers, so an opcode does not have one
 context-free cycle count.
 
-[`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/timing_020.rs)
+[`timing_020.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/src/core/timing_020.rs)
 transcribes the integer timing tables from section 8.2 of the
 [MC68020 User's Manual](https://www.nxp.com/docs/en/data-sheet/MC68020UM.pdf).
 The manual publishes Best Case (cached with maximum execution overlap),
@@ -939,7 +944,7 @@ claim that the full 020 pipeline is cycle-exact.
 
 ## 68040 timing
 
-[`timing_040.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.13.0/src/core/timing_040.rs)
+[`timing_040.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.17.1/src/core/timing_040.rs)
 (m68k 0.12) gives the 68040 a single-issue pipeline model in place of the
 scaled approximation, which the same accelprobe columns (a 25 MHz A3640,
 two byte-identical serial captures) measured as ~2-2.5x pessimistic on
@@ -1024,8 +1029,9 @@ loads an entry, and a `PMOVE` to TC, SRP or CRP flushes the cache unless it
 is the `PMOVEFD` form. A write to a descriptor does not reach the cache;
 software flushes, as on real hardware. A write to a write-protected page
 misses and re-walks, which raises the fault. Not modelled: entries for
-invalid translations (the B bit), the CI and modified bits, and the part's
-exact replacement order. The cache is saved with the CPU state, so a
+invalid translations (the B bit), the CI bit, and the part's exact
+replacement order (the modified bit is tracked: an ATC entry loaded by a read
+re-walks on the first write to set M). The cache is saved with the CPU state, so a
 resumed run misses where the original would have. Before it existed every
 translated access, including instruction fetches that hit the instruction
 cache, re-walked the tables. A 68030 with its MMU on (bundled AROS enables
@@ -1098,14 +1104,16 @@ would touch the physically adjacent page instead of the mapped one (under
 Linux/m68k that mis-fetched the low half of a page-straddling `BSR.L`
 displacement and sent execution mid-instruction).
 
-`PTEST` (68040) walks the addressed page and reports the physical address and
-resident bit in MMUSR (the cache-mode/used/modified attribute bits are not yet
-filled in). The 68030 `PTEST` performs a real level-limited walk in the
-extension word's function-code space and composes the 16-bit MMUSR (B, S, W
--- reported for read tests too -- I, T, and the level count N); with the A
-bit it hands back the physical address of the last descriptor examined,
-which is how mmu.library's fault handler locates the shared descriptor slot
-to materialize.
+`PTEST` (68040) walks the addressed page, fills in the physical address and
+MMUSR attribute and status bits (G, U1/U0, S, CM, M, W, R, T, B), and updates
+descriptor U/M history and the ATC. The 68030 `PTEST` searches the TT
+registers and ATC at level 0 (`T`, `I`, `W`, `M`), or performs a real
+level-limited table walk in the extension word's function-code space at
+levels 1-7 and composes the 16-bit MMUSR (`B`, `L`, `S`, `W` -- reported for
+read tests too -- `I`, `M`, and the level count `N`); with the `A` bit it
+hands back the physical address of the last descriptor examined, which is
+how mmu.library's fault handler locates the shared descriptor slot to
+materialize.
 
 68030 faults push the long bus-cycle fault frame (format $B, 46 words):
 SSW (DF/RW/SIZ/FC for data faults, FB|RB with the stage B address for
@@ -1116,9 +1124,9 @@ fixed the mapping RTEs with DF set and the instruction restarts; a handler
 that *completed* the data cycle itself clears DF, supplying a faulted
 read's result in the data input buffer (mmu.library emulates lazily-zeroed
 pages this way) or absorbing a faulted write, honoured as a one-shot
-substitution on the re-executed instruction's matching access. Remaining:
-the used/modified/limit MMUSR bits and descriptor write-back, CRP limit
-checks, and the DT=1 page-descriptor root.
+substitution on the re-executed instruction's matching access. Remaining
+68030 MMU gaps: `DT=1` page-descriptor roots, the cache-inhibit (CI) bit, and
+invalid-entry ATC (`B`-bit) caching.
 
 ### The MMU-less EC parts
 

@@ -4,7 +4,7 @@ These are original, unedited desktop captures from the Copperline debugging
 showcase on 5 September 2026. They are committed at capture resolution so
 readers can open the images to inspect small text.
 
-- `01`–`04`: Bartman source debugging and captured-frame views of its bundled
+- `01`-`04`: Bartman source debugging and captured-frame views of its bundled
   Amiga C template, using Copperline with the integration fixes developed
   during the session.
 - `05`: Copperline's native DAP adapter, demonstrating a two-file relocatable

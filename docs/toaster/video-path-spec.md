@@ -16,7 +16,7 @@ Names used here:
   in `VTSU_RG`, B/I words in `VTSU_BI`, `elh.i:56-157`).
 * Bus names: `AM`/`BM` are the A and B sides of the program fader, `PV` is the
   preview mux, `LK` the luma-key source mux, `IS` the framestore-input
-  (digitiser) mux.
+  (digitizer) mux.
 * Software button masks (`M_*`) and UI names: `M_VIDEO1..4` = $1/$2/$4/$8,
   `M_DV0`=$10 (UI "DV1", bank 0), `M_DV1`=$20 (UI "DV2", bank 1),
   `M_ENCODER`=$40 (UI "BKG"), `M_MONO`=$100, `M_MAIN`=$200, `M_EXTER`=$400.
@@ -35,14 +35,14 @@ Names used here:
           6 ENCODER  (MATTE=1: matte generator / BKG; MATTE=0: Amiga RGB encoded)
           7 MONO / latch (see 3.4)
 
-   AM mux ──┐                       PV mux (7 = copy of Program) ──► PREVIEW
-            ├─ FADER k ──► PROGRAM          (+ Amiga UI overlay if USERON)
-   BM mux ──┘    ▲
-                 │ k = f(CDS):  CD     → constant CD (header, 8 bit)
-                 │              LUMKEY → luma(LK mux) vs LKA/LKB
-                 │              DIB/DIBGR/PIXELSW/QUAF/... → per-pixel Amiga bits
-   LK mux ──► luma keyer / MONO bus
-   IS mux ──► digitiser ──► framestore record (per-line CERB, bank OBR)
+   AM mux --+                       PV mux (7 = copy of Program) --> PREVIEW
+            +-> FADER k --> PROGRAM          (+ Amiga UI overlay if USERON)
+   BM mux --+    ^
+                 | k = f(CDS):  CD     -> constant CD (header, 8 bit)
+                 |              LUMKEY -> luma(LK mux) vs LKA/LKB
+                 |              DIB/DIBGR/PIXELSW/QUAF/... -> per-pixel Amiga bits
+   LK mux --> luma keyer / MONO bus
+   IS mux --> digitizer --> framestore record (per-line CERB, bank OBR)
 ```
 
 There is a single A/B fader in the program path. Every program effect (cut,
@@ -153,7 +153,7 @@ Other lists (bytes decoded from the binary) **[H]**:
 | list | contents | used by |
 |---|---|---|
 | `ehinitlist`@10f860 | EH1 EH2 EH3 EH4 EH5 EH68 EH69 EH6A EH6B | InitToaster, sent 21 times |
-| `justeh0`@10ffd4 | EH0 × 241 (whole field) | FreezeThawDVE, going to freeze |
+| `justeh0`@10ffd4 | EH0 x 241 (whole field) | FreezeThawDVE, going to freeze |
 | `live2freezelist`@1100c6 | EH0 EH2 EH4 EH1(CERB high) EH0 EH68 | FreezeThawDVE |
 | `freeze2livelist`@1100cd | EH2 EH0 EH4 EH1(CERB high) EH0 EH68 | FreezeThawDVE |
 | `elhlist6`@110904 | EH2 EH3 | InstallSBM |
@@ -163,7 +163,7 @@ Other lists (bytes decoded from the binary) **[H]**:
 | `MainBlankList` | EH3 EH2 EH3 | frame loading (black matte on main) |
 
 In `Headers2Sprite0` list encoding, $FF = EH0 (with the freeze mask), a
-negative number −n = EHn with CERB forced high, and 0 = end.
+negative number -n = EHn with CERB forced high, and 0 = end.
 
 **Your observation "EH0 R=$8E00 G=$7400 + incrementing L on every line"** is
 `justeh0`: 241 lines of EH0 with G = ($0500\|$F000)&$7EFF = $7400 and B/I taken
@@ -189,14 +189,14 @@ persist** and take effect from the line on which they arrive.
   EH4 will be the last sent, turning on the LOCK, the final EH0 will never be
   seen". So **NOLOCK=0 freezes the header registers and the card ignores later
   ELHs** until unlocked; mode 0 sends NOLOCK=1. **[M]**
-* Clip levels and matte are analog. The software waits a field for big LKA/LKB
+* Clip levels and matte are analogue. The software waits a field for big LKA/LKB
   changes (`ChangeClips` keylogic.a:5230) and warns that matte cannot change
   quickly (cop.a:2532-2535). An emulator can ignore this.
 
 **Field numbering**: fields I/III = LOF=1 (long) fields. `InstallFieldIorIII`
 waits for LOF=1 (vthand.txt:51-77). **[M]**
 
-**Line numbers**: do not treat L ≥ $F0 as "not data" in general. LUT mode
+**Line numbers**: do not treat L >= $F0 as "not data" in general. LUT mode
 displays framestore lines with L = 252/253 (`EnterShiftedKey`,
 buttons.a:2220-2290), and readback tests line 504 (L=252). $F000F000 (L=255
 with R=$F) is the only explicit dummy. Whether a line is an ELH is decided by R
@@ -208,7 +208,7 @@ bits 15-12 alone. **[H]**
 
 ### 3.1 Values (elh.i:449-503) and the software's mask mapping (buttons.a:178-375)
 
-| val | PV (EH1G) → **Preview** | AM (EH2R) / BM (EH2B) → **Program fader A / B** | LK (EH1R) → key source | IS (EH2G) → framestore input |
+| val | PV (EH1G) -> **Preview** | AM (EH2R) / BM (EH2B) -> **Program fader A / B** | LK (EH1R) -> key source | IS (EH2G) -> framestore input |
 |---|---|---|---|---|
 | 0-3 | VID1-4 | VID1-4 | VID1-4 | VID1-4 |
 | 4 | DAC0 | DAC0 | DAC0 | MAIN (program output fed back) |
@@ -216,7 +216,7 @@ bits 15-12 alone. **[H]**
 | 6 | ENCODER | ENCODER | ENCODER | ENCODER |
 | 7 | MAIN (= Program) | MONO | EXT | MONO |
 
-* **Preview output = PV mux** (plus the UI overlay, 3.3). `CookPrvw` →
+* **Preview output = PV mux** (plus the UI overlay, 3.3). `CookPrvw` ->
   `Mask2PV(PrvwSec)` (buttons.a:1157-1240). An empty preview row gives
   PV=MAIN. **[H]**
 * **Program output = fader(AM, BM)**. **[H]**
@@ -226,14 +226,14 @@ bits 15-12 alone. **[H]**
 
 ### 3.2 DAC0 / DAC1 **[M-H]**
 DAC0 is framestore bank 0 (UI "DV1") and DAC1 is bank 1 (UI "DV2"):
-* `Mask2AM`: M_DV0 → DAC0 "LIVE DVE or FROZEN DV0 = DV0", M_DV1 → DAC1
+* `Mask2AM`: M_DV0 -> DAC0 "LIVE DVE or FROZEN DV0 = DV0", M_DV1 -> DAC1
   "FROZEN DV1" (buttons.a:197-200).
 * DoSafeWrite needs matte when "writing to bank 0" and AM/BM/PV = DAC0, or bank
   1 and DAC1 (cop.a:3600-3650).
-* CG: "CG to go to main is in DV1" → BM=DAC0; "in DV2" → BM=DAC1
+* CG: "CG to go to main is in DV1" -> BM=DAC0; "in DV2" -> BM=DAC1
   (cgsupport.a:1553-1562). CG preview of the render bank: PV=DAC0 with OBR=0,
   or PV=DAC1 with OBR=1 (CG edita.a:248-263).
-* Live DVE (live digitised video) only ever comes out of **DAC0**. DAC1 is
+* Live DVE (live digitized video) only ever comes out of **DAC0**. DAC1 is
   only ever a frozen bank.
 
 ### 3.3 ENCODER, MATTE, USERON, PVMUTE
@@ -248,7 +248,7 @@ DAC0 is framestore bank 0 (UI "DV1") and DAC1 is bank 1 (UI "DV2"):
   video. AnimFX "Encoder" effects clear MATTE (animfxhandler.a:2685-2700), and
   the `EncoderAlpha` logic keys "encoded graphics" (tags.i:420-421). **[M-H]**
 * **USERON** (EH1G bit 11) is the "preview overlay" (2-monitor mode,
-  `spB_PrvwOLay` → `TB_UserOn`, pecomm.a:5046-5056; default on, switcher.a:6683).
+  `spB_PrvwOLay` -> `TB_UserOn`, pecomm.a:5046-5056; default on, switcher.a:6683).
   It overlays the switcher UI on the **Preview** output. It is always set
   together with **PVMUTE** (EH4B bit 11). USERON and PVMUTE are cleared during
   effects unless `HonorPreviewOverLay` is set (animfxhandler.a:2727-2731), and
@@ -256,7 +256,7 @@ DAC0 is framestore bank 0 (UI "DV1") and DAC1 is bank 1 (UI "DV2"):
   * Overlay level per pixel = 2 bits on the R and G lines. These are the AA
     "UIO" bits r1 ($200) and g1 ($020) (tags.i:2101-2105,
     `PACO_UIO0..3`=$000/$200/$020/$220). The AA interface palette forces them
-    per colour: colour 0 → 0, 1 → $200, 2 → $020, 3 → $220
+    per colour: colour 0 -> 0, 1 -> $200, 2 -> $020, 3 -> $220
     (cop.a:3995-4015). The 2-plane default pairs them with grays
     $666/$999/$DDD. On ECS the 2-monitor palette is $000/$842/$7BC/$FFF, i.e.
     r3,g3 = 00/01/10/11 (cop.a:3926). **[M]**
@@ -278,10 +278,10 @@ DAC0 is framestore bank 0 (UI "DV1") and DAC1 is bank 1 (UI "DV2"):
 ## 4. Program output: the fader (Q2)
 
 ### 4.1 Fader and CD **[H]**
-Program = A·(1−k) + B·k, with A = AM source, B = BM source.
+Program = A*(1-k) + B*k, with A = AM source, B = BM source.
 `VTI_CD_SHOWA`=0 shows A and `VTI_CD_SHOWB`=255 shows B (elh.i:505-506).
 CD is 8 bits: bits 3-0 in EH4R 11-8, bits 7-4 in EH4G 11-8. Whether the
-analog fader is linear in CD is **[?]**; use k = CD/255.
+analogue fader is linear in CD is **[?]**; use k = CD/255.
 
 ### 4.2 CDS: where k comes from (EH4B bits 10-8)
 
@@ -306,7 +306,7 @@ AUTO, CDS=CD and the Amiga pixels are ignored on the program path. Fades are
 done by rewriting CD (EH4) every field.** **[H]**
 
 ### 4.3 Idle (no transition, no key) **[H]**
-`MainOLayClip` → `SetAMandBM(MainSec)`: AM = BM = main source, CDS=CD,
+`MainOLayClip` -> `SetAMandBM(MainSec)`: AM = BM = main source, CDS=CD,
 CD=SHOWB, PV = preview source, LINR=1, LINP=1 unless LUT (buttons.a:1305-1597).
 So Program = Main and Preview = PV.
 
@@ -321,14 +321,14 @@ is a single EH2/EH1 change that is visible from the field where it arrives.
 * The internal fade uses logic `TSEab` with `DefaultFadeData`
   (switcher.a:5267-5333). Mode `SEF_DOELH1` means "per field, recompute TELH1
   (CD, LKA, LKB) and send the ELHs".
-* `HandleSwitcher1` (@18192a) packs the TELH1 results into VTSU: CD → EH4R/G,
-  LKA → EH68, LKB → EH69, where negative = ignore. TELH2 (AM BM IS PV LK CDS)
+* `HandleSwitcher1` (@18192a) packs the TELH1 results into VTSU: CD -> EH4R/G,
+  LKA -> EH68, LKB -> EH69, where negative = ignore. TELH2 (AM BM IS PV LK CDS)
   and TELH3 (MA MB MP) can also be animated per field (`SEF_DOELH2/3`,
   rect.i:283-304).
 * CD curve: `TVT_HARMON`, amplitude 127.5, offset 127.5, frequency 0.5, phase
-  0.75 (16.16 fixed point). That gives **CD(t) = 127.5·(1 − cos πt)**, an
+  0.75 (16.16 fixed point). That gives **CD(t) = 127.5*(1 - cos(pi*t))**, an
   S-curve from 0 to 255 over t = 0..1. LKA and LKB are IGNORE. **[M]** for the
-  exact shape (fixed-point and phase units inferred), **[H]** for 0 → 255.
+  exact shape (fixed-point and phase units inferred), **[H]** for 0 -> 255.
 * T-bar: TValSec 0..511 / TBarTime 0..$FFFF gives t. Each T-bar movement runs
   the same per-field evaluation (`PEtbar` keylogic.a:3204, `DoTBar`). The CG
   slice's own T-bar fade is simply CD = TVal>>1 (`TBarHandler` CGSliceCode.a:1020-1030).
@@ -355,11 +355,11 @@ else = no change; CDS $FF = keep.
 
 | logic | stage | AM | BM | PV | IS | LK | CDS |
 |---|---|---|---|---|---|---|---|
-| TSEab (fades) | 1 | Main | OLay | Prvw | LiveDVE | – | keep (CD) |
-| TSEwipe (wipes) | 1 | Main | OLay | Prvw | LiveDVE | – | **DIB** |
+| TSEab (fades) | 1 | Main | OLay | Prvw | LiveDVE | - | keep (CD) |
+| TSEwipe (wipes) | 1 | Main | OLay | Prvw | LiveDVE | - | **DIB** |
 | TDEon (DVE push-on) | 1 | Main | OLay | Prvw | OLay | OLay | **QUAF** |
 | TDEon + key | Take/1 | Main | OLay | Prvw | OLay | OLay | LUMKEY |
-| TStoMtoTS (via matte) | 1 / 2 | Main / OLay | OLay / Main | Prvw | LiveDVE | – | keep |
+| TStoMtoTS (via matte) | 1 / 2 | Main / OLay | OLay / Main | Prvw | LiveDVE | - | keep |
 | EncoderAlpha | 1 | Main | ENCODER | Prvw | LiveDVE | ENCODER | LUMKEY |
 
 Take/UnTake rows are AM=BM=Main, PV=Prvw, CDS=CD or keep. Frozen variants use
@@ -408,7 +408,7 @@ cleared after every transition.
 
 ECS equivalents from the `AFXT_Remap_*` code (animfxhandler.a:4661-4690)
 **[H]**: R=r3, G=g3, B=b3, I=b0. DIB on ECS = b3/b0 (`PACO_NonAA_Mask_DIB`
-$009). Latch on ECS = pixelsw→r3, index→g3, b3, b0.
+$009). Latch on ECS = pixelsw->r3, index->g3, b3, b0.
 
 **Inconsistency to flag:** under the "line = OR of a bit pair" model, the AA
 latch codes 3 ($400) and DAC0 ($200) would be identical on the R line. So
@@ -418,7 +418,7 @@ plus the T/ZD bit, and decode per mode as tabled.
 
 DIB/DIBGR transfer curve **[?]**. Evidence: DIBGR with CD=$FF = key on and
 CD=0 = key off (`CUTITONOFF` cgsupport.a:1370-1400). Key fades step CD and the
-palettes together. Suggested start: k = (code/15)·(CD/255) for DIBGR and
+palettes together. Suggested start: k = (code/15)*(CD/255) for DIBGR and
 k = code/3 for DIB.
 
 ### 4.11 During framestore writes (DoSafeWrite) **[H]**
@@ -451,14 +451,14 @@ write), LUT=0, LUST per zipper (cop.a:3796-3820).
 | yellow | $D51 | D | 5 | 1 |
 | magenta | $90A | 9 | 0 | A |
 | cyan | $2D6 | 2 | D | 6 |
-| snow | $8000 | – | – | (MP=F, NOSNOW=0) |
+| snow | $8000 | - | - | (MP=F, NOSNOW=0) |
 
 * Model **[L]**, consistent with all 8 codes: the matte alternates between
   levels MA and MB at the subcarrier with phase MP.
-  * luma ≈ (MA+MB)/2, giving yellow 9 > cyan 7.5 > green 5.5 > magenta =
+  * luma ~ (MA+MB)/2, giving yellow 9 > cyan 7.5 > green 5.5 > magenta =
     red 4.5 > blue 3.5. This matches the NTSC bar order.
-  * chroma ≈ |MA−MB|/2.
-  * hue = MP, about 11.25° per step over 180°. Swapping MA and MB adds 180°:
+  * chroma ~ |MA-MB|/2.
+  * hue = MP, about 11.25 deg per step over 180 deg. Swapping MA and MB adds 180 deg:
     complementary pairs share MP (yellow/blue 1, red/cyan 6, green/magenta A).
 * Calibration slider presets (adjust.a:2056-2085): red MA=9 MB=0, green MA=0
   MB=$B, blue MA=0 MB=7, with MP = hue slider.
@@ -472,7 +472,7 @@ write), LUT=0, LUST per zipper (cop.a:3796-3820).
 * **Luma key** (CookOLay buttons.a:959, MainOLayClip 1440-1530) **[H]** setup:
   * AM = Main (background), BM = OLay (fill), LK = OLay (key source), CDS=LUMKEY.
   * If OLay = Main there is no real key (CDS stays CD).
-  * Clip: LKA = ClipASec−1 when keying on black, or ClipAMax−ClipASec−1 when
+  * Clip: LKA = ClipASec-1 when keying on black, or ClipAMax-ClipASec-1 when
     keying on white (CookOLay buttons.a:984-1000; 0 or max clip short-circuits to FG or
     BG). `VTI_LKA_KEYBLACK_FG=0`, `_BG=255`, `KEYWHITE_FG=255`, `_BG=0`.
   * **NOKEYINVERT**=1 keys on black, 0 keys on white.
@@ -482,21 +482,21 @@ write), LUT=0, LUST per zipper (cop.a:3796-3820).
     buttons.a:2220-2290; keylogic.a:4398-4416).
   * LKB (EH69) default $80, saved and restored but never set by button logic.
     Probably a second clip or softness. **[?]**
-  * Model **[L]**: k = step or ramp of (luma(LK) − LKA), inverted per
+  * Model **[L]**: k = step or ramp of (luma(LK) - LKA), inverted per
     NOKEYINVERT.
   * **LKNOT, LKEC, LCE** are never used by the source. **[?]**
 * **ToasterCG in 4.x** **[H]**:
   * The page is *rendered into a framestore bank* (DV1/DV2), with OBR selecting
     the bank (edita.a:248-263).
   * The Amiga displays an alpha bitmap (`TB_CurrentAlphaBM`) whose palette
-    holds DIB/DIBGR codes. AM = Main, BM = DAC0/DAC1, CDS = DIB (≤2 planes) or
+    holds DIB/DIBGR codes. AM = Main, BM = DAC0/DAC1, CDS = DIB (<=2 planes) or
     DIBGR (3-4 planes) (cgsupport.a:940-966, 1550-1567).
   * Key fade in and out = step CD (and the palette) with CDS=DIBGR
     (cgsupport.a:1370-1400).
 * **Amiga RGB over program**: through ENCODER with MATTE=0, either luma-keyed
   (`EncoderAlpha`: BM=LK=ENCODER, CDS=LUMKEY) or pixel-switched (shutdown
-  genlock: BM=ENCODER, CDS=PIXELSW; colour-0 or T-bit pixels → A, otherwise
-  → B **[M]**).
+  genlock: BM=ENCODER, CDS=PIXELSW; colour-0 or T-bit pixels -> A, otherwise
+  -> B **[M]**).
 
 ---------------------------------------------------------------------------
 
@@ -510,7 +510,7 @@ write), LUT=0, LUST per zipper (cop.a:3796-3820).
     **[M-H]**
   * **LINP=0** (DVE, LUT, readback) means the line comes from header L. **[H]**
   * Framestore interlaced line n = 2L+1 in fields I/III, 2L in fields II/IV
-    (LUT ramp at n=504-507 ↔ L=252/253). **[H]**
+    (LUT ramp at n=504-507 <-> L=252/253). **[H]**
 * **Field / copy for playback**:
   * **AFP=1** = automatic. **AFP=0** = from the header F bits (G 13-12), used
     by readback (`ReadPart1` autocal.a:602, 668). **[M]**
@@ -523,7 +523,7 @@ write), LUT=0, LUST per zipper (cop.a:3796-3820).
     (dswsprchng `or.l d4` with `ror.l #8,d4` = bank, cop.a:3820;
     `SetLoadBank` "load into DV0/DV1", buttons.a:1903-1930). **[H]**
   * **Reads to the Amiga come from bank NOT OBR**: `ReadPart1` sets OBR=1 for
-    bank 0 (autocal.a:606-611); `SetSaveBank` sets "OBR → save DV0"
+    bank 0 (autocal.a:606-611); `SetSaveBank` sets "OBR -> save DV0"
     (buttons.a:1944-1959). This closes the open item in the protocol doc.
     **[H]**
   * **LINR=1** = record lines by the card's own counter. **AFR=1** = record
@@ -541,15 +541,15 @@ write), LUT=0, LUST per zipper (cop.a:3796-3820).
 | state | CERB (every line) | ABSE | BRIDGE |
 |---|---|---|---|
 | LIVE | 1 (Sprite0Live) | 1 | 1 |
-| FREEZE8 | 0 | 1 | – |
+| FREEZE8 | 0 | 1 | - |
 | FREEZE4 | 0 | 0 | 0 |
-| MIXED | 1 | 0 | – |
+| MIXED | 1 | 0 | - |
 
   * Live DVE: the card continuously digitises IS, and DAC0 shows the live
     (framestore-delayed) picture. Changing IS is done 3+ fields before an
     effect starts (`ChangeIS` keylogic.a:5136-5200), so the path has a few
     fields of latency. **[M]**
-  * Leaving live with only analog sources shown: Prvw is put on IS and the
+  * Leaving live with only analogue sources shown: Prvw is put on IS and the
     software waits 8 fields "to flood both banks" (CookFreeze
     buttons.a:760-770). So with ABSE=1 recording alternates between both banks
     (FREEZE8 = an 8-field, two-bank freeze). **[M]**
@@ -566,13 +566,13 @@ write), LUT=0, LUST per zipper (cop.a:3796-3820).
 ## 8. PED, GAIN, DP/EP, TERM and the rest (Q6)
 
 * **PED** (EH6A) / **GAIN** (EH6B): 8 bits, stored inverted. Pedestal and gain
-  of the input digitiser, set by AutoCalibrate (autocal.a:1588-2078). Default
+  of the input digitizer, set by AutoCalibrate (autocal.a:1588-2078). Default
   $7F. They affect what gets *recorded*, not the outputs. **[M]**
 * **EP** (External Phase) / **DP** (Digital Phase): 6 bits, EH5.
   `SetExternalPhase`/`SetDigitalPhase` (autocal.a:3193, 3515), with adjust
   texts "Analog (external) video phase" and "Digital (internal) video phase"
   (adjust.a:2513, 2525). Default 32. These are hue trims; ignore them. **[M]**
-* **TERM1-4**: 75 Ω termination for inputs 1-4, from prefs
+* **TERM1-4**: 75 ohm termination for inputs 1-4, from prefs
   (`spref_Termination`, pecomm.a:5038-5042). **[H]**
 * **NOLOCK**: see section 2 (0 locks the header registers). **[M]**
 * **NOPAIRS/LUST**, **SA**, **WERB**: write-path details. SA is cleared for sync
@@ -619,8 +619,8 @@ linearly.
 1. Composite sample format. The scale is known: sync tip 4, black (7.5 IRE) 71,
    white 200, about 1.407 codes/IRE (`DMIN/DMAX/YOFFSET`, rgb2yiq.i). The 4fsc
    I/Q phase order per pixel is not: `YIQ2Composite`@135282 is object-only.
-   yiq2comp.i says "Q from pixels 1,5,9", which hints s[4m]=Y±I,
-   s[4m+1]=Y±Q... Calibrate the decoder against
+   yiq2comp.i says "Q from pixels 1,5,9", which hints s[4m]=Y+/-I,
+   s[4m+1]=Y+/-Q... Calibrate the decoder against
    `NewTek/Framestore/ColorBars`.
 2. Exact transfer curves: CD, DIB/DIBGR codes, LUMKEY with LKA/LKB.
 3. Meaning of QUAF, TRANSQUAD, RGQUAD, BRIDGE, ABSE (details), LCE, LKEC,
@@ -636,9 +636,9 @@ linearly.
 |---|---|
 | bit/field map, macros, lists | `old/switcher/INC/elh.i` |
 | defaults | switcher.a:6984-7085; shutdown 958-990; fade data 5267-5333; FCounts 7456 |
-| mask ↔ mux, cook routines | buttons.a:178-375, 638-1597, 1903-2010, 2124-2300 |
+| mask <-> mux, cook routines | buttons.a:178-375, 638-1597, 1903-2010, 2124-2300 |
 | transitions | keylogic.a PEtake 3063, PEtbar 3204, ProcessDuring 4225, GetFrom 4548, ProcessTakeUnTake 4787, ChangeIS 5136 |
-| logic tables | binary `TSEab`@17ff90 … `LatchTDEonEncoderB`@180af6; layout in cgsupport.a:1850-1940 |
+| logic tables | binary `TSEab`@17ff90 ... `LatchTDEonEncoderB`@180af6; layout in cgsupport.a:1850-1940 |
 | per-field fader update | binary `HandleSwitcher1/TBar/Auto` @18192a/@1818ec/@181826 |
 | sprites | binary `SpriteData`@17ac84 (Sprite0Live/Freeze, DVESprite1, VTSprite, ELHSprite, Sprite1Linear @17e1b4); vthand.txt ELH2Sprite0/1, Headers2Sprite0/1, FreezeThawDVE |
 | writes / matte in write areas | cop.a:2440-2560, dswsprchng 3564-3900 |

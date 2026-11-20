@@ -34,7 +34,7 @@ can be made.
 Run the asset-free checks before opening a pull request:
 
 ```sh
-cargo fmt --check
+cargo fmt --all --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --locked
 ```

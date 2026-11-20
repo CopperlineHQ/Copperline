@@ -62,8 +62,8 @@ B64_LINE = 8192  # a multiple of 4, so every line decodes on its own
 # The models the root crate's parse_machine_model accepts, normalized the
 # way crates/copperline-player/build.rs does.
 MODELS = [
-    "A1000", "A500", "A500OCS", "A500PLUS", "A600", "A1200", "A3000", "A4000",
-    "CDTV", "CD32",
+    "A1000", "A500", "A500OCS", "A500PLUS", "A2000", "A600", "A1200", "A3000",
+    "A4000", "CDTV", "CD32",
 ]
 # Machines with no floppy drive of their own: nothing here could boot them.
 CD_MODELS = {"CDTV", "CD32"}

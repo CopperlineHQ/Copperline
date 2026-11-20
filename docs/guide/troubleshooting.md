@@ -41,6 +41,7 @@ These older spellings have specific compatibility behaviour:
 | `[lide] drives` | `[lide] drive0` through `drive3` | Old array still accepted; named slots override it. |
 | `[floppy.dfN] bridge_auto_cache` | Remove the key. | Rejected. FluxBridge no longer does a background disk sweep. |
 | `[emulation] speed` | Remove the key. | Accepted with a warning and ignored; it does not choose a timing model. |
+| `[recording] native_screenshot_button` | Remove the key. | Accepted and ignored; native screenshots use `Cmd+Option+S` / `Ctrl+Alt+S` and `--native-screenshots`. |
 
 Replace an alias rather than adding the current spelling beside it. Both
 spellings together are a duplicate-field error. For CPU speed, use
@@ -141,10 +142,12 @@ for individual programs. The linked subsystem chapters give the details.
 | JIT and CPU `speed = "fastest"` | JIT batches execution; `fastest` also adapts the CPU clock to spare host time. Use the default fixed clock and JIT disabled for precise timing investigations. [CPU execution modes](../internals/cpu.md#the-batch-jit-execution-mode). |
 | External 68851 MMU on a 68020 | Not modelled. The on-chip MMUs on the full 68030/040/060 are separate supported devices; EC variants omit them. [CPU configuration](configuration.md#id-cpu). |
 | A2024 / UHRES dual-scan output | Not emulated. [Chipset gaps](../internals/chipset.md#known-aga-ecs-gaps-and-non-goals). |
-| External genlock | Physical genlock input/output is not emulated. This does not remove the CD32 FMV module's internal digital video compositing. [Chipset gaps](../internals/chipset.md#known-aga-ecs-gaps-and-non-goals). |
+| External genlock | Generic physical genlock video input/output and ZD key-signal output beyond register storage are not emulated. External genlock sync (`[chipset] genlock`), the Video Toaster 4000 video-slot card, and the CD32 FMV module's internal digital video compositing are separate supported features. [Chipset gaps](../internals/chipset.md#known-aga-ecs-gaps-and-non-goals). |
 | AGA display fetch | Sub-unit DDF stop effects beyond whole fetch-unit completion are not modelled. [Chipset gaps](../internals/chipset.md#known-aga-ecs-gaps-and-non-goals). |
 | CD+G graphics | Subcode R-W data reaches the CDTV and CD32 only from an image that stored it: a `.sub` file beside the image, a cue sheet `CDG` track, or a CHD with raw subcode. CHD "cooked" subcode is not read. [CD images](configuration.md#cd-config). |
 | Toccata recording | The capture FIFO is a stub: reads return zero and no record half-full interrupt fires. Playback is implemented. [Toccata scope](../internals/toccata.md#out-of-scope). |
+| Video Flyer | Clip recording into the Flyer, SMPTE time code, and the TBC module are not emulated. Playback, editing/cutting, and clip import/export are supported. [Video slot](configuration.md#video-slot). |
+| SCSI tape | Setmarks, partitions, `READ POSITION`, `LOCATE`, and mechanical tape-motion timing are not modelled. [Tape drives](configuration.md#tape-drives). |
 
 Browser and libretro builds also have host integration limits; see the
 [browser guide](browser.md) and [libretro guide](libretro.md) for the available

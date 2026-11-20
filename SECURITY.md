@@ -24,9 +24,11 @@ Trusted, with the access of the user who supplied them:
   loaded without being named; run Copperline from a directory whose contents
   you trust, or pass `--config`.
 - **Save states.** A state restores a whole machine, and that includes the
-  host bindings it was saved with: the paths of its hard-drive, floppy and CD
-  images, its `[[filesys]]` host directories and whether they are writable,
-  its plugin modules and their capabilities, and its network backend. Loading
+  host bindings it was saved with: the paths of its hard-drive, floppy, CD,
+  and `[[tape]]` cartridge files, its `[[host_disk]]` physical disks (matched
+  by fingerprint), its `[[filesys]]` and `[video_slot]` host directories and
+  whether they are writable, its plugin modules and their capabilities, and
+  its network backend. Loading
   a state opens those, whatever the running configuration says, and the
   machine in it then runs code of the author's choosing. Load a state from
   someone else only as you would run a configuration file from them.
@@ -54,8 +56,10 @@ vulnerabilities on their own:
 
 - Change or delete anything inside a writable `[[filesys]]` directory, the
   directory `--run` or `--whdload DIR` mounts (the program's own directory,
-  read/write by default), or a writable disk image. A host symlink inside a
-  mounted directory is followed wherever it points.
+  read/write by default), a writable `[video_slot]` or Flyer media folder,
+  a writable `[[tape]]` cartridge (within any configured capacity and file
+  count limit), a writable `[[host_disk]]`, or a writable disk image. A host
+  symlink inside a mounted directory is followed wherever it points.
 - With a network board set to `net = "nat"`, open outbound connections,
   including to services listening on the host's loopback interface through
   the gateway address.

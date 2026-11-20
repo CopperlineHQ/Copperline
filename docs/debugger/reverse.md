@@ -8,7 +8,7 @@ instruction or beam position requested.
 
 Reverse debugging is available through:
 
-- **Interactive UI:** `< Step`, `< Frame`, and `< Run` in the [debugger window](window).
+- **Interactive UI:** `< Step`, `< Frame`, and `< Run` in the [Debug workspace](window).
 - **Console commands:** `RSTEP`, `RFRAME`, `RRUN`, and `WRITER` in the [debugger console](console).
 - **Headless analysis:** Automated "last writer" reverse watchpoints via `COPPERLINE_DBG_RWATCH`.
 - **GDB remote stub:** `reverse-stepi` and `reverse-continue` (or source-level
@@ -57,11 +57,11 @@ the colour clock of the write. The run then continues.
 - `COPPERLINE_DBG_RR_INTERVAL=N`: Number of emulated video frames between snapshots (default: 5).
 
 The last two also size the ring that a [control protocol](control.md) server
-arms for its reverse commands.
+or headless [`--gdb`](gdb.md) stub arms for its reverse commands.
 
 ## Interactive reverse controls
 
-In the [debugger window](window), the reverse controls follow the forward ones
+In the [Debug workspace](window), the reverse controls follow the forward ones
 in the transport row:
 
 | Button | Function |
@@ -70,15 +70,15 @@ in the transport row:
 | **`< Step`** | Step backward by one CPU instruction |
 | **`< Run`** | Run backward until a breakpoint or watchpoint condition is met |
 
-Opening the debugger arms the snapshot ring (512 MiB, one snapshot every 10
-frames) if nothing has armed it already. History accrues only while the machine
-advances (**Run**, **Frame**), not while it is paused.
+Opening the debugger or console arms the snapshot ring (512 MiB, one snapshot
+every 10 frames) if nothing has armed it already. History accrues only while
+the machine advances (**Run**, **Frame**), not while it is paused.
 
 `< Run` (and the console command `RRUN`) replays the history and stops at the
 most recent event that any armed stop condition would have caught: PC
 breakpoints (their conditions are not re-evaluated), memory watchpoints,
-register watches, beam traps, Copper breakpoints, exception catches, and the
-task catch.
+register watches, MMIO watches, beam traps, Copper breakpoints, exception
+catches, and the task catch.
 
 ## Rewind in normal sessions
 

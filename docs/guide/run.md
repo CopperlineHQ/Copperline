@@ -71,10 +71,10 @@ With `--exit-on-return` (which requires `--run`), the session ends the
 moment the program's return code lands in the completion marker, and
 Copperline's own exit status is that code (clamped to 0-255). Like
 `--coverage`, the flag on its own makes a headless run: no window,
-unthrottled, and no capture flag needed to end it. Only with
-`--control-gui` or `--gdb-gui` does the session stay windowed, and the
-window then closes when the program returns. `--gdb` and `--control`, which
-own the run loop themselves, refuse the flag.
+unthrottled, and no capture flag needed to end it. Only with `--terminal`
+(interactive terminal) or `--control-gui` / `--gdb-gui` (windowed) does the
+session stay interactive, closing when the program returns. `--gdb` and
+`--control`, which own the run loop themselves, refuse the flag.
 
 ```sh
 copperline --run build/tests --exit-on-return --noaudio; echo $?
@@ -172,14 +172,14 @@ long (*UaeConf)(long fn, int index, const char *param, int len, char *out, int o
     = (long (*)(long, int, const char *, int, char *, int))0xf0ff60;
 if (*(UWORD *)UaeConf == 0x4eb9 || *(UWORD *)UaeConf == 0xa00e) {
     char out;
-    UaeConf(82, -1, "warp true", 0, &out, 1);   /* warpmode(1) */
+    UaeConf(82, -1, "warp true", 0, &out, 1);   // warpmode(1)
 }
 ```
 
 | Function | WinUAE meaning | Copperline |
 |---|---|---|
 | 13 | `ExitEmu`: quit the emulator | Ends the session cleanly at the next frame boundary: the window closes, a headless run stops, and the process exits with status 0 (or 3 if a screenshot expectation had failed). No arguments; returns 1. `guest/uaelib-test/exitemu` calls it. |
-| 82 | `uae-configuration`-style `"key value"` line | `warp true` / `warp false` (also `yes` / `no`) toggles warp mode. Parameters like `cpu_speed` and `*_cycle_exact` are accepted as no-ops. Returns 0. |
+| 82 | `uae-configuration`-style `"key value"` line | `warp true` / `warp false` (also `yes` / `no`) toggles warp mode. Parameters like `cpu_speed` and `*_cycle_exact` are accepted as no-ops. Returns 0 when `index == -1` and a key/value pair is given, or -1 otherwise. |
 | 86 | Debug log string | Printed to the host console as `DBG: <text>` (shared with serial output), streamed to control-protocol `debug` subscribers as `event.debug`, and mirrored into the debugger console. Returns 1. |
 | 88 | `debug_cmd` multiplexer | `debug_register_bitmap` / `_palette` / `_copperlist` and `debug_unregister` register guest assets, viewable in the Frame Analyzer (Resources and Memory tabs), exportable as PNG there or with `debug.resource.export`, searchable via `palette.dump` / `copper.list`, and listed with the console `DBGRES` command; `debug_start_idle` / `debug_stop_idle` report guest idle time in `debug.idle` and `event.frame.guest_idle_cck`. Overlay drawing (`debug_clear` / `debug_rect` / `debug_filled_rect` / `debug_text` on a 768x576 virtual canvas) renders on screen in the window (excluded from captures and recordings). `debug_load` / `debug_save` are disabled by default; see below. |
 | others | version, disks, RTG, ... | Return 0 with no side effects. |

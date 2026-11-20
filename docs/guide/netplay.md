@@ -63,18 +63,18 @@ with touch controls. Cycle **Joystick** off to type ordinary Amiga keys.
 Both keyboards contribute to the shared keyboard. The desktop F11/F12
 netplay shortcuts do not apply to the browser.
 
-For games that use two mice, such as two-player Lemmings, the host chooses
+For two-player dual-mouse software, the host chooses
 **Advanced -> Controllers -> Two mice** before hosting. Each player's mouse then
 drives their own Amiga port, including left, right and middle mouse buttons.
 Touch devices can use the canvas trackpad for movement and left/right clicks.
 Click the screen to capture the mouse; Escape releases it. Keyboard joystick
 mode stays off so both players can type ordinary Amiga keys.
 
-Room setup uses a small signaling service. WebRTC tries direct routes and can
+Room setup uses a small signalling service. WebRTC tries direct routes and can
 fall back to a TURN relay. **Advanced -> Use relay only** forces that route for
 troubleshooting. Relay credentials expire after 24 hours; start a new session
 for longer play. WebRTC encrypts game files and input packets, including traffic
-carried by a relay. The signaling service receives no ROM or disk bytes.
+carried by a relay. The signalling service receives no ROM or disk bytes.
 
 Received files are held only for the session and are not saved into the guest's
 remembered-ROM storage. Disconnect restores the guest's previous media choices
@@ -146,15 +146,15 @@ clicks **Host with manual codes**, sends its code to the guest, and the guest
 pastes it and clicks **Join offer**. The guest sends its answer back; the host
 pastes it and clicks **Connect answer**. The STUN field helps discover routes;
 leave it blank for LAN-only discovery. Manual setup has no relay fallback.
-The host's files and settings are transferred after manual signaling too.
+The host's files and settings are transferred after manual signalling too.
 The codes are large and contain network addresses and session details, so
 exchange them privately. If the page has no room service configured,
 Advanced opens by default.
 
 Keep both pages open. A suspended tab can stall its peer and eventually time
 out; background execution depends on browser and device restrictions.
-Machine, media, serial, floppy sound, pause and save-state controls are
-locked from the moment the page captures its media (**Join game** or
+Machine, media, serial, floppy sound, mono/stereo audio, pause and save-state
+controls are locked from the moment the page captures its media (**Join game** or
 **Watch game** for a guest or spectator, player 2's arrival for the host)
 until disconnect. Display and main output volume choices remain local.
 Floppy sound enablement and level are part of the machine fingerprint and
@@ -250,9 +250,10 @@ four fits the four-player adapter with a joystick in each of its sockets, so
 **Local player** then offers ports 3 and 4 as well. Only the host sets the
 count; everyone else is told when they join.
 
-Enabling netplay changes analogue, gamepad-mouse and empty ports to
-joysticks, turns serial and JIT off, disables run-ahead and warp boot, and
-enables power on. Existing mouse/joystick/CD32 ports stay selected. These
+Enabling netplay changes analogue, gamepad-mouse, light-pen and empty ports to
+joysticks, clears any parallel printer or sampler, turns serial and JIT off,
+disables run-ahead and warp boot, and enables power on. Existing
+mouse/joystick/CD32 ports stay selected. These
 changes are visible on the other configuration pages; Run reapplies them
 after model or configuration changes.
 The host chooses ROMs, media, storage and controller devices; Run explains any
@@ -436,7 +437,7 @@ The host uses the status bar's load, next-disk and eject buttons for DF0-DF3.
 The load picker can select a playlist; Cmd+D on macOS or Alt+D elsewhere cycles
 it. Dropping floppy images loads a playlist into the first connected drive.
 The guest's media controls are disabled. The host can schedule a replacement
-with `--insert-disk-after SECS dfN PATH` at a nonzero emulated time, or an
+with `--insert-disk-after SECS dfN PATH` at a non-zero emulated time, or an
 eject with `--eject-disk-after SECS dfN`.
 
 Both peers stop at a confirmed frame, verify and transfer the replacement,
@@ -551,10 +552,13 @@ not persisted.
 
 Desktop converts host directory volumes (including `--run` and WHDLoad
 staging) to private disks and supports IDE/SCSI/LIDE hardfiles. The
-`copperhf` asynchronous controller, ATAPI images, physical drives, live
-networking/MIDI/parallel peripherals, CD images, persistent NVRAM, debugger
-traces, and recordings are excluded, because these devices and observers
-keep state outside the rollback snapshots. Netplay uses session-only
+`copperhf` asynchronous controller, SF2000 SD, PCMCIA cards, MHI decoding,
+WASM expansion boards (including `[zz9k]` and `[hostsocket]`), ATAPI images,
+physical floppy and host disks, SCSI tape drives (silently omitted), live
+networking/MIDI/parallel peripherals, CD images, `[cpu] speed = "fastest"`,
+`[emulation] power_on = false`, `[emulation] uaelib_files = true`, persistent
+NVRAM, debugger traces, and recordings are excluded, because these devices and
+observers keep state outside the rollback snapshots. Netplay uses session-only
 clock/NVRAM storage. A state file cannot be used to bypass these
 restrictions: this version does not accept `--load-state` or USS imports
 for netplay.
@@ -568,11 +572,13 @@ wait for actual remote input and acknowledgement of the local input before
 rendering and exiting. `--press-after` and `--key-after` feed the
 synchronized keyboard; `--joy-after ... PORT` must name that peer's own
 port. Input schedules belong to each peer and need not be identical. The
-other scheduled work is refused under netplay: `--save-state-after`,
-`--gif-after`, `--audio-wav`, `--audio-stems`, `--record-input`,
-`--insert-cd-after`, `--freeze-after`, the scripted mouse, pointer,
-analogue and light-pen flags, `--warp-boot`/`--warp-until`, and a guest's
-`--insert-disk-after` or `--eject-disk-after`.
+other scheduled work and live-debug modes are refused under netplay:
+`--save-state-after`, `--gif-after`, `--audio-wav`, `--audio-stems`,
+`--record-input`, `--insert-cd-after`, `--freeze-after`, the scripted mouse,
+pointer, analogue and light-pen flags, `--warp-boot`/`--warp-until`,
+`--coverage`, `--waveform`, `--benchmark-until`, `--terminal`,
+`--gdb`/`--gdb-gui`, `--control`/`--control-gui`, and a guest's
+`--insert-disk-after`, `--defer-disk-insert`, or `--eject-disk-after`.
 
 The local smoke check starts every peer, schedules a button press on each,
 and compares confirmed PNGs and checkpoint logs. `--players N` runs a
@@ -592,7 +598,7 @@ python3 tools/check-netplay.py --seconds 20 --spectators 2
 python3 tools/check-netplay.py --seconds 10 --players 4
 ```
 
-A spectator's log ends with `netplay: spectating finished frames=... checked=...`.
+A spectator's log ends with `netplay: spectating finished frames=... checked=... swaps=...`.
 
 The implementation and regression-test plan are described in
 [Netplay internals](../internals/netplay.md).

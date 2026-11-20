@@ -528,6 +528,7 @@ pub fn period_profile_id(bus: DriveBus, machine: Option<MachineModel>) -> &'stat
         DriveBus::A2091 => match machine {
             None
             | Some(MachineModel::A500)
+            | Some(MachineModel::A500Ocs)
             | Some(MachineModel::A500Plus)
             | Some(MachineModel::A1000)
             | Some(MachineModel::Cdtv) => "seagate-st125n",
@@ -562,6 +563,8 @@ mod tests {
             for machine in [
                 None,
                 Some(MachineModel::A500),
+                Some(MachineModel::A500Ocs),
+                Some(MachineModel::A500Plus),
                 Some(MachineModel::A2000),
                 Some(MachineModel::A600),
                 Some(MachineModel::A1200),
@@ -578,6 +581,10 @@ mod tests {
         );
         assert_eq!(
             period_profile_id(A2091, Some(MachineModel::A500)),
+            "seagate-st125n"
+        );
+        assert_eq!(
+            period_profile_id(A2091, Some(MachineModel::A500Ocs)),
             "seagate-st125n"
         );
         assert_eq!(

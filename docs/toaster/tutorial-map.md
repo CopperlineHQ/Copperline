@@ -184,6 +184,6 @@ sources (`fly/Edit/Edit/src`, `vt/full/switcher/SRC`, `fly/amiflyer`). Nothing w
    - Unlocks: CG/Paint/LightWave "save to Flyer", BatchStills, IFF2Clip/Univ2Clip, and FlyerProc's output.
    - Effort: mostly ClipWriter plumbing.
 5. **Proper answers for the HD tools.**
-   - What: synthesised SCSIDIRECT (INQUIRY, READ CAPACITY, MODE SENSE/SELECT) and a timed READTEST, so FlyerHDTools
+   - What: synthesized SCSIDIRECT (INQUIRY, READ CAPACITY, MODE SENSE/SELECT) and a timed READTEST, so FlyerHDTools
      and FlyTape show real drive data instead of a crash risk. Add EEPROM persistence.
    - Runners-up: the LUT (ChromaFX), burst in blanking (AutoHue), and the DSP volume law ("95 = unity").

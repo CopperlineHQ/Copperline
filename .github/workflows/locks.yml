@@ -4,13 +4,14 @@ name: Lockfile sync
 # in sync with its workspace's manifests. The root lock covers the emulator
 # and the frontends in its workspace (browser, libretro, player), and
 # `cargo tree --workspace` resolves all of their graphs in one step.
-# The standalone crates the root workspace excludes carry their own
-# committed locks: the cputest-runner lock pins its `m68k` dependency and the
-# hostsocket-plugin lock pins its `smoltcp` dependency (the committed
-# assets/hostsocket/hostsocket_plugin.wasm is built from it). A manifest
-# update without a lock refresh breaks `cargo build --locked` (issue #219:
-# the v0.12.0 tag shipped a frontend lockfile, then separate, still pinning
-# copperline 0.11.0).
+# The standalone crates outside the root workspace carry their own committed
+# locks: cputest-runner pins its `m68k` dependency, hostsocket-plugin and
+# zz9k-plugin pin the dependency graphs used to build the committed WASM
+# plugins (`assets/hostsocket/hostsocket_plugin.wasm` and
+# `assets/zz9k/zz9k_plugin.wasm`), and tools/bezel-preview pins its standalone
+# shader preview tool. A manifest update without a lock refresh breaks
+# `cargo build --locked` (issue #219: the v0.12.0 tag shipped a frontend
+# lockfile, then separate, still pinning copperline 0.11.0).
 #
 # The v* tag trigger is the part that closes issue #219: the drift reached
 # the 0.12.0 release because the tag was cut directly from a fresh bump
@@ -47,6 +48,12 @@ jobs:
         run: cargo tree --locked > /dev/null
       - name: crates/hostsocket-plugin
         working-directory: crates/hostsocket-plugin
+        run: cargo tree --locked > /dev/null
+      - name: crates/zz9k-plugin
+        working-directory: crates/zz9k-plugin
+        run: cargo tree --locked > /dev/null
+      - name: tools/bezel-preview
+        working-directory: tools/bezel-preview
         run: cargo tree --locked > /dev/null
       - name: CPU consumers use the same m68k core
         # Root tests do not run dependency tests. Core CI gates those suites;

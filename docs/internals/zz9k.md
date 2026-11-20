@@ -277,7 +277,7 @@ elapsed at save time arrives on schedule after load).
 
 - `crates/zz9k-plugin` native tests: RFC/NIST/FIPS known-answer vectors
   for every primitive (including the SDK's own RSA-2048 KAT, ported from
-  `tools/rsa_kat_vector.h`), the allocator, and the full mailbox protocol
+  `zz9000-sdk`'s `tools/rsa_kat_vector.h`), the allocator, and the full mailbox protocol
   driven through 16-bit accesses like the 68k's.
 - `src/wasmboard.rs` tests drive the committed artifact through wasmtime:
   bootstrap detection, a mailbox hash round trip, IRQ line selection, the
@@ -290,7 +290,7 @@ elapsed at save time arrives on schedule after load).
   `test-assets/zz9k/`) runs the unmodified SDK tools.
 - **AmiSSL end-to-end (verified manually, 2026-08-18):** the SDK's AmiSSL
   provider self-test (`amiga/provider/zz9k_amissl_selftest.c`, built per
-  the SDK's `docs/zz9k-amissl-provider.md` against the AmiSSL SDK) reports
+  `zz9000-sdk`'s `docs/zz9k-amissl-provider.md` against the AmiSSL SDK) reports
   `ALL PASS` with every offloadable operation `via 'zz9000'` against this
   board, on a 68030 + Kickstart 3.1 machine with the official AmiSSL 5.27
   OS3 runtime -- both with the stock `amissl_v362.library` (application-

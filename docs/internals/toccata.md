@@ -183,7 +183,7 @@ refuses a Toccata-fitted machine (`src/netplay/mod.rs`).
   bit, but reads return 0 and the record half-full latch is never set, so
   the record interrupt never fires.
 - **The "Paula/CD audio mixer" board setting** (reg 2-5's AUX1/AUX2 input
-  gain feeding the board's own analog mixer) is not modelled: Copperline's
+  gain feeding the board's own analogue mixer) is not modelled: Copperline's
   Paula and CD-DA already reach the master mix directly, so replicating
   the board's own internal mixing would add no user-visible capability.
 - The launcher's **I/O Ports** tab (Audio category) has a plain

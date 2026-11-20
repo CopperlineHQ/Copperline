@@ -18,9 +18,7 @@ without waiting for the upstream pull request.
 
 ## Requirements
 
-- A recent Copperline build with the September 2026 debugger additions
-  (the guide was tested against commit `3d334a11`). Build from current source
-  until those changes are in your installed release. Every release
+- Copperline 0.19.0 or newer (recommended: 1.0+). Every release
   package ships `copperline-ctl` next to the emulator (Homebrew on PATH,
   `Copperline.app/Contents/MacOS` on macOS, the Windows zip folder, the
   AppImage's companion tools tarball). Put `copperline-ctl`
