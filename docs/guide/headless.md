@@ -71,16 +71,19 @@ Interlaced chipset output saves both fields woven at full height: a
 alternate rows. Fields are placed by the long-field flag (LOF), the long
 field on the even rows, as the display hardware places them. Software
 that alternates its per-field images without reading LOF can start on
-either field, so its images may belong in the opposite order. When the
-two fields weave clearly smoother with the short field on the even rows,
-measured by the same comparison of the lines where the fields meet that
-the window's deinterlacer uses, the capture is saved in that order
-instead of combed one line apart. When neither order is clearly
-smoother, as with blank and most moving pictures, the LOF order is
-kept. The first field after interlace is switched on (or after a reset
-or state load) has no partner yet and saves on its own.
-`--expect-screenshot` uses the same native capture when this flag is
-present. Frame dumps, GIFs and video recordings retain their
+either field, so its images may belong in the opposite order on every
+pair of fields. When the two fields weave clearly smoother with the
+short field on the even rows, and so did each of the three pairs of
+fields before them (the same comparison of the lines where the fields
+meet, and the same four pairs of evidence, that the window's
+deinterlacer uses), the capture is saved in that order instead of
+combed one line apart. Otherwise the LOF order is kept, as it is for
+blank or ambiguous pictures, for the first few fields after interlace is
+switched on, and for moving pictures: motion can make one pair favour
+the other order, but does not keep doing so pair after pair. The first
+field after interlace is switched on (or after a reset or state load)
+has no partner yet and saves on its own. `--expect-screenshot` uses the
+same native capture when this flag is present. Frame dumps, GIFs and video recordings retain their
 presentation geometry.
 
 (screenshot-expectations)=

@@ -30,10 +30,11 @@ for the earlier release notes.
   shortcut and the control protocol's `capture.screenshot` with
   `native: true`) of interlaced software that alternates its per-field
   images without reading the long-field flag are no longer combed one line
-  apart when the images landed on the opposite fields. The capture weaves
-  the two fields in whichever order is clearly smoother, as the window's
-  deinterlacer already did; blank, moving or ambiguous pictures keep the
-  long-field order. Kang Fu (CD32) showed its GREED splash text combed.
+  apart when the images landed on the opposite fields. As the window's
+  deinterlacer already did, the capture puts the short field on the even
+  rows when that order is clearly smoother on four consecutive pairs of
+  fields; blank, moving or ambiguous pictures keep the long-field order.
+  Kang Fu (CD32) showed its GREED splash text combed.
 
 ### Compatibility
 

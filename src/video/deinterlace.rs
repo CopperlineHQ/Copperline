@@ -275,8 +275,6 @@ impl Deinterlacer {
     /// the stored field history (each kept field's output parity flips with
     /// the routing).
     fn update_weave_phase(&mut self, field: &[u32], rows: usize, width: usize, base_parity: usize) {
-        /// Consecutive fields of comb evidence needed to toggle the phase.
-        const WEAVE_FLIP_FIELDS: u32 = 4;
         /// Every eighth column is enough evidence per field and keeps the
         /// per-field cost of the presentation path small.
         const X_STEP: usize = 8;
@@ -700,6 +698,15 @@ impl Deinterlacer {
 /// lines (two woven rows each).
 const H_CENTRE_SLACK: i32 = 2 * crate::config::TV_H_CENTRE_RANGE;
 const V_CENTRE_SLACK: i32 = 2 * crate::config::TV_V_CENTRE_RANGE;
+
+/// Consecutive field pairs that must all measure the opposite pairing
+/// smoother before the weave phase changes. One pair is not enough: motion
+/// between correctly ordered fields can make a single pair's seams favour
+/// the wrong order (a picture scrolling vertically by a field line per
+/// field favours it on every other pair), while software that ignores LOF
+/// draws the opposite pairing on every pair. The native screenshot weave
+/// retains this many fields before the one it captures.
+pub(crate) const WEAVE_FLIP_FIELDS: u32 = 4;
 
 /// Which of the two ways two fields of one interlaced picture weave is
 /// smoother, measured where their rows meet.
