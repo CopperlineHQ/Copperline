@@ -296,6 +296,42 @@ fn a_card_loaded_from_a_state_goes_on_as_the_saved_one_does() {
     }
 }
 
+/// The inputs read their host folders only once the switcher drives the
+/// card. A card that loads a state saved while the switcher was driving
+/// it starts them too, though it never sees the switcher's first
+/// extended header itself: before, every input stayed without a signal.
+#[test]
+fn a_card_loaded_from_a_driven_state_starts_its_inputs() {
+    let started = |card: &mut Toaster| -> Vec<bool> {
+        card.card()
+            .video
+            .input_status()
+            .iter()
+            .map(|input| input["started"].as_bool().unwrap_or(false))
+            .collect()
+    };
+    let media = tempfile::tempdir().unwrap();
+    let mut driven = Toaster::with_media(Some(media.path().to_path_buf()));
+    for line in &session_fields() {
+        driven.field_complete(&line.field(), BeamPos::default());
+    }
+    assert!(driven.card().active);
+    assert_eq!(started(&mut driven), vec![true; media::INPUTS]);
+    let state = VideoSlotDevice::save_state(&driven).expect("a state");
+
+    let mut loaded = Toaster::with_media(Some(media.path().to_path_buf()));
+    assert_eq!(started(&mut loaded), vec![false; media::INPUTS]);
+    VideoSlotDevice::load_state(&mut loaded, Some(&state));
+    assert!(loaded.card().active);
+    assert_eq!(started(&mut loaded), vec![true; media::INPUTS]);
+
+    // A state saved before the switcher took the card leaves them waiting.
+    let idle = VideoSlotDevice::save_state(&Toaster::new()).expect("a state");
+    let mut waiting = Toaster::with_media(Some(media.path().to_path_buf()));
+    VideoSlotDevice::load_state(&mut waiting, Some(&idle));
+    assert_eq!(started(&mut waiting), vec![false; media::INPUTS]);
+}
+
 /// A save takes in every field handed over. If the compose thread
 /// has died, the fields left in its queue are run by the save itself,
 /// as the card's own next use runs them: the saved card and the live
