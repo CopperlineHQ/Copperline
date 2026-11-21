@@ -111,6 +111,8 @@ pub enum MenuAction {
     ToggleRecord,
     /// What the next Record Video writes.
     SetVideoFormat(crate::config::VideoFormat),
+    /// What the next Save Clip writes.
+    SetClipFormat(crate::gifclip::ClipFormat),
     ToggleRecordInput,
     /// Start or stop recording the video-slot card's Program output.
     ToggleCardRecord,
@@ -491,6 +493,8 @@ pub struct MenuState<'a> {
     pub recording: bool,
     /// What Record Video writes (`[recording] video_format`).
     pub video_format: crate::config::VideoFormat,
+    /// What Save Clip writes (`[recording] clip_format`).
+    pub clip_format: crate::gifclip::ClipFormat,
     pub input_recording: bool,
     /// The video-slot card has outputs of its own (the Toaster's monitors),
     /// and whether its Program output is being recorded.
@@ -1277,6 +1281,16 @@ fn recording_rows(s: &MenuState) -> Vec<MenuRow> {
             )
         })
         .collect();
+    let clip_formats = crate::gifclip::ClipFormat::MENU_ORDER
+        .iter()
+        .map(|f| {
+            MenuRow::choice(
+                f.menu_label(),
+                MenuAction::SetClipFormat(*f),
+                s.clip_format == *f,
+            )
+        })
+        .collect();
     rows.extend(vec![
         MenuRow::action(
             if s.recording {
@@ -1295,7 +1309,14 @@ fn recording_rows(s: &MenuState) -> Vec<MenuRow> {
             },
             MenuAction::ToggleRecordInput,
         ),
-        MenuRow::action("Save Clip as GIF", MenuAction::SaveClip),
+        MenuRow::action(
+            match s.clip_format {
+                crate::gifclip::ClipFormat::Gif => "Save Clip as GIF",
+                crate::gifclip::ClipFormat::Apng => "Save Clip as APNG",
+            },
+            MenuAction::SaveClip,
+        ),
+        MenuRow::submenu("Clip Format", clip_formats).with_value(s.clip_format.short_label()),
         MenuRow::action(
             "Save Native Screenshot (1:1)",
             MenuAction::SaveNativeScreenshot,
@@ -1507,6 +1528,7 @@ mod tests {
             rewind: false,
             recording: false,
             video_format: crate::config::VideoFormat::Avi,
+            clip_format: crate::gifclip::ClipFormat::Gif,
             input_recording: false,
             card_outputs: false,
             card_recording: false,
@@ -1584,6 +1606,40 @@ mod tests {
             for (choice, f) in choices.iter().zip(VideoFormat::MENU_ORDER) {
                 assert_eq!(choice.label, f.menu_label());
                 assert_eq!(choice.menu_action(), Some(&MenuAction::SetVideoFormat(f)));
+                assert_eq!(choice.marked(), f == format, "{}", choice.label);
+                assert!(
+                    !choice.closes_menu(),
+                    "picking {} closed the menu",
+                    f.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recording_offers_the_clip_format_and_names_it_on_save_clip() {
+        use crate::gifclip::ClipFormat;
+        let slots = empty_slots();
+        let none: [String; 0] = [];
+        for (format, save) in [
+            (ClipFormat::Gif, "Save Clip as GIF"),
+            (ClipFormat::Apng, "Save Clip as APNG"),
+        ] {
+            let mut s = state(&none, &none, &none, &none, &slots);
+            s.clip_format = format;
+            let rows = build(&s);
+            let recording = find(&rows, "Recording")
+                .and_then(|r| r.children())
+                .expect("recording");
+            let save_row = find(recording, save).expect("save clip row");
+            assert_eq!(save_row.menu_action(), Some(&MenuAction::SaveClip));
+            let row = find(recording, "Clip Format").expect("clip format");
+            assert_eq!(row.value.as_deref(), Some(format.short_label()));
+            let choices = row.children().expect("formats");
+            assert_eq!(choices.len(), ClipFormat::MENU_ORDER.len());
+            for (choice, f) in choices.iter().zip(ClipFormat::MENU_ORDER) {
+                assert_eq!(choice.label, f.menu_label());
+                assert_eq!(choice.menu_action(), Some(&MenuAction::SetClipFormat(f)));
                 assert_eq!(choice.marked(), f == format, "{}", choice.label);
                 assert!(
                     !choice.closes_menu(),

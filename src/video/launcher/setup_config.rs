@@ -28,6 +28,7 @@ pub(super) fn carry_unowned_keys(src: &RawConfig, dst: &mut RawConfig) {
     // `native_screenshot_button` is retired: read and ignored, never saved.
     dst.recording.clip_seconds = src.recording.clip_seconds;
     dst.recording.clip_fps = src.recording.clip_fps;
+    dst.recording.clip_format = src.recording.clip_format.clone();
     dst.recording.video_format = src.recording.video_format.clone();
     dst.recording.ffmpeg = src.recording.ffmpeg.clone();
     dst.zz9k = src.zz9k.clone();

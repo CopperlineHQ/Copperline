@@ -1099,6 +1099,19 @@ impl TryFrom<RawConfig> for Config {
                     defaults.recording.clip_fps
                 }
             };
+            let clip_format = match raw.recording.clip_format.as_deref() {
+                None => defaults.recording.clip_format,
+                Some(s) => match crate::gifclip::ClipFormat::parse(s) {
+                    Some(format) => format,
+                    None => {
+                        errors.push(anyhow!(
+                            "[recording] clip_format must be \"gif\" or \"apng\", got {:?}",
+                            s.trim()
+                        ));
+                        defaults.recording.clip_format
+                    }
+                },
+            };
             let video_format = match raw.recording.video_format.as_deref() {
                 None => defaults.recording.video_format,
                 Some(s) => match parse_video_format(s) {
@@ -1119,6 +1132,7 @@ impl TryFrom<RawConfig> for Config {
             RecordingConfig {
                 clip_seconds,
                 clip_fps,
+                clip_format,
                 video_format,
                 ffmpeg,
             }
