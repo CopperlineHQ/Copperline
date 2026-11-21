@@ -410,6 +410,10 @@ impl RawConfig {
             &mut self.recording.video_format,
             &overlay.recording.video_format,
         );
+        take(
+            &mut self.recording.clip_format,
+            &overlay.recording.clip_format,
+        );
     }
 
     /// The keys whose values differ between `self` and `before`, as a
@@ -1360,13 +1364,16 @@ pub(crate) struct RawCartridge {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawRecording {
-    /// Emulated seconds the window keeps for Save Clip as GIF (default
+    /// Emulated seconds the window keeps for Save Clip (default
     /// 10; 0 disables the ring).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) clip_seconds: Option<u32>,
     /// Clip frame rate (default 0 = 25 on PAL, 30 on NTSC).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) clip_fps: Option<u32>,
+    /// What Save Clip writes: "gif" (the default) or "apng".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) clip_format: Option<String>,
     /// What Record Video writes: "avi" (the default) or "mp4".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) video_format: Option<String>,

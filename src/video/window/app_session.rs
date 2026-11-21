@@ -1417,10 +1417,11 @@ impl App {
         self.present_fb_generation = self.present_fb_generation.wrapping_add(1);
     }
 
-    /// Save Clip as GIF (shortcut / menu item): write the ring's frames to
-    /// an auto-named file in the recordings folder on a background thread
-    /// and flash the outcome on the OSD when it lands.
-    pub(super) fn save_clip_gif(&mut self) {
+    /// Save Clip (shortcut / menu item): write the ring's frames to an
+    /// auto-named file in the recordings folder, in the configured clip
+    /// format, on a background thread and flash the outcome on the OSD
+    /// when it lands.
+    pub(super) fn save_clip(&mut self) {
         if self.clip_settings.seconds == 0 {
             self.show_osd("Clip ring is off ([recording] clip_seconds = 0)");
             return;
@@ -1436,7 +1437,7 @@ impl App {
         let (frames, end) = ring.clip();
         let fps = ring.fps();
         let span = ring.span_seconds();
-        let path = crate::gifclip::auto_filename();
+        let path = crate::gifclip::auto_filename(self.clip_format);
         info!(
             "saving clip: {} frames ({span:.1}s at {fps} fps) to {}",
             frames.len(),
@@ -1445,7 +1446,7 @@ impl App {
         self.show_osd(format!("Saving {}...", display_file_name(&path)));
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
-            .name("gif-clip".into())
+            .name("clip-writer".into())
             .spawn(move || {
                 let result = crate::gifclip::write_clip(&path, &frames, fps, Some(end))
                     .map(|written| (path, written, span));
@@ -1460,8 +1461,9 @@ impl App {
 
     /// Write the ring's frames to `path` now, on this thread: the
     /// interactive save without its background thread and auto-named file.
+    /// The format follows `path`'s extension.
     #[cfg(test)]
-    pub(super) fn save_clip_gif_to(&self, path: &std::path::Path) -> Result<u32> {
+    pub(super) fn save_clip_to(&self, path: &std::path::Path) -> Result<u32> {
         let ring = self
             .clip_ring
             .as_ref()
@@ -1544,7 +1546,8 @@ impl App {
                         })?;
                         let file = std::fs::File::create(path)
                             .with_context(|| format!("creating clip {}", path.display()))?;
-                        capture.writer = Some(crate::gifclip::GifWriter::new(
+                        capture.writer = Some(crate::gifclip::ClipWriter::new(
+                            crate::gifclip::ClipFormat::for_path(path),
                             std::io::BufWriter::new(file),
                             width,
                             height,
