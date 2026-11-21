@@ -11088,10 +11088,17 @@ fn windowless_run_writes_a_gif_clip_deterministically() {
     while let Some(frame) = decoder.read_next_frame().expect("clip frame parses") {
         frames += 1;
         total_delay += u32::from(frame.delay);
+        assert!(
+            frame.delay >= 2,
+            "a {} cs frame plays at 10 cs",
+            frame.delay
+        );
     }
     // 0.2 s at the automatic rate (25 fps PAL, 30 fps NTSC) is five or
-    // six frames whose delays add up to the window: 20 cs.
-    assert!((5..=7).contains(&frames), "{frames} frames");
+    // six frames whose delays add up to the window: 20 cs. The test
+    // machine presents its first frames unevenly, and a frame taken one
+    // centisecond before the next is dropped, so one may be missing.
+    assert!((4..=7).contains(&frames), "{frames} frames");
     assert!((19..=21).contains(&total_delay), "{total_delay} cs");
 }
 
