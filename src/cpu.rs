@@ -172,6 +172,9 @@ pub struct M68kMachine {
     /// stop report built from the stop's reason string can still carry the
     /// structured access (`exec::stop_snapshot`). Debug-only state.
     ui_last_mmio_stop: Option<crate::debugger::MmioAccess>,
+    /// The exception behind the most recently taken catch stop, kept for
+    /// the stop report the same way. Debug-only state.
+    ui_last_exception_stop: Option<crate::debugger::CaughtException>,
     /// ThisTask pointer at the last armed task-catch check, so only a
     /// reschedule (a change) can fire the catch. Debug-only state.
     ui_last_this_task: Option<u32>,
@@ -796,6 +799,7 @@ impl M68kMachine {
             ui_breaks: crate::debugger::InteractiveBreaks::new(address_mask_for_model(cpu_model)),
             ui_stop: None,
             ui_last_mmio_stop: None,
+            ui_last_exception_stop: None,
             ui_last_this_task: None,
             ui_loadseg_tracker: crate::amigaos::LibraryTracker::default(),
             coverage: None,
@@ -2880,6 +2884,18 @@ impl M68kMachine {
                 crate::debugger::DebugStop::Mmio(access) => Some(*access),
                 _ => None,
             };
+            self.ui_last_exception_stop = match *stop {
+                crate::debugger::DebugStop::Exception {
+                    vector,
+                    pc,
+                    fault_pc,
+                } => Some(crate::debugger::CaughtException {
+                    vector,
+                    handler: pc,
+                    fault_pc,
+                }),
+                _ => None,
+            };
         }
         stop
     }
@@ -2888,6 +2904,12 @@ impl M68kMachine {
     /// an MMIO watch hit.
     pub fn ui_last_mmio_stop(&self) -> Option<crate::debugger::MmioAccess> {
         self.ui_last_mmio_stop
+    }
+
+    /// The exception behind the most recently taken stop, when that stop
+    /// was a catch.
+    pub fn ui_last_exception_stop(&self) -> Option<crate::debugger::CaughtException> {
+        self.ui_last_exception_stop
     }
 
     /// Whether an interactive break/watch hit is waiting to be surfaced.
@@ -3037,7 +3059,16 @@ impl M68kMachine {
         if let Some(vector) = self.cpu.last_exception_vector.take() {
             let vector = vector.min(u32::from(u16::MAX)) as u16;
             if self.ui_breaks.catches.contains(&vector) {
-                self.ui_stop = Some(DebugStop::Exception { vector, pc });
+                // PPC still holds the start of the instruction that raised
+                // the exception: the core latches it as each instruction
+                // begins, and the handler has not started one yet.
+                let fault_pc = (!crate::debugger::exception_vector_is_interrupt(vector))
+                    .then_some(self.cpu.ppc & self.cpu.address_mask);
+                self.ui_stop = Some(DebugStop::Exception {
+                    vector,
+                    pc,
+                    fault_pc,
+                });
                 return;
             }
         }
@@ -3420,8 +3451,13 @@ impl M68kMachine {
                     if let Some(vector) = self.cpu.last_exception_vector.take() {
                         let vector = vector.min(u32::from(u16::MAX)) as u16;
                         if self.ui_breaks.catches.contains(&vector) {
-                            self.ui_stop =
-                                Some(crate::debugger::DebugStop::Exception { vector, pc });
+                            // An interrupt arrives between instructions:
+                            // no instruction raised it.
+                            self.ui_stop = Some(crate::debugger::DebugStop::Exception {
+                                vector,
+                                pc,
+                                fault_pc: None,
+                            });
                             break;
                         }
                     }

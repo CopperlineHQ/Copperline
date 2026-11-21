@@ -377,6 +377,26 @@ first instruction.
 }
 ```
 
+A stop on a `catch` (reason `catch`) adds `exception`: the `vector`, its
+`name`, the `handler` entry the machine stopped at (also the stop's `pc`), and
+`fault_pc`, the start of the instruction whose execution raised the exception.
+That is not always the PC the CPU stacked: a TRAP, TRAPV, CHK or zero divide
+stacks the next instruction, and a 68000 bus or address error a prefetch
+address past the opcode. `fault_pc` is null for an interrupt, which arrives
+between instructions. A jump or return to an odd address faults on the first
+fetch from its target, so `fault_pc` is that target. At the stop, A7 points at
+the exception stack frame the CPU pushed.
+
+```json
+{
+  "reason": "catch",
+  "detail": "Caught Address error (vector 3) at $C0123A, handler $F80A2E",
+  "exception": {"vector": 3, "name": "Address error", "handler": 16255534, "fault_pc": 12587578},
+  "pc": 16255534, "frame": 301, "vpos": 120, "hpos": 88, "cck": 21355940,
+  "seconds": 6.0251, "retired_instructions": 3104577
+}
+```
+
 (streaming-observability)=
 ## Streaming observability
 
@@ -505,7 +525,7 @@ fails with code `-32006`.
 - `last_writer {"addr": "..."}`: Find the instruction that last wrote the memory at `addr` by replaying the recorded history. The reply's `outcome` is `found`, `never_written`, or `beyond_history`; `record` holds the write (`addr`, `old`, `new`, `pc`, `pos`, `cck`, `frame`) and `position` where the machine was left (at the write when found).
 
 ### State inspection and modification
-- `regs.get` / `regs.set {"reg": "...", "value": ...}`: Read or modify 68k registers (`d0`-`d7`, `a0`-`a7`, `sp`, `fp` for A6, `sr`, `pc`). `regs.get` includes exact raw FP0-FP7 plus FPCR/FPSR/FPIAR when an FPU is fitted.
+- `regs.get` / `regs.set {"reg": "...", "value": ...}`: Read or modify 68k registers (`d0`-`d7`, `a0`-`a7`, `sp`, `fp` for A6, `sr`, `pc`). `regs.get` also reports `usp`, the user stack pointer (A7 in user mode, the banked USP in supervisor mode: the running task's stack inside an exception handler), and includes exact raw FP0-FP7 plus FPCR/FPSR/FPIAR when an FPU is fitted.
 - `mem.read {"addr": ..., "len": ..., "encoding": "hex"|"base64"}` / `mem.write {"addr": ..., "data": "...", "encoding": "hex"|"base64"}`: Read or modify memory through the CPU's address map (`len` defaults to 2; either direction moves at most 1 MiB). Memory writes are not part of the reverse-execution journal, so when reverse execution is armed the `mem.write` reply carries `replay_unsafe: true`: a replay across the write can diverge.
 - `mem.digest {"region": "chip"|"all"}` or `mem.digest {"addr": ..., "len": ...}`:
   FNV-1a digest of RAM computed inside the emulator, for change detection

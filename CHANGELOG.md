@@ -8,6 +8,21 @@ for the earlier release notes.
 
 ## Unreleased
 
+### Added
+
+- Crashes in the IDE debugger: when an exception breakpoint stops a program
+  (an address error, an illegal instruction), the DAP adapter unwinds
+  through the exception stack frame, so the call stack continues from the
+  handler into the instruction that raised the exception, at its source line
+  from vasm `LINE` debug hunks or DWARF, with that code's registers, SR and
+  stack, then its callers. The exception details name the faulting address,
+  its line, and the address a bus or address error accessed (see
+  docs/debugger/dap.md, "Crashes"). In the control protocol a `catch` stop
+  reports `exception` (`vector`, `name`, `handler`, `fault_pc`), `regs.get`
+  reports `usp`, and a catch stop's description names the faulting
+  instruction (`Caught Address error (vector 3) at $C0123A, handler
+  $F80A2E`).
+
 ## 1.2.0 - 2026-11-21
 
 ### Added

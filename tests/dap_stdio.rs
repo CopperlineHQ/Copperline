@@ -342,6 +342,152 @@ fn debug_source_fixture(dir_name: &str, name: &str, elf: bool, rom: Option<&std:
 }
 
 #[test]
+#[ignore = "boots bundled AROS and launches the emulator plus DAP adapter"]
+fn dap_unwinds_a_caught_address_error_to_the_faulting_source_line() {
+    struct Adapter(std::process::Child);
+    impl Drop for Adapter {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("guest/dap-test");
+    let program = dir.join("crash");
+    let source_text = std::fs::read_to_string(dir.join("crash.s")).unwrap();
+    let line_of = |needle: &str| {
+        source_text
+            .lines()
+            .position(|l| l.trim() == needle)
+            .map(|i| i as u64 + 1)
+            .unwrap_or_else(|| panic!("no line {needle:?}"))
+    };
+    let fault_line = line_of("move.w  (a0),d0");
+    let call_line = line_of("bsr.s   fetch");
+    let mut child = Adapter(
+        Command::new(env!("CARGO_BIN_EXE_copperline-ctl"))
+            .arg("--dap")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("starting adapter"),
+    );
+    let stdin = child.0.stdin.take().unwrap();
+    let stdout = BufReader::new(child.0.stdout.take().unwrap());
+    let (tx, rx) = channel();
+    std::thread::spawn(move || read_messages(stdout, tx));
+    let mut c = Client {
+        stdin,
+        rx,
+        seq: 0,
+        backlog: std::cell::RefCell::new(Vec::new()),
+    };
+    c.call(
+        "initialize",
+        json!({"clientID": "test", "linesStartAt1": true, "columnsStartAt1": true}),
+    );
+    c.call(
+        "launch",
+        json!({
+            "program": program,
+            "copperline": env!("CARGO_BIN_EXE_copperline"),
+            "factory": true,
+            "headless": true,
+            "model": "A500",
+            "cpu": "68000",
+            "stopOnEntry": false,
+            "timeoutMs": 120000,
+        }),
+    );
+    c.event("initialized");
+    // What an IDE sends for the filters the adapter marks as defaults.
+    c.call(
+        "setExceptionBreakpoints",
+        json!({"filters": ["address-error", "illegal-instruction", "trap7"]}),
+    );
+    c.call("configurationDone", json!({}));
+    c.event("module");
+
+    let stop = c.stopped();
+    assert_eq!(stop["reason"], "exception", "{stop}");
+    let frames = c.call("stackTrace", json!({"threadId": 1}));
+    let frames = frames["stackFrames"].as_array().unwrap().clone();
+    // The machine is at the operating system's handler, which has no
+    // source; the IDE focuses the first frame that has one.
+    let handler = &frames[0];
+    assert!(
+        handler["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("Address error handler: "),
+        "{handler}"
+    );
+    assert!(handler.get("source").is_none(), "{handler}");
+    let fault = &frames[1];
+    assert_eq!(fault["name"], "fetch", "{frames:?}");
+    assert!(fault["source"]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("crash.s"));
+    assert_eq!(fault["line"], fault_line, "{frames:?}");
+    // A caller without DWARF is named by its symbol and the return
+    // address's offset from it (start+8).
+    let caller = &frames[2];
+    assert!(
+        caller["name"].as_str().unwrap().starts_with("start+"),
+        "{frames:?}"
+    );
+    assert_eq!(caller["line"], call_line, "{frames:?}");
+
+    // The fault happened on a user stack, and the faulting frame's
+    // registers are the ones the instruction saw: A0 holds the odd
+    // address the exception reports.
+    let info = c.call("exceptionInfo", json!({"threadId": 1}));
+    let description = info["description"].as_str().unwrap();
+    assert!(
+        description.contains(&format!("(crash.s:{fault_line})")),
+        "{info}"
+    );
+    let scopes = c.call("scopes", json!({"frameId": fault["id"]}));
+    let registers = scopes["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Registers")
+        .unwrap_or_else(|| panic!("no Registers scope in {scopes}"));
+    let variables = c.call(
+        "variables",
+        json!({"variablesReference": registers["variablesReference"]}),
+    );
+    let a0 = variables["variables"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| {
+            v["name"]
+                .as_str()
+                .is_some_and(|n| n.eq_ignore_ascii_case("a0"))
+        })
+        .unwrap_or_else(|| panic!("no A0 in {variables}"));
+    let a0 = a0["value"].as_str().unwrap().to_string();
+    let accessed = description
+        .split("accessing $")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no access address in {info}"));
+    assert!(
+        a0.trim_start_matches("0x")
+            .trim_start_matches('$')
+            .trim_start_matches('0')
+            .eq_ignore_ascii_case(accessed.trim_start_matches('0')),
+        "A0 {a0} vs {info}"
+    );
+
+    c.call("disconnect", json!({"terminateDebuggee": true}));
+    drop(c);
+    assert!(child.0.wait().expect("adapter exits").success());
+}
+
+#[test]
 #[ignore]
 fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
     let ctl = env!("CARGO_BIN_EXE_copperline-ctl");

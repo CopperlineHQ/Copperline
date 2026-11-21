@@ -231,7 +231,7 @@ global(s), call-frame info`.
 | Continue / Pause | `continue` / `pause`. |
 | Step Over / Into / Out | `step_over` / `step` / `step_out`, repeated until the source line changes (statement granularity) or once (instruction granularity). Step Out while the PC is in Kickstart uses `run_until {"pc_outside": true}` to return to program code. Stepping into code without lines runs it to its return. A line that outgrows 64 single steps (a loop) gets temporary breakpoints on the function's other lines and the return address instead. |
 | Step Back / Reverse Continue | `reverse_step` / `reverse_continue` from the snapshot ring (see [Reverse debugging](reverse.md)); Step Back also repeats until the line changes (bounded to 32 single reverse steps per request). The adapter takes a snapshot (`reverse_anchor`) at every stop a run ends in, so stepping back replays from there: the boot volume `--run` stages is a host directory mount, whose traffic a replay from an older snapshot could not reproduce. |
-| Call stack | Call-frame information when the DWARF has it, else a scan of the stack for return addresses that follow a `JSR`/`BSR`. Frames beyond the innermost are looked up at the call site. ROM frames use live names such as `[exec] AllocMem+$12`, derived from the running guest rather than a per-ROM symbol file. |
+| Call stack | Call-frame information when the DWARF has it, else a scan of the stack for return addresses that follow a `JSR`/`BSR`. Frames beyond the innermost are looked up at the call site. ROM frames use live names such as `[exec] AllocMem+$12`, derived from the running guest rather than a per-ROM symbol file. At a caught exception the stack continues through the exception stack frame into the code it interrupted (see [Crashes](#dap-crashes)). |
 | Scopes | Registers (D0-D7, A0-A7, PC, SR with its flags, plus FP0-FP7/FPCR/FPSR/FPIAR when an FPU is fitted), Locals, Globals, Chipset (every custom register and the beam position). |
 | Disassembly | `disasm`; each instruction text ends in its theoretical cycle count or range, while a precise profile measures additional contention actually encountered. |
 | Set variable | `regs.set` for the innermost frame's registers; `mem.write` for base-type variables and members. |
@@ -250,6 +250,33 @@ reported as a breakpoint with the machine's description. In a windowed
 session the IDE picks up a pause or resume made from the window within a
 second.
 
+(dap-crashes)=
+## Crashes
+
+An exception breakpoint stops the machine at the first instruction of the
+exception's handler, usually in ROM, with the exception stack frame the CPU
+pushed at A7. The adapter reads that frame (the 68000's short and bus/address
+error frames, and the formats the 68010 and later push) and unwinds through
+it. Below the handler frame comes the context the exception interrupted:
+
+- its PC is the instruction that raised the exception, as the emulator saw
+  it start, rather than the PC the CPU stacked. A TRAP, TRAPV, CHK or zero
+  divide stacks the next instruction, and a 68000 bus or address error
+  stacks a prefetch address 2 to 10 bytes past the opcode;
+- its source line comes from the program's line table (vasm `LINE` debug
+  hunks or DWARF);
+- its registers are the ones the instruction saw, its SR is the one the
+  frame stacked, and its A7 is the task's user stack (or, for code that ran
+  in supervisor mode, the supervisor stack above the frame);
+- its callers follow, unwound from that stack.
+
+The IDE focuses the first frame that has source, so a crash in the program
+opens at its line. A fault inside a library call shows the ROM routine and
+then the program's call into it. The exception details add the faulting
+instruction's address, its source line, and, for a bus or address error,
+the address that was accessed, for example `SIGBUS: address error (vector
+3) at $C0123A (main.s:42), accessing $C3A001`.
+
 ## Limitations
 
 - Locals are shown for simple location expressions and one level of
@@ -257,6 +284,11 @@ second.
   expressions render as unsupported.
 - One thread (the CPU) is presented; Exec tasks are not separate threads.
 - The call stack shows at most 16 frames.
+- A jump or return to an odd address faults on the first fetch from its
+  target, so the faulting frame is that address, without a source line,
+  and its callers are guessed from the stack; Step Back reaches the jump.
+- After a step inside the exception handler the call stack is unwound from
+  the handler again; it no longer passes through the exception frame.
 - The `sourceMap` is a prefix replacement; when a recorded path does not
   exist on the host, the adapter also tries the path's tail under the
   program's directory.
