@@ -12,7 +12,8 @@ use super::{eval, Emit, Msg};
 use crate::amigaos::symbols::SymbolSnapshot;
 use crate::control::bridge::{self, Bridge, LaunchSpec, Launched, Reply};
 use crate::control::proto;
-use crate::debuginfo::unwind::{self, Frame, Registers};
+use crate::debugger::CaughtException;
+use crate::debuginfo::unwind::{self, ExceptionFrame, Frame, FrameStyle, FrameVia, Registers};
 use crate::debuginfo::DebugInfo;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -254,6 +255,12 @@ pub struct Session {
     serial_buf: String,
     serial_idle_ticks: u32,
     last_exception: Option<(String, String)>,
+    /// The exception of the catch stop the machine is paused at, until
+    /// it resumes: the frames then start at its handler.
+    exception_stop: Option<CaughtException>,
+    /// The exception stack frame `frames` was unwound through, when it
+    /// was (filled with `frames`).
+    exception_frame: Option<ExceptionFrame>,
     temp_breaks: Vec<u32>,
     /// The first hunk's address from the load stop, for a session
     /// without debug information.
@@ -483,6 +490,8 @@ impl Session {
             serial_buf: String::new(),
             serial_idle_ticks: 0,
             last_exception: None,
+            exception_stop: None,
+            exception_frame: None,
             temp_breaks: Vec::new(),
             first_hunk: None,
             waiting_for_target_load: false,
@@ -620,16 +629,7 @@ impl Session {
     }
 
     fn regs(&self) -> Result<(Registers, u16), String> {
-        let v = self.call("regs.get", json!({}))?;
-        let mut regs = Registers::default();
-        for (i, d) in v["d"].as_array().into_iter().flatten().enumerate().take(8) {
-            regs.d[i] = d.as_u64().unwrap_or(0) as u32;
-        }
-        for (i, a) in v["a"].as_array().into_iter().flatten().enumerate().take(8) {
-            regs.a[i] = a.as_u64().unwrap_or(0) as u32;
-        }
-        regs.pc = v["pc"].as_u64().unwrap_or(0) as u32;
-        Ok((regs, v["sr"].as_u64().unwrap_or(0) as u16))
+        Ok(registers_of(&self.call("regs.get", json!({}))?))
     }
 
     fn pc(&self) -> Result<u32, String> {
@@ -649,6 +649,7 @@ impl Session {
         self.phase = Phase::Running(kind);
         self.vars.clear();
         self.frames.clear();
+        self.exception_stop = None;
         Ok(())
     }
 
@@ -665,6 +666,7 @@ impl Session {
     fn call_stop(&mut self, method: &str, params: Value) -> Result<Value, String> {
         self.vars.clear();
         self.frames.clear();
+        self.exception_stop = None;
         self.call(method, params)
     }
 
@@ -924,6 +926,7 @@ impl Session {
     fn on_stop(&mut self, emit: &mut Emit, stop: &Value, from: Option<RunKind>) {
         self.vars.clear();
         self.frames.clear();
+        self.exception_stop = caught_exception_of(stop);
         let reason = stop["reason"].as_str().unwrap_or("").to_string();
         let detail = stop["detail"].as_str().unwrap_or("").to_string();
         let pc = stop["pc"].as_u64().unwrap_or(0) as u32;
@@ -1090,6 +1093,7 @@ impl Session {
                 self.phase = Phase::RunningExternal;
                 self.vars.clear();
                 self.frames.clear();
+                self.exception_stop = None;
                 emit.continued();
             }
             (Phase::RunningExternal, false) => {
@@ -1415,6 +1419,8 @@ impl Session {
     fn finish_bounded(&mut self, _emit: &mut Emit, stop: &Value, from: Option<RunKind>) {
         self.vars.clear();
         self.frames.clear();
+        // A step can end in a caught exception's handler too.
+        self.exception_stop = caught_exception_of(stop);
         self.phase = Phase::Paused;
         let reason = stop["reason"].as_str().unwrap_or("").to_string();
         let detail = stop["detail"].as_str().unwrap_or("").to_string();
@@ -1716,13 +1722,55 @@ impl Session {
         if !self.frames.is_empty() {
             return Ok(());
         }
-        let (regs, _) = self.regs()?;
+        let reply = self.call("regs.get", json!({}))?;
+        let (regs, _) = registers_of(&reply);
+        let usp = reply["usp"].as_u64().map(|v| v as u32);
+        let msp = reply["msp"].as_u64().map(|v| v as u32);
+        // Paused at a caught exception's handler entry, A7 points at the
+        // frame the CPU pushed: unwind through it into the interrupted
+        // context.
+        let caught = self
+            .exception_stop
+            .filter(|caught| caught.handler == regs.pc)
+            .zip(usp);
+        let style = match caught {
+            Some(_) => Some(FrameStyle::for_cpu(
+                self.call("status", json!({}))?["cpu"]
+                    .as_str()
+                    .unwrap_or(""),
+            )),
+            None => None,
+        };
         let empty = DebugInfo::default();
         let info = self.info.as_ref().unwrap_or(&empty);
         let mut mem = GuestMem::new(&self.bridge);
         let mut read32 = |addr: u32| mem.read32(addr);
         let mut mem2 = GuestMem::new(&self.bridge);
         let mut read16 = |addr: u32| mem2.read16(addr);
+        self.exception_frame = None;
+        if let (Some((caught, usp)), Some(style)) = (caught, style) {
+            if let Some(frame) = unwind::locate_exception_frame(
+                style,
+                caught.vector,
+                regs.sp(),
+                msp,
+                &mut read16,
+                &mut read32,
+            ) {
+                self.frames = unwind::unwind_exception(
+                    info,
+                    &regs,
+                    usp,
+                    &frame,
+                    caught.fault_pc,
+                    &mut read32,
+                    &mut read16,
+                    MAX_FRAMES,
+                );
+                self.exception_frame = Some(frame);
+                return Ok(());
+            }
+        }
         self.frames = unwind::unwind(info, &regs, &mut read32, &mut read16, MAX_FRAMES);
         Ok(())
     }
@@ -1747,13 +1795,21 @@ impl Session {
         let start = args["startFrame"].as_u64().unwrap_or(0) as usize;
         let levels = args["levels"].as_u64().unwrap_or(0) as usize;
         let rom_symbols = self.rom_symbols();
+        // Paused at a caught exception's handler: frame 0 says so.
+        let handling = self.exception_stop.filter(|_| self.unwound_exception());
         let mut out = Vec::new();
         for (i, frame) in self.frames.iter().enumerate().skip(start) {
             if levels > 0 && out.len() >= levels {
                 break;
             }
             let lookup = vars::lookup_pc(frame, i);
-            let name = self.frame_name(frame.pc, lookup, &rom_symbols);
+            let mut name = self.frame_name(frame.pc, lookup, &rom_symbols);
+            if let (0, Some(caught)) = (i, handling) {
+                name = format!(
+                    "{} handler: {name}",
+                    crate::debugger::exception_vector_name(caught.vector)
+                );
+            }
             let mut v = json!({
                 "id": FRAME_ID_BASE + i as i64,
                 "name": name,
@@ -1892,15 +1948,26 @@ impl Session {
                 if frame == 0 {
                     let regs = self.call("regs.get", json!({}))?;
                     let sr = regs["sr"].as_u64().unwrap_or(0) as u16;
-                    out.push(vars::status_register(&mut self.vars, sr));
+                    out.push(vars::status_register(&mut self.vars, sr, true));
                     if let Some(fpu) = regs.get("fpu") {
                         out.extend(vars::fpu_registers(fpu));
+                    }
+                } else if f.via == FrameVia::Exception {
+                    // The interrupted context's SR is the one its frame
+                    // stacked.
+                    if let Some(stacked) = self.exception_frame {
+                        out.push(vars::status_register(&mut self.vars, stacked.sr, false));
                     }
                 }
                 out
             }
-            Node::StatusRegister => {
-                let (_, sr) = self.regs()?;
+            Node::StatusRegister { stacked } => {
+                // The live SR is read again: an edit leaves the client
+                // holding this reference.
+                let sr = match stacked {
+                    Some(sr) => sr,
+                    None => self.regs()?.1,
+                };
                 vars::status_register_bits(sr)
             }
             Node::Locals { frame } => {
@@ -2410,12 +2477,91 @@ impl Session {
         Ok(Value::Null)
     }
 
-    fn exception_info(&self) -> Result<Value, String> {
-        let Some((reason, detail)) = &self.last_exception else {
+    fn exception_info(&mut self) -> Result<Value, String> {
+        let Some((reason, detail)) = self.last_exception.clone() else {
             return Err("no exception has been caught".into());
         };
-        Ok(exception_info_payload(reason, detail))
+        let mut payload = exception_info_payload(&reason, &detail);
+        if let (Some(origin), Some(caught)) = (self.exception_origin(), self.exception_stop) {
+            // The raw detail already names an address; start from the
+            // exception's name instead.
+            let base = exception_description(&detail).map_or_else(
+                || {
+                    format!(
+                        "{} (vector {})",
+                        crate::debugger::exception_vector_name(caught.vector),
+                        caught.vector
+                    )
+                },
+                str::to_string,
+            );
+            payload["description"] = json!(format!("{base} {origin}"));
+        }
+        Ok(payload)
     }
+
+    /// Whether `frames` were unwound through a caught exception's frame.
+    fn unwound_exception(&self) -> bool {
+        self.exception_frame.is_some()
+            && self
+                .frames
+                .get(1)
+                .is_some_and(|frame| frame.via == FrameVia::Exception)
+    }
+
+    /// Where the exception the machine is paused at came from: the
+    /// instruction, its source line when the debug information has one,
+    /// and the faulted access of a bus or address error.
+    fn exception_origin(&mut self) -> Option<String> {
+        if self.running() || self.exception_stop.is_none() {
+            return None;
+        }
+        self.ensure_frames().ok()?;
+        if !self.unwound_exception() {
+            return None;
+        }
+        let frame = self.frames[1];
+        let mut origin = format!("at ${:06X}", frame.pc);
+        if let Some((source, line, _)) = self.source_at(frame.pc) {
+            let name = source["name"].as_str().unwrap_or("");
+            origin.push_str(&format!(" ({name}:{line})"));
+        }
+        if let Some(access) = self.exception_frame.and_then(|f| f.access) {
+            origin.push_str(&format!(", accessing ${access:06X}"));
+        }
+        Some(origin)
+    }
+}
+
+/// The registers of a `regs.get` reply, and SR.
+fn registers_of(v: &Value) -> (Registers, u16) {
+    let mut regs = Registers::default();
+    for (i, d) in v["d"].as_array().into_iter().flatten().enumerate().take(8) {
+        regs.d[i] = d.as_u64().unwrap_or(0) as u32;
+    }
+    for (i, a) in v["a"].as_array().into_iter().flatten().enumerate().take(8) {
+        regs.a[i] = a.as_u64().unwrap_or(0) as u32;
+    }
+    regs.pc = v["pc"].as_u64().unwrap_or(0) as u32;
+    (regs, v["sr"].as_u64().unwrap_or(0) as u16)
+}
+
+/// The exception a `catch` stop report carries. `handler` is the stop's
+/// own `pc`, the architectural PC that `regs.get` reports: the
+/// exception's `handler` is the address the bus sees, which on a 24-bit
+/// CPU drops the top byte a vector may set.
+fn caught_exception_of(stop: &Value) -> Option<CaughtException> {
+    if stop["reason"].as_str() != Some("catch") {
+        return None;
+    }
+    let exception = &stop["exception"];
+    Some(CaughtException {
+        vector: u16::try_from(exception["vector"].as_u64()?).ok()?,
+        handler: u32::try_from(stop["pc"].as_u64().or(exception["handler"].as_u64())?).ok()?,
+        fault_pc: exception["fault_pc"]
+            .as_u64()
+            .and_then(|pc| u32::try_from(pc).ok()),
+    })
 }
 
 fn exception_info_payload(reason: &str, detail: &str) -> Value {
@@ -2461,7 +2607,11 @@ impl eval::Env for EvalEnv<'_> {
                 .get(reg)
                 .map(i64::from)
                 .ok_or_else(|| "register unknown".into()),
-            16 => Ok(i64::from(self.session.regs()?.1)),
+            16 => match (self.frame.via, self.session.exception_frame) {
+                // An interrupted context's SR is the one its frame stacked.
+                (FrameVia::Exception, Some(stacked)) => Ok(i64::from(stacked.sr)),
+                _ => Ok(i64::from(self.session.regs()?.1)),
+            },
             17 => Ok(i64::from(self.frame.pc)),
             _ => Err("unknown register".into()),
         }
@@ -2543,6 +2693,50 @@ mod tests {
         assert_eq!(parse_address("4096"), Ok(4096));
         assert!(parse_address("zz").is_err());
         assert!(parse_address("0x1FFFFFFFF").is_err());
+    }
+
+    #[test]
+    fn catch_stops_carry_their_exception() {
+        // A 24-bit CPU's vector can carry a top byte the bus drops: the
+        // handler compared with regs.get is the stop's architectural PC.
+        let stop = json!({
+            "reason": "catch",
+            "detail": "Caught Address error (vector 3) at $C0123A, handler $F80A2E",
+            "pc": 0xFFF8_0A2Eu32,
+            "exception": {"vector": 3, "name": "Address error", "handler": 0x00F8_0A2E, "fault_pc": 0x00C0_123A},
+        });
+        assert_eq!(
+            caught_exception_of(&stop),
+            Some(CaughtException {
+                vector: 3,
+                handler: 0xFFF8_0A2E,
+                fault_pc: Some(0x00C0_123A),
+            })
+        );
+        let interrupt = json!({
+            "reason": "catch",
+            "exception": {"vector": 27, "handler": 0x00F8_0014, "fault_pc": null},
+        });
+        assert_eq!(caught_exception_of(&interrupt).unwrap().fault_pc, None);
+        // Only a catch carries one, and a report without it unwinds as usual.
+        assert_eq!(caught_exception_of(&json!({"reason": "breakpoint"})), None);
+        assert_eq!(caught_exception_of(&json!({"reason": "catch"})), None);
+    }
+
+    #[test]
+    fn registers_come_from_a_regs_get_reply() {
+        let reply = json!({
+            "d": [1, 2, 3, 4, 5, 6, 7, 8],
+            "a": [9, 10, 11, 12, 13, 14, 15, 0x3FF2],
+            "pc": 0x00F8_0030,
+            "sr": 0x2700,
+            "usp": 0x8000,
+        });
+        let (regs, sr) = registers_of(&reply);
+        assert_eq!(regs.d, [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(regs.a[7], 0x3FF2);
+        assert_eq!(regs.pc, 0x00F8_0030);
+        assert_eq!(sr, 0x2700);
     }
 
     #[test]

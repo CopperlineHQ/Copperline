@@ -3854,8 +3854,22 @@ pub fn stop_snapshot(emu: &Emulator, reason: &str, detail: &str) -> StopEvent {
             .then(|| emu.machine.ui_last_mmio_stop())
             .flatten()
             .map(|access| mmio_access_value(&access)),
+        exception: (reason == "catch")
+            .then(|| emu.machine.ui_last_exception_stop())
+            .flatten()
+            .map(|caught| caught_exception_value(&caught)),
         collect: None,
     }
+}
+
+/// The exception behind a `catch` stop, as the stop report carries it.
+pub fn caught_exception_value(caught: &crate::debugger::CaughtException) -> Value {
+    json!({
+        "vector": caught.vector,
+        "name": crate::debugger::exception_vector_name(caught.vector),
+        "handler": caught.handler,
+        "fault_pc": caught.fault_pc,
+    })
 }
 
 /// One CPU access an MMIO watch saw, as the stop report and `event.mmio`
@@ -4187,8 +4201,12 @@ fn regs_value(emu: &Emulator) -> Value {
         "a": a,
         "pc": machine.pc(),
         "sr": machine.sr(),
+        "usp": machine.usp(),
         "stopped": machine.stopped(),
     });
+    if let Some(msp) = machine.msp() {
+        value["msp"] = json!(msp);
+    }
     if let Some((fp, fpcr, fpsr, fpiar)) = machine.debug_fpu_registers() {
         value["fpu"] = json!({
             "fp": fp.map(|(sign_exp, mantissa)| {

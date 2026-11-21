@@ -6089,19 +6089,38 @@ mod tests {
     /// F80030  BRA.S  *          ; trap handler
     /// ```
     fn emulator_with_trap_program() -> super::Emulator {
+        emulator_with_rom_program(
+            crate::config::CpuModel::M68000,
+            &[
+                (0x10, 0x4E71), // NOP
+                (0x12, 0x4E40), // TRAP #0
+                (0x14, 0x60FE), // BRA.S *
+            ],
+            32, // TRAP #0
+        )
+    }
+
+    /// A machine that resets into `words` placed in ROM from $F80010
+    /// (`(offset, word)` pairs), with reset SSP $4000 and `vector`
+    /// pointing at a `BRA.S *` handler at $F80030.
+    fn emulator_with_rom_program(
+        model: crate::config::CpuModel,
+        words: &[(usize, u16)],
+        vector: usize,
+    ) -> super::Emulator {
         let mut rom = vec![0u8; crate::memory::ROM_SIZE];
         let put = |mem: &mut [u8], off: usize, word: u16| {
             mem[off..off + 2].copy_from_slice(&word.to_be_bytes());
         };
-        put(&mut rom, 0x10, 0x4E71); // NOP
-        put(&mut rom, 0x12, 0x4E40); // TRAP #0
-        put(&mut rom, 0x14, 0x60FE); // BRA.S *
+        for &(off, word) in words {
+            put(&mut rom, off, word);
+        }
         put(&mut rom, 0x30, 0x60FE); // handler: BRA.S *
 
         let mut chip_ram = vec![0u8; 512 * 1024];
         chip_ram[0..4].copy_from_slice(&0x0000_4000u32.to_be_bytes()); // reset SSP
         chip_ram[4..8].copy_from_slice(&0x00F8_0010u32.to_be_bytes()); // reset PC
-        chip_ram[32 * 4..32 * 4 + 4].copy_from_slice(&0x00F8_0030u32.to_be_bytes()); // TRAP #0
+        chip_ram[vector * 4..vector * 4 + 4].copy_from_slice(&0x00F8_0030u32.to_be_bytes());
 
         let bus = crate::bus::Bus::new(
             crate::memory::Memory {
@@ -6125,7 +6144,7 @@ mod tests {
         );
         super::Emulator::new(
             bus,
-            crate::config::CpuModel::M68000,
+            model,
             false,
             Default::default(),
             crate::config::PacingBudget::Cycles,
@@ -6771,11 +6790,246 @@ mod tests {
         }
         assert!(stopped, "TRAP #0 catchpoint did not fire");
         match emu.machine.take_ui_debug_stop() {
-            Some(DebugStop::Exception { vector, .. }) => assert_eq!(vector, 32),
+            Some(
+                stop @ DebugStop::Exception {
+                    vector,
+                    pc,
+                    fault_pc,
+                },
+            ) => {
+                assert_eq!((vector, pc), (32, 0x00F8_0030));
+                // The stop names the TRAP itself, though the CPU stacked
+                // the PC of the instruction after it.
+                assert_eq!(fault_pc, Some(0x00F8_0012));
+                assert_eq!(
+                    stop.describe(),
+                    "Caught TRAP #0 (vector 32) at $F80012, handler $F80030"
+                );
+            }
             other => panic!("expected an exception stop, got {other:?}"),
         }
         // The machine sits in the trap handler.
         assert_eq!(emu.machine.pc() & 0x00FF_FFFF, 0x00F8_0030);
+        assert_eq!(
+            emu.machine.ui_last_exception_stop(),
+            Some(crate::debugger::CaughtException {
+                vector: 32,
+                handler: 0x00F8_0030,
+                fault_pc: Some(0x00F8_0012),
+            })
+        );
+    }
+
+    /// Step `emu` until a debug stop is pending; panics past `budget`.
+    fn step_to_debug_stop(emu: &mut super::Emulator, budget: usize) -> crate::debugger::DebugStop {
+        for _ in 0..budget {
+            emu.debug_step_instructions(1).unwrap();
+            if emu.machine.ui_debug_stop_pending() {
+                return emu.machine.take_ui_debug_stop().unwrap();
+            }
+        }
+        panic!("no debug stop within {budget} instructions");
+    }
+
+    /// Decode the exception frame at A7 of `emu`, stopped at a handler's
+    /// entry, the way the DAP adapter does.
+    #[cfg(feature = "dap")]
+    fn decode_frame_at_a7(
+        emu: &super::Emulator,
+        vector: u16,
+    ) -> crate::debuginfo::unwind::ExceptionFrame {
+        use crate::debuginfo::unwind::{decode_exception_frame, FrameStyle};
+        let style = FrameStyle::for_cpu(&format!("{:?}", emu.machine.cpu_type()));
+        let read = |addr: u32, len: usize| emu.machine.debug_read_memory(addr, len);
+        decode_exception_frame(
+            style,
+            vector,
+            emu.machine.a(7),
+            &mut |a| Some(u16::from_be_bytes(read(a, 2).try_into().ok()?)),
+            &mut |a| Some(u32::from_be_bytes(read(a, 4).try_into().ok()?)),
+        )
+        .unwrap_or_else(|| panic!("{style:?} frame for vector {vector} did not decode"))
+    }
+
+    #[test]
+    fn exception_catch_reports_the_faulting_instruction_not_the_stacked_prefetch_pc() {
+        use crate::debugger::DebugStop;
+        // F80010 MOVEA.L #$1001,A0 / F80016 MOVE.W (A0),D0: a word read at
+        // an odd address, which only the 68000 and 68010 fault.
+        let mut emu = emulator_with_rom_program(
+            crate::config::CpuModel::M68000,
+            &[
+                (0x10, 0x207C),
+                (0x12, 0x0000),
+                (0x14, 0x1001),
+                (0x16, 0x3010),
+                (0x18, 0x60FE),
+            ],
+            3,
+        );
+        assert!(emu.machine.ui_toggle_catch(3));
+        let stop = step_to_debug_stop(&mut emu, 64);
+        assert!(
+            matches!(
+                stop,
+                DebugStop::Exception {
+                    vector: 3,
+                    pc: 0x00F8_0030,
+                    fault_pc: Some(0x00F8_0016),
+                }
+            ),
+            "{stop:?}"
+        );
+        #[cfg(feature = "dap")]
+        {
+            let frame = decode_frame_at_a7(&emu, 3);
+            assert_eq!(frame.access, Some(0x1001));
+            assert_eq!(frame.sr, 0x2700);
+            // The group 0 frame stacks the prefetch address, past the opcode.
+            assert!(
+                (0x00F8_0018..=0x00F8_0020).contains(&frame.stacked_pc),
+                "stacked PC ${:06X}",
+                frame.stacked_pc
+            );
+            assert_eq!(emu.machine.a(7).wrapping_add(frame.size), 0x4000);
+        }
+    }
+
+    #[test]
+    fn exception_catch_and_its_frame_on_every_cpu_model() {
+        use crate::config::CpuModel;
+        use crate::debugger::DebugStop;
+        for model in [
+            CpuModel::M68000,
+            CpuModel::M68010,
+            CpuModel::M68020,
+            CpuModel::M68030,
+            CpuModel::M68040,
+            CpuModel::M68060,
+        ] {
+            // F80010 ILLEGAL: the short frame (format $0 from the 68010).
+            let mut emu = emulator_with_rom_program(model, &[(0x10, 0x4AFC), (0x12, 0x60FE)], 4);
+            assert!(emu.machine.ui_toggle_catch(4));
+            let stop = step_to_debug_stop(&mut emu, 64);
+            assert!(
+                matches!(
+                    stop,
+                    DebugStop::Exception {
+                        vector: 4,
+                        pc: 0x00F8_0030,
+                        fault_pc: Some(0x00F8_0010),
+                    }
+                ),
+                "{model:?}: {stop:?}"
+            );
+            #[cfg(feature = "dap")]
+            {
+                let frame = decode_frame_at_a7(&emu, 4);
+                assert_eq!(frame.sr, 0x2700, "{model:?}");
+                assert_eq!(frame.stacked_pc, 0x00F8_0010, "{model:?}");
+                assert_eq!(frame.access, None, "{model:?}");
+                assert_eq!(
+                    emu.machine.a(7).wrapping_add(frame.size),
+                    0x4000,
+                    "{model:?}"
+                );
+            }
+
+            // F80010 MOVEA.L #$1001,A0 / F80016 JMP (A0): an instruction
+            // fetch from an odd address, which faults on every model with
+            // its long bus/address error frame.
+            let mut emu = emulator_with_rom_program(
+                model,
+                &[
+                    (0x10, 0x207C),
+                    (0x12, 0x0000),
+                    (0x14, 0x1001),
+                    (0x16, 0x4ED0),
+                    (0x18, 0x60FE),
+                ],
+                3,
+            );
+            assert!(emu.machine.ui_toggle_catch(3));
+            let stop = step_to_debug_stop(&mut emu, 64);
+            // The faulting access is the first opcode fetch at the
+            // target, so the stop names the target, not the JMP.
+            assert!(
+                matches!(
+                    stop,
+                    DebugStop::Exception {
+                        vector: 3,
+                        pc: 0x00F8_0030,
+                        fault_pc: Some(0x1001),
+                    }
+                ),
+                "{model:?}: {stop:?}"
+            );
+            #[cfg(feature = "dap")]
+            {
+                let frame = decode_frame_at_a7(&emu, 3);
+                assert_eq!(frame.sr, 0x2700, "{model:?}");
+                // The 68040 and 68060 record the fetch address word-aligned.
+                assert_eq!(frame.access.map(|a| a & !1), Some(0x1000), "{model:?}");
+                assert_eq!(
+                    emu.machine.a(7).wrapping_add(frame.size),
+                    0x4000,
+                    "{model:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_interrupt_in_master_mode_leaves_its_frame_on_the_master_stack() {
+        use crate::debugger::DebugStop;
+        // F80010 BRA.S *, with the vertical blank enabled.
+        let mut emu =
+            emulator_with_rom_program(crate::config::CpuModel::M68020, &[(0x10, 0x60FE)], 27);
+        assert!(!emu.bus_mut().custom_write(0x09A, 2, 0xC020));
+        // Interrupt stack at $70000, then master mode on a stack at $74000.
+        assert!(emu.machine.debug_set_register(16, 0x2000));
+        assert!(emu.machine.debug_set_register(15, 0x0007_0000));
+        assert!(emu.machine.debug_set_register(16, 0x3000));
+        assert!(emu.machine.debug_set_register(15, 0x0007_4000));
+        assert_eq!(emu.machine.msp(), Some(0x0007_4000));
+        assert!(emu.machine.ui_toggle_catch(27));
+        let stop = step_to_debug_stop(&mut emu, 200_000);
+        assert!(
+            matches!(
+                stop,
+                DebugStop::Exception {
+                    vector: 27,
+                    pc: 0x00F8_0030,
+                    fault_pc: None,
+                }
+            ),
+            "{stop:?}"
+        );
+        // The handler runs on the interrupt stack, above a format $1
+        // throwaway frame; the real frame is on the master stack.
+        assert_eq!(emu.machine.a(7), 0x0006_FFF8);
+        assert_eq!(emu.machine.msp(), Some(0x0007_3FF8));
+        #[cfg(feature = "dap")]
+        {
+            use crate::debuginfo::unwind::{locate_exception_frame, FrameStyle};
+            let read = |addr: u32, len: usize| emu.machine.debug_read_memory(addr, len);
+            let frame = locate_exception_frame(
+                FrameStyle::Formatted,
+                27,
+                emu.machine.a(7),
+                emu.machine.msp(),
+                &mut |a| Some(u16::from_be_bytes(read(a, 2).try_into().ok()?)),
+                &mut |a| Some(u32::from_be_bytes(read(a, 4).try_into().ok()?)),
+            )
+            .unwrap();
+            assert_eq!((frame.at, frame.format), (0x0007_3FF8, Some(0)));
+            assert_eq!(frame.at.wrapping_add(frame.size), 0x0007_4000);
+            assert_eq!(frame.sr & 0x3000, 0x3000, "stacked SR {:04X}", frame.sr);
+            assert_eq!(frame.stacked_pc, 0x00F8_0010);
+        }
+        // A 68000 has no master stack.
+        let emu = emulator_with_trap_program();
+        assert_eq!(emu.machine.msp(), None);
     }
 
     #[test]
@@ -6809,10 +7063,16 @@ mod tests {
             emu.machine.sr(),
         );
         match emu.machine.take_ui_debug_stop() {
-            Some(DebugStop::Exception { vector, pc }) => {
+            Some(DebugStop::Exception {
+                vector,
+                pc,
+                fault_pc,
+            }) => {
                 assert_eq!(vector, 27);
                 // Stopped at the handler's entry, before it executes.
                 assert_eq!(pc, 0x00F8_0014);
+                // An interrupt arrives between instructions: none raised it.
+                assert_eq!(fault_pc, None);
             }
             other => panic!("expected an exception stop, got {other:?}"),
         }
