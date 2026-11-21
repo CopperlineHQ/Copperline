@@ -6833,6 +6833,7 @@ mod tests {
 
     /// Decode the exception frame at A7 of `emu`, stopped at a handler's
     /// entry, the way the DAP adapter does.
+    #[cfg(feature = "dap")]
     fn decode_frame_at_a7(
         emu: &super::Emulator,
         vector: u16,
@@ -6879,20 +6880,23 @@ mod tests {
             ),
             "{stop:?}"
         );
-        let frame = decode_frame_at_a7(&emu, 3);
-        assert_eq!(frame.access, Some(0x1001));
-        assert_eq!(frame.sr, 0x2700);
-        // The group 0 frame stacks the prefetch address, past the opcode.
-        assert!(
-            (0x00F8_0018..=0x00F8_0020).contains(&frame.stacked_pc),
-            "stacked PC ${:06X}",
-            frame.stacked_pc
-        );
-        assert_eq!(emu.machine.a(7).wrapping_add(frame.size), 0x4000);
+        #[cfg(feature = "dap")]
+        {
+            let frame = decode_frame_at_a7(&emu, 3);
+            assert_eq!(frame.access, Some(0x1001));
+            assert_eq!(frame.sr, 0x2700);
+            // The group 0 frame stacks the prefetch address, past the opcode.
+            assert!(
+                (0x00F8_0018..=0x00F8_0020).contains(&frame.stacked_pc),
+                "stacked PC ${:06X}",
+                frame.stacked_pc
+            );
+            assert_eq!(emu.machine.a(7).wrapping_add(frame.size), 0x4000);
+        }
     }
 
     #[test]
-    fn exception_frames_decode_on_every_cpu_model() {
+    fn exception_catch_and_its_frame_on_every_cpu_model() {
         use crate::config::CpuModel;
         use crate::debugger::DebugStop;
         for model in [
@@ -6918,15 +6922,18 @@ mod tests {
                 ),
                 "{model:?}: {stop:?}"
             );
-            let frame = decode_frame_at_a7(&emu, 4);
-            assert_eq!(frame.sr, 0x2700, "{model:?}");
-            assert_eq!(frame.stacked_pc, 0x00F8_0010, "{model:?}");
-            assert_eq!(frame.access, None, "{model:?}");
-            assert_eq!(
-                emu.machine.a(7).wrapping_add(frame.size),
-                0x4000,
-                "{model:?}"
-            );
+            #[cfg(feature = "dap")]
+            {
+                let frame = decode_frame_at_a7(&emu, 4);
+                assert_eq!(frame.sr, 0x2700, "{model:?}");
+                assert_eq!(frame.stacked_pc, 0x00F8_0010, "{model:?}");
+                assert_eq!(frame.access, None, "{model:?}");
+                assert_eq!(
+                    emu.machine.a(7).wrapping_add(frame.size),
+                    0x4000,
+                    "{model:?}"
+                );
+            }
 
             // F80010 MOVEA.L #$1001,A0 / F80016 JMP (A0): an instruction
             // fetch from an odd address, which faults on every model with
@@ -6957,15 +6964,18 @@ mod tests {
                 ),
                 "{model:?}: {stop:?}"
             );
-            let frame = decode_frame_at_a7(&emu, 3);
-            assert_eq!(frame.sr, 0x2700, "{model:?}");
-            // The 68040 and 68060 record the fetch address word-aligned.
-            assert_eq!(frame.access.map(|a| a & !1), Some(0x1000), "{model:?}");
-            assert_eq!(
-                emu.machine.a(7).wrapping_add(frame.size),
-                0x4000,
-                "{model:?}"
-            );
+            #[cfg(feature = "dap")]
+            {
+                let frame = decode_frame_at_a7(&emu, 3);
+                assert_eq!(frame.sr, 0x2700, "{model:?}");
+                // The 68040 and 68060 record the fetch address word-aligned.
+                assert_eq!(frame.access.map(|a| a & !1), Some(0x1000), "{model:?}");
+                assert_eq!(
+                    emu.machine.a(7).wrapping_add(frame.size),
+                    0x4000,
+                    "{model:?}"
+                );
+            }
         }
     }
 
