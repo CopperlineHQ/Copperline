@@ -4673,7 +4673,12 @@ fn recording_clip_format_parses_and_validates() -> Result<()> {
     }
     let err = parse_config("[recording]\nclip_format = \"webp\"\n").unwrap_err();
     assert!(format!("{err:#}").contains("clip_format"), "{err:#}");
-    // The Recording menu's choice is kept like the video format's.
+    Ok(())
+}
+
+#[cfg(feature = "frontend")]
+#[test]
+fn the_recording_menus_clip_format_is_kept_with_the_menu_settings() -> Result<()> {
     let mut base = RawConfig::parse("")?;
     let overlay = RawConfig::parse("[recording]\nclip_format = \"apng\"\n")?;
     base.merge_menu_settings(&overlay);
