@@ -78,9 +78,10 @@ pub struct CliArgs {
     /// with --screenshot-after/--dump-frames to bound the run).
     /// Repeatable, like `--screenshot-after`.
     pub save_state_after: Vec<(f32, PathBuf)>,
-    /// `--gif-after SECS PATH`: write an animated GIF of the presented
+    /// `--gif-after SECS PATH`: write an animated clip of the presented
     /// frames from SECS emulated seconds for `--gif-seconds` (default
-    /// `[recording] clip_seconds`). Repeatable; the run ends once every
+    /// `[recording] clip_seconds`), an APNG when PATH ends in `.png` or
+    /// `.apng` and a GIF otherwise. Repeatable; the run ends once every
     /// clip is complete.
     pub gif_after: Vec<(f32, PathBuf)>,
     /// `--gif-seconds N`: how many emulated seconds each `--gif-after`
@@ -2295,8 +2296,9 @@ fn help_text() -> String {
          \x20                            <stem>.diff.png and exits with status 3 at the end\n  \
          --save-state-after SECS PATH   write a save state to PATH after SECS emulated seconds,\n  \
          \x20                            then keep running\n  \
-         --gif-after SECS PATH          write an animated GIF of the display starting at SECS\n  \
-         \x20                            emulated seconds to PATH, then exit\n  \
+         --gif-after SECS PATH          write an animated clip of the display starting at SECS\n  \
+         \x20                            emulated seconds to PATH, then exit: an APNG when PATH\n  \
+         \x20                            ends in .png or .apng, a GIF otherwise\n  \
          --gif-seconds N                emulated seconds each --gif-after clip covers\n  \
          \x20                            (default: [recording] clip_seconds, 10)\n  \
          --load-uss PATH                import a WinUAE state; requires its matching Kickstart\n  \
