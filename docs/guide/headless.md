@@ -144,10 +144,10 @@ defaults to 0. Frames are saved in DIR as `frame-000000.png`,
 `frame-000001.png`, and so on, and the run exits after the last one.
 
 (capturing-gif-clips)=
-## Capturing GIF clips
+## Capturing GIF and APNG clips
 
-To write a stretch of the display as an animated GIF -- the same clip the
-window's [Save Clip as GIF](ui.md#saving-a-gif-clip) produces, from a
+To write a stretch of the display as an animated GIF or APNG -- the same
+clip the window's [Save Clip](ui.md#saving-a-gif-clip) produces, from a
 scheduled emulated time instead of the last few seconds:
 
 ```sh
@@ -155,7 +155,13 @@ scheduled emulated time instead of the last few seconds:
   --gif-after 24 /tmp/intro.gif --gif-seconds 5
 ```
 
-`--gif-after SECS PATH` starts the clip at SECS emulated seconds.
+`--gif-after SECS PATH` starts the clip at SECS emulated seconds. The
+file's extension picks its format: a PATH ending in `.png` or `.apng`
+writes an animated PNG, anything else a GIF (so `--gif-after 24
+/tmp/intro.png` is the APNG of the clip above). The APNG is lossless
+whatever the picture's colour count, usually smaller, and plays at up
+to 60 frames per second; see [Saving a GIF clip](ui.md#saving-a-gif-clip)
+for the trade-offs.
 `--gif-seconds N` sets its length (up to 120 seconds) and defaults to
 `[recording] clip_seconds` (10); with `clip_seconds = 0` it must be given.
 Frames are thinned to `[recording] clip_fps` (25 per second on PAL, 30 on
@@ -173,7 +179,7 @@ Timestamps are absolute like every other scheduled flag, so the capture
 composes with `--load-state`, `--script` and the scheduled-input flags:
 resuming a 120 s state, `--gif-after 125 clip.gif` starts five seconds
 in. Because frames are taken on the emulated timeline, the same run
-produces a byte-identical GIF every time. `--gif-after` cannot be combined
+produces a byte-identical clip every time. `--gif-after` cannot be combined
 with `--benchmark-until`, `--gdb`, `--control`, or netplay.
 
 (save-states-headless)=

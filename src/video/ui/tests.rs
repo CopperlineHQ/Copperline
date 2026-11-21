@@ -3825,6 +3825,7 @@ fn panels_render_into_their_rects() {
         rewind: false,
         recording: false,
         video_format: crate::config::VideoFormat::Avi,
+        clip_format: crate::gifclip::ClipFormat::Gif,
         input_recording: false,
         card_outputs: false,
         card_recording: false,

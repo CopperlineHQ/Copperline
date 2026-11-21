@@ -1624,7 +1624,7 @@ pub struct LideConfig {
     pub spin_up: bool,
 }
 
-/// `[recording]`: GIF clip and video recording settings.
+/// `[recording]`: animated clip and video recording settings.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordingConfig {
     /// Emulated seconds of presented frames the window keeps (default
@@ -1634,6 +1634,8 @@ pub struct RecordingConfig {
     /// Clip frame rate, 1 to `gifclip::MAX_CLIP_FPS`; 0 (the default)
     /// picks 25 on PAL and 30 on NTSC.
     pub clip_fps: u32,
+    /// What Save Clip writes: a GIF (the default) or a lossless APNG.
+    pub clip_format: crate::gifclip::ClipFormat,
     /// What Record Video writes.
     pub video_format: VideoFormat,
     /// The ffmpeg MP4 recordings are made with; None looks for one
@@ -1646,6 +1648,7 @@ impl Default for RecordingConfig {
         Self {
             clip_seconds: crate::gifclip::DEFAULT_CLIP_SECONDS,
             clip_fps: 0,
+            clip_format: crate::gifclip::ClipFormat::default(),
             video_format: VideoFormat::default(),
             ffmpeg: None,
         }

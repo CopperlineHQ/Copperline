@@ -507,11 +507,15 @@ pub fn recording_file() -> PathBuf {
     )
 }
 
-/// Default name for a GIF clip saved from the window.
-pub fn clip_file() -> PathBuf {
+/// Default name for an animated clip saved from the window, with the
+/// clip format's file `extension` (`gif` or `png`).
+pub fn clip_file(extension: &str) -> PathBuf {
     output(
         |p, h| p.recordings_dir(h),
-        format!("copperline-clip-{}.gif", crate::timestamp::compact_now()),
+        format!(
+            "copperline-clip-{}.{extension}",
+            crate::timestamp::compact_now()
+        ),
     )
 }
 

@@ -22,6 +22,17 @@ for the earlier release notes.
   reports `usp` (and `msp` on the 68020-68040), and a catch stop's description names the faulting
   instruction (`Caught Address error (vector 3) at $C0123A, handler
   $F80A2E`).
+- Animated clips can be saved as APNG (animated PNG) as well as GIF. The
+  Recording menu's new Clip Format, or `[recording] clip_format = "apng"`,
+  makes Save Clip write `copperline-clip-<timestamp>.png`, and a headless
+  `--gif-after` clip whose path ends in `.png` or `.apng` is written as
+  an APNG. An APNG is lossless: a clip whose frames use 256 colours or
+  fewer between them shares one palette, and HAM or AGA pictures with more
+  are kept as 24-bit RGB instead of being reduced to 256 colours. Frames
+  store only the area that changed, which usually makes the file much
+  smaller than the GIF, and frame timings are exact to the millisecond, so
+  50 and 60 fps clips play at their real rate. Browsers show an APNG in an
+  `<img>` tag like a GIF. GIF stays the default.
 
 ## 1.2.0 - 2026-11-21
 

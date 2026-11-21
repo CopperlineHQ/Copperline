@@ -197,7 +197,7 @@ range checks as the equivalent TOML fields:
 | `--exit-on-return` | (none) | with `--run`: exit with the program's AmigaDOS return code ([Run](run.md#exit-on-return)) |
 | `--pcmcia-cf PATH` | `[pcmcia] card = "cf"`, `path` | a CompactFlash card over a hard-disk image in the A600/A1200 slot |
 | `--pcmcia-sram SIZE` | `[pcmcia] card = "sram"`, `size` | a session-only SRAM card in the slot, `64K` to `4M` |
-| `--gif-after SECS PATH` | (none) | write an animated GIF clip of the display from SECS emulated seconds, then exit (see [](headless.md#capturing-gif-clips)) |
+| `--gif-after SECS PATH` | (none) | write an animated clip of the display from SECS emulated seconds, then exit: an APNG when PATH ends in `.png` or `.apng`, a GIF otherwise (see [](headless.md#capturing-gif-clips)) |
 | `--gif-seconds N` | (none) | length of each `--gif-after` clip in emulated seconds; defaults to `[recording] clip_seconds` |
 | `--terminal` | (none) | show and drive the machine in a Kitty-protocol terminal instead of a window, also over SSH ([Terminal display](terminal.md)) |
 | `--terminal-fps N` | (none; needs `--terminal`) | send at most N frames a second to the terminal |
@@ -1988,19 +1988,24 @@ that much. Headless runs and `--audio-wav` captures are not affected.
 
 ```toml
 [recording]
-clip_seconds = 10      # emulated seconds kept for Save Clip as GIF; 0 = off
-clip_fps = 0           # GIF frame rate; 0 = 25 on PAL, 30 on NTSC
+clip_seconds = 10      # emulated seconds kept for Save Clip; 0 = off
+clip_fps = 0           # clip frame rate; 0 = 25 on PAL, 30 on NTSC
+clip_format = "gif"    # what Save Clip writes: "gif" or "apng"
 video_format = "avi"   # what Record Video writes: "avi" or "mp4"
 # ffmpeg = "/opt/ffmpeg/bin/ffmpeg"   # the ffmpeg MP4 recordings are made with
 ```
 
 The window keeps a rolling ring of the last `clip_seconds` (up to 120) of
-the presented picture for [Save Clip as GIF](ui.md#saving-a-gif-clip);
+the presented picture for [Save Clip](ui.md#saving-a-gif-clip);
 `0` switches the ring and the menu item off. `clip_fps` (1 to 60) is the
-rate every GIF clip is written at, the interactive one and headless
+rate every clip is written at, the interactive one and headless
 `--gif-after` captures alike; the default `0` picks half the field rate,
-25 fps on PAL and 30 on NTSC. Clips land in the `[paths] recordings`
-folder.
+25 fps on PAL and 30 on NTSC. `clip_format` is what Save Clip writes:
+`"gif"` (the default) or `"apng"`, a lossless animated PNG; the Recording
+menu's **Clip Format** sets it too, and keeps the choice for the next
+launch. A headless `--gif-after` clip takes its format from its file's
+extension instead (`.png` or `.apng` for an APNG). Clips land in the
+`[paths] recordings` folder.
 
 `video_format` is what [Record Video](ui.md#recording-video) writes:
 `"avi"` (the default), the recorder's lossless ZMBV and PCM AVI, or
