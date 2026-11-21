@@ -582,6 +582,31 @@ into the boot. With the disk inserted at 32.8 s, it reproduced the new
 `a500-cia-request` beam samples and three of its four timer-B flips. INTREQR, PB6
 and the timer-A ICR bit, the behaviour that probe covers, stayed identical.
 
+The 2026-11-20 AROS ROM refresh moved the handoff on the OCS and ECS probe
+machines from line 131 at 11.263 s to line 235 at 11.393 s (4.999 s to
+5.016 s on the A1200 shape), and six more probes moved with it. Each
+measures something that depends on where it starts against the beam:
+
+- `bltprobe-post` counts the polls left in an all-channel blit that spans
+  about 45 lines, so where the blit starts against the one-plane display
+  fetch changes the count (BLTPRI clear: 1,345 -> 1,231; BLTPRI set stays
+  at 1).
+- `posprobe-v8` counts backward VPOSR:VHPOSR steps, which include one real
+  wrap for each frame the sampling spans (110 -> 112).
+- `a500-display-boundaries` records raw beam samples.
+- `irqprobe-window`, `memprobe-chipmirror` and `memprobe-chipmirror-ecs`
+  change by a few pixels at a stripe edge, where the CPU's COLOR00 write
+  lands against the beam.
+
+The old ROM reproduced each new render exactly. For `bltprobe-post`,
+`irqprobe-window` and both `memprobe-chipmirror` renders, inserting the
+probe disk later in the boot was enough (1.20 s and 0.25 s, among other
+times). For `posprobe-v8` and `a500-display-boundaries`, it took a boot
+block that waits for a fixed beam line, with interrupts off, before jumping
+to the probe: line 40 and line 76 respectively. With that boot block the
+two ROMs render those two probes identically at four of six sync lines; at
+the other two they differ by the sync loop's sub-line jitter.
+
 The OneROM A500 CIA/interrupt timing corrections refresh these two references:
 the timing table changes with the corrected CIA transfer, START/STOP,
 running FORCE LOAD hold, interrupt timing and fixed-DMA starvation counting;

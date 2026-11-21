@@ -17,50 +17,140 @@ The two halves are consumed exactly as WinUAE and FS-UAE take them.
 
 ## Provenance
 
-Built from source on 2026-10-30 from AROS upstream master
-(https://github.com/aros-development-team/AROS) at commit `1fef6c415e`.
+Built from source on 2026-11-20 from AROS upstream master
+(https://github.com/aros-development-team/AROS) at commit `b6dcaeeaa2`.
 No local patch and no unmerged pull request is carried.
 
-The build links `.rom` at 522,216 bytes and `.ext` at 522,104 bytes of the
-524,288-byte banks, leaving 2,072 and 2,184 bytes spare (1,132 and 1,610
-at the previous refresh). Upstream made room before adding the gfx.hidd
-display compositor (`b72155e2bb`):
+The build links `.rom` at 494,524 bytes and `.ext` at 482,996 bytes of the
+524,288-byte banks, leaving 29,764 and 41,292 bytes spare (2,072 and 2,184
+at the previous refresh). The ROM carries the same 75 resident modules.
+The room comes from upstream work to shrink the m68k ROM:
 
-- Generated library and resource setup calls shared libautoinit helpers,
-  and module strings are pooled per bank (`aaab1ff30d`).
-- The empty symbol set every module carried is pooled per bank
-  (`c9b64995c2`).
-- Duplicated helpers in the ext bank, which had overflowed by 938 bytes,
-  are compiled once (`e46ecb2e00`).
-- The no-media boot image is LZ-packed and cut to 8 colours
-  (`b48168b9cf`, `c9b64995c2`).
+- Modules share common code instead of carrying their own copies:
+  gfx.hidd (about 9.9 KB, `fb4105368c`), exec (`f40790db90`), dos
+  (`eec64f2c6d`), graphics (`1d7931b8eb`), intuition (`72f5d7478b`),
+  amigavideo.hidd (`1659e168bb`), p96gfx.hidd (`863a023246`), layers
+  (`2461f44787`), console.device (`ceeb1ed39e`), ata.device
+  (`577b133a02`), afs (`d49e5e0633`), con-handler (`bcf450476f`),
+  cdrom-handler (`9aea166f5d`), gadtools (`c5aef0f2c5`), icon
+  (`84e8b2c80f`) and other m68k code (`01b2c5e6c5`).
+- The kernel no longer builds the TLSF allocator on amiga-m68k, where
+  nothing creates TLSF memory headers (`e451625d6a`).
+- partition.library (now 4.0) keeps only the functions that read
+  partition tables. Creating, writing and editing tables moves to a
+  disk-based partitionedit.library (`da5bab9a88`, `856c7976c8`). The
+  write functions are removed from the function table, so the LVOs of
+  the functions after them move: HDToolBox and C:Partition from AROS
+  disks built before this change call the wrong functions under this ROM.
 
-audio.device and disk.resource moved from the main bank to the ext bank
-(`adff8323a1`).
+mathieeesingbas.library moved from the ext bank to the main bank
+(`37e5538a58`) when the ext bank overflowed by 712 bytes earlier in the
+cycle, before most of the shrinking work landed.
 
 Free memory when a `--run` staged program starts on a `--factory` machine,
 measured with a guest probe that calls `AvailMem` (a bare assembler
 executable, so no C startup code allocates first; these figures are not
-comparable with the older table further down, which used a C probe):
+comparable with the older table further down, which used a C probe). Both
+columns were measured with this refresh's probe, whose executable differs
+slightly in size from the previous refresh's, so the previous-ROM column
+reads 8 bytes below the figures quoted for it further down:
 
 | Machine                        | previous ROM | this ROM  | change  |
 |--------------------------------|--------------|-----------|---------|
-| A500, 512K chip + 512K slow    |      790,488 |   788,712 |  -1,776 |
-| A500, 1 MB chip, no slow/fast  |      793,736 |   791,960 |  -1,776 |
-| A1200, 2 MB chip, no fast      |    1,829,032 | 1,827,256 |  -1,776 |
+| A500, 512K chip + 512K slow    |      788,704 |   785,464 |  -3,240 |
+| A500, 1 MB chip, no slow/fast  |      791,952 |   788,712 |  -3,240 |
+| A1200, 2 MB chip, no fast      |    1,827,248 | 1,823,984 |  -3,264 |
 
-The largest contiguous chip block shrinks by the same 1,776 bytes, to
-785,160 on the 1 MB A500 and 1,820,472 on the A1200. On the 512K chip +
-512K slow A500 the loss is all slow RAM; free chip RAM stays at 509,112
-bytes. The loss has not been traced to a single commit. Among the changes
-in this cycle that allocate at boot are the base compositor object
-gfx.hidd now creates for each display (`b72155e2bb`) and the larger
-TrackDiskBase with its graphics.library open count (`876234286f`,
-`a57919d299`).
+The largest contiguous chip block shrinks by more: 4,248 bytes on the 1 MB
+A500 (785,144 -> 780,896) and 4,288 on the A1200 (1,820,456 ->
+1,816,168). On the 512K chip + 512K slow A500 the loss is all slow RAM;
+free chip RAM stays at 509,112 bytes.
 
-Upstream changes since the previous refresh (master `949d6834f8`) that
-reach this ROM (74 of the 662 commits in the range change the ROM's
-contents):
+2,080 bytes of the loss are oop.library's. `2712c1290e` sizes every OOP
+hash table to a power of two at least twice its expected entry count,
+raises the interface ID table's expected count from 31 to 64, and fixes
+lookups that hashed interface IDs to different buckets on insert and
+lookup. This was traced by breaking on exec.library `AllocMem()` and
+`FreeMem()` through the control protocol from power-on to the probe's
+load, and attributing each call to the first return address on the stack
+outside exec.library: oop.library makes the same 279 allocations on both
+ROMs, 2,080 bytes more in total. The remaining 1,100 bytes or so were not
+attributed by that method.
+
+Upstream changes since the previous refresh (master `1fef6c415e`, 479
+commits) that reach this ROM:
+
+- exec and kernel:
+  - m68k `Switch()` masks interrupts while it puts the outgoing task back
+    on TaskReady or TaskWait. An interrupt that `Signal()`ed a waiting
+    task during that list work could unlink a node and leave a task
+    TS_READY on no list, never dispatched again (`d0b5fa16ab`).
+  - Private memory pools (`Allocate()`/`Deallocate()` on a caller's own
+    MemHeader) accept region sizes that are not a multiple of the chunk
+    size, and their updates are serialised against task switches, for a
+    pool two processes share (`3076e12f66`).
+  - A task that removes itself is marked invalid only once it is off its
+    own stack, which the service task frees as soon as it sees the task
+    invalid (`c60297e56f`).
+- dos.library:
+  - m68k executable hunks, `RunCommand()` stacks and standard DOS packets
+    are allocated normally again instead of from the top of memory, which
+    collided with CD32Load takeover copies and fragmented RAM preloading
+    in Fury of the Furries (`6283e9c420`).
+  - FileInfoBlock, ExAllData, InfoData64 and RecordLock64 take the MorphOS
+    V51 64-bit layouts; `fib_Size64` and `fib_NumBlocks64` overlay
+    `fib_Reserved` (`29019867d8`).
+  - NIL: lock packets pass the right arguments (`aa9fb479d9`), and
+    `ReadArgs()`, pattern matching, `StrToLong()` and `DupLock()` get
+    NULL, overflow and failure checks (`97a5a13cf0`, `452c758ff4`,
+    `e1d8c7e58d`).
+  - LDDemon puts its own current directory back after a lookup instead of
+    keeping a lock the caller may already have freed (`a5e2ee7e53`).
+- graphics, layers and intuition:
+  - amigavideo falls back from the blitter before an operation exceeds
+    the blitter's size limits, checks that every plane is in Chip RAM
+    before using DMA, and accelerates diagonal scrolling (`9e193ec320`).
+  - Area fills keep their line-walk arithmetic in LONGs, so wide or tall
+    polygons no longer read and write outside the TmpRas (`82bfd1df86`).
+    `BltBitMap()` clips negative destination coordinates (`af91a9f30a`),
+    and disposing a region from a hole keeps its chunk chain intact
+    (`506d0f80ea`).
+  - Intuition's synchronous actions (`CloseWindow()`, `OpenWindow()` and
+    the like) work for a task with every signal bit allocated
+    (`2a3000acab`), and Workbench is not reopened for the depth it
+    already has (`b062db2606`).
+- CD32 and ATAPI:
+  - cd.device updates its Akiko interrupt-enable shadow and CDINTENA
+    together with interrupts disabled. An IRQ2 between the two writes
+    left a stale mask that stopped I/O with an interrupt storm
+    (`5a129afd9c`).
+  - ata.device treats NOT READY / BECOMING READY as a disc spinning up,
+    reports UNIT ATTENTION 06/28 as a media change, and drops the
+    spurious media change its initial probe used to report
+    (`c790a4ff7f`, `9c65fbdac0`).
+- afs refuses to rename a directory into itself (`6b7b11a967`); RAM:
+  refuses an empty name and keeps `ExNext()` valid after its entry is
+  deleted (`33fa525b3e`, `7fc67df7ab`); utility.library `CheckDate()`
+  rejects 29 February outside leap years (`e54d391643`).
+
+The previous refresh was built on 2026-10-30 from master `1fef6c415e`,
+also with no local patch and no unmerged pull request. It linked `.rom`
+at 522,216 bytes and `.ext` at 522,104 bytes, leaving 2,072 and 2,184
+bytes spare (1,132 and 1,610 at the refresh before it). Upstream had made
+room before adding the gfx.hidd display compositor (`b72155e2bb`): module
+strings and the empty symbol set every module carried were pooled per
+bank and the generated library setup code shared (`aaab1ff30d`,
+`c9b64995c2`), duplicated ext-bank helpers were compiled once
+(`e46ecb2e00`), and the no-media boot image was LZ-packed and cut to 8
+colours (`b48168b9cf`). audio.device and disk.resource moved to the ext
+bank (`adff8323a1`). Measured with that refresh's probe, it had 1,776
+bytes less free memory at a `--run` program's start than the refresh
+before it: 790,488 -> 788,712 bytes on the 512K chip + 512K slow A500,
+793,736 -> 791,960 on a 1 MB chip-only A500 and 1,829,032 -> 1,827,256 on
+a 2 MB A1200. That loss was not traced to a single commit.
+
+That refresh picked up these changes since master `949d6834f8` (74 of the
+662 commits in the range change the ROM's contents):
 
 - exec: the m68k task-exception trampoline calls Enable() after a
   `tc_ExceptCode` dispatch and restores the interrupted code's condition
@@ -656,6 +746,11 @@ cleanly on macOS):
     ../AROS/configure --target=amiga-m68k    # needs python3-mako and python3-yaml
     make kernel-link-amiga-m68k
     # ROMs land in bin/amiga-m68k/gen/boot/aros-amiga-m68k-{rom,ext}.bin
+
+Installing new images here also means pinning their SHA-256 digests in
+`tools/performance/baseline.json` (`rom_sha256`): the AROS performance gate
+boots both its baseline and candidate binaries on these images and refuses
+to run against unpinned ones.
 
 A build that carries an unmerged pull request merges its head into master
 in the source tree first, so the provenance above is a commit pair anyone
