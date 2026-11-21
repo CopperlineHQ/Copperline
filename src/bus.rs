@@ -1075,10 +1075,12 @@ pub struct Bus {
     /// window plus bitplane pointers during that line for a status bar at
     /// 285-300; the level test resumed fetching in the tail of line 284
     /// and raced the pointer writes, shearing the bar. Re-evaluated at
-    /// every line start (the video standard's fixed line 312 PAL / 262
-    /// NTSC forces a reset, so a window whose DIWSTOP the beam never
-    /// reaches stays open only to the end of its own frame; the frame
-    /// wrap's line zero then runs its own comparators) and after DIW
+    /// every line start (the last line of the field being scanned forces
+    /// a reset -- 312 PAL / 262 NTSC, one line earlier on an interlaced
+    /// short field, line zero of the next field on the A1000's DIP Agnus
+    /// -- so a window whose DIWSTOP the beam never reaches
+    /// stays open only to the end of its own field; the frame wrap's line
+    /// zero then runs its own comparators) and after DIW
     /// writes. `None` means no evaluation has happened on this timeline
     /// (unit fixtures that teleport the beam and poke registers), which
     /// falls back to the level test. Serialized: the value is
@@ -11234,23 +11236,34 @@ impl Bus {
     /// DIWSTRT/DIWSTOP/DIWHIGH write, mirroring the continuously-running
     /// hardware comparators (an equality match on DIWSTOP.V resets the
     /// flop, one on DIWSTRT.V sets it, reset winning a tie; any other line
-    /// leaves it alone). The video standard's fixed line 312 (PAL) / 262
-    /// (NTSC) also resets the flop, winning over a DIWSTRT match on that
-    /// line, so a window whose DIWSTOP the beam never reaches stays open
-    /// only to the end of its own frame and never bleeds into the next
-    /// frame's top. On the hardwired beam schedule the comparator is the
-    /// fixed standard line exactly as vAmiga models it
-    /// (Sequencer::eolHandler, which deliberately does NOT use the current
-    /// field's last line): an interlaced short field ends one line earlier
-    /// and is not force-reset. VARBEAMEN bypasses the hardwired sync
-    /// decode, and its programmable frame may end before line 312 or run
-    /// past it mid-frame (DblPAL), so there the reset follows the
-    /// programmable frame's last line instead.
-    /// timing-test/vdiwprobe-flop pins the progressive-PAL render, where
-    /// the fixed line and the frame's last line coincide.
-    /// TODO: no hardware evidence yet pins the reset line on interlaced
-    /// short fields or programmable totals; an interlaced or VARBEAMEN
-    /// probe photographed on real hardware would.
+    /// leaves it alone). The last raster line of the field being scanned
+    /// also resets the flop, winning over a DIWSTRT match on that line, so
+    /// a window whose DIWSTOP the beam never reaches stays open only to the
+    /// end of its own field and never bleeds into the next field's top.
+    /// That line follows the field: a progressive or interlaced long field
+    /// resets on 312 (PAL) / 262 (NTSC), an interlaced short field one line
+    /// earlier on its own last line (311 / 261), and a VARBEAMEN frame on
+    /// its programmable last line (which may come before line 312 or run
+    /// past it mid-frame, DblPAL).
+    /// The short field's own reset is what keeps the two fields of an
+    /// interlaced screen aligned when its DIWSTOP is the long field's last
+    /// line: a reset on the fixed standard line only (vAmiga's
+    /// Sequencer::eolHandler) carries the short field's open window across
+    /// the wrap, and the long field then fetches from the frame's top, one
+    /// field shifted against the other. The Video Toaster 4.2 switcher is
+    /// the regression example (NTSC, DIWSTOP line 262): its planes hold
+    /// exactly the 241 + 240 lines the two fields show when the short field
+    /// closes on line 261, and the shifted long field wove its screen with
+    /// the fields swapped.
+    /// timing-test/vdiwprobe-flop pins the progressive-PAL render and
+    /// timing-test/vdiwprobe-lace the interlaced one.
+    /// The A1000's original DIP Agnus (8361/8367) has no last-line reset:
+    /// its vertical blank starts on line zero, and that is where it forces
+    /// the window closed, so an open window shows every field's last line
+    /// and the next field's line zero never fetches (WinUAE and Minimig
+    /// model the same split; see [`Self::dip_agnus_resets_window_on_line_zero`]).
+    /// TODO: no hardware photograph pins the reset line on programmable
+    /// totals yet; a VARBEAMEN probe photographed on real hardware would.
     /// An unprogrammed window (both registers zero, the power-on state)
     /// keeps the level fallback so a bare machine still scans its whole
     /// overscan canvas.
@@ -11265,12 +11278,10 @@ impl Bus {
             ));
             return;
         }
-        let forced_reset_line = match self.agnus.programmable_frame_lines() {
-            Some(lines) => lines - 1,
-            None => match self.agnus.video_standard() {
-                VideoStandard::Pal => 312,
-                VideoStandard::Ntsc => 262,
-            },
+        let forced_reset_line = if self.dip_agnus_resets_window_on_line_zero() {
+            0
+        } else {
+            self.agnus.current_frame_lines().saturating_sub(1)
         };
         let diwhigh = self.effective_diwhigh();
         let stop = u32::from(diw_v_stop(self.denise.diwstop, diwhigh));
@@ -11280,6 +11291,19 @@ impl Bus {
         } else if vpos == start {
             self.diw_vertical_open = Some(true);
         }
+    }
+
+    /// Whether the vertical display window's forced reset comes on line
+    /// zero, as on the A1000's DIP Agnus (8361/8367), rather than on the
+    /// field's last line, as on every later Agnus. The DIP Agnus has no
+    /// revision of its own here: it is the OCS Agnus of the machine with
+    /// the WCS at $FC0000, the same identification the light-pen wiring
+    /// uses (`light_pen_wired_port`), so an A1000 configured with an ECS
+    /// Agnus keeps the later rule.
+    /// TODO: model the DIP Agnus as its own `AgnusRevision` (config,
+    /// launcher, netplay and save-state names) and key this on it.
+    fn dip_agnus_resets_window_on_line_zero(&self) -> bool {
+        self.agnus.revision() == AgnusRevision::Ocs && !self.mem.wcs.is_empty()
     }
 
     /// The vertical display gate for a beam line: the live flop for the
