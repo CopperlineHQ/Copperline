@@ -2137,6 +2137,30 @@ impl M68kMachine {
         self.cpu.get_usp()
     }
 
+    /// The master stack pointer, on the CPUs that bank one (the 68020,
+    /// 68030 and 68040 families; the 68060 has a single supervisor
+    /// stack): A7 in master mode, else the banked MSP. An interrupt taken
+    /// in master mode leaves its real frame on this stack.
+    pub fn msp(&self) -> Option<u32> {
+        matches!(
+            self.cpu.cpu_type,
+            CpuType::M68EC020
+                | CpuType::M68020
+                | CpuType::M68EC030
+                | CpuType::M68030
+                | CpuType::M68EC040
+                | CpuType::M68LC040
+                | CpuType::M68040
+        )
+        .then(|| {
+            if self.cpu.s_flag != 0 && self.cpu.m_flag != 0 {
+                self.cpu.a(7)
+            } else {
+                self.cpu.sp[6]
+            }
+        })
+    }
+
     pub fn d(&self, reg: usize) -> u32 {
         self.cpu.d(reg)
     }

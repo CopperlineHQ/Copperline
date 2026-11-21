@@ -83,9 +83,10 @@ pub enum Node {
     Registers {
         frame: usize,
     },
-    /// The flags of a status register value.
+    /// The flags of the live status register (`stacked: None`), or of
+    /// the one an exception frame stacked.
     StatusRegister {
-        sr: u16,
+        stacked: Option<u16>,
     },
     Locals {
         frame: usize,
@@ -230,7 +231,9 @@ pub fn status_register(store: &mut VarStore, sr: u16, live: bool) -> Value {
         "value": format!("0x{sr:04X} [{}]", sr_flags(sr)),
         "type": "word",
         "evaluateName": "sr",
-        "variablesReference": store.add(Node::StatusRegister { sr }),
+        "variablesReference": store.add(Node::StatusRegister {
+            stacked: (!live).then_some(sr),
+        }),
     });
     if !live {
         value["presentationHint"] = json!({"kind": "data", "attributes": ["readOnly"]});

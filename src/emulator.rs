@@ -6980,6 +6980,59 @@ mod tests {
     }
 
     #[test]
+    fn an_interrupt_in_master_mode_leaves_its_frame_on_the_master_stack() {
+        use crate::debugger::DebugStop;
+        // F80010 BRA.S *, with the vertical blank enabled.
+        let mut emu =
+            emulator_with_rom_program(crate::config::CpuModel::M68020, &[(0x10, 0x60FE)], 27);
+        assert!(!emu.bus_mut().custom_write(0x09A, 2, 0xC020));
+        // Interrupt stack at $70000, then master mode on a stack at $74000.
+        assert!(emu.machine.debug_set_register(16, 0x2000));
+        assert!(emu.machine.debug_set_register(15, 0x0007_0000));
+        assert!(emu.machine.debug_set_register(16, 0x3000));
+        assert!(emu.machine.debug_set_register(15, 0x0007_4000));
+        assert_eq!(emu.machine.msp(), Some(0x0007_4000));
+        assert!(emu.machine.ui_toggle_catch(27));
+        let stop = step_to_debug_stop(&mut emu, 200_000);
+        assert!(
+            matches!(
+                stop,
+                DebugStop::Exception {
+                    vector: 27,
+                    pc: 0x00F8_0030,
+                    fault_pc: None,
+                }
+            ),
+            "{stop:?}"
+        );
+        // The handler runs on the interrupt stack, above a format $1
+        // throwaway frame; the real frame is on the master stack.
+        assert_eq!(emu.machine.a(7), 0x0006_FFF8);
+        assert_eq!(emu.machine.msp(), Some(0x0007_3FF8));
+        #[cfg(feature = "dap")]
+        {
+            use crate::debuginfo::unwind::{locate_exception_frame, FrameStyle};
+            let read = |addr: u32, len: usize| emu.machine.debug_read_memory(addr, len);
+            let frame = locate_exception_frame(
+                FrameStyle::Formatted,
+                27,
+                emu.machine.a(7),
+                emu.machine.msp(),
+                &mut |a| Some(u16::from_be_bytes(read(a, 2).try_into().ok()?)),
+                &mut |a| Some(u32::from_be_bytes(read(a, 4).try_into().ok()?)),
+            )
+            .unwrap();
+            assert_eq!((frame.at, frame.format), (0x0007_3FF8, Some(0)));
+            assert_eq!(frame.at.wrapping_add(frame.size), 0x0007_4000);
+            assert_eq!(frame.sr & 0x3000, 0x3000, "stacked SR {:04X}", frame.sr);
+            assert_eq!(frame.stacked_pc, 0x00F8_0010);
+        }
+        // A 68000 has no master stack.
+        let emu = emulator_with_trap_program();
+        assert_eq!(emu.machine.msp(), None);
+    }
+
+    #[test]
     fn exception_catchpoint_stops_on_vblank_interrupt() {
         use crate::debugger::DebugStop;
         let mut emu = emulator_with_call_program();

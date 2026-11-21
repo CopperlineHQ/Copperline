@@ -118,6 +118,8 @@ impl FrameStyle {
 /// An exception stack frame, read where the CPU pushed it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExceptionFrame {
+    /// The address the frame starts at, on the stack the CPU pushed it on.
+    pub at: u32,
     /// The status register of the interrupted context.
     pub sr: u16,
     /// The PC the frame holds: where RTE resumes. Depending on the
@@ -128,7 +130,7 @@ pub struct ExceptionFrame {
     /// The frame format (68010 and later).
     pub format: Option<u8>,
     /// The frame's length in bytes: the interrupted context's supervisor
-    /// stack pointer is this far above the frame.
+    /// stack pointer is this far above `at`.
     pub size: u32,
     /// For a bus or address error, the address of the faulted access,
     /// where the frame records one.
@@ -172,6 +174,7 @@ pub fn decode_exception_frame(
     match style {
         // Group 0: status word, access address, IR, SR, PC (14 bytes).
         FrameStyle::M68000 if matches!(vector, 2 | 3) => Some(ExceptionFrame {
+            at: sp,
             sr: read16(at(8))?,
             stacked_pc: read32(at(10))?,
             format: None,
@@ -179,6 +182,7 @@ pub fn decode_exception_frame(
             access: Some(read32(at(2))?),
         }),
         FrameStyle::M68000 => Some(ExceptionFrame {
+            at: sp,
             sr: read16(at(0))?,
             stacked_pc: read32(at(2))?,
             format: None,
@@ -215,6 +219,7 @@ pub fn decode_exception_frame(
                 _ => None,
             };
             Some(ExceptionFrame {
+                at: sp,
                 sr: read16(at(0))?,
                 stacked_pc: read32(at(2))?,
                 format: Some(format),
@@ -225,13 +230,35 @@ pub fn decode_exception_frame(
     }
 }
 
+/// The frame an exception left for the context it interrupted, with the
+/// handler's A7 at `sp`. An interrupt taken in master mode on a 68020,
+/// 68030 or 68040 pushes its frame on the master stack and a format $1
+/// throwaway copy on the interrupt stack the handler runs on; `msp` is
+/// the banked master stack pointer, which then points at the real frame.
+/// Without it, a throwaway frame cannot be followed and yields `None`.
+pub fn locate_exception_frame(
+    style: FrameStyle,
+    vector: u16,
+    sp: u32,
+    msp: Option<u32>,
+    read16: &mut dyn FnMut(u32) -> Option<u16>,
+    read32: &mut dyn FnMut(u32) -> Option<u32>,
+) -> Option<ExceptionFrame> {
+    let frame = decode_exception_frame(style, vector, sp, read16, read32)?;
+    if frame.format != Some(0x1) {
+        return Some(frame);
+    }
+    decode_exception_frame(style, vector, msp?, read16, read32)
+        .filter(|master| master.format != Some(0x1))
+}
+
 /// Walk the stack of a machine stopped at the first instruction of an
-/// exception handler: the handler (`regs`, A7 at `frame`), then the
-/// context the exception interrupted, then that context's callers.
+/// exception handler: the handler (`regs`), then the context the
+/// exception interrupted, then that context's callers.
 ///
 /// The interrupted context keeps the live registers, which exception
-/// entry does not change, except A7: the frame's own stack above it when
-/// the stacked SR was in supervisor mode, else `usp`. Its PC is
+/// entry does not change, except A7: the stack above `frame` when the
+/// stacked SR was in supervisor mode, else `usp`. Its PC is
 /// `fault_pc`, the instruction that raised the exception, when the stop
 /// knows it, else the stacked PC.
 #[allow(clippy::too_many_arguments)]
@@ -253,7 +280,7 @@ pub fn unwind_exception(
     };
     let mut interrupted = *regs;
     interrupted.a[7] = if frame.sr & 0x2000 != 0 {
-        regs.sp().wrapping_add(frame.size)
+        frame.at.wrapping_add(frame.size)
     } else {
         usp
     };
@@ -585,6 +612,76 @@ mod tests {
         assert_eq!(FrameStyle::for_cpu("M68EC020"), FrameStyle::Formatted);
     }
 
+    #[test]
+    fn a_throwaway_frame_is_followed_to_the_master_stack() {
+        let mut mem = Mem::new();
+        // Interrupt stack: the format $1 throwaway copy.
+        mem.put16(0x6FFF8, 0x3000);
+        mem.put32(0x6FFFA, 0x0000_1030);
+        mem.put16(0x6FFFE, 0x1000 | (27 << 2));
+        // Master stack: the real format $0 frame.
+        mem.put16(0x73FF8, 0x3000);
+        mem.put32(0x73FFA, 0x0000_1030);
+        mem.put16(0x73FFE, 27 << 2);
+        let mut r16 = |a| mem.r16(a);
+        let mut r32 = |a| mem.r32(a);
+        let frame = locate_exception_frame(
+            FrameStyle::Formatted,
+            27,
+            0x6FFF8,
+            Some(0x73FF8),
+            &mut r16,
+            &mut r32,
+        )
+        .unwrap();
+        assert_eq!((frame.at, frame.format, frame.size), (0x73FF8, Some(0), 8));
+        assert_eq!(frame.at.wrapping_add(frame.size), 0x74000);
+        // Without the master stack pointer there is nothing to follow.
+        assert!(locate_exception_frame(
+            FrameStyle::Formatted,
+            27,
+            0x6FFF8,
+            None,
+            &mut r16,
+            &mut r32
+        )
+        .is_none());
+        // Any other frame is the one at A7.
+        let frame =
+            locate_exception_frame(FrameStyle::Formatted, 27, 0x73FF8, None, &mut r16, &mut r32)
+                .unwrap();
+        assert_eq!(frame.at, 0x73FF8);
+
+        // The interrupted context's A7 is above the real frame, not above
+        // the throwaway copy at the handler's A7.
+        let (info, code) = program_with_a_call();
+        let master = locate_exception_frame(
+            FrameStyle::Formatted,
+            27,
+            0x6FFF8,
+            Some(0x73FF8),
+            &mut r16,
+            &mut r32,
+        )
+        .unwrap();
+        let regs = Registers {
+            a: [0, 0, 0, 0, 0, 0, 0, 0x6FFF8],
+            pc: 0x00F8_0100,
+            ..Default::default()
+        };
+        let frames = unwind_exception(
+            &info,
+            &regs,
+            0x8000,
+            &master,
+            None,
+            &mut |a| code.r32(a),
+            &mut |a| code.r16(a),
+            2,
+        );
+        assert_eq!((frames[1].pc, frames[1].sp), (0x1030, 0x74000));
+    }
+
     /// A one-hunk program at 0x1000 with a `bsr.s` at 0x1010 (returning
     /// to 0x1012).
     fn program_with_a_call() -> (crate::debuginfo::DebugInfo, Mem) {
@@ -603,6 +700,7 @@ mod tests {
         let (info, mut mem) = program_with_a_call();
         mem.put32(0x8000, 0x0000_1012); // the faulting routine's return address
         let frame = ExceptionFrame {
+            at: 0x3FF2,
             sr: 0x0000,
             stacked_pc: 0x1044,
             format: None,
@@ -643,6 +741,7 @@ mod tests {
         let (info, mut mem) = program_with_a_call();
         mem.put32(0x3FF8, 0x0000_1012); // just above the six-byte frame
         let frame = ExceptionFrame {
+            at: 0x3FF2,
             sr: 0x2000,
             stacked_pc: 0x1050,
             format: None,

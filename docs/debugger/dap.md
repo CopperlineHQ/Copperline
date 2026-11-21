@@ -257,7 +257,11 @@ An exception breakpoint stops the machine at the first instruction of the
 exception's handler, usually in ROM, with the exception stack frame the CPU
 pushed at A7. The adapter reads that frame (the 68000's short and bus/address
 error frames, and the formats the 68010 and later push) and unwinds through
-it. Below the handler frame comes the context the exception interrupted:
+it. An interrupt taken in master mode on a 68020, 68030 or 68040 leaves only a
+format $1 throwaway frame on the interrupt stack; the adapter follows it to the
+real frame on the master stack. The stop is the same whether it comes from
+Continue or from a step that runs into the exception. Below the handler frame
+comes the context the exception interrupted:
 
 - its PC is the instruction that raised the exception, as the emulator saw
   it start, rather than the PC the CPU stacked. A TRAP, TRAPV, CHK or zero

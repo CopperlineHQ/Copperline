@@ -19,7 +19,7 @@ for the earlier release notes.
   its line, and the address a bus or address error accessed (see
   docs/debugger/dap.md, "Crashes"). In the control protocol a `catch` stop
   reports `exception` (`vector`, `name`, `handler`, `fault_pc`), `regs.get`
-  reports `usp`, and a catch stop's description names the faulting
+  reports `usp` (and `msp` on the 68020-68040), and a catch stop's description names the faulting
   instruction (`Caught Address error (vector 3) at $C0123A, handler
   $F80A2E`).
 

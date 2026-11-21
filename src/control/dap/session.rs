@@ -1419,6 +1419,8 @@ impl Session {
     fn finish_bounded(&mut self, _emit: &mut Emit, stop: &Value, from: Option<RunKind>) {
         self.vars.clear();
         self.frames.clear();
+        // A step can end in a caught exception's handler too.
+        self.exception_stop = caught_exception_of(stop);
         self.phase = Phase::Paused;
         let reason = stop["reason"].as_str().unwrap_or("").to_string();
         let detail = stop["detail"].as_str().unwrap_or("").to_string();
@@ -1723,6 +1725,7 @@ impl Session {
         let reply = self.call("regs.get", json!({}))?;
         let (regs, _) = registers_of(&reply);
         let usp = reply["usp"].as_u64().map(|v| v as u32);
+        let msp = reply["msp"].as_u64().map(|v| v as u32);
         // Paused at a caught exception's handler entry, A7 points at the
         // frame the CPU pushed: unwind through it into the interrupted
         // context.
@@ -1746,10 +1749,11 @@ impl Session {
         let mut read16 = |addr: u32| mem2.read16(addr);
         self.exception_frame = None;
         if let (Some((caught, usp)), Some(style)) = (caught, style) {
-            if let Some(frame) = unwind::decode_exception_frame(
+            if let Some(frame) = unwind::locate_exception_frame(
                 style,
                 caught.vector,
                 regs.sp(),
+                msp,
                 &mut read16,
                 &mut read32,
             ) {
@@ -1957,7 +1961,15 @@ impl Session {
                 }
                 out
             }
-            Node::StatusRegister { sr } => vars::status_register_bits(sr),
+            Node::StatusRegister { stacked } => {
+                // The live SR is read again: an edit leaves the client
+                // holding this reference.
+                let sr = match stacked {
+                    Some(sr) => sr,
+                    None => self.regs()?.1,
+                };
+                vars::status_register_bits(sr)
+            }
             Node::Locals { frame } => {
                 let (Some(info), Some(f)) = (self.info.as_ref(), frame_of(&self.frames, frame))
                 else {
@@ -2534,7 +2546,10 @@ fn registers_of(v: &Value) -> (Registers, u16) {
     (regs, v["sr"].as_u64().unwrap_or(0) as u16)
 }
 
-/// The exception a `catch` stop report carries.
+/// The exception a `catch` stop report carries. `handler` is the stop's
+/// own `pc`, the architectural PC that `regs.get` reports: the
+/// exception's `handler` is the address the bus sees, which on a 24-bit
+/// CPU drops the top byte a vector may set.
 fn caught_exception_of(stop: &Value) -> Option<CaughtException> {
     if stop["reason"].as_str() != Some("catch") {
         return None;
@@ -2542,7 +2557,7 @@ fn caught_exception_of(stop: &Value) -> Option<CaughtException> {
     let exception = &stop["exception"];
     Some(CaughtException {
         vector: u16::try_from(exception["vector"].as_u64()?).ok()?,
-        handler: u32::try_from(exception["handler"].as_u64()?).ok()?,
+        handler: u32::try_from(stop["pc"].as_u64().or(exception["handler"].as_u64())?).ok()?,
         fault_pc: exception["fault_pc"]
             .as_u64()
             .and_then(|pc| u32::try_from(pc).ok()),
@@ -2682,17 +2697,19 @@ mod tests {
 
     #[test]
     fn catch_stops_carry_their_exception() {
+        // A 24-bit CPU's vector can carry a top byte the bus drops: the
+        // handler compared with regs.get is the stop's architectural PC.
         let stop = json!({
             "reason": "catch",
             "detail": "Caught Address error (vector 3) at $C0123A, handler $F80A2E",
-            "pc": 0x00F8_0A2E,
+            "pc": 0xFFF8_0A2Eu32,
             "exception": {"vector": 3, "name": "Address error", "handler": 0x00F8_0A2E, "fault_pc": 0x00C0_123A},
         });
         assert_eq!(
             caught_exception_of(&stop),
             Some(CaughtException {
                 vector: 3,
-                handler: 0x00F8_0A2E,
+                handler: 0xFFF8_0A2E,
                 fault_pc: Some(0x00C0_123A),
             })
         );

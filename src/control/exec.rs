@@ -4204,6 +4204,9 @@ fn regs_value(emu: &Emulator) -> Value {
         "usp": machine.usp(),
         "stopped": machine.stopped(),
     });
+    if let Some(msp) = machine.msp() {
+        value["msp"] = json!(msp);
+    }
     if let Some((fp, fpcr, fpsr, fpiar)) = machine.debug_fpu_registers() {
         value["fpu"] = json!({
             "fp": fp.map(|(sign_exp, mantissa)| {
