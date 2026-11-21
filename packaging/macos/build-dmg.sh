@@ -90,12 +90,16 @@ if [ -n "${PREBUILT_DIR:-}" ]; then
   done
 else
   echo "==> Building release binaries (${targets[*]})"
+  bin_args=()
+  for name in "${binaries[@]}"; do
+    bin_args+=(--bin "$name")
+  done
   for target in "${targets[@]}"; do
     # Idempotent; ensures hand-builds on a fresh checkout have the cross target.
     if command -v rustup >/dev/null 2>&1; then
       rustup target add "$target" >/dev/null
     fi
-    cargo build --release --locked --target "$target"
+    cargo build --release --locked --target "$target" "${bin_args[@]}"
     slice_dirs+=("target/$target/release")
   done
 fi
