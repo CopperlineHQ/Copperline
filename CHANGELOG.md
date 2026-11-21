@@ -23,7 +23,9 @@ for the earlier release notes.
   field being scanned, so an interlaced short field closes it one line
   earlier instead of carrying it open into the next field, which started
   that field's picture a line early. The Video Toaster 4.2 switcher screen
-  was the visible case.
+  was the visible case. The A1000's original Agnus closes the window on
+  line zero of the next field instead, so there an open window now shows
+  each field's last line.
 
 ### Compatibility
 

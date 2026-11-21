@@ -1683,6 +1683,63 @@ fn diw_vertical_flop_resets_on_an_interlaced_short_fields_last_line() {
     );
 }
 
+/// The A1000's DIP Agnus forces the vertical window closed on line zero,
+/// where its vertical blank starts, not on the field's last line: with an
+/// unreachable DIWSTOP an interlaced short field still shows its line 311
+/// and a long field its line 312, and each next field's top starts closed
+/// (WinUAE and Minimig model the same split). The DIP Agnus is the OCS
+/// Agnus of the machine with the WCS at $FC0000; an ECS Agnus fitted to
+/// that machine keeps the later Agnus's last-line rule.
+#[test]
+fn a1000_dip_agnus_resets_the_vertical_window_on_line_zero() {
+    let laced_bus = |agnus: AgnusRevision| {
+        let mut bus = empty_bus();
+        bus.set_chipset_revisions(agnus, DeniseRevision::Ocs);
+        bus.mem.wcs = vec![0u8; crate::memory::WCS_SIZE];
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+        bus.denise.bplcon0 = 0x1204; // 1 plane, LACE
+        bus.denise.ddfstrt = 0x0038;
+        bus.denise.ddfstop = 0x00D0;
+        bus.agnus.set_lace(true);
+        bus.agnus.lof = false; // start inside a short field (312 lines)
+                               // Open at line 0xA0; VSTOP $3C addresses line 316, never reached.
+        assert!(!bus.write_custom_word_from(0x08E, 0xA081, BeamWriteSource::Cpu));
+        assert!(!bus.write_custom_word_from(0x090, 0x3CC1, BeamWriteSource::Cpu));
+        bus
+    };
+    let advance_to_line = |bus: &mut Bus, vpos: u32| {
+        while bus.agnus.vpos != vpos {
+            bus.advance_chipset(1);
+        }
+    };
+    let open = |bus: &Bus| bus.diw_vertical_open_at(bus.agnus.vpos);
+
+    let mut bus = laced_bus(AgnusRevision::Ocs);
+    advance_to_line(&mut bus, 0xA8);
+    assert!(open(&bus));
+    advance_to_line(&mut bus, 311);
+    assert!(open(&bus), "the A1000 shows a short field's last line");
+    advance_to_line(&mut bus, 0);
+    assert_eq!(bus.agnus.current_frame_lines(), 313);
+    assert!(!open(&bus), "line zero closes the window");
+    advance_to_line(&mut bus, 0x30);
+    assert!(!open(&bus), "the long field's top starts closed");
+    advance_to_line(&mut bus, 0xA0);
+    assert!(open(&bus), "the long field opens at its own DIWSTRT");
+    advance_to_line(&mut bus, 312);
+    assert!(open(&bus), "the A1000 shows a long field's last line");
+    advance_to_line(&mut bus, 0);
+    assert_eq!(bus.agnus.current_frame_lines(), 312);
+    assert!(!open(&bus), "line zero closes the window again");
+
+    let mut bus = laced_bus(AgnusRevision::Ecs8372Rev4);
+    advance_to_line(&mut bus, 311);
+    assert!(
+        !open(&bus),
+        "an ECS Agnus in the A1000 resets on the short field's last line"
+    );
+}
+
 /// Both fields of an interlaced NTSC screen whose DIWSTOP is the long
 /// field's last line (262) open on the same DIWSTRT line: the long field
 /// shows lines 21..261, the short field 21..260 (its own last line, 261,

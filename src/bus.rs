@@ -1077,7 +1077,8 @@ pub struct Bus {
     /// and raced the pointer writes, shearing the bar. Re-evaluated at
     /// every line start (the last line of the field being scanned forces
     /// a reset -- 312 PAL / 262 NTSC, one line earlier on an interlaced
-    /// short field -- so a window whose DIWSTOP the beam never reaches
+    /// short field, line zero of the next field on the A1000's DIP Agnus
+    /// -- so a window whose DIWSTOP the beam never reaches
     /// stays open only to the end of its own field; the frame wrap's line
     /// zero then runs its own comparators) and after DIW
     /// writes. `None` means no evaluation has happened on this timeline
@@ -11256,6 +11257,11 @@ impl Bus {
     /// the fields swapped.
     /// timing-test/vdiwprobe-flop pins the progressive-PAL render and
     /// timing-test/vdiwprobe-lace the interlaced one.
+    /// The A1000's original DIP Agnus (8361/8367) has no last-line reset:
+    /// its vertical blank starts on line zero, and that is where it forces
+    /// the window closed, so an open window shows every field's last line
+    /// and the next field's line zero never fetches (WinUAE and Minimig
+    /// model the same split; see [`Self::dip_agnus_resets_window_on_line_zero`]).
     /// TODO: no hardware photograph pins the reset line on programmable
     /// totals yet; a VARBEAMEN probe photographed on real hardware would.
     /// An unprogrammed window (both registers zero, the power-on state)
@@ -11272,7 +11278,11 @@ impl Bus {
             ));
             return;
         }
-        let forced_reset_line = self.agnus.current_frame_lines().saturating_sub(1);
+        let forced_reset_line = if self.dip_agnus_resets_window_on_line_zero() {
+            0
+        } else {
+            self.agnus.current_frame_lines().saturating_sub(1)
+        };
         let diwhigh = self.effective_diwhigh();
         let stop = u32::from(diw_v_stop(self.denise.diwstop, diwhigh));
         let start = u32::from(diw_v_start(self.denise.diwstrt, diwhigh));
@@ -11281,6 +11291,19 @@ impl Bus {
         } else if vpos == start {
             self.diw_vertical_open = Some(true);
         }
+    }
+
+    /// Whether the vertical display window's forced reset comes on line
+    /// zero, as on the A1000's DIP Agnus (8361/8367), rather than on the
+    /// field's last line, as on every later Agnus. The DIP Agnus has no
+    /// revision of its own here: it is the OCS Agnus of the machine with
+    /// the WCS at $FC0000, the same identification the light-pen wiring
+    /// uses (`light_pen_wired_port`), so an A1000 configured with an ECS
+    /// Agnus keeps the later rule.
+    /// TODO: model the DIP Agnus as its own `AgnusRevision` (config,
+    /// launcher, netplay and save-state names) and key this on it.
+    fn dip_agnus_resets_window_on_line_zero(&self) -> bool {
+        self.agnus.revision() == AgnusRevision::Ocs && !self.mem.wcs.is_empty()
     }
 
     /// The vertical display gate for a beam line: the live flop for the

@@ -359,7 +359,13 @@ end of its own field and the next field's top starts closed. That line
 follows the field: 312 (PAL) or 262 (NTSC) on a progressive or interlaced
 long field, one line earlier (311 / 261) on an interlaced short field,
 and the programmable frame's last line under VARBEAMEN, whose frame may
-end before line 312 or run past it mid-frame (DblPAL).
+end before line 312 or run past it mid-frame (DblPAL). The A1000's
+original DIP Agnus (8361/8367) is the exception: its vertical blank starts
+on line zero and forces the window closed there, so an open window shows
+every field's last line and the next field's line zero never fetches
+(WinUAE and Minimig model the same split). Copperline has no separate
+revision for the DIP Agnus yet; it is the OCS Agnus of the machine with
+the A1000's WCS at `$FC0000`.
 
 The short field's own reset keeps the two fields of an interlaced screen
 aligned when its DIWSTOP is the long field's last line. vAmiga resets on
