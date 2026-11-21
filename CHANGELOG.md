@@ -35,6 +35,12 @@ for the earlier release notes.
   rows when that order is clearly smoother on four consecutive pairs of
   fields; blank, moving or ambiguous pictures keep the long-field order.
   Kang Fu (CD32) showed its GREED splash text combed.
+- A netplay control link (setup, disk changes and the spectator feed) no
+  longer fails with "setup data exceeds receive window" when the receiver
+  holds a window of data behind messages its session has not taken yet,
+  as a spectator catching up on a long backlog could. The sender counted
+  those held packets as delivered and ran a whole window past what the
+  receiver could accept; it now waits for the receiver to take them.
 
 ### Compatibility
 
