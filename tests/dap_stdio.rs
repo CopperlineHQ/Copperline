@@ -341,6 +341,265 @@ fn debug_source_fixture(dir_name: &str, name: &str, elf: bool, rom: Option<&std:
     assert!(child.0.wait().expect("adapter exits").success());
 }
 
+/// The adapter process, reaped even when an assertion fails.
+struct AdapterChild(std::process::Child);
+
+impl Drop for AdapterChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// The lines of `guest/dap-test/crash.s` the crash tests expect.
+struct CrashLines {
+    /// The `move.w (a0),d0` that reads an odd address.
+    fault: u64,
+    /// The `bsr.s fetch` that calls it.
+    call: u64,
+}
+
+fn crash_lines() -> CrashLines {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("guest/dap-test/crash.s");
+    let source_text = std::fs::read_to_string(path).unwrap();
+    let line_of = |needle: &str| {
+        source_text
+            .lines()
+            .position(|l| l.trim() == needle)
+            .map(|i| i as u64 + 1)
+            .unwrap_or_else(|| panic!("no line {needle:?}"))
+    };
+    CrashLines {
+        fault: line_of("move.w  (a0),d0"),
+        call: line_of("bsr.s   fetch"),
+    }
+}
+
+/// Launch the crash probe on an A500 with the exception filters an IDE
+/// sends by default, up to the program's load.
+fn start_crash_session(stop_on_entry: bool) -> (AdapterChild, Client) {
+    let program = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("guest/dap-test/crash");
+    let mut child = AdapterChild(
+        Command::new(env!("CARGO_BIN_EXE_copperline-ctl"))
+            .arg("--dap")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("starting adapter"),
+    );
+    let stdin = child.0.stdin.take().unwrap();
+    let stdout = BufReader::new(child.0.stdout.take().unwrap());
+    let (tx, rx) = channel();
+    std::thread::spawn(move || read_messages(stdout, tx));
+    let mut c = Client {
+        stdin,
+        rx,
+        seq: 0,
+        backlog: std::cell::RefCell::new(Vec::new()),
+    };
+    c.call(
+        "initialize",
+        json!({"clientID": "test", "linesStartAt1": true, "columnsStartAt1": true}),
+    );
+    c.call(
+        "launch",
+        json!({
+            "program": program,
+            "copperline": env!("CARGO_BIN_EXE_copperline"),
+            "factory": true,
+            "headless": true,
+            "model": "A500",
+            "cpu": "68000",
+            "stopOnEntry": stop_on_entry,
+            "timeoutMs": 120000,
+        }),
+    );
+    c.event("initialized");
+    // What an IDE sends for the filters the adapter marks as defaults.
+    c.call(
+        "setExceptionBreakpoints",
+        json!({"filters": ["address-error", "illegal-instruction", "trap7"]}),
+    );
+    c.call("configurationDone", json!({}));
+    c.event("module");
+    (child, c)
+}
+
+/// The call stack at the crash probe's address error: the handler, then
+/// the faulting line, then its caller. Returns the faulting frame.
+fn assert_unwound_to_the_fault(c: &mut Client, lines: &CrashLines) -> Value {
+    let frames = c.call("stackTrace", json!({"threadId": 1}));
+    let frames = frames["stackFrames"].as_array().unwrap().clone();
+    // The machine is at the operating system's handler, which has no
+    // source; the IDE focuses the first frame that has one.
+    let handler = &frames[0];
+    assert!(
+        handler["name"]
+            .as_str()
+            .unwrap()
+            .starts_with("Address error handler: "),
+        "{handler}"
+    );
+    assert!(handler.get("source").is_none(), "{handler}");
+    let fault = &frames[1];
+    assert_eq!(fault["name"], "fetch", "{frames:?}");
+    assert!(fault["source"]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("crash.s"));
+    assert_eq!(fault["line"], lines.fault, "{frames:?}");
+    // A caller without DWARF is named by its symbol and the return
+    // address's offset from it (start+8).
+    let caller = &frames[2];
+    assert!(
+        caller["name"].as_str().unwrap().starts_with("start+"),
+        "{frames:?}"
+    );
+    assert_eq!(caller["line"], lines.call, "{frames:?}");
+    fault.clone()
+}
+
+/// A frame's Registers scope, as `variables` returns it, and its
+/// reference.
+fn registers_of_frame(c: &mut Client, frame: &Value) -> (i64, Vec<Value>) {
+    let scopes = c.call("scopes", json!({"frameId": frame["id"]}));
+    let reference = scopes["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Registers")
+        .unwrap_or_else(|| panic!("no Registers scope in {scopes}"))["variablesReference"]
+        .as_i64()
+        .unwrap();
+    let variables = c.call("variables", json!({"variablesReference": reference}));
+    (
+        reference,
+        variables["variables"].as_array().unwrap().clone(),
+    )
+}
+
+fn named<'a>(variables: &'a [Value], name: &str) -> &'a Value {
+    variables
+        .iter()
+        .find(|v| v["name"].as_str() == Some(name))
+        .unwrap_or_else(|| panic!("no {name} in {variables:?}"))
+}
+
+fn finish_crash_session(mut child: AdapterChild, mut c: Client) {
+    c.call("disconnect", json!({"terminateDebuggee": true}));
+    drop(c);
+    assert!(child.0.wait().expect("adapter exits").success());
+}
+
+#[test]
+#[ignore = "boots bundled AROS and launches the emulator plus DAP adapter"]
+fn dap_unwinds_a_caught_address_error_to_the_faulting_source_line() {
+    let lines = crash_lines();
+    let (child, mut c) = start_crash_session(false);
+    let stop = c.stopped();
+    assert_eq!(stop["reason"], "exception", "{stop}");
+    let fault = assert_unwound_to_the_fault(&mut c, &lines);
+
+    // The fault happened on a user stack, and the faulting frame's
+    // registers are the ones the instruction saw: A0 holds the odd
+    // address the exception reports, and SR is the stacked user SR.
+    let info = c.call("exceptionInfo", json!({"threadId": 1}));
+    let description = info["description"].as_str().unwrap();
+    assert!(
+        description.contains(&format!("(crash.s:{})", lines.fault)),
+        "{info}"
+    );
+    let (_, registers) = registers_of_frame(&mut c, &fault);
+    let a0 = named(&registers, "a0")["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let accessed = description
+        .split("accessing $")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no access address in {info}"));
+    assert!(
+        a0.trim_start_matches("0x")
+            .trim_start_matches('0')
+            .eq_ignore_ascii_case(accessed.trim_start_matches('0')),
+        "A0 {a0} vs {info}"
+    );
+    let sr = named(&registers, "sr")["value"].as_str().unwrap();
+    assert!(sr.starts_with("0x00"), "user-mode SR expected: {sr}");
+
+    finish_crash_session(child, c);
+}
+
+#[test]
+#[ignore = "boots bundled AROS and launches the emulator plus DAP adapter"]
+fn dap_unwinds_an_exception_reached_by_stepping_through_an_aliased_vector() {
+    let lines = crash_lines();
+    let (child, mut c) = start_crash_session(true);
+    let stop = c.stopped();
+    assert_eq!(stop["reason"], "entry", "{stop}");
+
+    // An SR flag reference the client already holds follows an edit.
+    let frames = c.call("stackTrace", json!({"threadId": 1}));
+    let entry = frames["stackFrames"][0].clone();
+    let (registers_ref, registers) = registers_of_frame(&mut c, &entry);
+    let sr_var = named(&registers, "sr").clone();
+    let sr_text = sr_var["value"].as_str().unwrap();
+    let sr = u16::from_str_radix(&sr_text[2..6], 16).unwrap();
+    let flags_ref = sr_var["variablesReference"].as_i64().unwrap();
+    let carry = |c: &mut Client| {
+        let flags = c.call("variables", json!({"variablesReference": flags_ref}));
+        named(flags["variables"].as_array().unwrap(), "C")["value"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let before = carry(&mut c);
+    for value in [sr ^ 1, sr] {
+        c.call(
+            "setVariable",
+            json!({"variablesReference": registers_ref, "name": "sr", "value": format!("${value:04X}")}),
+        );
+        let now = carry(&mut c);
+        let expected = if value & 1 != 0 { "1" } else { "0" };
+        assert_eq!(now, expected, "C after setting SR to ${value:04X}");
+    }
+    assert_eq!(carry(&mut c), before);
+
+    // Give the address error vector a top byte the 68000's 24-bit bus
+    // drops: the handler PC is then an alias of the address it runs at.
+    c.call(
+        "evaluate",
+        json!({"expression": "!mem.write {\"addr\": 12, \"data\": \"FF\", \"encoding\": \"hex\"}", "context": "repl"}),
+    );
+
+    // Instruction steps run into the fault: lea, bsr.s, move.w.
+    let mut reason = String::new();
+    for _ in 0..8 {
+        c.call(
+            "stepIn",
+            json!({"threadId": 1, "granularity": "instruction"}),
+        );
+        let stop = c.stopped();
+        reason = stop["reason"].as_str().unwrap_or("").to_string();
+        if reason == "exception" {
+            break;
+        }
+    }
+    assert_eq!(reason, "exception");
+    assert_unwound_to_the_fault(&mut c, &lines);
+    let info = c.call("exceptionInfo", json!({"threadId": 1}));
+    assert!(
+        info["description"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("(crash.s:{})", lines.fault)),
+        "{info}"
+    );
+
+    finish_crash_session(child, c);
+}
+
 #[test]
 #[ignore]
 fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {

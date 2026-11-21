@@ -8,7 +8,7 @@
 use super::eval;
 use crate::control::bridge::{Bridge, Reply};
 use crate::control::proto;
-use crate::debuginfo::unwind::{Frame, Registers};
+use crate::debuginfo::unwind::{Frame, FrameVia, Registers};
 use crate::debuginfo::{
     DebugInfo, Encoding, Function, HunkAddr, Location, TypeDesc, TypeId, Variable,
 };
@@ -83,7 +83,11 @@ pub enum Node {
     Registers {
         frame: usize,
     },
-    StatusRegister,
+    /// The flags of the live status register (`stacked: None`), or of
+    /// the one an exception frame stacked.
+    StatusRegister {
+        stacked: Option<u16>,
+    },
     Locals {
         frame: usize,
     },
@@ -219,15 +223,22 @@ pub fn fpu_registers(fpu: &Value) -> Vec<Value> {
     out
 }
 
-/// The status register, live only (frame 0).
-pub fn status_register(store: &mut VarStore, sr: u16) -> Value {
-    json!({
+/// A status register: the live one (frame 0), or the one an exception
+/// frame stacked for the context it interrupted.
+pub fn status_register(store: &mut VarStore, sr: u16, live: bool) -> Value {
+    let mut value = json!({
         "name": "sr",
         "value": format!("0x{sr:04X} [{}]", sr_flags(sr)),
         "type": "word",
         "evaluateName": "sr",
-        "variablesReference": store.add(Node::StatusRegister),
-    })
+        "variablesReference": store.add(Node::StatusRegister {
+            stacked: (!live).then_some(sr),
+        }),
+    });
+    if !live {
+        value["presentationHint"] = json!({"kind": "data", "attributes": ["readOnly"]});
+    }
+    value
 }
 
 pub fn sr_flags(sr: u16) -> String {
@@ -692,11 +703,12 @@ pub fn locals(
 }
 
 /// The address to look a frame's line/function up at: the PC itself
-/// for the innermost frame, the call site (return address - 2) for the
-/// callers, so a return address at the start of the next line maps to
-/// the line of the call.
+/// for the innermost frame and for the context an exception interrupted
+/// (whose PC is an instruction, not a return address), the call site
+/// (return address - 2) for the callers, so a return address at the
+/// start of the next line maps to the line of the call.
 pub fn lookup_pc(frame: &Frame, index: usize) -> u32 {
-    if index == 0 {
+    if index == 0 || frame.via == FrameVia::Exception {
         frame.pc
     } else {
         frame.pc.wrapping_sub(2)

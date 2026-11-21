@@ -243,6 +243,11 @@ pub struct StopEvent {
     /// the stop coordinate above is the instruction boundary after it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access: Option<Value>,
+    /// For a `catch` stop: the vector, the handler entry the machine
+    /// stopped at (`pc`), and `fault_pc`, the start of the instruction
+    /// that raised the exception (null for an interrupt).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exception: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub collect: Option<Vec<Value>>,
 }
@@ -522,6 +527,7 @@ mod tests {
             seconds: 0.03,
             retired_instructions: 99,
             access: None,
+            exception: None,
             collect: None,
         };
         let v = serde_json::to_value(&ev).unwrap();

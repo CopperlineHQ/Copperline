@@ -3,7 +3,8 @@
 #
 # `lines` is vasm output with LINE debug hunks (-linedebug), the format
 # assembly projects get, from the shared dockerized toolchain
-# (guest/toolchain.mk).
+# (guest/toolchain.mk). `crash` is the same format for the exception
+# unwinding test in tests/dap_stdio.rs: it takes an address error.
 #
 # `hello` is C with DWARF (-g -O0): a relocatable hunk executable whose
 # trailing HUNK_DEBUG block carries the DWARF sections with a symbol
@@ -25,7 +26,7 @@ VASM      = $(DOCKER) vasmm68k_mot
 CFLAGS  = -g -O0 -m68000 -Wall -Wextra -nostdlib -nostartfiles -ffreestanding \
           -fno-tree-loop-distribute-patterns
 
-all: hello lines
+all: hello lines crash
 
 # start.s first: the CLI enters at the start of the first hunk.
 hello: start.s hello.c
@@ -34,7 +35,10 @@ hello: start.s hello.c
 lines: lines.s
 	$(VASM) -Fhunkexe -linedebug -o $@ $<
 
+crash: crash.s
+	$(VASM) -Fhunkexe -linedebug -o $@ $<
+
 clean:
-	rm -f hello lines
+	rm -f hello lines crash
 
 .PHONY: all clean

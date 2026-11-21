@@ -467,8 +467,16 @@ pub enum DebugStop {
     /// there has not executed yet).
     CopperBreak { pc: u32, vpos: u16, hpos: u16 },
     /// The CPU entered a caught exception vector; `pc` is the handler
-    /// entry the machine stopped at.
-    Exception { vector: u16, pc: u32 },
+    /// entry the machine stopped at. `fault_pc` is the start of the
+    /// instruction whose execution raised the exception (the faulting
+    /// access, the illegal opcode, the TRAP), whatever PC the CPU model
+    /// stacked for it; `None` for an interrupt, which arrives between
+    /// instructions (its stacked PC is the one that runs next).
+    Exception {
+        vector: u16,
+        pc: u32,
+        fault_pc: Option<u32>,
+    },
     /// Exec scheduled a task matching the armed task catch.
     Task { name: String, addr: u32 },
     /// The guest OS loaded a program matching the armed loadseg catch;
@@ -499,6 +507,23 @@ pub fn exception_vector_name(vector: u16) -> String {
         32..=47 => format!("TRAP #{}", vector - 32),
         _ => format!("vector {vector}"),
     }
+}
+
+/// A caught exception as a stop report carries it: the vector, the
+/// handler entry the machine stopped at, and the start of the instruction
+/// that raised it (see [`DebugStop::Exception`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CaughtException {
+    pub vector: u16,
+    pub handler: u32,
+    pub fault_pc: Option<u32>,
+}
+
+/// Whether `vector` is taken between instructions (an interrupt
+/// autovector, a spurious or uninitialised interrupt, or a user
+/// interrupt vector) rather than raised by the instruction executing.
+pub fn exception_vector_is_interrupt(vector: u16) -> bool {
+    matches!(vector, 15 | 24..=31 | 64..)
 }
 
 impl DebugStop {
@@ -546,7 +571,19 @@ impl DebugStop {
             DebugStop::CopperBreak { pc, vpos, hpos } => {
                 format!("Copper breakpoint at ${pc:06X} (v{vpos} h{hpos})")
             }
-            DebugStop::Exception { vector, pc } => format!(
+            DebugStop::Exception {
+                vector,
+                pc,
+                fault_pc: Some(fault),
+            } => format!(
+                "Caught {} (vector {vector}) at ${fault:06X}, handler ${pc:06X}",
+                exception_vector_name(*vector)
+            ),
+            DebugStop::Exception {
+                vector,
+                pc,
+                fault_pc: None,
+            } => format!(
                 "Caught {} (vector {vector}), handler ${pc:06X}",
                 exception_vector_name(*vector)
             ),
