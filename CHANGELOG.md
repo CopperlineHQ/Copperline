@@ -17,6 +17,13 @@ for the earlier release notes.
   build whose firmware differs refuses such a state with an error naming
   the board and saying to boot afresh, instead of resuming the guest
   against changed firmware and hanging it.
+- An interlaced screen whose display window stops on the long field's last
+  line (PAL 312, NTSC 262) no longer shows its two fields woven in the wrong
+  order. The vertical display window now closes on the last line of the
+  field being scanned, so an interlaced short field closes it one line
+  earlier instead of carrying it open into the next field, which started
+  that field's picture a line early. The Video Toaster 4.2 switcher screen
+  was the visible case.
 
 ### Compatibility
 

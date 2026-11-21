@@ -352,19 +352,28 @@ line N writing the lower band's DIW, mode and bitplane pointers, and let
 the new DIWSTRT match open the band at line N+1 (Kang Fu CD32's status bar
 is the regression example; a level test resumed fetching in the tail of
 line N and raced the pointer writes). The flop is evaluated at every line
-start and after DIW writes; the video standard's fixed line 312 (PAL) or
-262 (NTSC) forces a reset (winning over a DIWSTRT match on that line), so
-a window whose DIWSTOP line the beam never reaches stays open only to the
-end of its own frame and the next frame's top starts closed. On the
-hardwired beam schedule the comparator is the fixed standard line,
-exactly as vAmiga models it: an interlaced short field ends one line
-earlier and is not force-reset. VARBEAMEN bypasses the hardwired sync
-decode and its programmable frame may end before line 312 or run past it
-mid-frame (DblPAL), so there the reset follows the programmable frame's
-last line instead. The `vdiwprobe-flop` golden render pins the
-progressive-PAL case, where the fixed line and the frame's last line
-coincide; no hardware evidence yet pins the reset line on short fields
-or programmable totals. The latch is part of the save state: it is
+start and after DIW writes; the last raster line of the field being
+scanned forces a reset (winning over a DIWSTRT match on that line), so a
+window whose DIWSTOP line the beam never reaches stays open only to the
+end of its own field and the next field's top starts closed. That line
+follows the field: 312 (PAL) or 262 (NTSC) on a progressive or interlaced
+long field, one line earlier (311 / 261) on an interlaced short field,
+and the programmable frame's last line under VARBEAMEN, whose frame may
+end before line 312 or run past it mid-frame (DblPAL).
+
+The short field's own reset keeps the two fields of an interlaced screen
+aligned when its DIWSTOP is the long field's last line. vAmiga resets on
+the fixed standard line only, which a short field never reaches: the
+window then carries across the wrap and the long field fetches from the
+top of the frame, one field shifted against the other, which a woven
+picture shows as swapped fields. The Video Toaster 4.2 switcher is the
+regression example: its NTSC interlaced screen (DIWSTRT line 21, DIWSTOP
+line 262) has planes of exactly 481 rows, the 241 lines the long field
+shows (21-261) and the 240 the short field shows when its line 261
+closes the window (21-260). The `vdiwprobe-flop` golden render pins the
+progressive-PAL case and `vdiwprobe-lace` the interlaced one; no hardware
+photograph pins the reset line on programmable totals yet. The latch is
+part of the save state: it is
 history-dependent, and control sessions can snapshot mid-frame where no
 register-derived reconstruction is exact.
 
