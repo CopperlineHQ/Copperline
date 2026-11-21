@@ -1881,7 +1881,8 @@ runs to the clip's end (the ring's newest frame plus one period, or the
 would replace sooner is dropped and the newer picture takes over its
 start, which keeps the cumulative timing (60 fps on 60 Hz fields comes
 out as 2, 3, 2, 3 with two frames in three kept). Only the last frame
-can be lengthened, by at most a centisecond. The interactive save clones the ring and
+can be lengthened, by at most a centisecond; a last frame whose slot
+rounds to nothing is left out unless it is the clip's only frame. The interactive save clones the ring and
 encodes on a background thread, flashing the file name on the OSD when
 the write lands; the headless capture writes frames as they are taken,
 waiting for the renderer's exact frame like a frame dump, and finishes
