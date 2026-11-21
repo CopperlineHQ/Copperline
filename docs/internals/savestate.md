@@ -164,6 +164,38 @@ deliberately *not* fingerprinted, but missing storage is still caught on
 load: HDF/CD images reopen by path and fail the load cleanly if absent
 (see below).
 
+### Built-in board firmware
+
+Most board ROMs travel in the state with their board, because the board
+keeps the bytes in a serialized field: the A2091, A4091, LIDE and SF2000
+boot ROMs, the CD32 FMV cartridge ROM, the HRTMon cartridge bank, the
+services board's window image (which holds the `[[filesys]]` handler), and
+the uaelib trap page. A few boards instead serve firmware compiled into the
+binary, listed by `zorro_device::BuiltinRom`: the copperhf boot ROM that
+`copperhf.device` runs from in place, and, for the bundled plugin boards,
+the HostSocket boot ROM and the HostSocket and zz9k plugin modules (whose
+linear memory the state replays). The state carries the board's registers
+and the guest memory initialised from that code, but a load maps whatever
+bytes the loading build embeds, so a state is only sound against the
+firmware it was saved with: a Kickstart 3.1 A1200 state saved while
+booting from a copperhf drive under 1.1.0 hangs at an empty Workbench
+screen in 1.2.0, whose copperhf ROM is 5,416 bytes instead of 5,260.
+
+`M68kMachine::write_chunks` therefore writes a `BROM` chunk
+(`savestate/board_rom.rs`) recording the id, length and SHA-256 of each
+piece of built-in firmware the machine's boards map
+(`BoardDevice::builtin_roms`). The chunk comes before the `Bus` chunks, and
+a load compares each record with this build's bytes as soon as it is
+read: any difference refuses the load, naming the firmware and its board
+and saying to boot afresh, before any board is rebuilt and with the live
+machine untouched. A record for firmware this build does not embed is
+logged and left to the board's own chunk. A state without the chunk
+(written by 1.2.0 or earlier) loads unchecked, as it always did, and the
+load logs a warning naming the built-in firmware its boards map. A board
+added later that serves embedded bytes must be listed in `BuiltinRom` and
+returned by `BoardDevice::builtin_roms`, whose match names every board for
+that reason.
+
 ### File-backed images
 
 Hard-drive and CD backends store enough metadata to reopen their backing
@@ -324,6 +356,7 @@ before it arrived complete.
 | `CPU ` | value | `CpuCore` |
 | `MACH` | value | `MachineRuntimeState` |
 | `ICAC`, `DCAC` | value | `Option<Box<CpuCache>>`, `nil` when absent |
+| `BROM` | value, optional | `board_rom::BoardRoms`: the id, length and SHA-256 of each piece of [built-in board firmware](#built-in-board-firmware) the machine maps; absent from states written before it existed, which load unchecked |
 | `MEM ` | bus fields | `mem` (chip/slow/motherboard/accelerator RAM, ROMs, WCS, and the Zorro autoconfig chain with its RAM boards), `ram_init` |
 | `CIAA`, `CIAB` | bus fields | `cia_a`, `cia_b` |
 | `PAUL` | bus fields | `paula` |
@@ -347,8 +380,8 @@ before it arrived complete.
 
 The chunks for optional hardware (`GAYL`, `PCMC`, `MOBO`, `UAEL`, `CART`,
 `AKIK`, `CDTV`) hold only `Option` fields and are not required: a state
-without one loads with that hardware absent. Apart from `META`, a state
-missing any other chunk is refused with a message naming it.
+without one loads with that hardware absent. Apart from `META` and `BROM`,
+a state missing any other chunk is refused with a message naming it.
 
 `Bus` keeps a single derived `Serialize`/`Deserialize`; the split is done
 by two serde adapters in `savestate/split.rs`. `BusSplitter` is a

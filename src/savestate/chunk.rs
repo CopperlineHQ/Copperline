@@ -86,6 +86,9 @@ pub(crate) struct ChunkSpec {
 //     states simply lack it.
 //   CIAA, CIAB v2: corrected pulse-output semantics. v1 payloads are
 //     upgraded by `migrate_cia_pulse_v1`.
+//   BROM v1: the identities of the built-in board firmware the machine
+//     maps (`board_rom`), added after DCAC (additive: a state without it
+//     loads unchecked, with a warning).
 
 const fn value(tag: &[u8; 4], version: u32, name: &'static str) -> ChunkSpec {
     ChunkSpec {
@@ -129,6 +132,17 @@ pub(crate) const CPU: ChunkSpec = value(b"CPU ", 1, "CPU core");
 pub(crate) const MACH: ChunkSpec = value(b"MACH", 1, "machine runtime");
 pub(crate) const ICAC: ChunkSpec = value(b"ICAC", 1, "instruction cache");
 pub(crate) const DCAC: ChunkSpec = value(b"DCAC", 1, "data cache");
+/// The identities of the built-in board firmware the machine maps
+/// (`board_rom::BoardRoms`). Ahead of the `Bus` chunks so a load refuses
+/// different firmware before any board is rebuilt. Absent from states
+/// written before it existed, which load without the check.
+pub(crate) const BROM: ChunkSpec = ChunkSpec {
+    tag: *b"BROM",
+    version: 1,
+    name: "built-in board firmware",
+    payload: Payload::Value,
+    required: false,
+};
 pub(crate) const MEM: ChunkSpec = bus(b"MEM ", 1, "memory", &["mem", "ram_init"], true);
 pub(crate) const CIAA: ChunkSpec = bus(b"CIAA", 2, "CIA-A", &["cia_a"], true);
 pub(crate) const CIAB: ChunkSpec = bus(b"CIAB", 2, "CIA-B", &["cia_b"], true);
@@ -172,8 +186,8 @@ pub(crate) const BUS: ChunkSpec = ChunkSpec {
 /// chunks, then the body, whose `Bus` chunks follow the order of their
 /// fields in `Bus`, which is what lets them stream.
 pub(crate) const CHUNKS: &[ChunkSpec] = &[
-    DESC, META, CPU, MACH, ICAC, DCAC, MEM, CIAA, CIAB, PAUL, AGNS, COPR, DENI, BLIT, FLOP, RTC,
-    GAYL, PCMC, MOBO, UAEL, CART, AKIK, CDTV, ZORR, KEYB, INPT, BUS,
+    DESC, META, CPU, MACH, ICAC, DCAC, BROM, MEM, CIAA, CIAB, PAUL, AGNS, COPR, DENI, BLIT, FLOP,
+    RTC, GAYL, PCMC, MOBO, UAEL, CART, AKIK, CDTV, ZORR, KEYB, INPT, BUS,
 ];
 
 /// The chunks written in the clear ahead of the zlib stream, in file

@@ -48,6 +48,7 @@
 //! same format over any byte stream, for hosts without a filesystem (the
 //! browser build keeps its states in a download or IndexedDB).
 
+pub(crate) mod board_rom;
 pub(crate) mod chunk;
 pub mod meta;
 pub(crate) mod split;
@@ -1601,6 +1602,115 @@ mod tests {
         let mut blob = Vec::new();
         save_to_writer(machine, &MachineDescriptor::default(), None, &mut blob).unwrap();
         blob
+    }
+
+    // ---- built-in board firmware (BROM) ------------------------------------
+
+    /// A test machine with the copperhf board fitted, which serves the boot
+    /// ROM this build embeds and keeps none of it in its own state.
+    fn copperhf_machine() -> M68kMachine {
+        let mut machine = test_machine();
+        machine
+            .bus_mut()
+            .attach_devices(vec![crate::zorro_device::BoardDevice::Copperhf(
+                crate::copperhf::CopperhfBoard::new(),
+            )]);
+        machine
+    }
+
+    fn recorded_board_roms(blob: &[u8]) -> board_rom::BoardRoms {
+        let (_, chunks) = unpack(blob);
+        let brom = chunks
+            .iter()
+            .find(|chunk| chunk.tag == chunk::BROM.tag)
+            .expect("the state has a BROM chunk");
+        chunk::decode(&brom.payload).unwrap()
+    }
+
+    fn has_copperhf(machine: &mut M68kMachine) -> bool {
+        matches!(
+            machine.bus_mut().devices[..],
+            [crate::zorro_device::BoardDevice::Copperhf(_)]
+        )
+    }
+
+    #[test]
+    fn states_record_the_built_in_board_firmware_they_map() {
+        let blob = saved_blob(&copperhf_machine());
+        let recorded = recorded_board_roms(&blob);
+        let rom = crate::copperhf::COPPERHF_ROM;
+        assert_eq!(recorded.roms.len(), 1);
+        assert_eq!(recorded.roms[0].id, "copperhf-rom");
+        assert_eq!(recorded.roms[0].len, rom.len() as u64);
+        assert_eq!(recorded.roms[0].sha256, crate::hash::sha256_hex(rom));
+        // The same build's firmware matches, so the state loads.
+        let mut restored = test_machine();
+        load_from_reader(&mut restored, blob.as_slice()).unwrap();
+        assert!(has_copperhf(&mut restored));
+        assert!(board_rom::unchecked_warning(restored.bus_mut(), Some(&recorded)).is_none());
+        // A machine without such boards records an empty list.
+        assert!(recorded_board_roms(&saved_blob(&test_machine()))
+            .roms
+            .is_empty());
+    }
+
+    /// A state whose copperhf boot ROM differs from this build's (as a
+    /// 1.1.0 state, with its 5,260-byte ROM, does from 1.2.0's) is refused
+    /// with a message naming the board, and the live machine is untouched.
+    #[test]
+    fn a_state_saved_with_different_board_firmware_is_refused() {
+        let blob = saved_blob(&copperhf_machine());
+        let (prefix, mut chunks) = unpack(&blob);
+        let brom = chunk_mut(&mut chunks, &chunk::BROM);
+        let mut recorded: board_rom::BoardRoms = chunk::decode(&brom.payload).unwrap();
+        recorded.roms[0].len = 5260;
+        recorded.roms[0].sha256 = "0123456789abcdef".repeat(4);
+        brom.payload.clear();
+        chunk::encode(&recorded, &mut brom.payload).unwrap();
+
+        let mut untouched = test_machine();
+        untouched.bus_mut().mem.chip_ram[0x100] = 0x5A;
+        let err = load_from_reader(&mut untouched, pack(&prefix, &chunks).as_slice()).unwrap_err();
+        let text = format!("{err:#}");
+        assert!(
+            text.starts_with("this save state was made with different built-in board firmware"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "the copperhf.device boot ROM of the copperhf hard-drive board ([copperhf])"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("was 5260 bytes"), "{text}");
+        assert!(text.contains("Boot the machine afresh"), "{text}");
+        assert_eq!(untouched.bus_mut().mem.chip_ram[0x100], 0x5A);
+        assert!(untouched.bus_mut().devices.is_empty());
+    }
+
+    /// A state written before the BROM chunk existed (1.2.0 and earlier)
+    /// carries no identities: it loads as it always did, and the warning
+    /// names the firmware that went unchecked.
+    #[test]
+    fn a_state_without_board_firmware_identities_still_loads() {
+        let blob = saved_blob(&copperhf_machine());
+        let (prefix, chunks) = unpack(&blob);
+        let older: Vec<RawChunk> = chunks
+            .into_iter()
+            .filter(|chunk| chunk.tag != chunk::BROM.tag)
+            .collect();
+        let mut restored = test_machine();
+        load_from_reader(&mut restored, pack(&prefix, &older).as_slice()).unwrap();
+        assert!(has_copperhf(&mut restored));
+        let warning = board_rom::unchecked_warning(restored.bus_mut(), None)
+            .expect("an unchecked copperhf ROM is warned about");
+        assert!(
+            warning.contains("the copperhf.device boot ROM of the copperhf hard-drive board"),
+            "{warning}"
+        );
+        assert!(warning.contains("boot the machine afresh"), "{warning}");
+        // Without such boards there is nothing to warn about.
+        assert!(board_rom::unchecked_warning(test_machine().bus_mut(), None).is_none());
     }
 
     #[test]

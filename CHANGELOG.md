@@ -8,6 +8,24 @@ for the earlier release notes.
 
 ## Unreleased
 
+### Fixed
+
+- A save state now records the identity (length and SHA-256) of the board
+  firmware built into Copperline that its machine maps -- the
+  `copperhf.device` boot ROM, and the bundled HostSocket and zz9k boards'
+  plugin modules and HostSocket ROM -- in a new optional `BROM` chunk. A
+  build whose firmware differs refuses such a state with an error naming
+  the board and saying to boot afresh, instead of resuming the guest
+  against changed firmware and hanging it.
+
+### Compatibility
+
+- States written by 1.2.0 and earlier carry no firmware identities and load
+  as before, unchecked, with a warning naming the built-in firmware their
+  boards map. 1.2.0 skips the new chunk (with a log line), so the chunk
+  does not stop it reading states this build writes. Save states keep
+  container version 82 and every existing chunk keeps its version.
+
 ## 1.2.0 - 2026-11-21
 
 ### Added
