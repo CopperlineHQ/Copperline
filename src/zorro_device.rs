@@ -542,7 +542,9 @@ pub trait ZorroDevice {
     fn kind(&self) -> &'static str;
 }
 
+mod builtin_rom;
 mod state;
+pub use builtin_rom::BuiltinRom;
 pub use state::BoardDevice;
 
 impl ZorroDevice for BoardDevice {
@@ -776,6 +778,36 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Copperhf(d) => ZorroDevice::kind(d),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::kind(d),
             BoardDevice::Flyer(d) => ZorroDevice::kind(d.as_ref()),
+        }
+    }
+}
+
+impl BoardDevice {
+    /// The firmware this board serves from the binary rather than from its
+    /// own serialized state ([`BuiltinRom`]). Every board is listed so a new
+    /// one has to decide: a board that keeps its ROM bytes in a serialized
+    /// field (or maps none) has nothing here.
+    pub fn builtin_roms(&self) -> Vec<BuiltinRom> {
+        match self {
+            BoardDevice::Copperhf(_) => vec![BuiltinRom::Copperhf],
+            #[cfg(feature = "wasm-boards")]
+            BoardDevice::Wasm(d) => d.builtin_roms(),
+            BoardDevice::A2091(_)
+            | BoardDevice::A4091(_)
+            | BoardDevice::A2065(_)
+            | BoardDevice::Filesys(_)
+            | BoardDevice::Z3660(_)
+            | BoardDevice::Picasso2(_)
+            | BoardDevice::IdeZorro(_)
+            | BoardDevice::GraffityZ2(_)
+            | BoardDevice::GraffityZ3(_)
+            | BoardDevice::Toccata(_)
+            | BoardDevice::Sf2000Sd(_)
+            | BoardDevice::Flyer(_) => Vec::new(),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(_) => Vec::new(),
+            #[cfg(feature = "cd32-fmv")]
+            BoardDevice::Cd32Fmv(_) => Vec::new(),
         }
     }
 }

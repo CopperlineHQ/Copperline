@@ -115,10 +115,22 @@ the device clock's wall-clock fields, which newer states no longer write. An
 error naming one of those missing fields calls for a newer reader or a new
 snapshot made by the older executable.
 
-Built-in board drivers that run from a ROM inside Copperline are not stored
-in a state. 1.2.0 changed the `copperhf.device` driver, so a 1.1.0 state
-saved with a `[copperhf]` drive attached can hang after loading in 1.2.0;
-boot that machine afresh and save a new state.
+Built-in board firmware -- the ROM `copperhf.device` runs from, and the
+bundled `[hostsocket]` and `[zz9k]` boards' plugin modules and ROM -- is
+part of Copperline, not of a state, so a state is only sound in a build
+with the same firmware. A state records the identity of the built-in
+firmware it was saved with, and a build whose firmware differs refuses to
+load it, with an error naming the board ("this save state was made with
+different built-in board firmware than this build of Copperline: the
+copperhf.device boot ROM of the copperhf hard-drive board ([copperhf]) is
+...") rather than resuming into a hang. Boot that machine afresh and save a
+new state, or load the state in the Copperline version that saved it.
+
+States written by 1.2.0 and earlier do not record it. They load as before,
+with a warning in the log naming the firmware that could not be checked.
+1.2.0 changed the `copperhf.device` driver, so a 1.1.0 state saved with a
+`[copperhf]` drive attached can hang after loading in 1.2.0 or later; boot
+that machine afresh and save a new state.
 
 The reader must also have support for every expansion board in the state.
 A file that loads in one feature build may fail in another. The

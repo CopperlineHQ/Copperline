@@ -2009,6 +2009,29 @@ impl WasmBoard {
         })
     }
 
+    /// The embedded firmware this board runs: a bundled module (named by
+    /// its path sentinel) and the bundled HostSocket ROM resource. A save
+    /// state carries neither, only the module's linear memory, so both are
+    /// recorded by identity (`savestate::board_rom`).
+    pub(crate) fn builtin_roms(&self) -> Vec<crate::zorro_device::BuiltinRom> {
+        use crate::zorro_device::BuiltinRom;
+        let mut roms = Vec::new();
+        if self.module_path == Path::new(crate::hostsocket::BUNDLED_HOSTSOCKET_WASM) {
+            roms.push(BuiltinRom::HostSocketPlugin);
+        } else if self.module_path == Path::new(crate::zz9k::BUNDLED_ZZ9K_WASM) {
+            roms.push(BuiltinRom::Zz9kPlugin);
+        }
+        let rt = self.rt.borrow();
+        let manifest = &rt.manifest;
+        if manifest.file_keys.iter().any(|key| {
+            manifest.config.get(key).map(String::as_str)
+                == Some(crate::hostsocket::BUNDLED_HOSTSOCKET_ROM)
+        }) {
+            roms.push(BuiltinRom::HostSocketRom);
+        }
+        roms
+    }
+
     /// Call an exported function that takes no Amiga memory, returning its
     /// `i32` result (0 if the export is absent or traps).
     fn call_flag(&self, sel: impl FnOnce(&Exports) -> Option<TypedFunc<(), i32>>) -> bool {
@@ -3042,6 +3065,22 @@ mod tests {
         let mut rmem = empty_memory();
         let mut rhost = DeviceHost::new(&mut rmem);
         assert_eq!(restored.read(0x08, 1, &mut rhost), rom_first);
+
+        // Neither embedded piece travels in the state, so a save state
+        // records both by identity.
+        use crate::zorro_device::BuiltinRom;
+        assert_eq!(
+            restored.builtin_roms(),
+            [BuiltinRom::HostSocketPlugin, BuiltinRom::HostSocketRom]
+        );
+    }
+
+    #[test]
+    fn a_plugin_board_from_a_file_embeds_no_firmware() {
+        let path = write_wasm("builtin_roms_counter", COUNTER_WAT);
+        let board = WasmBoard::from_file(&path, manifest("counter", false)).unwrap();
+        assert!(board.builtin_roms().is_empty());
+        let _ = std::fs::remove_file(&path);
     }
 
     // -- Bundled zz9k board: the committed crypto plugin driven through the
@@ -3063,6 +3102,14 @@ mod tests {
             assert_eq!(cfg.spec.manufacturer, 0x6D6E);
             assert_eq!(cfg.spec.product, 4);
             WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap()
+        }
+
+        #[test]
+        fn the_bundled_module_is_recorded_as_built_in_firmware() {
+            assert_eq!(
+                board(false).builtin_roms(),
+                [crate::zorro_device::BuiltinRom::Zz9kPlugin]
+            );
         }
 
         fn r16(b: &mut WasmBoard, host: &mut DeviceHost, off: u32) -> u16 {
