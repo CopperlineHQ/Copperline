@@ -54,9 +54,11 @@ needed. Outputs live in `target/ci/` (or `target/<triple>/ci/` with
 `--release` and its fat LTO. Linux retains Cargo's artifact paths from the
 full suite and directly reuses those executables for the extra ignored
 audio and network checks, avoiding further build-script runs and recompiles.
-macOS and both Windows architectures stage and run every integration test
-target too; asset-backed tests remain ignored. Probe goldens run in separate
-jobs. Audio-stem determinism runs explicitly on all three host platforms.
+On macOS the build runner executes the unit and integration suites, bundled-ROM
+end-to-end tests, probe goldens, and DiagROM checks from one compilation.
+Both Windows architectures stage the test binaries for separate unit and
+golden-render jobs. Audio-stem determinism runs explicitly on all three
+host platforms.
 Native CI jobs have wall-clock limits; golden captures time out after 120 s,
 and image-regression subprocesses after 300 s, killing and reaping a stalled
 emulator while retaining its output.
@@ -74,8 +76,10 @@ GPU preview renders remain ignored; see the
 [video internals](../docs/internals/video.md) for their commands.
 
 The native CI builders publish `cargo-timings-*` artifacts from `--timings`
-for seven days. To inspect build costs locally, add `--timings` and open
-`target/cargo-timings/cargo-timing.html`. CI and packaging use distinct
+for seven days. The macOS DMG workflow also publishes a report per architecture
+for the three executables shipped in the bundle. To inspect build costs locally,
+add `--timings` and open `target/cargo-timings/cargo-timing.html`.
+CI and packaging use distinct
 cache keys because an explicit `--target` build cannot populate the native
 build's output directory. These Rust caches are saved only on `main` and
 restored by pull requests. This avoids filling the repository cache budget

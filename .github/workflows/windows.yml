@@ -6,7 +6,7 @@ name: Windows
 # jobs produce the portable Windows ZIP plus installer and the prebuilt test
 # executables (packages use the shipping release profile; tests use the optimized ci
 # profile without fat LTO), then the checks fan out in
-# parallel against those artifacts, mirroring ci.yml: the packaged zip is
+# parallel against those artifacts: the packaged zip is
 # booted from a clean directory (and its copperline-ctl / import-uae
 # companions started), and the unit suites plus the probe golden
 # renders (pixel-exact deterministic boots on the bundled AROS ROM) run
