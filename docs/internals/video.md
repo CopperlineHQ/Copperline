@@ -1879,9 +1879,14 @@ colour type and a single palette in the header, so frames are staged
 rather than streamed: each frame's delay is fixed when the next arrives,
 the frame is diffed against the canvas the earlier ones left, and only the
 changed rectangle is kept (an unchanged frame lengthens the previous
-one), stored as the rectangle's own exact palette plus indices, or as RGB
-past 256 colours, and deflated at a fast level so a two-minute capture
-stays small in memory. `finish` then picks the format: palette-indexed
+one by its own time), stored as the rectangle's own exact palette plus
+indices, or as RGB past 256 colours, and deflated at a fast level. The
+deflated data stays in memory up to 64 MiB (`STAGE_MEMORY_BUDGET`); later
+frames are appended to an anonymous temporary file and read back when the
+file is written, since a headless capture has no ring budget and two
+minutes of changing truecolour frames can stage gigabytes (a browser
+build, with no host files, keeps everything in memory). `finish` then
+picks the format: palette-indexed
 with the clip's union of colours (first-seen order) when that is 256 or
 fewer, 24-bit RGB otherwise, so nothing is quantized; each staged
 rectangle is inflated, mapped to that form and written through the `png`
@@ -1890,4 +1895,6 @@ first frame is the full-canvas default image). Delays are milliseconds by
 the same cumulative rounding as the GIF's centiseconds, switching to a
 centisecond denominator past the 16-bit numerator's 65.5 s. Browsers show
 a frame of 10 ms or less for 100 ms, so no APNG frame is shorter than
-11 ms: a frame replaced sooner gives its start to the newer picture.
+11 ms: a frame replaced sooner gives its start to the newer picture, and
+a last frame whose slot rounds to nothing is left out unless it is the
+clip's only frame.

@@ -6,9 +6,10 @@
 //! An APNG names its frame count, colour type and one palette for the
 //! whole animation in its header, so frames cannot be written as they
 //! arrive the way a GIF's are. Each frame is staged instead: only the
-//! rectangle that changed since the previous frame is kept, deflated in
-//! memory, and the file is written in [`ApngWriter::finish`] once every
-//! frame is known. A clip whose frames use 256 colours or fewer between
+//! rectangle that changed since the previous frame is kept, deflated --
+//! in memory up to [`STAGE_MEMORY_BUDGET`], in an anonymous temporary
+//! file past it -- and the file is written in [`ApngWriter::finish`] once
+//! every frame is known. A clip whose frames use 256 colours or fewer between
 //! them is written palette-indexed; any more and it is written as 24-bit
 //! RGB. Either way no colour is reduced, unlike a GIF, which quantizes a
 //! frame of more than 256 colours.
@@ -23,11 +24,13 @@
 //! writer uses in centiseconds. Browsers show a frame of 10 ms or less
 //! for 100 ms, so no frame is shorter than [`MIN_APNG_DELAY_MS`]; a frame
 //! replaced sooner gives its slot to the newer picture. 60 fps clips
-//! therefore play at their real rate, which a GIF cannot.
+//! therefore play at their real rate, which a GIF cannot. A final frame
+//! whose slot rounds to nothing is left out unless it is the only one.
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use super::{frame_rgba, resample_nearest, ClipFrame, FramePixels};
 
@@ -38,6 +41,21 @@ pub const MIN_APNG_DELAY_MS: i64 = 11;
 /// Colour bits that make a picture: the renderer's alpha byte is
 /// presentation noise, not picture.
 const RGB_MASK: u32 = 0x00FF_FFFF;
+/// Deflated frame data an [`ApngWriter`] holds in memory; frames past it
+/// are spooled to a temporary file until the APNG is written. A headless
+/// capture is not bounded by the interactive ring's budget, and two
+/// minutes of 60 fps truecolour noise stages gigabytes.
+pub const STAGE_MEMORY_BUDGET: usize = 64 * 1024 * 1024;
+
+/// Where a staged frame's deflated data is kept.
+enum Payload {
+    Memory(Vec<u8>),
+    /// `len` bytes at `offset` in the writer's spool file.
+    Spooled {
+        offset: u64,
+        len: usize,
+    },
+}
 
 /// A frame's changed rectangle, staged until the file is written.
 struct StagedFrame {
@@ -50,7 +68,7 @@ struct StagedFrame {
     /// indices into them, None when `data` holds RGB triples.
     palette: Option<Vec<u32>>,
     /// The indices or RGB triples, row by row, deflated.
-    data: Vec<u8>,
+    data: Payload,
 }
 
 /// Every colour the clip uses, in first-seen order, while there are 256
@@ -99,6 +117,13 @@ pub struct ApngWriter<W: Write> {
     palette: Option<ClipPalette>,
     /// Scratch for a frame whose size differs from the canvas.
     resample: Vec<u32>,
+    /// Staged data held in memory, against `memory_budget`.
+    in_memory: usize,
+    memory_budget: usize,
+    /// The temporary file frames past the budget are appended to, created
+    /// with the first of them, and its length.
+    spool: Option<File>,
+    spool_len: u64,
 }
 
 impl<W: Write> ApngWriter<W> {
@@ -125,6 +150,15 @@ impl<W: Write> ApngWriter<W> {
             staged: Vec::new(),
             palette: Some(ClipPalette::default()),
             resample: Vec::new(),
+            in_memory: 0,
+            // A browser build has no host files to spool to.
+            memory_budget: if cfg!(target_arch = "wasm32") {
+                usize::MAX
+            } else {
+                STAGE_MEMORY_BUDGET
+            },
+            spool: None,
+            spool_len: 0,
         })
     }
 
@@ -154,14 +188,20 @@ impl<W: Write> ApngWriter<W> {
     }
 
     /// Stage the last queued frame -- shown until `end` (default: one clip
-    /// period after it), and for at least [`MIN_APNG_DELAY_MS`] -- then
-    /// write the file, returning the sink and the number of frames.
+    /// period after it) -- then write the file, returning the sink and the
+    /// number of frames. A last frame identical to the one before only
+    /// lengthens it by its own time; a new picture is shown for at least
+    /// [`MIN_APNG_DELAY_MS`], unless its slot rounds to no time at all and
+    /// an earlier frame is staged, when it is left out rather than
+    /// lengthen the loop.
     pub fn finish(mut self, end: Option<f64>) -> Result<(W, u32)> {
         if let Some(last) = self.pending.take() {
             let end = end.unwrap_or(last.t + 1.0 / f64::from(self.fps));
             let origin = self.origin.unwrap_or(last.t);
-            let delay = (millis(end - origin) - self.pending_start_ms).max(MIN_APNG_DELAY_MS);
-            self.stage(&last, delay)?;
+            let delay = millis(end - origin) - self.pending_start_ms;
+            if delay > 0 || self.staged.is_empty() {
+                self.stage(&last, delay)?;
+            }
         }
         anyhow::ensure!(!self.staged.is_empty(), "no frames to write");
         let frames = self.staged.len() as u32;
@@ -169,7 +209,9 @@ impl<W: Write> ApngWriter<W> {
         Ok((self.out, frames))
     }
 
-    /// Diff `frame` against the canvas and stage the changed rectangle.
+    /// Diff `frame` against the canvas and stage the changed rectangle,
+    /// shown for `delay_ms` (at least [`MIN_APNG_DELAY_MS`]). A frame that
+    /// changes nothing adds `delay_ms` to the frame before it instead.
     fn stage(&mut self, frame: &ClipFrame, delay_ms: i64) -> Result<()> {
         let mut rgb = frame_rgba(&frame.pixels);
         if frame.width != self.width || frame.height != self.height {
@@ -196,9 +238,10 @@ impl<W: Write> ApngWriter<W> {
             changed_rect(&self.canvas, &rgb, self.width)
         };
         let Some((x, y, w, h)) = rect else {
-            // Nothing changed: the frame on screen simply stays longer.
+            // Nothing changed: the frame on screen simply stays longer, by
+            // this frame's own time (that frame already has the minimum).
             if let Some(last) = self.staged.last_mut() {
-                last.delay_ms += delay_ms;
+                last.delay_ms += delay_ms.max(0);
             }
             return Ok(());
         };
@@ -226,17 +269,42 @@ impl<W: Write> ApngWriter<W> {
                 (None, rgb_bytes(&px))
             }
         };
+        let data = self.keep(deflate(&raw)?)?;
         self.staged.push(StagedFrame {
-            delay_ms,
+            delay_ms: delay_ms.max(MIN_APNG_DELAY_MS),
             x: x as u32,
             y: y as u32,
             width: w as u32,
             height: h as u32,
             palette,
-            data: deflate(&raw)?,
+            data,
         });
         self.canvas = rgb;
         Ok(())
+    }
+
+    /// Keep a staged frame's deflated `data`: in memory while the staged
+    /// data fits the budget, else appended to the spool file.
+    fn keep(&mut self, data: Vec<u8>) -> Result<Payload> {
+        let held = self.in_memory.saturating_add(data.len());
+        if held <= self.memory_budget {
+            self.in_memory = held;
+            return Ok(Payload::Memory(data));
+        }
+        let mut spool = match self.spool.take() {
+            Some(file) => file,
+            None => spool_file().context("creating a temporary file for the APNG clip")?,
+        };
+        spool
+            .write_all(&data)
+            .context("spooling an APNG frame to a temporary file")?;
+        self.spool = Some(spool);
+        let offset = self.spool_len;
+        self.spool_len += data.len() as u64;
+        Ok(Payload::Spooled {
+            offset,
+            len: data.len(),
+        })
     }
 
     /// Encode the staged frames as the APNG.
@@ -271,7 +339,21 @@ impl<W: Write> ApngWriter<W> {
             .context("writing the APNG animation header")?;
         let mut writer = encoder.write_header().context("writing the APNG header")?;
         for frame in &self.staged {
-            let data = inflate(&frame.data)?;
+            let data = match &frame.data {
+                Payload::Memory(bytes) => inflate(bytes)?,
+                &Payload::Spooled { offset, len } => {
+                    let spool = self
+                        .spool
+                        .as_mut()
+                        .context("the APNG clip's temporary file is missing")?;
+                    let mut bytes = vec![0; len];
+                    spool
+                        .seek(SeekFrom::Start(offset))
+                        .and_then(|_| spool.read_exact(&mut bytes))
+                        .context("reading back a spooled APNG frame")?;
+                    inflate(&bytes)?
+                }
+            };
             let raw = match (&frame.palette, clip_index) {
                 // Indices into the frame's own colours, mapped to the
                 // clip's palette. (Every frame of an indexed clip has its
@@ -307,6 +389,19 @@ impl<W: Write> ApngWriter<W> {
         writer.finish().context("writing the APNG trailer")?;
         Ok(())
     }
+}
+
+/// An anonymous temporary file for staged frames, removed when closed.
+#[cfg(not(target_arch = "wasm32"))]
+fn spool_file() -> std::io::Result<File> {
+    tempfile::tempfile()
+}
+
+/// A browser build has no host files (and never spools: its budget is
+/// unlimited).
+#[cfg(target_arch = "wasm32")]
+fn spool_file() -> std::io::Result<File> {
+    Err(std::io::ErrorKind::Unsupported.into())
 }
 
 /// `secs` rounded to whole milliseconds.
@@ -603,6 +698,77 @@ mod tests {
         let (_, decoded) = decode(&bytes);
         assert_eq!(delays_ms(&decoded), vec![20.0, 40.0]);
         assert_eq!(decoded[1].canvas, rgb_of(&solid(2, 2, blue)));
+    }
+
+    #[test]
+    fn an_identical_last_sample_adds_only_its_own_time() {
+        let red = solid(2, 2, rgba(255, 0, 0));
+        let blue = solid(2, 2, rgba(0, 0, 255));
+        let two = vec![
+            ClipFrame::new(0.0, 2, 2, &red),
+            ClipFrame::new(0.040, 2, 2, &blue),
+        ];
+        let mut three = two.clone();
+        three.push(ClipFrame::new(0.080, 2, 2, &blue));
+        // The repeated blue's 1 ms tail adds that millisecond to the blue
+        // frame, which already has the minimum: both loop every 81 ms.
+        for frames in [&two, &three] {
+            let (bytes, written) = encode(frames, 25, Some(0.081));
+            assert_eq!(written, 2);
+            assert_eq!(delays_ms(&decode(&bytes).1), vec![40.0, 41.0]);
+        }
+    }
+
+    #[test]
+    fn a_final_frame_with_no_time_left_is_left_out() {
+        let frames = vec![
+            ClipFrame::new(0.0, 2, 2, &solid(2, 2, rgba(1, 1, 1))),
+            ClipFrame::new(0.040, 2, 2, &solid(2, 2, rgba(2, 2, 2))),
+        ];
+        // The clip ends 0.4 ms after the last frame, so both round to
+        // 40 ms: holding that frame for the minimum would make a 40 ms
+        // clip loop every 51 ms.
+        let (bytes, written) = encode(&frames, 25, Some(0.0404));
+        assert_eq!(written, 1);
+        assert_eq!(delays_ms(&decode(&bytes).1), vec![40.0]);
+        // A clip's only frame is still written, held for the minimum.
+        let (bytes, written) = encode(&frames[..1], 25, Some(0.0));
+        assert_eq!(written, 1);
+        assert_eq!(delays_ms(&decode(&bytes).1), vec![MIN_APNG_DELAY_MS as f64]);
+    }
+
+    #[test]
+    fn frames_past_the_memory_budget_spool_to_a_file_and_write_the_same_clip() {
+        // Eight different 1024-colour pictures: each stages a truecolour
+        // rectangle of about 3 KiB.
+        let pictures: Vec<Vec<u32>> = (0..8usize)
+            .map(|i| {
+                let mut px = gradient_1024();
+                px.rotate_left(i * 37);
+                px
+            })
+            .collect();
+        let frames: Vec<ClipFrame> = pictures
+            .iter()
+            .enumerate()
+            .map(|(i, px)| ClipFrame::new(i as f64 * 0.04, 32, 32, px))
+            .collect();
+        let (unspooled, _) = encode(&frames, 25, None);
+        let budget = 8 * 1024;
+        let mut writer = ApngWriter::new(Vec::new(), 32, 32, 25).unwrap();
+        writer.memory_budget = budget;
+        for frame in &frames {
+            writer.push(frame.clone()).unwrap();
+        }
+        assert!(writer.in_memory > 0 && writer.in_memory <= budget);
+        assert!(writer.spool_len > 0, "later frames were spooled");
+        let (spooled, written) = writer.finish(None).unwrap();
+        assert_eq!(written, 8);
+        assert_eq!(spooled, unspooled, "spooling does not change the file");
+        let (_, decoded) = decode(&spooled);
+        for (frame, px) in decoded.iter().zip(&pictures) {
+            assert_eq!(frame.canvas, rgb_of(px));
+        }
     }
 
     #[test]
