@@ -106,14 +106,17 @@ while preserving your settings, saves and any media you added. By default,
 user data is in
 `%USERPROFILE%\Documents\Copperline`; see [portable data](ui.md#where-files-go).
 
-The installer and executables are code-signed, and Windows names **SignPath
-Foundation** as their publisher: free code signing provided by
+Windows releases are to be code-signed with **SignPath Foundation** as their
+publisher: free code signing provided by
 [SignPath.io](https://signpath.io/), certificate by
 [SignPath Foundation](https://signpath.org/). See the
-[code signing policy](https://copperline.dev/code-signing/). SmartScreen
-also weighs how widely a download has been seen, so shortly after a release
-it may still show **Windows protected your PC**. **More info** shows the
-publisher; **Run anyway** proceeds.
+[code signing policy](https://copperline.dev/code-signing/). Until that
+certificate is issued, the installer and executables are unsigned, and
+SmartScreen shows **Windows protected your PC** when Setup or
+`copperline.exe` first runs; choose **More info**, then **Run anyway**. Once
+releases are signed, SmartScreen still weighs how widely a download has been
+seen, so shortly after a release it may show the same warning with SignPath
+Foundation named as the publisher.
 
 For a portable installation, download `Copperline-X.Y.Z-win-x64.zip` or
 `Copperline-X.Y.Z-win-arm64.zip`. Extract the whole archive and run
