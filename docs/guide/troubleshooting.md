@@ -108,12 +108,17 @@ CIA version 2. That does not make the resulting states readable by 1.0.x.
 Forward compatibility is not guaranteed merely because the container version
 is the same. Preserve a copy before trying a state in another build.
 
-The post-1.1.0 external-drive ID fix is another one-way boundary even though
-the container and chunk versions did not change: current maintenance builds
-read 1.1.0 states, but 1.1.0 cannot read their states. Its floppy decoder
-requires `external_id_mode`, which newer states no longer write. An error
-naming that missing field calls for a newer reader or a new snapshot made by
-the older executable.
+1.2.0 is another one-way boundary even though the container and chunk
+versions did not change: 1.2.0 reads 1.1.0 states, but 1.1.0 cannot read
+1.2.0 states. Its decoder requires the floppy drives' `external_id_mode` and
+the device clock's wall-clock fields, which newer states no longer write. An
+error naming one of those missing fields calls for a newer reader or a new
+snapshot made by the older executable.
+
+Built-in board drivers that run from a ROM inside Copperline are not stored
+in a state. 1.2.0 changed the `copperhf.device` driver, so a 1.1.0 state
+saved with a `[copperhf]` drive attached can hang after loading in 1.2.0;
+boot that machine afresh and save a new state.
 
 The reader must also have support for every expansion board in the state.
 A file that loads in one feature build may fail in another. The

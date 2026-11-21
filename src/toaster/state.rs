@@ -181,6 +181,12 @@ impl Toaster {
             }
         }
         card.active = saved.active;
+        // The inputs start reading their folders when the switcher first
+        // drives the card. A card that takes a state saved while it was
+        // driven never sees that first header, so start them here.
+        if card.active {
+            card.video.start_inputs();
+        }
         card.record_lines = saved.record_lines;
         let [fields, elh_lines, write_lines, read_requests, port_bytes, grabs_encoded] =
             saved.stats;
