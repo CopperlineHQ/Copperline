@@ -10,23 +10,30 @@ use super::*;
 
 impl Bus {
     /// Before the wrap replaces the completed-frame snapshot, keep it as the
-    /// previous field when it was laced, so the field about to be promoted
-    /// can be woven with it (`screenshot::render_native`). Only laced
-    /// pictures pay for the copy; any other frame drops the history.
+    /// newest previous field when it was laced, so the field about to be
+    /// promoted can be woven with it and the older fields can corroborate
+    /// the weave order (`screenshot::render_native`). Only laced pictures
+    /// pay for the copy, one field per wrap however long the history: the
+    /// oldest retained field's buffers are reused for the new one. Any
+    /// other frame drops the history.
     fn retain_native_previous_field(&mut self) {
         let laced = self
             .last_frame_render_base
             .is_some_and(|base| base.bplcon0 & 0x0004 != 0);
         if !laced {
-            self.native_previous_field = None;
+            self.native_previous_fields.clear();
             return;
         }
-        let mut field = match self.native_previous_field.take() {
-            Some(field) => field,
-            None => Box::new(crate::video::bitplane::RenderInput::from_bus(self)),
+        let retained = crate::video::deinterlace::WEAVE_FLIP_FIELDS as usize;
+        let oldest = if self.native_previous_fields.len() >= retained {
+            self.native_previous_fields.pop_back()
+        } else {
+            None
         };
+        let mut field =
+            oldest.unwrap_or_else(|| Box::new(crate::video::bitplane::RenderInput::from_bus(self)));
         field.refill_detached_from_bus(self);
-        self.native_previous_field = Some(field);
+        self.native_previous_fields.push_front(field);
     }
 
     pub(super) fn begin_new_beam_frame(&mut self) {

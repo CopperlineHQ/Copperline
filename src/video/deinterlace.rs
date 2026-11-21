@@ -268,27 +268,16 @@ impl Deinterlacer {
     /// Judge the two possible weave pairings of the incoming field against
     /// the stored opposite field and maintain [`Self::weave_flip`].
     ///
-    /// Both assemblies share the seams between same-index rows of the two
-    /// fields, so the discriminating energy is in the cross seams: with the
-    /// current field on the upper parity the output pairs `opp[y]` with
-    /// `cur[y + 1]`, on the lower parity it pairs `cur[y]` with
-    /// `opp[y + 1]`. A wrongly phased weave of a static picture makes the
-    /// losing sum carry the comb, so the smoother sum names the pairing the
-    /// content was drawn for. Motion widens both sums roughly equally and
-    /// fails the margin test, so panning scenes do not vote. The flip
-    /// toggles only after `WEAVE_FLIP_FIELDS` consecutive losing fields,
-    /// and toggling relabels the stored field history (each kept field's
-    /// output parity flips with the routing).
+    /// [`WeaveSeams`] names the pairing a static picture was drawn for;
+    /// motion widens both of its sums roughly equally and fails the margin
+    /// test, so panning scenes do not vote. The flip toggles only after
+    /// `WEAVE_FLIP_FIELDS` consecutive losing fields, and toggling relabels
+    /// the stored field history (each kept field's output parity flips with
+    /// the routing).
     fn update_weave_phase(&mut self, field: &[u32], rows: usize, width: usize, base_parity: usize) {
-        /// Consecutive fields of comb evidence needed to toggle the phase.
-        const WEAVE_FLIP_FIELDS: u32 = 4;
-        /// The smoother pairing must win by this ratio (denominator /
-        /// numerator of a 20% margin) before a field counts as evidence.
-        const MARGIN_NUM: u64 = 4;
-        const MARGIN_DEN: u64 = 5;
-        /// Minimum per-sample seam energy for a field to vote at all:
-        /// blank and near-blank fields say nothing about pairing.
-        const MIN_ENERGY: u64 = 4;
+        /// Every eighth column is enough evidence per field and keeps the
+        /// per-field cost of the presentation path small.
+        const X_STEP: usize = 8;
 
         let parity = base_parity ^ usize::from(self.weave_flip);
         let opposite = parity ^ 1;
@@ -296,37 +285,10 @@ impl Deinterlacer {
             self.weave_flip_votes = 0;
             return;
         }
-        let prev_opp = &self.prev[opposite];
-        let mut cur_upper: u64 = 0;
-        let mut cur_lower: u64 = 0;
-        let mut samples: u64 = 0;
-        let diff = |a: u32, b: u32| -> u64 {
-            let d = |shift: u32| {
-                (((a >> shift) & 0xFF) as i32 - ((b >> shift) & 0xFF) as i32).unsigned_abs() as u64
-            };
-            d(0) + d(8) + d(16)
-        };
-        for y in 0..rows - 1 {
-            let cur_row = &field[y * width..(y + 1) * width];
-            let cur_next = &field[(y + 1) * width..(y + 2) * width];
-            let opp_row = &prev_opp[y * width..(y + 1) * width];
-            let opp_next = &prev_opp[(y + 1) * width..(y + 2) * width];
-            let mut x = 0;
-            while x < width {
-                cur_upper += diff(opp_row[x], cur_next[x]);
-                cur_lower += diff(cur_row[x], opp_next[x]);
-                samples += 1;
-                x += 8;
-            }
-        }
-        let (smoother_cur_upper, smaller, larger) = if cur_upper <= cur_lower {
-            (true, cur_upper, cur_lower)
-        } else {
-            (false, cur_lower, cur_upper)
-        };
-        let decisive = smaller * MARGIN_DEN <= larger * MARGIN_NUM
-            && larger >= samples * MIN_ENERGY
-            && smoother_cur_upper != (parity == 0);
+        let seams = WeaveSeams::measure(field, &self.prev[opposite], rows, width, width, X_STEP);
+        let decisive = seams
+            .clear_winner()
+            .is_some_and(|cur_upper| cur_upper != (parity == 0));
         if !decisive {
             self.weave_flip_votes = 0;
             return;
@@ -737,6 +699,100 @@ impl Deinterlacer {
 const H_CENTRE_SLACK: i32 = 2 * crate::config::TV_H_CENTRE_RANGE;
 const V_CENTRE_SLACK: i32 = 2 * crate::config::TV_V_CENTRE_RANGE;
 
+/// Consecutive field pairs that must all measure the opposite pairing
+/// smoother before the weave phase changes. One pair is not enough: motion
+/// between correctly ordered fields can make a single pair's seams favour
+/// the wrong order (a picture scrolling vertically by a field line per
+/// field favours it on every other pair), while software that ignores LOF
+/// draws the opposite pairing on every pair. The native screenshot weave
+/// retains this many fields before the one it captures.
+pub(crate) const WEAVE_FLIP_FIELDS: u32 = 4;
+
+/// Which of the two ways two fields of one interlaced picture weave is
+/// smoother, measured where their rows meet.
+///
+/// Field order on screen is the long field (LOF=1) on the upper rows, but
+/// software that never observes LOF and simply alternates two per-field
+/// images (a Copper list ping-pong, for one) lands on whichever phase the
+/// field running when its chain started gives it. Both assemblies
+/// share the seams between same-index rows `a[y]` and `b[y]`, so the
+/// discriminating energy is in the cross seams: with `a` on the upper rows
+/// the picture runs from `b[y]` into `a[y + 1]`, with `b` there from `a[y]`
+/// into `b[y + 1]`. A wrongly phased weave of a static picture puts a
+/// one-line comb into the losing sum, so the smoother sum names the pairing
+/// the content was drawn for.
+pub(crate) struct WeaveSeams {
+    /// Cross-seam energy with `a` on the upper rows.
+    a_upper: u64,
+    /// Cross-seam energy with `b` on the upper rows.
+    b_upper: u64,
+    /// Samples in each sum.
+    samples: u64,
+}
+
+impl WeaveSeams {
+    /// The smoother pairing must win by this ratio (denominator /
+    /// numerator of a 20% margin) to count.
+    const MARGIN_NUM: u64 = 4;
+    const MARGIN_DEN: u64 = 5;
+    /// Minimum per-sample energy of the rougher pairing: blank and
+    /// near-blank fields say nothing about pairing.
+    const MIN_ENERGY: u64 = 4;
+
+    /// Measure `rows` rows of `width` pixels of fields `a` and `b`, whose
+    /// rows start `stride` pixels apart, sampling every `x_step`-th column.
+    /// Energy is the summed per-channel RGB difference across each seam.
+    pub(crate) fn measure(
+        a: &[u32],
+        b: &[u32],
+        rows: usize,
+        width: usize,
+        stride: usize,
+        x_step: usize,
+    ) -> Self {
+        let diff = |p: u32, q: u32| -> u64 {
+            let d = |shift: u32| {
+                (((p >> shift) & 0xFF) as i32 - ((q >> shift) & 0xFF) as i32).unsigned_abs() as u64
+            };
+            d(0) + d(8) + d(16)
+        };
+        let mut seams = Self {
+            a_upper: 0,
+            b_upper: 0,
+            samples: 0,
+        };
+        let row = |y: usize| y * stride..y * stride + width;
+        for y in 0..rows.saturating_sub(1) {
+            let (a_row, a_next) = (&a[row(y)], &a[row(y + 1)]);
+            let (b_row, b_next) = (&b[row(y)], &b[row(y + 1)]);
+            let mut x = 0;
+            while x < width {
+                seams.a_upper += diff(b_row[x], a_next[x]);
+                seams.b_upper += diff(a_row[x], b_next[x]);
+                seams.samples += 1;
+                x += x_step;
+            }
+        }
+        seams
+    }
+
+    /// The pairing that wins by the margin: `Some(true)` with `a` on the
+    /// upper rows, `Some(false)` with `b` there, `None` when neither wins
+    /// clearly (ambiguous or moving content) or the seams carry too little
+    /// energy to judge.
+    pub(crate) fn clear_winner(&self) -> Option<bool> {
+        let (a_smoother, smaller, larger) = if self.a_upper <= self.b_upper {
+            (true, self.a_upper, self.b_upper)
+        } else {
+            (false, self.b_upper, self.a_upper)
+        };
+        (self.samples > 0
+            && smaller * Self::MARGIN_DEN <= larger * Self::MARGIN_NUM
+            && larger >= self.samples * Self::MIN_ENERGY)
+            .then_some(a_smoother)
+    }
+}
+
 /// Channel-wise average of two packed RGBA pixels.
 fn avg_rgba(a: u32, b: u32) -> u32 {
     ((a ^ b) & 0xFEFE_FEFE) / 2 + (a & b)
@@ -1070,6 +1126,22 @@ mod tests {
         for r in 2..OUT_HEIGHT - 2 {
             assert_eq!(out_row(&d, r), straddling_stroke_picture(r), "row {r}");
         }
+    }
+
+    #[test]
+    fn weave_seams_name_a_winner_only_with_rows_and_energy_to_judge() {
+        let upper = field_filled_rows(|y| straddling_stroke_picture(2 * y));
+        let lower = field_filled_rows(|y| straddling_stroke_picture(2 * y + 1));
+        let judge = |a: &[u32], b: &[u32], rows| {
+            WeaveSeams::measure(a, b, rows, FB_WIDTH, FB_WIDTH, 1).clear_winner()
+        };
+        assert_eq!(judge(&upper, &lower, FB_HEIGHT), Some(true));
+        assert_eq!(judge(&lower, &upper, FB_HEIGHT), Some(false));
+        // One row has no seam between neighbouring rows, and blank fields
+        // have no energy in either pairing.
+        assert_eq!(judge(&upper, &lower, 1), None);
+        let blank = field_filled_rows(|_| 0);
+        assert_eq!(judge(&blank, &blank, FB_HEIGHT), None);
     }
 
     #[test]

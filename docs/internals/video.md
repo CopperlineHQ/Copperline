@@ -1147,6 +1147,19 @@ routes the next stream's fields to the wrong parity. Kang Fu CD32's
 laced HAM8 intro screens are the regression example: with the phase
 wrong, its thin lettering rendered as "every other line missing".
 
+Native screenshots (`screenshot::render_native`) weave the current field
+with the one before it and keep no phase state of their own. The bus
+retains the last `WEAVE_FLIP_FIELDS` (four) laced fields before the
+captured one (`Bus::native_previous_fields`, reusing the oldest field's
+buffers so a wrap still copies one field), and the capture applies the
+same cross-seam measurement (`WeaveSeams`) over its playfield crop and
+every column to each of the four newest pairs of neighbouring fields.
+The short field takes the even rows only when all four pairs put it
+there; the LOF order stands otherwise. A single pair is not enough
+evidence: a picture scrolling vertically by about a field line per
+field between correctly ordered fields measures the wrong order
+smoother on every other pair.
+
 Progressive content is line-doubled without history. With phosphor
 persistence off, the common progressive path writes those doubled rows
 directly into the frontend-owned presentation buffer instead of filling
