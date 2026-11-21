@@ -26,6 +26,13 @@ for the earlier release notes.
   was the visible case. The A1000's original Agnus closes the window on
   line zero of the next field instead, so there an open window now shows
   each field's last line.
+- An animated GIF clip no longer plays some frames slowly in web
+  browsers. A frame that the next one replaced a centisecond later got a
+  one-centisecond delay, which browsers show for ten; it happened at
+  `[recording] clip_fps` rates above 50, above about 45 on an NTSC
+  machine, and wherever frames were presented unevenly. No frame is now
+  shorter than two centiseconds: a frame replaced sooner is dropped, and
+  the clip keeps its length.
 
 ### Compatibility
 
