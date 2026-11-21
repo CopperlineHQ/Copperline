@@ -1147,6 +1147,13 @@ routes the next stream's fields to the wrong parity. Kang Fu CD32's
 laced HAM8 intro screens are the regression example: with the phase
 wrong, its thin lettering rendered as "every other line missing".
 
+Native screenshots (`screenshot::render_native`) weave the current field
+with the one before it and have no history to vote over, so they apply
+the same cross-seam measurement (`WeaveSeams`) once, over the capture's
+playfield crop and every column: the short field takes the even rows
+only when that pairing wins the margin, and the LOF order stands
+otherwise (blank, moving and ambiguous pictures).
+
 Progressive content is line-doubled without history. With phosphor
 persistence off, the common progressive path writes those doubled rows
 directly into the frontend-owned presentation buffer instead of filling

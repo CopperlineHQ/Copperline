@@ -26,6 +26,14 @@ for the earlier release notes.
   was the visible case. The A1000's original Agnus closes the window on
   line zero of the next field instead, so there an open window now shows
   each field's last line.
+- Native screenshots (`--native-screenshots`, the native screenshot
+  shortcut and the control protocol's `capture.screenshot` with
+  `native: true`) of interlaced software that alternates its per-field
+  images without reading the long-field flag are no longer combed one line
+  apart when the images landed on the opposite fields. The capture weaves
+  the two fields in whichever order is clearly smoother, as the window's
+  deinterlacer already did; blank, moving or ambiguous pictures keep the
+  long-field order. Kang Fu (CD32) showed its GREED splash text combed.
 
 ### Compatibility
 

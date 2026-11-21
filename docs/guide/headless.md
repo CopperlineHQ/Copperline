@@ -69,13 +69,19 @@ the full field. RTG output uses the board's native width and height.
 Interlaced chipset output saves both fields woven at full height: a
 640x512 hi-res laced screen saves at 640x512, each field's lines on
 alternate rows. Fields are placed by the long-field flag (LOF), the long
-field on the even rows, as the display hardware places them, so software
-that pairs its per-field images without reading LOF shows the one-line
-comb that the window's deinterlacer corrects. The first field after
-interlace is switched on (or after a reset or state load) has no partner
-yet and saves on its own. `--expect-screenshot` uses the same native
-capture when this flag is present. Frame dumps, GIFs and video
-recordings retain their presentation geometry.
+field on the even rows, as the display hardware places them. Software
+that alternates its per-field images without reading LOF can start on
+either field, so its images may belong in the opposite order. When the
+two fields weave clearly smoother with the short field on the even rows,
+measured by the same comparison of the lines where the fields meet that
+the window's deinterlacer uses, the capture is saved in that order
+instead of combed one line apart. When neither order is clearly
+smoother, as with blank and most moving pictures, the LOF order is
+kept. The first field after interlace is switched on (or after a reset
+or state load) has no partner yet and saves on its own.
+`--expect-screenshot` uses the same native capture when this flag is
+present. Frame dumps, GIFs and video recordings retain their
+presentation geometry.
 
 (screenshot-expectations)=
 ## Checking screenshots against expected images

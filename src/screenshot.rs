@@ -11,7 +11,8 @@ use std::path::{Path, PathBuf};
 /// playfield envelope, or an RTG board's native scanout. Chipset output is
 /// the current field without presentation scaling or phosphor; when it and
 /// the field before it are the two halves of an interlaced picture, they
-/// are woven at full height (long field on the even rows).
+/// are woven at full height (long field on the even rows, unless the
+/// picture clearly belongs the other way round; see `short_field_on_top`).
 /// Returns `(pixels, height, width)`; available to core-only frontends too.
 pub fn render_native(bus: &crate::bus::Bus) -> (Vec<u32>, usize, usize) {
     let mut fb = Vec::new();
@@ -26,9 +27,9 @@ pub fn render_native(bus: &crate::bus::Bus) -> (Vec<u32>, usize, usize) {
     {
         let other = NativeField::render(previous);
         return if input.render_base().long_field {
-            weave_native(&field, &other)
+            weave_fields(&field, &other)
         } else {
-            weave_native(&other, &field)
+            weave_fields(&other, &field)
         };
     }
     crop_native(&field.fb, field.width, field.rows, field.rect, field.repeat)
@@ -90,33 +91,83 @@ fn fields_weave(
         && current.native_canvas_scale() == previous.native_canvas_scale()
 }
 
-/// Interleave a long and a short field row by row (long field on the even
-/// rows) and crop the result to the union of both fields' playfields.
-fn weave_native(long: &NativeField, short: &NativeField) -> (Vec<u32>, usize, usize) {
-    use crate::video::bitplane::ContentRect;
-    let width = long.width;
-    let rows = long.rows.min(short.rows);
-    let mut woven = Vec::with_capacity(width * rows * 2);
-    for y in 0..rows {
-        woven.extend_from_slice(&long.fb[y * width..(y + 1) * width]);
-        woven.extend_from_slice(&short.fb[y * width..(y + 1) * width]);
-    }
-    let field_rect = match (long.rect, short.rect) {
-        (Some(a), Some(b)) => Some(ContentRect {
+/// The union of both fields' playfields, in field rows, or `None` when
+/// neither field shows one.
+fn union_rect(a: &NativeField, b: &NativeField) -> Option<crate::video::bitplane::ContentRect> {
+    match (a.rect, b.rect) {
+        (Some(a), Some(b)) => Some(crate::video::bitplane::ContentRect {
             x0: a.x0.min(b.x0),
             x1: a.x1.max(b.x1),
             y0: a.y0.min(b.y0),
             y1: a.y1.max(b.y1),
         }),
         (rect, None) | (None, rect) => rect,
-    };
-    let rect = field_rect.map(|r| ContentRect {
+    }
+}
+
+/// Whether the short field's rows belong on the even rows of the woven
+/// picture. The display hardware puts the long field there, and software
+/// that reads LOF to pick each field's image draws for that order; software
+/// that alternates its images without reading LOF can start on either
+/// field. Over the part of the fields the capture keeps, the short field
+/// goes on top only when that weave is clearly smoother where the fields'
+/// rows meet, the same measurement the presentation deinterlacer's
+/// weave-phase detector makes (`WeaveSeams`); ambiguous, blank and most
+/// moving pictures keep the LOF order. With only these two fields there is
+/// no history to vote over, so one clear measurement decides.
+fn short_field_on_top(long: &NativeField, short: &NativeField) -> bool {
+    let rows = long.rows.min(short.rows);
+    let rect = union_rect(long, short).unwrap_or(crate::video::bitplane::ContentRect {
+        x0: 0,
+        x1: long.width,
+        y0: 0,
+        y1: rows,
+    });
+    let (y0, y1) = (rect.y0.min(rows), rect.y1.min(rows));
+    let (x0, x1) = (rect.x0.min(long.width), rect.x1.min(long.width));
+    if y1 <= y0 || x1 <= x0 {
+        return false;
+    }
+    let start = y0 * long.width + x0;
+    let seams = crate::video::deinterlace::WeaveSeams::measure(
+        &long.fb[start..],
+        &short.fb[start..],
+        y1 - y0,
+        x1 - x0,
+        long.width,
+        1,
+    );
+    seams.clear_winner() == Some(false)
+}
+
+/// Weave the long and short field of one interlaced picture in the order
+/// `short_field_on_top` picks.
+fn weave_fields(long: &NativeField, short: &NativeField) -> (Vec<u32>, usize, usize) {
+    if short_field_on_top(long, short) {
+        weave_native(short, long)
+    } else {
+        weave_native(long, short)
+    }
+}
+
+/// Interleave two fields row by row (`upper` on the even rows) and crop the
+/// result to the union of both fields' playfields.
+fn weave_native(upper: &NativeField, lower: &NativeField) -> (Vec<u32>, usize, usize) {
+    use crate::video::bitplane::ContentRect;
+    let width = upper.width;
+    let rows = upper.rows.min(lower.rows);
+    let mut woven = Vec::with_capacity(width * rows * 2);
+    for y in 0..rows {
+        woven.extend_from_slice(&upper.fb[y * width..(y + 1) * width]);
+        woven.extend_from_slice(&lower.fb[y * width..(y + 1) * width]);
+    }
+    let rect = union_rect(upper, lower).map(|r| ContentRect {
         y0: 2 * r.y0.min(rows),
         y1: 2 * r.y1.min(rows),
         ..r
     });
-    let repeat = if long.repeat == short.repeat {
-        long.repeat
+    let repeat = if upper.repeat == lower.repeat {
+        upper.repeat
     } else {
         1
     };
@@ -472,6 +523,114 @@ mod tests {
             let px = if y % 2 == 0 { long_px } else { short_px };
             assert!(row.iter().all(|p| *p == px), "row {y}");
         }
+    }
+
+    /// An interlaced picture whose 2-row strokes straddle the field pairs
+    /// (picture rows 1,2 mod 8): only one weave order reunites each stroke.
+    fn straddling_stroke_picture(p: usize) -> u32 {
+        if p % 8 == 1 || p % 8 == 2 {
+            0xFFFF_FFFF
+        } else {
+            0xFF00_0000
+        }
+    }
+
+    /// A field whose row `y` shows picture row `2 * y + offset`, inside a
+    /// border column on each side that the playfield crop removes.
+    fn picture_field(offset: usize, picture: impl Fn(usize) -> u32) -> NativeField {
+        use crate::video::bitplane::ContentRect;
+        let (width, rows) = (8, 12);
+        let border = 0xFF80_8080;
+        let mut fb = Vec::with_capacity(width * rows);
+        for y in 0..rows {
+            fb.push(border);
+            fb.extend(std::iter::repeat_n(picture(2 * y + offset), width - 2));
+            fb.push(border);
+        }
+        NativeField {
+            fb,
+            width,
+            rows,
+            rect: Some(ContentRect {
+                x0: 1,
+                x1: width - 1,
+                y0: 0,
+                y1: rows,
+            }),
+            repeat: 1,
+        }
+    }
+
+    fn assert_woven_picture(woven: (Vec<u32>, usize, usize), picture: impl Fn(usize) -> u32) {
+        let (pixels, rows, width) = woven;
+        assert_eq!((width, rows), (6, 24));
+        for (y, row) in pixels.chunks(width).enumerate() {
+            assert!(row.iter().all(|p| *p == picture(y)), "picture row {y}");
+        }
+    }
+
+    #[test]
+    fn field_blind_interlaced_images_weave_in_the_order_they_were_drawn_for() {
+        // Software that never reads LOF drew its even picture rows into the
+        // SHORT field and its odd rows into the LONG one, as a copper list
+        // ping-pong started in the other field would. The LOF weave combs
+        // every stroke; the clearly smoother weave puts the short field on
+        // the even rows.
+        let long = picture_field(1, straddling_stroke_picture);
+        let short = picture_field(0, straddling_stroke_picture);
+        assert!(short_field_on_top(&long, &short));
+        assert_woven_picture(weave_fields(&long, &short), straddling_stroke_picture);
+    }
+
+    #[test]
+    fn lof_ordered_interlaced_images_keep_the_long_field_on_even_rows() {
+        // The same picture drawn for the hardware order stays in it.
+        let long = picture_field(0, straddling_stroke_picture);
+        let short = picture_field(1, straddling_stroke_picture);
+        assert!(!short_field_on_top(&long, &short));
+        assert_woven_picture(weave_fields(&long, &short), straddling_stroke_picture);
+    }
+
+    #[test]
+    fn ambiguous_or_blank_interlaced_fields_keep_lof_order() {
+        // Unrelated field contents and a picture that moved sideways
+        // between the fields are as rough woven either way, and blank fields
+        // carry no evidence: all keep the long field on the even rows.
+        let mut panned = (
+            picture_field(0, |_| 0xFF00_0000),
+            picture_field(1, |_| 0xFF00_0000),
+        );
+        let width = panned.0.width;
+        for (i, (l, s)) in panned.0.fb.iter_mut().zip(&mut panned.1.fb).enumerate() {
+            let column = i % width;
+            if column != 0 && column != width - 1 {
+                let stripes = [0xFFFF_FFFF, 0xFF00_0000];
+                (*l, *s) = (stripes[column % 2], stripes[(column + 1) % 2]);
+            }
+        }
+        let ambiguous = [
+            (
+                picture_field(0, |_| 0xFFFF_FFFF),
+                picture_field(1, |_| 0xFF00_0000),
+            ),
+            (
+                picture_field(0, |_| 0xFF00_0000),
+                picture_field(1, |_| 0xFF00_0000),
+            ),
+            panned,
+        ];
+        for (case, (long, short)) in ambiguous.iter().enumerate() {
+            assert!(!short_field_on_top(long, short), "case {case}");
+        }
+        // Content outside the playfield crop does not vote: comb-shaped
+        // border columns around an otherwise blank picture keep LOF order.
+        let mut long = picture_field(1, |_| 0xFF00_0000);
+        let mut short = picture_field(0, |_| 0xFF00_0000);
+        for y in 0..long.rows {
+            long.fb[y * long.width] = straddling_stroke_picture(2 * y + 1);
+            short.fb[y * short.width] = straddling_stroke_picture(2 * y);
+        }
+        assert!(!short_field_on_top(&long, &short));
     }
 
     #[test]
