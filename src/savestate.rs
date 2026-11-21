@@ -1656,7 +1656,9 @@ mod tests {
 
     /// A state whose copperhf boot ROM differs from this build's (as a
     /// 1.1.0 state, with its 5,260-byte ROM, does from 1.2.0's) is refused
-    /// with a message naming the board, and the live machine is untouched.
+    /// with a message naming the board, and the live machine is untouched:
+    /// in the order the writer emits, and in a file rewritten with the
+    /// chunk after the board chunk (the reader accepts any order).
     #[test]
     fn a_state_saved_with_different_board_firmware_is_refused() {
         let blob = saved_blob(&copperhf_machine());
@@ -1667,25 +1669,35 @@ mod tests {
         recorded.roms[0].sha256 = "0123456789abcdef".repeat(4);
         brom.payload.clear();
         chunk::encode(&recorded, &mut brom.payload).unwrap();
+        let mut brom_last = chunks.clone();
+        let at = brom_last
+            .iter()
+            .position(|chunk| chunk.tag == chunk::BROM.tag)
+            .unwrap();
+        let moved = brom_last.remove(at);
+        brom_last.push(moved);
 
-        let mut untouched = test_machine();
-        untouched.bus_mut().mem.chip_ram[0x100] = 0x5A;
-        let err = load_from_reader(&mut untouched, pack(&prefix, &chunks).as_slice()).unwrap_err();
-        let text = format!("{err:#}");
-        assert!(
-            text.starts_with("this save state was made with different built-in board firmware"),
-            "{text}"
-        );
-        assert!(
-            text.contains(
-                "the copperhf.device boot ROM of the copperhf hard-drive board ([copperhf])"
-            ),
-            "{text}"
-        );
-        assert!(text.contains("was 5260 bytes"), "{text}");
-        assert!(text.contains("Boot the machine afresh"), "{text}");
-        assert_eq!(untouched.bus_mut().mem.chip_ram[0x100], 0x5A);
-        assert!(untouched.bus_mut().devices.is_empty());
+        for (order, chunks) in [("as written", &chunks), ("BROM last", &brom_last)] {
+            let mut untouched = test_machine();
+            untouched.bus_mut().mem.chip_ram[0x100] = 0x5A;
+            let err =
+                load_from_reader(&mut untouched, pack(&prefix, chunks).as_slice()).unwrap_err();
+            let text = format!("{err:#}");
+            assert!(
+                text.starts_with("this save state was made with different built-in board firmware"),
+                "{order}: {text}"
+            );
+            assert!(
+                text.contains(
+                    "the copperhf.device boot ROM of the copperhf hard-drive board ([copperhf])"
+                ),
+                "{order}: {text}"
+            );
+            assert!(text.contains("was 5260 bytes"), "{order}: {text}");
+            assert!(text.contains("Boot the machine afresh"), "{order}: {text}");
+            assert_eq!(untouched.bus_mut().mem.chip_ram[0x100], 0x5A, "{order}");
+            assert!(untouched.bus_mut().devices.is_empty(), "{order}");
+        }
     }
 
     /// A state written before the BROM chunk existed (1.2.0 and earlier)

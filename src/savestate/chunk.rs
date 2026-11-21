@@ -133,9 +133,11 @@ pub(crate) const MACH: ChunkSpec = value(b"MACH", 1, "machine runtime");
 pub(crate) const ICAC: ChunkSpec = value(b"ICAC", 1, "instruction cache");
 pub(crate) const DCAC: ChunkSpec = value(b"DCAC", 1, "data cache");
 /// The identities of the built-in board firmware the machine maps
-/// (`board_rom::BoardRoms`). Ahead of the `Bus` chunks so a load refuses
-/// different firmware before any board is rebuilt. Absent from states
-/// written before it existed, which load without the check.
+/// (`board_rom::BoardRoms`). Written ahead of the `Bus` chunks so that, in
+/// that order, a load refuses different firmware before any board is
+/// rebuilt; the reader accepts any order and still refuses it before the
+/// machine is touched. Absent from states written before it existed,
+/// which load without the check.
 pub(crate) const BROM: ChunkSpec = ChunkSpec {
     tag: *b"BROM",
     version: 1,

@@ -184,11 +184,17 @@ screen in 1.2.0, whose copperhf ROM is 5,416 bytes instead of 5,260.
 `M68kMachine::write_chunks` therefore writes a `BROM` chunk
 (`savestate/board_rom.rs`) recording the id, length and SHA-256 of each
 piece of built-in firmware the machine's boards map
-(`BoardDevice::builtin_roms`). The chunk comes before the `Bus` chunks, and
-a load compares each record with this build's bytes as soon as it is
-read: any difference refuses the load, naming the firmware and its board
-and saying to boot afresh, before any board is rebuilt and with the live
-machine untouched. A record for firmware this build does not embed is
+(`BoardDevice::builtin_roms`). The writer puts the chunk before the `Bus`
+chunks, and a load compares each record with this build's bytes as soon as
+it is read: any difference refuses the load, naming the firmware and its
+board and saying to boot afresh, with the live machine untouched. In the
+order Copperline writes, that happens before any board is rebuilt. The
+reader accepts chunks in any order, though, so a rewritten file that puts
+`ZORR` ahead of `BROM` has its boards rebuilt first (a bundled plugin board
+instantiates this build's module and restores its linear memory into it).
+A mismatch there is still refused before the machine is touched, but a
+board whose restore fails outright reports its own error rather than the
+firmware diagnostic. A record for firmware this build does not embed is
 logged and left to the board's own chunk. A state without the chunk
 (written by 1.2.0 or earlier) loads unchecked, as it always did, and the
 load logs a warning naming the built-in firmware its boards map. A board

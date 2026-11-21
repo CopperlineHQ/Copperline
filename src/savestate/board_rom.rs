@@ -14,7 +14,10 @@
 //!
 //! The chunk records the identity (length and SHA-256) of each such piece
 //! the machine maps, and a load refuses a state whose firmware differs
-//! from this build's before any board is rebuilt. It is optional: a state
+//! from this build's with the live machine untouched -- before any board
+//! is rebuilt, in the chunk order Copperline writes (a file rewritten with
+//! the board chunk first rebuilds its boards before the check, and a board
+//! whose restore fails outright reports that instead). It is optional: a state
 //! written before the chunk existed carries no identities and loads as it
 //! always did, with a warning naming the firmware it could not check.
 
