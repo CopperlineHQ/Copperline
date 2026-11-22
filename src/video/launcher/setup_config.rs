@@ -25,12 +25,8 @@ pub(super) fn carry_unowned_keys(src: &RawConfig, dst: &mut RawConfig) {
     dst.machine.rom_scsi_device_disable = src.machine.rom_scsi_device_disable;
     dst.pcmcia = src.pcmcia.clone();
     dst.clipboard = src.clipboard.clone();
+    // `[recording]` has rows on the Recording page (`write_recording_config`);
     // `native_screenshot_button` is retired: read and ignored, never saved.
-    dst.recording.clip_seconds = src.recording.clip_seconds;
-    dst.recording.clip_fps = src.recording.clip_fps;
-    dst.recording.clip_format = src.recording.clip_format.clone();
-    dst.recording.video_format = src.recording.video_format.clone();
-    dst.recording.ffmpeg = src.recording.ffmpeg.clone();
     dst.zz9k = src.zz9k.clone();
     dst.display.tv_h_centre = src.display.tv_h_centre;
     dst.display.tv_v_centre = src.display.tv_v_centre;
@@ -480,6 +476,13 @@ impl MachineSetup {
                 })
                 .collect(),
             paths: raw.paths.clone(),
+            clip_format: cfg.recording.clip_format,
+            clip_seconds: cfg.recording.clip_seconds,
+            clip_fps: cfg.recording.clip_fps,
+            video_format: cfg.recording.video_format,
+            ffmpeg: cfg.recording.ffmpeg.clone(),
+            // Filled by refresh_host_devices on open, like the audio devices.
+            ffmpeg_found: None,
             carried: {
                 let mut carried = RawConfig::default();
                 carry_unowned_keys(raw, &mut carried);
@@ -549,11 +552,32 @@ impl MachineSetup {
         self.write_io_config(&mut raw, &base);
         self.write_audio_config(&mut raw, &base);
         self.write_zorro_config(&mut raw);
+        self.write_recording_config(&mut raw, &base);
         raw.paths = self.paths.clone();
         carry_unowned_keys(&self.carried, &mut raw);
         self.write_drive_timing(&mut raw);
         self.drop_unfitting_carried_keys(&mut raw);
         raw
+    }
+
+    /// The Recording page, as `[recording]`. The ffmpeg path is kept
+    /// whatever the video format, so choosing AVI for a while does not
+    /// forget the one an MP4 is made with.
+    fn write_recording_config(&self, raw: &mut RawConfig, base: &Config) {
+        let base = &base.recording;
+        if self.clip_format != base.clip_format {
+            raw.recording.clip_format = Some(self.clip_format.label().to_string());
+        }
+        if self.clip_seconds != base.clip_seconds {
+            raw.recording.clip_seconds = Some(self.clip_seconds);
+        }
+        if self.clip_fps != base.clip_fps {
+            raw.recording.clip_fps = Some(self.clip_fps);
+        }
+        if self.video_format != base.video_format {
+            raw.recording.video_format = Some(self.video_format.label().to_string());
+        }
+        raw.recording.ffmpeg = self.ffmpeg.as_deref().map(path_string);
     }
 
     /// The Emulation page's hard-drive rows, written as every fitted

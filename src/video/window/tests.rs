@@ -5704,6 +5704,37 @@ fn vsync_menu_toggle_preserves_guest_pacing_and_configuration_choice() {
     assert!(crate::config::Config::try_from(saved).unwrap().vsync);
 }
 
+/// The Recording menu and the configuration screen's Recording page are two
+/// ways to the same `[recording]` choices: the page opens on what the menu
+/// last chose, and the machine its Run starts records the way the page
+/// says.
+#[test]
+fn the_recording_page_follows_the_menu_and_reaches_the_session() {
+    use crate::config::VideoFormat;
+    use crate::gifclip::ClipFormat;
+    use crate::video::launcher::LauncherField as F;
+    use crate::video::menu::MenuAction;
+
+    let mut app = test_app();
+    app.run_menu_action(MenuAction::SetClipFormat(ClipFormat::Apng), None);
+    app.run_menu_action(MenuAction::SetVideoFormat(VideoFormat::Mp4), None);
+    app.open_launcher();
+    let setup = &app.launcher_state().unwrap().setup;
+    assert_eq!(setup.value_label(F::RecordingClipFormat), "APNG (lossless)");
+    assert_eq!(setup.value_label(F::RecordingVideoFormat), "MP4 (H.264)");
+
+    let setup = &mut app.launcher_state_mut().unwrap().setup;
+    setup.cycle(F::RecordingClipFormat, true);
+    setup.cycle(F::RecordingClipSeconds, true);
+    let raw = setup.to_raw();
+    let cfg = crate::config::Config::try_from(raw.clone()).expect("config");
+    let emu = test_emulator(Box::new(NullSink), crate::config::CpuModel::M68000, &[]);
+    app.run_machine(emu, &cfg, raw);
+    assert_eq!(app.clip_format, ClipFormat::Gif);
+    assert_eq!(app.video_format, VideoFormat::Mp4);
+    assert_eq!(app.clip_settings.seconds, 15);
+}
+
 /// An interactive App around a real machine with one or more `[copperhf]`
 /// units configured, built over the bundled AROS ROM the way
 /// `tests/copperhf_machine.rs` does (the NOP-sled `test_app` fixture has no

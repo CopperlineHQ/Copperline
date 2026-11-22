@@ -531,6 +531,36 @@ const SERIAL_MODES: [SerialMode; 8] = [
 /// The config/CLI accept any 0-100; an off-grid value snaps to the nearest here.
 const STEREO_SEPARATION_STEPS: [usize; 11] = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
 
+/// Clip ring lengths the Recording page steps through, in emulated seconds,
+/// 0 (the ring off) up to the longest the configuration accepts. A loaded
+/// value between two snaps to the nearer before stepping, as above.
+const CLIP_SECONDS_STEPS: [usize; 10] = [
+    0,
+    5,
+    10,
+    15,
+    20,
+    30,
+    45,
+    60,
+    90,
+    crate::gifclip::MAX_CLIP_SECONDS as usize,
+];
+
+/// Clip frame rates the Recording page steps through: 0 is automatic (half
+/// the field rate), then the usual rates up to the highest accepted.
+const CLIP_FPS_STEPS: [usize; 9] = [
+    0,
+    10,
+    12,
+    15,
+    20,
+    25,
+    30,
+    50,
+    crate::gifclip::MAX_CLIP_FPS as usize,
+];
+
 /// Sampler input-gain presets the picker steps through (preamp decibels, in
 /// 3 dB steps), ascending. 0 dB is unity; the ends are the sampler's
 /// [`crate::sampler::MIN_SAMPLER_GAIN_DB`]..[`crate::sampler::MAX_SAMPLER_GAIN_DB`].
@@ -995,6 +1025,19 @@ pub struct MachineSetup {
     /// never seen them, because what cannot be reached is dropped when the
     /// configuration is adopted.
     paths: crate::pathconf::Paths,
+    /// The Recording page: the configuration's `[recording]` section.
+    /// Host output, not machine, so a model switch leaves it alone.
+    clip_format: crate::gifclip::ClipFormat,
+    clip_seconds: u32,
+    /// 0 is automatic: half the field rate of the machine's standard.
+    clip_fps: u32,
+    video_format: crate::config::VideoFormat,
+    /// `[recording] ffmpeg`; `None` lets [`crate::ffmpeg::find`] look.
+    ffmpeg: Option<PathBuf>,
+    /// The ffmpeg that look finds, shown greyed while the row is unset so
+    /// an MP4 that cannot be made says so before Run. Read by
+    /// [`Self::refresh_host_devices`], not on every draw.
+    ffmpeg_found: Option<PathBuf>,
     /// The keys the launcher has no rows for, as the configuration it was
     /// opened on had them (see [`carry_unowned_keys`]).
     carried: RawConfig,
@@ -1129,9 +1172,10 @@ impl MachineSetup {
     }
 
     /// Re-read every host device list (MIDI endpoints + audio outputs + sampler
-    /// inputs) for the pickers. Call after (re)building the setup -- e.g. loading
-    /// a config or resetting to defaults -- so the pickers show what is connected
-    /// now instead of an empty list that can only land on "Default"/"None".
+    /// inputs) for the pickers, and look for the host's ffmpeg again. Call
+    /// after (re)building the setup -- e.g. loading a config or resetting to
+    /// defaults -- so the pickers show what is connected now instead of an
+    /// empty list that can only land on "Default"/"None".
     pub fn refresh_host_devices(&mut self) {
         #[cfg(feature = "midi")]
         self.refresh_midi_endpoints();
@@ -1140,6 +1184,7 @@ impl MachineSetup {
         self.refresh_audio_devices();
         self.refresh_sampler_inputs();
         self.refresh_bridge_interfaces();
+        self.ffmpeg_found = crate::ffmpeg::find(None, &[]);
     }
 
     fn refresh_bridge_interfaces(&mut self) {
@@ -1325,6 +1370,9 @@ impl MachineSetup {
             F::HostSocketInterface => {
                 !matches!(self.hostsocket_net.as_ref(), Some(NetConfig::Bridge { .. }))
             }
+            // Only an MP4 recording runs ffmpeg; an AVI is written by
+            // Copperline itself.
+            F::RecordingFfmpeg => self.video_format != crate::config::VideoFormat::Mp4,
             // No controller, no SCSI: the ROM and unit rows go rather than
             // stand greyed under a setting most machines leave at None. They
             // return the moment a controller is chosen.
@@ -1663,6 +1711,7 @@ impl MachineSetup {
             F::Df3Image => self.df_playlists[3].first().map(PathBuf::as_path),
             F::IdeMaster => self.ide_master.as_deref(),
             F::IdeSlave => self.ide_slave.as_deref(),
+            F::RecordingFfmpeg => self.ffmpeg.as_deref(),
             F::ScsiRom => self.scsi_rom.as_deref(),
             F::ScsiRomOdd => self.scsi_rom_odd.as_deref(),
             F::ScsiUnit0 => self.scsi_units[0].as_deref(),
@@ -1781,14 +1830,30 @@ impl MachineSetup {
         self.paths_entry_ref(field).is_some_and(Option::is_some)
     }
 
+    /// The ffmpeg the Recording page's row names: the one chosen, else the
+    /// one [`crate::ffmpeg::find`] found when the page was last refreshed.
+    pub fn ffmpeg_shown(&self) -> Option<&Path> {
+        self.ffmpeg.as_deref().or(self.ffmpeg_found.as_deref())
+    }
+
     /// What a path row shows when the whole path is the point rather than
-    /// the file at the end of it: the printer's capture file, and every row
-    /// on the Paths page. `None` leaves the row to its usual file name.
+    /// the file at the end of it: the printer's capture file, the ffmpeg,
+    /// and every row on the Paths page. `None` leaves the row to its usual
+    /// file name.
     pub fn full_path_label(&self, field: LauncherField) -> Option<String> {
         if field == F::ParallelOutput {
             return Some(match self.path(field) {
                 Some(path) => path.display().to_string(),
                 None => "(none)".to_string(),
+            });
+        }
+        // Every ffmpeg is called `ffmpeg`: which one is the directory.
+        // Unset, the row names the one the search would run, or says
+        // there is none, which is what makes an MP4 fall back to AVI.
+        if field == F::RecordingFfmpeg {
+            return Some(match self.ffmpeg_shown() {
+                Some(path) => path.display().to_string(),
+                None => "(not found)".to_string(),
             });
         }
         if !field.is_paths_field() {
@@ -2180,6 +2245,7 @@ impl MachineSetup {
             F::CsynthSoundfont => self.csynth_soundfont = Some(path),
             F::Mt32PcmRom => self.mt32_pcm_rom = Some(path),
             F::ExtendedRom => self.extended_rom = Some(path),
+            F::RecordingFfmpeg => self.ffmpeg = Some(path),
             F::FmvRom => {
                 self.fmv_rom = Some(path);
                 self.fmv_fitted = true;
@@ -2271,6 +2337,7 @@ impl MachineSetup {
             #[cfg(feature = "coppersynth")]
             F::CsynthSoundfont => self.csynth_soundfont = None,
             F::Mt32PcmRom => self.mt32_pcm_rom = None,
+            F::RecordingFfmpeg => self.ffmpeg = None,
             F::Df0Image => self.df_playlists[0].clear(),
             F::Df1Image => self.df_playlists[1].clear(),
             F::Df2Image => self.df_playlists[2].clear(),

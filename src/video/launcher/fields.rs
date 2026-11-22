@@ -75,6 +75,9 @@ pub enum LauncherTab {
     /// open. Its rows are the configuration's `[paths]` section, saved
     /// with the rest of it and absent until one of them is set.
     AvPaths,
+    /// What the window's Save Clip and Record Video write: the
+    /// configuration's `[recording]` section.
+    AvRecording,
     /// The Create Image workshop, reached from Storage: two pages that make
     /// fresh images and touch nothing about the machine.
     CreateFloppy,
@@ -169,6 +172,7 @@ impl LauncherTab {
             LauncherTab::AvDisplay => "Display",
             LauncherTab::AvEmulation => "Emulation",
             LauncherTab::AvPaths => "Paths",
+            LauncherTab::AvRecording => "Recording",
             LauncherTab::CreateFloppy => "Floppy Disk",
             LauncherTab::CreateHard => "Hard Disk",
             LauncherTab::CreateGeometry => "Disk Geometry",
@@ -201,7 +205,8 @@ impl LauncherTab {
             LauncherTab::AvVideo
             | LauncherTab::AvDisplay
             | LauncherTab::AvEmulation
-            | LauncherTab::AvPaths => LauncherTab::AvAudio,
+            | LauncherTab::AvPaths
+            | LauncherTab::AvRecording => LauncherTab::AvAudio,
             LauncherTab::IoParallel | LauncherTab::IoNetworking | LauncherTab::IoAudio => {
                 LauncherTab::IoPorts
             }
@@ -250,7 +255,8 @@ impl LauncherTab {
             | LauncherTab::AvVideo
             | LauncherTab::AvDisplay
             | LauncherTab::AvEmulation
-            | LauncherTab::AvPaths => AV_NAV,
+            | LauncherTab::AvPaths
+            | LauncherTab::AvRecording => AV_NAV,
             LauncherTab::IoPorts
             | LauncherTab::IoParallel
             | LauncherTab::IoNetworking
@@ -320,8 +326,9 @@ pub(super) const AV_NAV: &[(&str, LauncherTab)] = &[
     ("Video", LauncherTab::AvVideo),
     ("Display", LauncherTab::AvDisplay),
     ("Emulation", LauncherTab::AvEmulation),
-    // Four to a row, so this one wraps onto a second.
+    // Four to a row, so these two wrap onto a second.
     ("Paths", LauncherTab::AvPaths),
+    ("Recording", LauncherTab::AvRecording),
 ];
 
 /// A single editable setting. Parameter-free variants keep the per-tab row
@@ -346,6 +353,15 @@ pub enum LauncherField {
     PathsFloppies,
     PathsHarddrives,
     PathsCds,
+    // --- the Recording page -----------------------------------------
+    //
+    // The configuration's `[recording]` section: what Save Clip and
+    // Record Video write, and the ffmpeg an MP4 is made with.
+    RecordingClipFormat,
+    RecordingClipSeconds,
+    RecordingClipFps,
+    RecordingVideoFormat,
+    RecordingFfmpeg,
     // Create Image workshop -- these edit no machine setting, only what the
     // next image will be made of.
     NewFloppyDensity,
@@ -1216,7 +1232,7 @@ pub(super) const SOUND_ROWS: [Row; 2] = [
 ];
 #[cfg(not(feature = "mhi"))]
 pub(super) const SOUND_ROWS: [Row; 1] = [row(F::Toccata, "  Toccata", Cycle)];
-// The A/V & Emu tab is split into five categories switched via the top nav row.
+// The A/V & Emu tab is split into six categories switched via the top nav row.
 // The Video category also carries the CRT-shader controls (a picture setting).
 // The emulated picture, in signal order -- what the monitor is fed and how
 // it is drawn -- with the shader pair last, since strength greys off the
@@ -1306,6 +1322,19 @@ pub(super) const PATHS_ROWS: [Row; 12] = [
     row(F::PathsFloppies, "  Floppies", PathRow),
     row(F::PathsHarddrives, "  Hard drives", PathRow),
     row(F::PathsCds, "  CD images", PathRow),
+];
+
+/// The Recording page: the `[recording]` section, under the names the
+/// window's Recording menu gives the two things it makes. The ffmpeg row
+/// is there only while MP4 is chosen, since nothing else runs it.
+pub(super) const RECORDING_ROWS: [Row; 7] = [
+    section_header("Save Clip:"),
+    row(F::RecordingClipFormat, "  Format", Cycle),
+    row(F::RecordingClipSeconds, "  Length", Cycle),
+    row(F::RecordingClipFps, "  Frame rate", Cycle),
+    section_header("Record Video:"),
+    row(F::RecordingVideoFormat, "  Format", Cycle),
+    row(F::RecordingFfmpeg, "  ffmpeg", PathRow),
 ];
 
 /// The floppy page. Every option the format carries is on it; nothing on
@@ -1466,6 +1495,7 @@ pub fn rows(
         LauncherTab::AvDisplay => Cow::Borrowed(&DISPLAY_ROWS),
         LauncherTab::AvEmulation => Cow::Borrowed(&EMULATION_ROWS),
         LauncherTab::AvPaths => Cow::Borrowed(&PATHS_ROWS),
+        LauncherTab::AvRecording => Cow::Borrowed(&RECORDING_ROWS),
     }
 }
 

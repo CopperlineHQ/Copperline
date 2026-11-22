@@ -419,11 +419,12 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
         LauncherTab::AvDisplay,
         LauncherTab::AvEmulation,
         LauncherTab::AvPaths,
+        LauncherTab::AvRecording,
     ];
     for &tab in launcher::TABS.iter().chain(off_strip.iter()) {
         // The row grid always ends above the status line; on tabs with a top
         // nav it starts a nav block lower, leaving it less room -- two nav
-        // rows' worth where the nav wraps (the A/V pages' five chips, the
+        // rows' worth where the nav wraps (the A/V pages' six chips, the
         // Storage links), which is what the draw path reserves too.
         let bound = launcher_status_y(rect);
         let row_offset = if tab.has_top_nav() {
@@ -487,6 +488,38 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
     }
 }
 
+/// The Recording page's steppers say what a format means as well as its
+/// name, which is only worth it read whole: every choice of every row fits
+/// the value box without `truncate_to_width` cutting it, on either video
+/// standard (automatic names the rate it comes to).
+#[test]
+fn every_recording_value_fits_its_box() {
+    let max = LAUNCH_VALUE_W / font::GLYPH_W;
+    let mut setup = launcher::MachineSetup::default();
+    for _standard in 0..2 {
+        for field in [
+            LauncherField::RecordingClipFormat,
+            LauncherField::RecordingClipSeconds,
+            LauncherField::RecordingClipFps,
+            LauncherField::RecordingVideoFormat,
+        ] {
+            let first = setup.value_label(field);
+            loop {
+                let label = setup.value_label(field);
+                assert!(
+                    label.chars().count() <= max,
+                    "{field:?} reads {label:?}, past the {max} characters its box holds"
+                );
+                setup.cycle(field, true);
+                if setup.value_label(field) == first {
+                    break;
+                }
+            }
+        }
+        setup.cycle(LauncherField::Video, true);
+    }
+}
+
 /// A greyed row that explains itself draws its reason as free text from the
 /// control column's left edge ([`GreyedAs::Reason`]), with no box to clip it
 /// and no truncation on the way out -- unlike the dimmed-value kinds, which
@@ -534,6 +567,7 @@ fn every_greyed_reason_fits_the_column() {
             LauncherTab::AvDisplay,
             LauncherTab::AvEmulation,
             LauncherTab::AvPaths,
+            LauncherTab::AvRecording,
         ];
         for &tab in launcher::TABS.iter().chain(off_strip.iter()) {
             for r in launcher::rows(
@@ -3933,7 +3967,7 @@ fn panels_render_into_their_rects() {
     save(&frame, "launcher-av-video");
 
     // The Display category: the host window's own settings, under the same
-    // nav row (which wraps -- five categories, four to a row).
+    // nav row (which wraps -- six categories, four to a row).
     let mut frame = vec![0u8; w * h * 4];
     let mut state = LauncherState::new(launcher::MachineSetup::default());
     state.tab = LauncherTab::AvDisplay;
@@ -3958,6 +3992,41 @@ fn panels_render_into_their_rects() {
     };
     draw(&mut frame, scale, &ui, None, None);
     save(&frame, "launcher-av-emulation");
+
+    // The Recording category, as it opens (GIF clips, AVI video, so no
+    // ffmpeg row), then with MP4 chosen: the ffmpeg row dimmed while no
+    // ffmpeg is known, and in full once one is chosen.
+    for (name, mp4, ffmpeg) in [
+        ("launcher-av-recording", false, None),
+        ("launcher-av-recording-mp4", true, None),
+        (
+            "launcher-av-recording-ffmpeg",
+            true,
+            Some("/opt/homebrew/bin/ffmpeg"),
+        ),
+    ] {
+        let mut frame = vec![0u8; w * h * 4];
+        let mut state = LauncherState::new(launcher::MachineSetup::default());
+        state.tab = LauncherTab::AvRecording;
+        if mp4 {
+            state.setup.cycle(LauncherField::RecordingVideoFormat, true);
+            state.setup.cycle(LauncherField::RecordingClipFormat, true);
+        }
+        if let Some(path) = ffmpeg {
+            state.setup.set_path(
+                LauncherField::RecordingFfmpeg,
+                std::path::PathBuf::from(path),
+            );
+        }
+        let ui = UiState {
+            menu_open: false,
+            menu_rows: Vec::new(),
+            menu_nav: menu::MenuNav::default(),
+            panel: Some(Panel::Launcher(Box::new(state))),
+        };
+        draw(&mut frame, scale, &ui, None, None);
+        save(&frame, name);
+    }
 
     // The Floppy tab with two drives wired in: each drive is a greyed "DFn:"
     // heading with indented settings; DF2/DF3 are hidden until enabled.

@@ -113,6 +113,11 @@ impl App {
             self.launcher_browse_save(field, "printer.txt");
             return;
         }
+        // A program, not media: no media folder to remember or open in.
+        if field == LauncherField::RecordingFfmpeg {
+            self.launcher_browse_ffmpeg();
+            return;
+        }
         // Beside whatever the field already holds; failing that, wherever
         // the last picker for that kind of media was answered; failing
         // that, the directory kept for it. A field with a value is the best
@@ -358,6 +363,34 @@ impl App {
             .or_else(crate::paths::harddrives_dir);
         let dialog = PickRequest::folder("Select host directory").directory(start_dir);
         self.pick_path(dialog, move |app, picked| {
+            let Some(path) = picked else { return };
+            if let Some(state) = app.launcher_state_mut() {
+                state.edit_cancel();
+                state.setup.set_path(field, path);
+                state.status = None;
+            }
+        });
+    }
+
+    /// File picker for the Recording page's ffmpeg, opened beside the one
+    /// the row shows -- the one chosen, else the one the search found -- so
+    /// a second ffmpeg next to the first is one click away.
+    fn launcher_browse_ffmpeg(&mut self) {
+        let field = LauncherField::RecordingFfmpeg;
+        let start_dir = self
+            .launcher_state()
+            .and_then(|s| s.setup.ffmpeg_shown())
+            .and_then(std::path::Path::parent)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(std::path::Path::to_path_buf);
+        let dialog = PickRequest::file("Select ffmpeg");
+        // Elsewhere a program has no extension to filter on.
+        let dialog = if cfg!(windows) {
+            dialog.filter("Programs", &["exe", "EXE"])
+        } else {
+            dialog
+        };
+        self.pick_path(dialog.directory(start_dir), move |app, picked| {
             let Some(path) = picked else { return };
             if let Some(state) = app.launcher_state_mut() {
                 state.edit_cancel();
