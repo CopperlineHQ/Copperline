@@ -866,7 +866,8 @@ pub struct FrameDumpSpec {
 }
 
 /// A scheduled `--gif-after SECS PATH` clip: `seconds` of presented frames
-/// from `start_secs`, written to `path` at the configured clip rate.
+/// from `start_secs`, written to `path` at the configured clip rate, as an
+/// APNG when `path` ends in `.png` or `.apng` and a GIF otherwise.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GifCaptureSpec {
     pub start_secs: f32,
@@ -1798,7 +1799,10 @@ pub struct App {
     /// presented frame, once the machine's video standard (which picks the
     /// automatic clip rate) is known.
     clip_settings: crate::gifclip::ClipSettings,
-    /// The rolling last-N-seconds ring behind Save Clip as GIF; None
+    /// What Save Clip writes (`[recording] clip_format`, and the Recording
+    /// menu's Clip Format).
+    clip_format: crate::gifclip::ClipFormat,
+    /// The rolling last-N-seconds ring behind Save Clip; None
     /// until the first frame, or for good when `clip_seconds` is 0.
     clip_ring: Option<crate::gifclip::ClipRing>,
     /// A clip being written on a background thread: its outcome flashes
@@ -1870,7 +1874,7 @@ struct FrameDumpState {
 /// inside the window and closes once emulated time passes its end.
 struct GifCaptureState {
     spec: GifCaptureSpec,
-    writer: Option<crate::gifclip::GifWriter<std::io::BufWriter<std::fs::File>>>,
+    writer: Option<crate::gifclip::ClipWriter<std::io::BufWriter<std::fs::File>>>,
     selector: crate::gifclip::FrameSelector,
     last_captured_emulated_frame: Option<u64>,
     finished: bool,
@@ -3205,6 +3209,7 @@ impl App {
             record_fb: Vec::new(),
             record_scratch_fb: Vec::new(),
             clip_settings: clip,
+            clip_format: crate::gifclip::ClipFormat::default(),
             clip_ring: None,
             clip_save: None,
             clip_fb: Vec::new(),
@@ -4147,9 +4152,10 @@ impl App {
         self.menu_settings_file = path;
     }
 
-    /// `[recording]`'s video settings: what Record Video writes, and the
-    /// ffmpeg an MP4 is made with.
+    /// `[recording]`'s output settings: what Save Clip and Record Video
+    /// write, and the ffmpeg an MP4 is made with.
     pub fn set_video_recording(&mut self, recording: &crate::config::RecordingConfig) {
+        self.clip_format = recording.clip_format;
         self.video_format = recording.video_format;
         self.ffmpeg_path = recording.ffmpeg.clone();
     }
@@ -5078,7 +5084,7 @@ impl ApplicationHandler for App {
                         if host_shortcut_modifier_pressed(self.modifiers)
                             && self.modifiers.shift_key() =>
                     {
-                        self.save_clip_gif()
+                        self.save_clip()
                     }
                     (KeyCode::KeyG, ElementState::Pressed)
                         if host_shortcut_modifier_pressed(self.modifiers) =>
@@ -7424,6 +7430,7 @@ impl App {
             .filter(|board| board.clipboard_fitted())
             .map(|board| board.clipboard_sharing());
         raw.recording.video_format = Some(self.video_format.label().to_string());
+        raw.recording.clip_format = Some(self.clip_format.label().to_string());
         raw
     }
 

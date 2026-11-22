@@ -4603,6 +4603,7 @@ fn recording_clip_settings_default_and_validate() -> Result<()> {
         RecordingConfig {
             clip_seconds: crate::gifclip::DEFAULT_CLIP_SECONDS,
             clip_fps: 0,
+            clip_format: crate::gifclip::ClipFormat::Gif,
             video_format: VideoFormat::Avi,
             ffmpeg: None,
         }
@@ -4654,6 +4655,34 @@ fn recording_video_format_and_ffmpeg_parse_and_validate() -> Result<()> {
     }
     let err = parse_config("[recording]\nvideo_format = \"mkv\"\n").unwrap_err();
     assert!(format!("{err:#}").contains("video_format"), "{err:#}");
+    Ok(())
+}
+
+#[test]
+fn recording_clip_format_parses_and_validates() -> Result<()> {
+    use crate::gifclip::ClipFormat;
+    assert_eq!(parse_config("")?.recording.clip_format, ClipFormat::Gif);
+    let cfg = parse_config("[recording]\nclip_format = \" APNG \"\n")?;
+    assert_eq!(cfg.recording.clip_format, ClipFormat::Apng);
+    for format in ClipFormat::MENU_ORDER {
+        let cfg = parse_config(&format!(
+            "[recording]\nclip_format = \"{}\"\n",
+            format.label()
+        ))?;
+        assert_eq!(cfg.recording.clip_format, format);
+    }
+    let err = parse_config("[recording]\nclip_format = \"webp\"\n").unwrap_err();
+    assert!(format!("{err:#}").contains("clip_format"), "{err:#}");
+    Ok(())
+}
+
+#[cfg(feature = "frontend")]
+#[test]
+fn the_recording_menus_clip_format_is_kept_with_the_menu_settings() -> Result<()> {
+    let mut base = RawConfig::parse("")?;
+    let overlay = RawConfig::parse("[recording]\nclip_format = \"apng\"\n")?;
+    base.merge_menu_settings(&overlay);
+    assert_eq!(base.recording.clip_format.as_deref(), Some("apng"));
     Ok(())
 }
 

@@ -117,6 +117,7 @@ impl App {
             rewind: self.rewind_armed,
             recording: self.recorder.is_some(),
             video_format: self.video_format,
+            clip_format: self.clip_format,
             input_recording: self.input_recorder.is_some(),
             card_outputs: !self.card_monitors.is_empty(),
             card_recording: self.card_monitors.program_recording(),
@@ -570,7 +571,13 @@ impl App {
             A::ToggleRecordInput => self.toggle_input_recording(),
             A::ToggleCardRecord => self.toggle_card_recording(),
             A::ShowCardMonitors => self.show_card_monitors(),
-            A::SaveClip => self.save_clip_gif(),
+            A::SetClipFormat(format) => {
+                self.clip_format = format;
+                info!("clip format: {}", format.label());
+                self.show_osd(format!("Clip format: {}", format.menu_label()));
+                self.request_redraw();
+            }
+            A::SaveClip => self.save_clip(),
             A::SaveNativeScreenshot => self.take_native_screenshot(),
 
             A::SaveState => self.save_state_interactive(),

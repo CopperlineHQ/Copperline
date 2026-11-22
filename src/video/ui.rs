@@ -2907,7 +2907,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 29] = [
     ("R", "Record video on/off", true),
     ("Shift+R", "Record input on/off", true),
     ("Shift+V", "Paste as keystrokes", true),
-    ("Shift+G", "Save clip as GIF", true),
+    ("Shift+G", "Save clip (GIF/APNG)", true),
     ("Shift+S", "Save state", true),
     ("Shift+L", "Load state", true),
     ("1-0", "Quick-save to a slot", true),

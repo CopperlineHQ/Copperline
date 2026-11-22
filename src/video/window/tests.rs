@@ -10969,7 +10969,7 @@ fn clip_ring_captures_presented_frames_and_saves_a_gif() {
     );
     assert!(ring.bytes() > 0);
 
-    let written = app.save_clip_gif_to(&path).expect("clip written");
+    let written = app.save_clip_to(&path).expect("clip written");
     assert_eq!(written as usize, ring.frame_count());
     let bytes = std::fs::read(&path).expect("clip file exists");
     std::fs::remove_file(&path).ok();
@@ -10987,9 +10987,29 @@ fn clip_ring_captures_presented_frames_and_saves_a_gif() {
     assert_eq!(usize::from(frame.height), crate::video::capture_height());
     assert!(frame.palette.is_some(), "frames carry their own palette");
 
+    // The same ring saved to a .png path is an APNG of the same canvas.
+    let apng_path = path.with_extension("png");
+    let written_apng = app.save_clip_to(&apng_path).expect("APNG clip written");
+    assert!(
+        (1..=written).contains(&written_apng),
+        "{written_apng} frames"
+    );
+    let bytes = std::fs::read(&apng_path).expect("APNG clip file exists");
+    std::fs::remove_file(&apng_path).ok();
+    let reader = png::Decoder::new(std::io::Cursor::new(&bytes[..]))
+        .read_info()
+        .expect("APNG parses");
+    let info = reader.info();
+    assert_eq!(
+        info.animation_control().expect("animated").num_frames,
+        written_apng
+    );
+    assert_eq!(info.width as usize, crate::video::FB_WIDTH);
+    assert_eq!(info.height as usize, crate::video::capture_height());
+
     // Without a ring there is nothing to save.
     let bare = test_app();
-    assert!(bare.save_clip_gif_to(&path).is_err());
+    assert!(bare.save_clip_to(&path).is_err());
 }
 
 /// A clip slot reached while `present_fb` still holds the picture the
@@ -11093,6 +11113,62 @@ fn windowless_run_writes_a_gif_clip_deterministically() {
     // six frames whose delays add up to the window: 20 cs.
     assert!((5..=7).contains(&frames), "{frames} frames");
     assert!((19..=21).contains(&total_delay), "{total_delay} cs");
+}
+
+/// `--gif-after` to a `.png` path writes an APNG through the same loop:
+/// deterministic, one screenshot-shaped canvas, and frame delays that
+/// add up to the window to the millisecond.
+#[test]
+fn windowless_run_writes_an_apng_clip_for_a_png_path() {
+    let run = |name: &str| -> Vec<u8> {
+        let path = temp_capture_path(name);
+        let mut app = test_app();
+        app.pending_gif_captures = vec![super::GifCaptureSpec {
+            start_secs: 0.05,
+            seconds: 0.2,
+            path: path.clone(),
+        }];
+        app.run_headless().expect("windowless APNG capture run");
+        let bytes = std::fs::read(&path).expect("clip written");
+        std::fs::remove_file(&path).ok();
+        bytes
+    };
+    let first = run("clip-a.png");
+    let second = run("clip-b.png");
+    assert_eq!(
+        first, second,
+        "the same run must produce a byte-identical clip"
+    );
+
+    let decoder = png::Decoder::new(std::io::Cursor::new(&first[..]));
+    let mut reader = decoder.read_info().expect("APNG parses");
+    assert_eq!(reader.info().width as usize, crate::video::FB_WIDTH);
+    assert_eq!(
+        reader.info().height as usize,
+        crate::video::capture_height()
+    );
+    let frames = reader
+        .info()
+        .animation_control()
+        .expect("acTL present")
+        .num_frames;
+    assert!((1..=7).contains(&frames), "{frames} frames");
+    let mut buf = vec![0u8; reader.output_buffer_size().expect("frame size")];
+    let mut total_ms = 0.0;
+    for _ in 0..frames {
+        reader.next_frame(&mut buf).expect("APNG frame parses");
+        let fctl = reader.info().frame_control().expect("fcTL present");
+        let ms = f64::from(fctl.delay_num) * 1000.0 / f64::from(fctl.delay_den);
+        assert!(ms > 10.0, "a {ms} ms frame plays at 100 ms");
+        total_ms += ms;
+    }
+    // Delays are whole milliseconds rounded cumulatively from the first
+    // frame, so they add up to the 200 ms window within a millisecond of
+    // where the first captured frame fell.
+    assert!(
+        (180.0..=201.0).contains(&total_ms),
+        "{total_ms} ms for a 200 ms window"
+    );
 }
 
 /// Scheduled captures of different kinds share one run: a clip that

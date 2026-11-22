@@ -98,9 +98,11 @@ Full reference: `docs/guide/headless.md`.
 ```
 
 `--gif-after` repeats like `--screenshot-after`; `--gif-seconds` defaults
-to `[recording] clip_seconds` (10). The window's Cmd+Shift+G /
-Alt+Shift+G saves the same kind of clip from a rolling ring of the last
-`clip_seconds` of the display.
+to `[recording] clip_seconds` (10). A PATH ending in `.png` (or `.apng`)
+writes a lossless animated PNG instead of a GIF. The window's
+Cmd+Shift+G / Alt+Shift+G saves the same kind of clip from a rolling ring
+of the last `clip_seconds` of the display, in `[recording] clip_format`
+(`gif` or `apng`).
 
 Audio: `--noaudio` runs silent; `--audio-wav PATH` captures the mixed output
 as a WAV in emulated time instead of playing it, and `--audio-stems DIR`

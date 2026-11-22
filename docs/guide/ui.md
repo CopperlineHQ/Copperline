@@ -57,7 +57,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+R` | `Alt+R` | Start / stop a video-with-audio recording (below) |
 | `Cmd+Shift+R` | `Alt+Shift+R` | Start / stop an input recording (below) |
 | `Cmd+Shift+V` | `Alt+Shift+V` | Paste as keystrokes: type the host clipboard's text on the emulated keyboard (also *Input Settings -> Paste as Keystrokes*) |
-| `Cmd+Shift+G` | `Alt+Shift+G` | Save the last few seconds of the display as an animated GIF (`copperline-clip-<YYYYMMDDHHmmSS>.gif` in the [recordings folder](#where-files-go); see [Saving a GIF clip](#saving-a-gif-clip)) |
+| `Cmd+Shift+G` | `Alt+Shift+G` | Save the last few seconds of the display as an animated GIF or APNG (`copperline-clip-<YYYYMMDDHHmmSS>.gif` or `.png` in the [recordings folder](#where-files-go); see [Saving a GIF clip](#saving-a-gif-clip)) |
 | `Cmd+Shift+S` | `Alt+Shift+S` | Save a state (`copperline-state-<YYYYMMDDHHmmSS>.clstate` in the [states folder](#where-files-go)) |
 | `Cmd+Shift+L` | `Alt+Shift+L` | Open the [Load State browser](#load-state-browser) |
 | `Cmd+1`..`Cmd+9`, `Cmd+0` | `Alt+1`..`Alt+9`, `Alt+0` | Quick-save to numbered slot 1-10 |
@@ -733,7 +733,10 @@ boot-time cards, SRAM cards, real card readers, and the fast-RAM rule.
   deterministically. See below.
 - **Save Clip as GIF** (also `Cmd+Shift+G` / `Alt+Shift+G`): writes the
   last `[recording] clip_seconds` (ten by default) of the display as an
-  animated GIF. See [Saving a GIF clip](#saving-a-gif-clip).
+  animated GIF, or an animated PNG when Clip Format is APNG (the row then
+  reads **Save Clip as APNG**). See [Saving a GIF clip](#saving-a-gif-clip).
+- **Clip Format**: what Save Clip writes, **GIF (256 colours)** (the
+  default) or **APNG (lossless)** (`[recording] clip_format`).
 - **Save Native Screenshot (1:1)** (also `Cmd+Option+S` / `Ctrl+Alt+S`):
   saves a native screenshot at the original pixel size.
 
@@ -1285,7 +1288,7 @@ for this RGB source ffmpeg picks H.264's 4:4:4 profile, which QuickTime,
 browsers and most video sites cannot play.
 
 (saving-a-gif-clip)=
-## Saving a GIF clip
+## Saving a GIF or APNG clip
 
 The window keeps a rolling ring of the last ten emulated seconds (by
 default) of the picture it presents, so a moment worth sharing can be
@@ -1308,6 +1311,19 @@ follow the emulated timeline, so a clip made under Warp Speed plays at
 normal speed, and a stretch where Warp presented no frames plays as one
 held frame rather than a burst. A clip has no sound; use
 [Record Video](#recording-video) for that.
+
+The Recording menu's **Clip Format** (`[recording] clip_format =
+"apng"`) makes the same item save an animated PNG instead, as
+`copperline-clip-<YYYYMMDDHHmmSS>.png`. Every current browser plays an
+APNG in an `<img>` tag as it does a GIF, and the format has none of the
+GIF's limits: one palette is shared by the whole clip when its frames use
+256 colours or fewer between them, and any more (HAM, AGA 24-bit) are
+written as 24-bit RGB, so nothing is ever quantized. Each frame after the
+first stores only the rectangle that changed, and delays are kept to the
+millisecond, so 50 and 60 frames per second play at their real rate. On
+typical footage the APNG is a third to nine tenths smaller than the GIF.
+GIF stays the default because some sites still convert an uploaded APNG
+to a still picture of its first frame.
 
 `[recording] clip_seconds` sets the ring's length (up to 120 seconds; 0
 switches the ring off, and the menu item and shortcut then only say so)

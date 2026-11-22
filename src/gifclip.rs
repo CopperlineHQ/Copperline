@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! Animated GIF clip export: the rolling "last N seconds" ring behind the
-//! window's Save Clip as GIF item, and the streaming capture behind the
-//! headless `--gif-after` flag. Both feed the same [`GifWriter`], so a clip
-//! saved from the window and one captured headlessly are the same picture.
+//! Animated clip export: the rolling "last N seconds" ring behind the
+//! window's Save Clip item, and the streaming capture behind the headless
+//! `--gif-after` flag. Both feed the same [`ClipWriter`] -- a GIF through
+//! [`GifWriter`] or an APNG through [`ApngWriter`] (the `apng` module) --
+//! so a clip saved from the window and one captured headlessly are the
+//! same picture.
 //!
 //! Frames arrive stamped with emulated time (one timestamp per presented
 //! frame) and are thinned to the clip rate by a [`FrameSelector`] before
@@ -31,6 +33,9 @@ use std::io::Write;
 use std::path::Path;
 
 use crate::chipset::agnus::VideoStandard;
+
+mod apng;
+pub use apng::{ApngWriter, MIN_APNG_DELAY_MS};
 
 /// `[recording] clip_seconds` default: the ring keeps the last ten seconds.
 pub const DEFAULT_CLIP_SECONDS: u32 = 10;
@@ -490,8 +495,114 @@ impl<W: Write> GifWriter<W> {
     }
 }
 
-/// Write `frames` (oldest first, ending at `end`) to `path` as a GIF whose
-/// canvas is the first frame's size. Returns the number of frames written.
+/// The file an animated clip is written as (`[recording] clip_format`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClipFormat {
+    /// GIF89a: 256 colours a frame, and plays wherever images do. The
+    /// default.
+    #[default]
+    Gif,
+    /// Animated PNG: lossless whatever the colour count, smaller on most
+    /// footage, and shown animated by every current browser.
+    Apng,
+}
+
+impl ClipFormat {
+    /// Every format, in the order a picker offers them.
+    pub const MENU_ORDER: [ClipFormat; 2] = [ClipFormat::Gif, ClipFormat::Apng];
+
+    /// The config name (round-trips through [`ClipFormat::parse`]).
+    pub fn label(self) -> &'static str {
+        match self {
+            ClipFormat::Gif => "gif",
+            ClipFormat::Apng => "apng",
+        }
+    }
+
+    /// Parse a config name, case-insensitively.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "gif" => Some(ClipFormat::Gif),
+            "apng" => Some(ClipFormat::Apng),
+            _ => None,
+        }
+    }
+
+    /// What a picker shows the user.
+    pub fn menu_label(self) -> &'static str {
+        match self {
+            ClipFormat::Gif => "GIF (256 colours)",
+            ClipFormat::Apng => "APNG (lossless)",
+        }
+    }
+
+    /// The short form a menu row shows as its value.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            ClipFormat::Gif => "GIF",
+            ClipFormat::Apng => "APNG",
+        }
+    }
+
+    /// The file extension a clip of this format is saved with.
+    pub fn extension(self) -> &'static str {
+        match self {
+            ClipFormat::Gif => "gif",
+            ClipFormat::Apng => "png",
+        }
+    }
+
+    /// The format a clip written to `path` takes: APNG for a `.png` or
+    /// `.apng` file, GIF for anything else.
+    pub fn for_path(path: &Path) -> Self {
+        let ext = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase);
+        match ext.as_deref() {
+            Some("png" | "apng") => ClipFormat::Apng,
+            _ => ClipFormat::Gif,
+        }
+    }
+}
+
+/// A clip being written in either format: frames go in with
+/// [`push`](Self::push) and the file is completed by
+/// [`finish`](Self::finish), whichever writer is behind it.
+pub enum ClipWriter<W: Write> {
+    Gif(GifWriter<W>),
+    Apng(ApngWriter<W>),
+}
+
+impl<W: Write> ClipWriter<W> {
+    /// Start a `width` x `height` clip in `format` at `fps`.
+    pub fn new(format: ClipFormat, out: W, width: usize, height: usize, fps: u32) -> Result<Self> {
+        Ok(match format {
+            ClipFormat::Gif => Self::Gif(GifWriter::new(out, width, height, fps)?),
+            ClipFormat::Apng => Self::Apng(ApngWriter::new(out, width, height, fps)?),
+        })
+    }
+
+    pub fn push(&mut self, frame: ClipFrame) -> Result<()> {
+        match self {
+            Self::Gif(writer) => writer.push(frame),
+            Self::Apng(writer) => writer.push(frame),
+        }
+    }
+
+    /// Complete the file with the last frame shown until `end`, returning
+    /// the sink and the number of frames written.
+    pub fn finish(self, end: Option<f64>) -> Result<(W, u32)> {
+        match self {
+            Self::Gif(writer) => writer.finish(end),
+            Self::Apng(writer) => writer.finish(end),
+        }
+    }
+}
+
+/// Write `frames` (oldest first, ending at `end`) to `path` as a clip
+/// whose canvas is the first frame's size, in the format its extension
+/// names ([`ClipFormat::for_path`]). Returns the number of frames written.
 pub fn write_clip(path: &Path, frames: &[ClipFrame], fps: u32, end: Option<f64>) -> Result<u32> {
     let first = frames
         .first()
@@ -500,7 +611,8 @@ pub fn write_clip(path: &Path, frames: &[ClipFrame], fps: u32, end: Option<f64>)
         .with_context(|| format!("creating the directory for {}", path.display()))?;
     let file =
         std::fs::File::create(path).with_context(|| format!("creating clip {}", path.display()))?;
-    let mut writer = GifWriter::new(
+    let mut writer = ClipWriter::new(
+        ClipFormat::for_path(path),
         std::io::BufWriter::new(file),
         first.width,
         first.height,
@@ -515,9 +627,9 @@ pub fn write_clip(path: &Path, frames: &[ClipFrame], fps: u32, end: Option<f64>)
     Ok(written)
 }
 
-/// Pick a default filename for an interactive clip.
-pub fn auto_filename() -> std::path::PathBuf {
-    crate::paths::clip_file()
+/// Pick a default filename for an interactive clip in `format`.
+pub fn auto_filename(format: ClipFormat) -> std::path::PathBuf {
+    crate::paths::clip_file(format.extension())
 }
 
 /// Index `rgba` against its own colours in first-seen order, or None once
@@ -918,6 +1030,54 @@ mod tests {
         assert_eq!(decode(&bytes).len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(write_clip(&path, &[], 25, None).is_err());
+    }
+
+    #[test]
+    fn the_clip_format_follows_the_file_extension() {
+        for (path, format) in [
+            ("clip.gif", ClipFormat::Gif),
+            ("clip.GIF", ClipFormat::Gif),
+            ("clip.png", ClipFormat::Apng),
+            ("clip.PNG", ClipFormat::Apng),
+            ("clip.apng", ClipFormat::Apng),
+            ("clip", ClipFormat::Gif),
+            ("dir.png/clip.out", ClipFormat::Gif),
+        ] {
+            assert_eq!(ClipFormat::for_path(Path::new(path)), format, "{path}");
+        }
+        for format in ClipFormat::MENU_ORDER {
+            assert_eq!(ClipFormat::parse(format.label()), Some(format));
+            // A saved clip's own extension selects its format again.
+            let name = format!("clip.{}", format.extension());
+            assert_eq!(ClipFormat::for_path(Path::new(&name)), format);
+        }
+        assert_eq!(ClipFormat::parse(" GIF "), Some(ClipFormat::Gif));
+        assert_eq!(ClipFormat::parse("webp"), None);
+        assert_eq!(ClipFormat::default(), ClipFormat::Gif);
+    }
+
+    #[test]
+    fn write_clip_to_a_png_path_writes_an_animated_png() {
+        let dir = std::env::temp_dir().join(format!(
+            "copperline-apngclip-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("clip.png");
+        let frames = vec![
+            ClipFrame::new(0.0, 4, 4, &solid(4, 4, rgba(3, 3, 3))),
+            ClipFrame::new(0.04, 4, 4, &solid(4, 4, rgba(4, 4, 4))),
+        ];
+        assert_eq!(write_clip(&path, &frames, 25, None).unwrap(), 2);
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        let decoder = png::Decoder::new(std::io::Cursor::new(&bytes[..]));
+        let reader = decoder.read_info().expect("APNG parses");
+        let actl = reader.info().animation_control().expect("animated");
+        assert_eq!((actl.num_frames, actl.num_plays), (2, 0));
     }
 
     #[test]
