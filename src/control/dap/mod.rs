@@ -22,6 +22,7 @@
 pub mod proto;
 
 mod breaks;
+mod console;
 mod eval;
 mod session;
 mod vars;
@@ -144,6 +145,8 @@ pub struct Adapter {
     start_args: Option<(String, Value)>,
     lines_start_at_1: bool,
     columns_start_at_1: bool,
+    /// The client's `supportsInvalidatedEvent`.
+    client_invalidated: bool,
     /// The client asked to leave; the loop ends once the session is
     /// down.
     finished: bool,
@@ -160,6 +163,7 @@ impl Adapter {
             start_args: None,
             lines_start_at_1: true,
             columns_start_at_1: true,
+            client_invalidated: false,
             finished: false,
         }
     }
@@ -275,6 +279,7 @@ impl Adapter {
         let args = &req.arguments;
         self.lines_start_at_1 = args["linesStartAt1"].as_bool().unwrap_or(true);
         self.columns_start_at_1 = args["columnsStartAt1"].as_bool().unwrap_or(true);
+        self.client_invalidated = args["supportsInvalidatedEvent"].as_bool().unwrap_or(false);
         Ok(capabilities())
     }
 
@@ -310,6 +315,7 @@ impl Adapter {
     }
 
     fn install(&mut self, mut session: Session) -> Result<Value, String> {
+        session.set_client_invalidated(self.client_invalidated);
         {
             let (out, writer) = (&mut self.out, &self.writer);
             let mut emit = Emit { out, writer };
@@ -385,6 +391,7 @@ pub fn capabilities() -> Value {
         "supportsDisassembleRequest": true,
         "supportsSteppingGranularity": true,
         "supportsInstructionBreakpoints": true,
+        "supportsCompletionsRequest": true,
         "supportsValueFormattingOptions": false,
         "supportsDelayedStackTraceLoading": false,
         "exceptionBreakpointFilters": breaks::EXCEPTION_FILTERS.iter().map(|f| json!({

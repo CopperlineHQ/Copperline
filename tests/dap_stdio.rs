@@ -511,8 +511,12 @@ fn dap_unwinds_a_caught_address_error_to_the_faulting_source_line() {
         "{info}"
     );
     let (_, registers) = registers_of_frame(&mut c, &fault);
+    // The value, without the label annotation (`<buffer+$1>`).
     let a0 = named(&registers, "a0")["value"]
         .as_str()
+        .unwrap()
+        .split_whitespace()
+        .next()
         .unwrap()
         .to_string();
     let accessed = description
@@ -598,6 +602,239 @@ fn dap_unwinds_an_exception_reached_by_stepping_through_an_aliased_vector() {
     );
 
     finish_crash_session(child, c);
+}
+
+/// The UAE debug adapter's debugger commands, document requests and
+/// variable formats, which the Amiga Assembly VS Code extension sends,
+/// against the vasm `lines` probe stopped in `twice` after it stored 6
+/// in `value`.
+#[test]
+#[ignore = "boots bundled AROS and launches the emulator plus DAP adapter"]
+fn dap_serves_the_uae_dap_commands_of_the_amiga_assembly_extension() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("guest/dap-test");
+    let program = dir.join("lines");
+    let source = dir.join("lines.s");
+    let store_line = std::fs::read_to_string(&source)
+        .unwrap()
+        .lines()
+        .position(|l| l.trim() == "move.l  d1,value")
+        .expect("the store in lines.s") as u64
+        + 1;
+    let mut child = AdapterChild(
+        Command::new(env!("CARGO_BIN_EXE_copperline-ctl"))
+            .arg("--dap")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .expect("starting adapter"),
+    );
+    let stdin = child.0.stdin.take().unwrap();
+    let stdout = BufReader::new(child.0.stdout.take().unwrap());
+    let (tx, rx) = channel();
+    std::thread::spawn(move || read_messages(stdout, tx));
+    let mut c = Client {
+        stdin,
+        rx,
+        seq: 0,
+        backlog: std::cell::RefCell::new(Vec::new()),
+    };
+    let caps = c.call(
+        "initialize",
+        json!({
+            "clientID": "test",
+            "linesStartAt1": true,
+            "columnsStartAt1": true,
+            "supportsInvalidatedEvent": true,
+        }),
+    );
+    assert_eq!(caps["supportsCompletionsRequest"], true);
+    c.call(
+        "launch",
+        json!({
+            "program": program,
+            "copperline": env!("CARGO_BIN_EXE_copperline"),
+            "factory": true,
+            "headless": true,
+            "model": "A500",
+            "cpu": "68000",
+            "stopOnEntry": true,
+            "timeoutMs": 120000,
+        }),
+    );
+    c.event("initialized");
+    // The rts after the store.
+    let bps = c.call(
+        "setBreakpoints",
+        json!({"source": {"path": source}, "breakpoints": [{"line": store_line + 1}]}),
+    );
+    let bp = bps["breakpoints"][0]["id"].as_i64().unwrap();
+    c.call("configurationDone", json!({}));
+    c.event("module");
+    assert_eq!(c.stopped()["reason"], "entry");
+    c.call("continue", json!({"threadId": 1}));
+    let stop = c.stopped();
+    assert_eq!(stop["hitBreakpointIds"], json!([bp]), "{stop}");
+    let repl = |c: &mut Client, expression: &str| -> String {
+        c.call(
+            "evaluate",
+            json!({"expression": expression, "context": "repl"}),
+        )["result"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+
+    // Memory dumps in the console: the address, then words and ASCII.
+    let dump = repl(&mut c, "m value,4,4,1");
+    assert!(dump.starts_with('$'), "{dump}");
+    assert!(dump.ends_with(": 00000006 | ...."), "{dump}");
+    // A short last row is padded to the full row's width.
+    let dump = repl(&mut c, "m value,4");
+    assert!(
+        dump.ends_with(&format!(": {:<35} | ....", "00000006")),
+        "{dump}"
+    );
+    assert!(repl(&mut c, "m value,4,2,2,b").ends_with(": 0000 0006"));
+    // In Watch the first row is the value and the rows expand.
+    let watch = c.call(
+        "evaluate",
+        json!({"expression": "m value,8,4,1", "context": "watch"}),
+    );
+    assert_eq!(watch["result"], "00000006 | ....", "{watch}");
+    let rows = c.call(
+        "variables",
+        json!({"variablesReference": watch["variablesReference"]}),
+    );
+    let rows = rows["variables"].as_array().unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows[0]["memoryReference"].is_string(), "{rows:?}");
+
+    // Memory set, and uae-dap's memory references in expressions.
+    let wrote = repl(&mut c, "M value=12345678");
+    assert!(wrote.starts_with("wrote 4 byte(s) at $"), "{wrote}");
+    let invalidated = c.event("invalidated");
+    assert_eq!(invalidated["areas"], json!(["variables"]));
+    assert_eq!(repl(&mut c, "@(value)"), "0x12345678 (305419896)");
+    assert_eq!(repl(&mut c, "#{value}"), "0x12345678 (305419896)");
+    assert_eq!(repl(&mut c, "@s(value+3,1)"), "0x78 (120)");
+    assert_eq!(repl(&mut c, "@(value,2) >> 8 & $F0"), "0x10 (16)");
+    assert_eq!(repl(&mut c, "${value}"), repl(&mut c, "value"));
+    // A letter followed by an operator is still an expression.
+    assert_eq!(repl(&mut c, "d1 + 1"), "0x7 (7)");
+
+    // CPU and Copper disassembly, labelled by the program's symbols.
+    let code = repl(&mut c, "d start,6");
+    assert!(code.starts_with("start:\n$"), "{code}");
+    assert_eq!(code.matches("MOVEQ").count(), 2, "{code}");
+    let copper = repl(&mut c, "c 1,8");
+    let first = copper.lines().next().unwrap();
+    assert!(
+        ["MOVE", "WAIT", "SKIP"]
+            .iter()
+            .any(|op| first.contains(&format!("  {op}"))),
+        "{copper}"
+    );
+    assert!(repl(&mut c, "h").contains("Memory dump"));
+    assert!(repl(&mut c, "h m").contains("rowSize"));
+
+    // Hovering a label shows its address and expands to its memory;
+    // so does an address register in Watch.
+    let hover = c.call(
+        "evaluate",
+        json!({"expression": "value", "context": "hover"}),
+    );
+    let rows = c.call(
+        "variables",
+        json!({"variablesReference": hover["variablesReference"]}),
+    );
+    assert!(
+        rows["variables"][0]["value"]
+            .as_str()
+            .unwrap()
+            .starts_with("1234 5678 "),
+        "{rows}"
+    );
+    let stack = c.call("evaluate", json!({"expression": "a7", "context": "watch"}));
+    assert!(stack["variablesReference"].as_i64().unwrap() > 0, "{stack}");
+
+    // The documents of the extension's Disassemble memory and
+    // Disassemble copper memory commands.
+    let document = |c: &mut Client, path: &str| -> String {
+        c.call("disassembledFileContents", json!({"path": path}))["content"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let start = document(&mut c, "0__start__3.dbgasm");
+    assert_eq!(start.lines().count(), 4, "{start}");
+    assert!(start.starts_with("start:\n"), "{start}");
+    let copper = document(&mut c, "copper_1__4.dbgasm");
+    assert!((1..=4).contains(&copper.lines().count()), "{copper}");
+    assert!(document(&mut c, "seg_0.dbgasm").contains("\ntwice:\n"));
+
+    // The registers: PC is annotated with its label, and View as Binary
+    // on d1 sticks.
+    let frames = c.call("stackTrace", json!({"threadId": 1}));
+    let top = frames["stackFrames"][0].clone();
+    let (_, registers) = registers_of_frame(&mut c, &top);
+    let pc = named(&registers, "pc")["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(pc.ends_with(" <twice+$8>"), "{pc}");
+    let d1 = named(&registers, "d1").clone();
+    assert!(d1.get("_raw").is_none(), "{d1}");
+    c.call(
+        "modifyVariableFormat",
+        json!({"variableInfo": {"variable": d1}, "variableDisplayFormat": 0}),
+    );
+    c.event("invalidated");
+    let (_, registers) = registers_of_frame(&mut c, &top);
+    assert_eq!(
+        named(&registers, "d1")["value"],
+        format!("0b{:032b}", 6),
+        "{registers:?}"
+    );
+    assert_eq!(repl(&mut c, "d1"), format!("0b{:032b}", 6));
+
+    // The program's hunks.
+    let scopes = c.call("scopes", json!({"frameId": top["id"]}));
+    let segments = scopes["scopes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == "Segments")
+        .unwrap_or_else(|| panic!("no Segments scope in {scopes}"))
+        .clone();
+    let segments = c.call(
+        "variables",
+        json!({"variablesReference": segments["variablesReference"]}),
+    );
+    let segments = segments["variables"].as_array().unwrap();
+    assert_eq!(segments.len(), 2, "{segments:?}");
+    assert!(
+        segments[0]["value"]
+            .as_str()
+            .unwrap()
+            .contains("bytes, code) <start>"),
+        "{segments:?}"
+    );
+
+    // Console completions replace the word before the cursor.
+    let completions = c.call(
+        "completions",
+        json!({"text": "m va", "column": 5, "frameId": top["id"]}),
+    );
+    assert_eq!(
+        completions["targets"],
+        json!([{"label": "value", "type": "variable", "start": 3, "length": 2}]),
+        "{completions}"
+    );
+
+    c.call("disconnect", json!({"terminateDebuggee": true}));
+    drop(c);
+    assert!(child.0.wait().expect("adapter exits").success());
 }
 
 #[test]
@@ -773,7 +1010,7 @@ fn dap_over_stdio_debugs_the_hello_probe_by_source_line() {
         .collect();
     assert_eq!(
         scope_names,
-        vec!["Registers", "Locals", "Globals", "Chipset"]
+        vec!["Registers", "Locals", "Globals", "Segments", "Chipset"]
     );
     let locals_ref = scopes["scopes"][1]["variablesReference"].clone();
     let locals = c.call("variables", json!({"variablesReference": locals_ref}));

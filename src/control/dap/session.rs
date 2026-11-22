@@ -6,6 +6,7 @@
 //! request past `initialize` lands here.
 
 use super::breaks::{self, BreakTable};
+use super::console::{self, Command, DumpMode, MemoryFormat, NumberFormat};
 use super::proto::Request;
 use super::vars::{self, GuestMem, Node, VarStore};
 use super::{eval, Emit, Msg};
@@ -16,6 +17,7 @@ use crate::debugger::CaughtException;
 use crate::debuginfo::unwind::{self, ExceptionFrame, Frame, FrameStyle, FrameVia, Registers};
 use crate::debuginfo::DebugInfo;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Sender};
@@ -42,6 +44,8 @@ const DISASSEMBLE_BACK_LIMIT: usize = 512;
 const DISASSEMBLE_CAP: i64 = 4096;
 /// Largest `readMemory` served per request.
 const READ_MEMORY_CAP: u64 = 16 * 1024 * 1024;
+/// The most instructions a whole-hunk `seg_N.dbgasm` document lists.
+const SEGMENT_DOCUMENT_CAP: usize = 65536;
 /// `step_frame` quanta a `copperline/profile` request may spend per
 /// requested frame before it reports what it captured. A quantum is a CPU
 /// budget, not a video frame, so a capture can need more quanta than frames.
@@ -274,6 +278,53 @@ pub struct Session {
     deferred: Vec<(String, Value)>,
     emulator_log: bool,
     emulator_log_offset: u64,
+    /// *View as* formats chosen through `modifyVariableFormat`, by
+    /// variable name, for the rest of the session.
+    formats: HashMap<String, NumberFormat>,
+    /// The memory dumps a hover, and a Watch entry, on a label show.
+    hover_format: MemoryFormat,
+    watch_format: MemoryFormat,
+    /// The client said it handles `invalidated` events.
+    client_invalidated: bool,
+}
+
+/// One line of a console command's output: a memory row or an
+/// instruction at `address`, or (with no address) a label.
+struct Row {
+    name: String,
+    value: String,
+    address: Option<u32>,
+}
+
+impl Row {
+    fn label(name: &str) -> Self {
+        Self {
+            name: format!("{name}:"),
+            value: String::new(),
+            address: None,
+        }
+    }
+
+    fn at(address: u32, value: String) -> Self {
+        Self {
+            name: format!("${address:08X}"),
+            value,
+            address: Some(address),
+        }
+    }
+}
+
+/// Rows as text, a line each.
+fn rows_text(rows: &[Row]) -> String {
+    let mut text = String::new();
+    for row in rows {
+        if row.address.is_some() {
+            text.push_str(&format!("{}: {}\n", row.name, row.value));
+        } else {
+            text.push_str(&format!("{}\n", row.name));
+        }
+    }
+    text
 }
 
 impl Session {
@@ -355,6 +406,7 @@ impl Session {
             launched.log_path.display()
         );
         let mut session = Self::new(bridge, Some(launched), !launch.headless, tx)?;
+        session.read_memory_formats(args);
         session.emulator_log = launch.emulator_log;
         session.load_program_info(&program, args);
         session.stop_on_entry = args["stopOnEntry"].as_bool().unwrap_or(true);
@@ -377,6 +429,7 @@ impl Session {
         };
         let windowed = args["windowed"].as_bool().unwrap_or(true);
         let mut session = Self::new(bridge, launched, windowed, tx)?;
+        session.read_memory_formats(args);
         session.stop_on_entry = args["stopOnEntry"].as_bool().unwrap_or(false);
         if let Some(program) = opt_string(args, "program") {
             let program = PathBuf::from(program);
@@ -499,7 +552,24 @@ impl Session {
             deferred: Vec::new(),
             emulator_log: false,
             emulator_log_offset: 0,
+            formats: HashMap::new(),
+            hover_format: MemoryFormat::HOVER,
+            watch_format: MemoryFormat::WATCH,
+            client_invalidated: false,
         })
+    }
+
+    /// uae-dap's `memoryFormats` launch and attach argument:
+    /// `{"hover": {...}, "watch": {...}}`.
+    fn read_memory_formats(&mut self, args: &Value) {
+        let formats = &args["memoryFormats"];
+        self.hover_format = MemoryFormat::from_value(&formats["hover"], MemoryFormat::HOVER);
+        self.watch_format = MemoryFormat::from_value(&formats["watch"], MemoryFormat::WATCH);
+    }
+
+    /// Whether the client's `initialize` said it handles `invalidated`.
+    pub fn set_client_invalidated(&mut self, supported: bool) {
+        self.client_invalidated = supported;
     }
 
     pub fn generation(&self) -> u64 {
@@ -1200,8 +1270,17 @@ impl Session {
             "loadedSources" => Ok(json!({"sources": self.loaded_sources()})),
             "exceptionInfo" => self.exception_info(),
             "source" => Err("source content is not available from the adapter".into()),
+            "completions" => self.completions(args, columns_at_1),
+            // The Amiga Assembly extension's requests, as uae-dap serves
+            // them for FS-UAE and WinUAE.
+            "disassembledFileContents" => self.disassembled_file_contents(args),
+            "modifyVariableFormat" => self.modify_variable_format(args),
             "copperline/profile" => self.profile(emit, args),
-            "copperline/chipset" => Ok(json!({"registers": vars::chipset(&self.bridge)})),
+            "copperline/chipset" => {
+                let mut registers = vars::chipset(&self.bridge);
+                self.finish_variables(&mut registers);
+                Ok(json!({"registers": registers}))
+            }
             "copperline/ui.show" => {
                 let window = args["window"].as_str().ok_or("ui.show needs a window")?;
                 self.call("ui.show", json!({"window": window}))
@@ -1928,7 +2007,13 @@ impl Session {
         self.require_paused()?;
         self.ensure_frames()?;
         let (index, _) = self.frame(args["frameId"].as_i64().unwrap_or(FRAME_ID_BASE))?;
-        Ok(vars::scopes(&mut self.vars, index, self.info.is_some()))
+        let loaded = self.info.as_ref().is_some_and(DebugInfo::relocated);
+        Ok(vars::scopes(
+            &mut self.vars,
+            index,
+            self.info.is_some(),
+            loaded,
+        ))
     }
 
     fn variables(&mut self, args: &Value) -> Result<Value, String> {
@@ -1939,7 +2024,7 @@ impl Session {
         };
         self.ensure_frames()?;
         let frame_of = |frames: &Vec<Frame>, i: usize| frames.get(i).copied();
-        let vars_out: Vec<Value> = match node {
+        let mut vars_out: Vec<Value> = match node {
             Node::Registers { frame } => {
                 let Some(f) = frame_of(&self.frames, frame) else {
                     return Err("unknown frame".into());
@@ -1993,16 +2078,58 @@ impl Session {
                 let mut mem = GuestMem::new(&self.bridge);
                 vars::typed_children(info, &mut mem, &mut self.vars, addr, ty, frame)
             }
+            Node::Segments => self.info.as_ref().map(vars::segments).unwrap_or_default(),
+            Node::Rows(rows) => rows,
         };
+        self.finish_variables(&mut vars_out);
         Ok(json!({"variables": vars_out}))
+    }
+
+    /// Apply the *View as* formats and the address values' label
+    /// annotations, and drop the raw values they work from.
+    fn finish_variables(&self, variables: &mut [Value]) {
+        for v in variables {
+            let Some(obj) = v.as_object_mut() else {
+                continue;
+            };
+            let raw = obj.remove(vars::RAW).and_then(|r| r.as_u64());
+            let bits = obj
+                .remove(vars::RAW_BITS)
+                .and_then(|b| b.as_u64())
+                .map_or(32, |b| b as u32);
+            let Some(raw) = raw else {
+                continue;
+            };
+            let name = obj.get("name").and_then(Value::as_str).unwrap_or("");
+            if let Some(format) = self.formats.get(name) {
+                obj.insert("value".into(), Value::from(format.render(raw, bits)));
+            }
+            if obj.get("type").and_then(Value::as_str) == Some("address") {
+                if let Some(label) = self.label_of(raw as u32) {
+                    let value = obj.get("value").and_then(Value::as_str).unwrap_or("");
+                    let value = format!("{value} {label}");
+                    obj.insert("value".into(), Value::from(value));
+                }
+            }
+        }
+    }
+
+    /// `<symbol+$offset>` for an address inside the program.
+    fn label_of(&self, addr: u32) -> Option<String> {
+        let (symbol, offset) = self.info.as_ref()?.symbol_at(addr)?;
+        Some(if offset == 0 {
+            format!("<{}>", symbol.name)
+        } else {
+            format!("<{}+${offset:X}>", symbol.name)
+        })
     }
 
     fn set_variable(&mut self, args: &Value) -> Result<Value, String> {
         self.require_paused()?;
         let reference = args["variablesReference"].as_i64().unwrap_or(0);
         let name = args["name"].as_str().unwrap_or("").to_string();
-        let text = args["value"].as_str().unwrap_or("").to_string();
-        let value = self.eval_number(&text)?;
+        let text = args["value"].as_str().unwrap_or("");
+        let value = self.eval_number(without_label(text))?;
         match self.vars.get(reference).cloned() {
             Some(Node::Registers { frame: 0 }) => {
                 let reg = eval::register_number(&name).ok_or("not a register")?;
@@ -2074,6 +2201,11 @@ impl Session {
         if text.is_empty() {
             return Err("empty expression".into());
         }
+        let context = args["context"].as_str().unwrap_or("repl");
+        let command = console::parse(&text).transpose()?;
+        if let Some(Command::Help(topic)) = &command {
+            return Ok(json!({"result": console::help(topic.as_deref()), "variablesReference": 0}));
+        }
         if self.running() {
             return Err("the machine is running".into());
         }
@@ -2087,6 +2219,10 @@ impl Session {
                 (0, self.frames.first().copied().unwrap_or_default())
             }
         };
+        if let Some(command) = command {
+            return self.console_command(command, frame, context);
+        }
+        let format = self.formats.get(&text).copied();
         // A bare variable name renders with its type, like the
         // Variables view.
         let is_name = text.chars().all(|c| c.is_alphanumeric() || c == '_')
@@ -2115,6 +2251,10 @@ impl Session {
                         "type": value["type"],
                         "variablesReference": value["variablesReference"],
                     });
+                    if let (Some(format), Some(raw)) = (format, value[vars::RAW].as_u64()) {
+                        let bits = value[vars::RAW_BITS].as_u64().map_or(32, |b| b as u32);
+                        body["result"] = Value::from(format.render(raw, bits));
+                    }
                     if let Some(m) = value.get("memoryReference") {
                         body["memoryReference"] = m.clone();
                     }
@@ -2131,8 +2271,18 @@ impl Session {
             eval::eval(&expr, &mut env)?
         };
         let unsigned = value as u32;
+        let mut result = match format {
+            Some(format) => format.render(u64::from(unsigned), 32),
+            None => format!("0x{unsigned:X} ({value})"),
+        };
+        let address_register = matches!(expr, eval::Expr::Register(8..=15 | 17));
+        if address_register {
+            if let Some(label) = self.label_of(unsigned) {
+                result = format!("{result} {label}");
+            }
+        }
         let mut body = json!({
-            "result": format!("0x{unsigned:X} ({value})"),
+            "result": result,
             "variablesReference": 0,
         });
         if is_name || matches!(expr, eval::Expr::Register(8..=15)) || value >= 0 {
@@ -2145,7 +2295,422 @@ impl Session {
                 }
             }
         }
+        // As with uae-dap, a hover or Watch entry on a label, and a
+        // Watch entry on an address register, expands to the memory
+        // there. (A bare name that reaches here is a symbol: a variable
+        // returned above.)
+        let dump = match context {
+            "hover" => Some(self.hover_format),
+            "watch" => Some(self.watch_format),
+            _ => None,
+        }
+        .filter(|f| f.length > 0)
+        .filter(|_| {
+            matches!(expr, eval::Expr::Name(_))
+                || (context == "watch" && matches!(expr, eval::Expr::Register(8..=15)))
+        });
+        if let Some(f) = dump {
+            if let Ok(rows) = self.memory_rows(unsigned, f.length, f.word, f.row, f.mode) {
+                body["variablesReference"] = Value::from(self.rows_reference(rows));
+            }
+        }
         Ok(body)
+    }
+
+    /// An expression's value in `frame`.
+    fn eval_at(&mut self, text: &str, frame: Frame) -> Result<i64, String> {
+        let expr = eval::parse(text)?;
+        let mut env = EvalEnv {
+            session: self,
+            frame,
+        };
+        eval::eval(&expr, &mut env)
+    }
+
+    /// An expression as a 32-bit address.
+    fn address_at(&mut self, text: &str, frame: Frame) -> Result<u32, String> {
+        let value = self.eval_at(text, frame)?;
+        u32::try_from(value)
+            .or_else(|_| i32::try_from(value).map(|v| v as u32))
+            .map_err(|_| format!("{text} is not an address"))
+    }
+
+    /// An optional size argument, `default` when absent.
+    fn size_at(
+        &mut self,
+        text: Option<&str>,
+        frame: Frame,
+        what: &str,
+        default: u32,
+        max: u32,
+    ) -> Result<u32, String> {
+        match text {
+            Some(text) => {
+                let value = self.eval_at(text, frame)?;
+                console::checked_size(value, what, max)
+            }
+            None => Ok(default),
+        }
+    }
+
+    /// The rows as variables behind a new reference.
+    fn rows_reference(&mut self, rows: Vec<Row>) -> i64 {
+        let variables = rows
+            .into_iter()
+            .map(|row| {
+                let mut v = json!({
+                    "name": row.name,
+                    "value": row.value,
+                    "variablesReference": 0,
+                    "presentationHint": {"attributes": ["readOnly"]},
+                });
+                if let Some(address) = row.address {
+                    v["memoryReference"] = Value::from(format!("0x{address:X}"));
+                }
+                v
+            })
+            .collect();
+        self.vars.add(Node::Rows(variables))
+    }
+
+    /// Run a uae-dap debugger command (`m`, `M`, `d`, `c`). In the Debug
+    /// Console the output is the reply's text; elsewhere (Watch) the
+    /// first row is the value and the rows are its children.
+    fn console_command(
+        &mut self,
+        command: Command,
+        frame: Frame,
+        context: &str,
+    ) -> Result<Value, String> {
+        let rows = match command {
+            Command::Dump {
+                address,
+                size,
+                word,
+                row,
+                mode,
+            } => {
+                let addr = self.address_at(&address, frame)?;
+                let size = self.size_at(size.as_deref(), frame, "size", 16, console::MAX_BYTES)?;
+                let word = self.size_at(word.as_deref(), frame, "word size", 4, 16)?;
+                let row = self.size_at(row.as_deref(), frame, "row size", 4, 64)?;
+                match mode {
+                    DumpMode::Disassemble => {
+                        self.cpu_rows(addr, size, (size as usize).div_ceil(2))?
+                    }
+                    DumpMode::Copper => self.copper_rows(addr, size.div_ceil(4) as usize)?,
+                    _ => self.memory_rows(addr, size, word as usize, row as usize, mode)?,
+                }
+            }
+            Command::Set { address, bytes } => {
+                let addr = self.address_at(&address, frame)?;
+                self.call(
+                    "mem.write",
+                    json!({"addr": addr, "data": proto::encode_hex(&bytes), "encoding": "hex"}),
+                )?;
+                // Register-relative frames and cached values may have
+                // moved under the write.
+                self.frames.clear();
+                if self.client_invalidated {
+                    self.defer_event("invalidated", json!({"areas": ["variables"]}));
+                }
+                return Ok(json!({
+                    "result": format!("wrote {} byte(s) at ${addr:08X}", bytes.len()),
+                    "variablesReference": 0,
+                }));
+            }
+            Command::Disassemble { address, size } => {
+                let addr = self.address_at(&address, frame)?;
+                let size = self.size_at(size.as_deref(), frame, "size", 16, console::MAX_BYTES)?;
+                self.cpu_rows(addr, size, (size as usize).div_ceil(2))?
+            }
+            Command::Copper { address, size } => {
+                let addr = match self.copper_location(&address) {
+                    Some(addr) => addr?,
+                    None => self.address_at(&address, frame)?,
+                };
+                let size = self.size_at(size.as_deref(), frame, "size", 16, console::MAX_BYTES)?;
+                self.copper_rows(addr, size.div_ceil(4) as usize)?
+            }
+            Command::Help(topic) => {
+                return Ok(
+                    json!({"result": console::help(topic.as_deref()), "variablesReference": 0}),
+                );
+            }
+        };
+        if context == "repl" {
+            let text = rows_text(&rows);
+            return Ok(json!({"result": text.trim_end(), "variablesReference": 0}));
+        }
+        let first = rows
+            .iter()
+            .find(|r| r.address.is_some())
+            .map(|r| r.value.clone())
+            .unwrap_or_default();
+        Ok(json!({"result": first, "variablesReference": self.rows_reference(rows)}))
+    }
+
+    /// `len` bytes from `addr`, in one or more `mem.read` calls.
+    fn read_bytes(&self, addr: u32, len: u32) -> Result<Vec<u8>, String> {
+        let mut data = Vec::with_capacity(len as usize);
+        while data.len() < len as usize {
+            let at = addr.wrapping_add(data.len() as u32);
+            let want = (len as usize - data.len()).min(0x10000);
+            let v = self.call(
+                "mem.read",
+                json!({"addr": at, "len": want, "encoding": "base64"}),
+            )?;
+            match v["data"].as_str().and_then(proto::decode_base64) {
+                Some(bytes) if !bytes.is_empty() => data.extend_from_slice(&bytes),
+                _ => break,
+            }
+        }
+        if data.is_empty() {
+            return Err(format!("cannot read ${addr:08X}"));
+        }
+        Ok(data)
+    }
+
+    fn memory_rows(
+        &self,
+        addr: u32,
+        len: u32,
+        word: usize,
+        row: usize,
+        mode: DumpMode,
+    ) -> Result<Vec<Row>, String> {
+        let bytes = self.read_bytes(addr, len)?;
+        Ok(console::dump_rows(addr, &bytes, word, row, mode)
+            .into_iter()
+            .map(|(at, text)| Row::at(at, text))
+            .collect())
+    }
+
+    /// The name of the program or ROM symbol that starts at `addr`.
+    fn label_at(&self, addr: u32, rom_symbols: &SymbolSnapshot) -> Option<String> {
+        if let Some((symbol, 0)) = self.info.as_ref().and_then(|i| i.symbol_at(addr)) {
+            return Some(symbol.name.clone());
+        }
+        rom_symbols
+            .resolve(addr)
+            .filter(|symbol| symbol.address == addr)
+            .map(|symbol| symbol.display_name())
+    }
+
+    /// The CPU instructions in `len` bytes from `addr` (at most `max`),
+    /// a label before each that starts a symbol.
+    fn cpu_rows(&mut self, addr: u32, len: u32, max: usize) -> Result<Vec<Row>, String> {
+        let end = u64::from(addr) + u64::from(len);
+        let rom_symbols = self.rom_symbols();
+        let mut rows = Vec::new();
+        for line in self.disassemble_forward(addr & !1, max.max(1))? {
+            let Some(at) = line["address"].as_str().and_then(|a| parse_address(a).ok()) else {
+                continue;
+            };
+            if u64::from(at) >= end {
+                break;
+            }
+            if let Some(label) = self.label_at(at, &rom_symbols) {
+                rows.push(Row::label(&label));
+            }
+            let bytes: String = line["instructionBytes"]
+                .as_str()
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
+            let instruction = line["instruction"].as_str().unwrap_or("??");
+            rows.push(Row::at(at, format!("{bytes:<20} {instruction}")));
+        }
+        if rows.is_empty() {
+            return Err(format!("cannot disassemble ${addr:08X}"));
+        }
+        Ok(rows)
+    }
+
+    /// `1` and `2` as Copper list addresses: COP1LC and COP2LC, as
+    /// uae-dap's copper disassembly takes them.
+    fn copper_location(&self, which: &str) -> Option<Result<u32, String>> {
+        let key = match which.trim() {
+            "1" => "cop1lc",
+            "2" => "cop2lc",
+            _ => return None,
+        };
+        Some(
+            self.call("copper.list", json!({"max": 1}))
+                .map(|v| v[key].as_u64().unwrap_or(0) as u32),
+        )
+    }
+
+    /// Up to `count` Copper instructions from `addr`, ending early at
+    /// the end-of-list WAIT.
+    fn copper_rows(&mut self, addr: u32, count: usize) -> Result<Vec<Row>, String> {
+        const PER_CALL: usize = 256;
+        let mut rows = Vec::new();
+        let mut at = addr & !1;
+        let mut mem = GuestMem::new(&self.bridge);
+        while rows.len() < count {
+            let want = (count - rows.len()).min(PER_CALL);
+            let v = self.call("copper.list", json!({"addr": at, "max": want}))?;
+            let entries = v["entries"].as_array().cloned().unwrap_or_default();
+            for entry in &entries {
+                let a = entry["addr"].as_u64().unwrap_or(0) as u32;
+                let words = mem.read32(a).map_or_else(
+                    || "????????".into(),
+                    |w| format!("{:04X} {:04X}", w >> 16, w & 0xFFFF),
+                );
+                let text = entry["text"].as_str().unwrap_or("??");
+                rows.push(Row::at(a, format!("{words}  {text}")));
+                at = a.wrapping_add(4);
+            }
+            if entries.len() < want {
+                break;
+            }
+        }
+        if rows.is_empty() {
+            return Err(format!("cannot read a Copper list at ${addr:08X}"));
+        }
+        Ok(rows)
+    }
+
+    /// The text of a `.dbgasm` document the Amiga Assembly extension
+    /// opens for *Disassemble memory* and *Disassemble copper memory*.
+    fn disassembled_file_contents(&mut self, args: &Value) -> Result<Value, String> {
+        self.require_paused()?;
+        let path = args["path"]
+            .as_str()
+            .ok_or("disassembledFileContents needs a path")?;
+        self.ensure_frames()?;
+        let rows = match console::parse_document(path)? {
+            console::Document::Cpu {
+                frame,
+                address,
+                count,
+            } => {
+                let frame = self
+                    .frames
+                    .get(frame)
+                    .or_else(|| self.frames.first())
+                    .copied()
+                    .unwrap_or_default();
+                let addr = self.address_at(&address, frame)?;
+                self.cpu_rows(addr, u32::MAX, count)?
+            }
+            console::Document::Copper { address, count } => {
+                let frame = self.frames.first().copied().unwrap_or_default();
+                let addr = match self.copper_location(&address) {
+                    Some(addr) => addr?,
+                    None => self.address_at(&address, frame)?,
+                };
+                self.copper_rows(addr, count)?
+            }
+            console::Document::Segment(index) => {
+                let (base, size) = self
+                    .info
+                    .as_ref()
+                    .filter(|i| i.relocated())
+                    .and_then(|i| Some((*i.bases().get(index)?, i.hunks.get(index)?.size)))
+                    .ok_or_else(|| format!("the program has no segment {index}"))?;
+                let max = (size as usize).div_ceil(2);
+                let mut rows = self.cpu_rows(base, size, max.min(SEGMENT_DOCUMENT_CAP))?;
+                if max > SEGMENT_DOCUMENT_CAP
+                    && rows.iter().filter(|r| r.address.is_some()).count() >= SEGMENT_DOCUMENT_CAP
+                {
+                    rows.push(Row {
+                        name: format!(
+                            "; the listing stops after {SEGMENT_DOCUMENT_CAP} instructions"
+                        ),
+                        value: String::new(),
+                        address: None,
+                    });
+                }
+                rows
+            }
+        };
+        Ok(json!({"content": rows_text(&rows)}))
+    }
+
+    /// The extension's *View as Decimal / Hex / Binary* on a variable:
+    /// that name shows in the format from now on, everywhere.
+    fn modify_variable_format(&mut self, args: &Value) -> Result<Value, String> {
+        let variable = &args["variableInfo"]["variable"];
+        let name = variable["name"]
+            .as_str()
+            .ok_or("modifyVariableFormat needs variableInfo.variable.name")?;
+        let format = args["variableDisplayFormat"]
+            .as_u64()
+            .and_then(NumberFormat::from_code)
+            .ok_or("variableDisplayFormat must be 0 (binary), 1 (decimal) or 2 (hexadecimal)")?;
+        self.formats.insert(name.to_string(), format);
+        if self.client_invalidated {
+            self.defer_event("invalidated", json!({"areas": ["variables"]}));
+        }
+        Ok(Value::Null)
+    }
+
+    /// Debug Console completions: registers, then the program's
+    /// functions, symbols and globals, for the word before the cursor.
+    fn completions(&mut self, args: &Value, columns_at_1: bool) -> Result<Value, String> {
+        let text = args["text"].as_str().unwrap_or("");
+        let base = usize::from(columns_at_1);
+        let utf16_len = text.encode_utf16().count();
+        let column = args["column"]
+            .as_u64()
+            .map_or(utf16_len, |c| (c as usize).saturating_sub(base))
+            .min(utf16_len);
+        // The cursor as a byte offset.
+        let mut cursor = text.len();
+        let mut units = 0;
+        for (i, c) in text.char_indices() {
+            if units >= column {
+                cursor = i;
+                break;
+            }
+            units += c.len_utf16();
+        }
+        let before = &text[..cursor];
+        let start = before
+            .char_indices()
+            .rev()
+            .find(|(_, c)| !(c.is_alphanumeric() || *c == '_'))
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        let word = &before[start..];
+        if word.is_empty() {
+            return Ok(json!({"targets": []}));
+        }
+        let lower = word.to_ascii_lowercase();
+        let mut candidates: Vec<(String, &str)> = Vec::new();
+        for i in 0..8 {
+            candidates.push((format!("d{i}"), "property"));
+            candidates.push((format!("a{i}"), "property"));
+        }
+        for name in ["sp", "fp", "pc", "sr"] {
+            candidates.push((name.to_string(), "property"));
+        }
+        if let Some(info) = &self.info {
+            for f in &info.functions {
+                candidates.push((f.name.clone(), "function"));
+            }
+            for g in &info.globals {
+                candidates.push((g.name.clone(), "variable"));
+            }
+            for sym in &info.symbols {
+                let code = info.hunks.get(sym.at.hunk as usize).map(|h| h.kind)
+                    == Some(crate::debuginfo::hunk::HunkKind::Code);
+                candidates.push((sym.name.clone(), if code { "function" } else { "variable" }));
+            }
+        }
+        candidates
+            .retain(|(name, _)| name.to_ascii_lowercase().starts_with(&lower) && name != word);
+        candidates.sort_by(|a, b| a.0.cmp(&b.0));
+        candidates.dedup_by(|a, b| a.0 == b.0);
+        let start16 = text[..start].encode_utf16().count() + base;
+        let length = word.encode_utf16().count();
+        let targets: Vec<Value> = candidates
+            .into_iter()
+            .take(100)
+            .map(|(label, kind)| json!({"label": label, "type": kind, "start": start16, "length": length}))
+            .collect();
+        Ok(json!({"targets": targets}))
     }
 
     /// `!method {json}`: a raw control-protocol call from the console.
@@ -2666,6 +3231,19 @@ fn read_sized(mem: &mut GuestMem, addr: u32, size: u32, signed: bool) -> Result<
     })
 }
 
+/// An edited value without the ` <label+$offset>` annotation an address
+/// register is shown with: an IDE pre-fills its editor with the shown
+/// text.
+fn without_label(text: &str) -> &str {
+    let text = text.trim();
+    match text.rfind(" <") {
+        Some(at) if text.ends_with('>') && !text[at + 2..].contains(char::is_whitespace) => {
+            text[..at].trim_end()
+        }
+        _ => text,
+    }
+}
+
 /// A DAP memory reference or address string: `0x1234`, `$1234`, `1234`.
 pub fn parse_address(text: &str) -> Result<u32, String> {
     let t = text.trim();
@@ -2685,6 +3263,15 @@ pub fn parse_address(text: &str) -> Result<u32, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edited_values_drop_the_label_annotation() {
+        assert_eq!(without_label("0x00C39FD9 <buffer+$1>"), "0x00C39FD9");
+        assert_eq!(without_label(" $100 <start> "), "$100");
+        assert_eq!(without_label("d0 >> 2"), "d0 >> 2");
+        assert_eq!(without_label("1 << 2"), "1 << 2");
+        assert_eq!(without_label("0x10"), "0x10");
+    }
 
     #[test]
     fn addresses_parse_in_every_spelling() {
