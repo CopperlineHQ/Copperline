@@ -97,7 +97,7 @@ jobs:
           } | tee e2e-tests.txt
           passed=$(awk '/^test result: ok\./ { total += $4 } END { print total + 0 }' e2e-tests.txt)
           echo "end-to-end tests passed: $passed"
-          test "$passed" -eq 14
+          test "$passed" -eq 15
       - name: Probe golden renders
         id: probes
         if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
