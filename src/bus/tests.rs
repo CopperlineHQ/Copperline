@@ -1566,10 +1566,9 @@ fn diw_vertical_flop_ignores_mid_frame_rewrite_of_a_closed_window() {
 
 /// A window whose DIWSTOP line the beam never reaches (a VSTOP below 128
 /// addresses lines 256-383) stays open only to the end of its own frame:
-/// the video standard's fixed line 312 (PAL) resets the vertical flop, so
-/// the next frame's top starts closed until the window's own DIWSTRT
-/// matches again (vAmiga compares against the same fixed standard line;
-/// timing-test/vdiwprobe-flop pins the render).
+/// the progressive frame's last line, 312 (PAL), resets the vertical flop,
+/// so the next frame's top starts closed until the window's own DIWSTRT
+/// matches again (timing-test/vdiwprobe-flop pins the render).
 #[test]
 fn diw_vertical_flop_resets_at_the_standards_fixed_line() {
     let mut bus = empty_bus();
@@ -1590,7 +1589,7 @@ fn diw_vertical_flop_resets_at_the_standards_fixed_line() {
     let line_fetches =
         |bus: &Bus, vpos: u32| (0x38..0xD8).any(|hpos| bus.bitplane_slot_active_at(vpos, hpos));
     // The window opens at DIWSTRT.V and, with the stop unreachable, is
-    // still open on the line before the fixed reset line.
+    // still open on the line before the frame's last line.
     advance_to_line(&mut bus, 0xA8);
     assert!(line_fetches(&bus, 0xA8));
     advance_to_line(&mut bus, 311);
@@ -1617,15 +1616,15 @@ fn diw_vertical_flop_resets_at_the_standards_fixed_line() {
     );
 }
 
-/// The forced reset compares against the fixed standard line, not the
-/// current field's last line (vAmiga Sequencer::eolHandler, which
-/// deliberately does not use the field length): an interlaced PAL short
-/// field ends at line 311 without force-resetting the flop, so an
-/// unreachable-stop window carries across the short field's wrap and is
-/// cleared by the following long field's line 312. No hardware photo
-/// separates the models yet; this pins the vAmiga-aligned choice.
+/// The forced reset follows the field being scanned, not the video
+/// standard's fixed line: an interlaced PAL short field ends on line 311,
+/// and that line resets the flop, so an unreachable-stop window closes with
+/// its own field and the following long field starts closed until its
+/// DIWSTRT matches (timing-test/vdiwprobe-lace pins the render). A reset
+/// on line 312 alone (vAmiga) carries the window across the short field's
+/// wrap into the long field's top.
 #[test]
-fn diw_vertical_flop_fixed_line_reset_skips_interlaced_short_fields() {
+fn diw_vertical_flop_resets_on_an_interlaced_short_fields_last_line() {
     let mut bus = empty_bus();
     bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
     bus.agnus.write_fmode(0x0003);
@@ -1648,30 +1647,150 @@ fn diw_vertical_flop_fixed_line_reset_skips_interlaced_short_fields() {
         |bus: &Bus, vpos: u32| (0x38..0xD8).any(|hpos| bus.bitplane_slot_active_at(vpos, hpos));
     advance_to_line(&mut bus, 0xA8);
     assert!(line_fetches(&bus, 0xA8));
-    // The short field's last line (311) is not the fixed reset line: the
-    // window stays open through it and across the wrap.
+    advance_to_line(&mut bus, 310);
+    assert!(
+        line_fetches(&bus, 310),
+        "an unreachable DIWSTOP keeps the window open to the field's end"
+    );
+    // The short field's last line (311) resets the flop.
+    advance_to_line(&mut bus, 311);
+    assert!(
+        !line_fetches(&bus, 311),
+        "a short field's last line must force-reset the flop"
+    );
+    // The following long field starts closed and opens at DIWSTRT.
+    advance_to_line(&mut bus, 0x30);
+    assert_eq!(bus.agnus.current_frame_lines(), 313);
+    assert!(
+        !line_fetches(&bus, 0x30),
+        "the window must not carry across the short field's wrap"
+    );
+    advance_to_line(&mut bus, 0xA0);
+    assert!(
+        line_fetches(&bus, 0xA0),
+        "the long field opens at its own DIWSTRT"
+    );
+    // The long field runs one line further: 311 fetches, 312 resets.
     advance_to_line(&mut bus, 311);
     assert!(
         line_fetches(&bus, 311),
-        "a short field's last line must not force-reset the flop"
+        "a long field's line 311 is not its last line"
     );
-    advance_to_line(&mut bus, 0x30);
-    assert!(
-        line_fetches(&bus, 0x30),
-        "the open window carries across the short field's wrap"
-    );
-    // The following long field reaches line 312, which resets the flop.
-    assert_eq!(bus.agnus.current_frame_lines(), 313);
     advance_to_line(&mut bus, 312);
     assert!(
         !line_fetches(&bus, 312),
-        "the long field's line 312 resets the carried-open flop"
+        "the long field's last line 312 resets the flop"
     );
+}
+
+/// The A1000's DIP Agnus forces the vertical window closed on line zero,
+/// where its vertical blank starts, not on the field's last line: with an
+/// unreachable DIWSTOP an interlaced short field still shows its line 311
+/// and a long field its line 312, and each next field's top starts closed
+/// (WinUAE and Minimig model the same split). The DIP Agnus is the OCS
+/// Agnus of the machine with the WCS at $FC0000; an ECS Agnus fitted to
+/// that machine keeps the later Agnus's last-line rule.
+#[test]
+fn a1000_dip_agnus_resets_the_vertical_window_on_line_zero() {
+    let laced_bus = |agnus: AgnusRevision| {
+        let mut bus = empty_bus();
+        bus.set_chipset_revisions(agnus, DeniseRevision::Ocs);
+        bus.mem.wcs = vec![0u8; crate::memory::WCS_SIZE];
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+        bus.denise.bplcon0 = 0x1204; // 1 plane, LACE
+        bus.denise.ddfstrt = 0x0038;
+        bus.denise.ddfstop = 0x00D0;
+        bus.agnus.set_lace(true);
+        bus.agnus.lof = false; // start inside a short field (312 lines)
+                               // Open at line 0xA0; VSTOP $3C addresses line 316, never reached.
+        assert!(!bus.write_custom_word_from(0x08E, 0xA081, BeamWriteSource::Cpu));
+        assert!(!bus.write_custom_word_from(0x090, 0x3CC1, BeamWriteSource::Cpu));
+        bus
+    };
+    let advance_to_line = |bus: &mut Bus, vpos: u32| {
+        while bus.agnus.vpos != vpos {
+            bus.advance_chipset(1);
+        }
+    };
+    let open = |bus: &Bus| bus.diw_vertical_open_at(bus.agnus.vpos);
+
+    let mut bus = laced_bus(AgnusRevision::Ocs);
+    advance_to_line(&mut bus, 0xA8);
+    assert!(open(&bus));
+    advance_to_line(&mut bus, 311);
+    assert!(open(&bus), "the A1000 shows a short field's last line");
+    advance_to_line(&mut bus, 0);
+    assert_eq!(bus.agnus.current_frame_lines(), 313);
+    assert!(!open(&bus), "line zero closes the window");
     advance_to_line(&mut bus, 0x30);
+    assert!(!open(&bus), "the long field's top starts closed");
+    advance_to_line(&mut bus, 0xA0);
+    assert!(open(&bus), "the long field opens at its own DIWSTRT");
+    advance_to_line(&mut bus, 312);
+    assert!(open(&bus), "the A1000 shows a long field's last line");
+    advance_to_line(&mut bus, 0);
+    assert_eq!(bus.agnus.current_frame_lines(), 312);
+    assert!(!open(&bus), "line zero closes the window again");
+
+    let mut bus = laced_bus(AgnusRevision::Ecs8372Rev4);
+    advance_to_line(&mut bus, 311);
     assert!(
-        !line_fetches(&bus, 0x30),
-        "the field after the reset starts with the window closed"
+        !open(&bus),
+        "an ECS Agnus in the A1000 resets on the short field's last line"
     );
+}
+
+/// Both fields of an interlaced NTSC screen whose DIWSTOP is the long
+/// field's last line (262) open on the same DIWSTRT line: the long field
+/// shows lines 21..261, the short field 21..260 (its own last line, 261,
+/// resets the flop). The Video Toaster 4.2 switcher programs exactly this
+/// window (DIWSTRT $155C, DIWSTOP $06D1) and sizes its planes for those
+/// 241 + 240 lines; carrying the short field's window into the long field
+/// started the long field a line early and wove the screen with its fields
+/// swapped.
+#[test]
+fn interlaced_ntsc_fields_open_on_the_same_line_with_diwstop_on_the_long_fields_last_line() {
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    bus.set_video_standard(VideoStandard::Ntsc);
+    bus.agnus.write_fmode(0x0003);
+    bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    bus.denise.bplcon0 = 0xC204; // hires, 4 planes, LACE
+    bus.denise.ddfstrt = 0x0038;
+    bus.denise.ddfstop = 0x00C8;
+    bus.agnus.set_lace(true);
+    bus.agnus.lof = true; // start inside a long field (263 lines)
+    assert_eq!(bus.agnus.current_frame_lines(), 263);
+    assert!(!bus.write_custom_word_from(0x08E, 0x155C, BeamWriteSource::Cpu));
+    assert!(!bus.write_custom_word_from(0x090, 0x06D1, BeamWriteSource::Cpu));
+    let advance_to_line = |bus: &mut Bus, vpos: u32| {
+        while bus.agnus.vpos != vpos {
+            bus.advance_chipset(1);
+        }
+    };
+    let line_fetches =
+        |bus: &Bus, vpos: u32| (0x38..0xD8).any(|hpos| bus.bitplane_slot_active_at(vpos, hpos));
+    // Run the long field to its end, then check two full fields, short
+    // then long, line by line around both window edges.
+    advance_to_line(&mut bus, 261);
+    assert!(line_fetches(&bus, 261));
+    advance_to_line(&mut bus, 262);
+    assert!(
+        !line_fetches(&bus, 262),
+        "DIWSTOP line 262 closes the long field"
+    );
+    for (field_lines, last_shown) in [(262, 260), (263, 261)] {
+        advance_to_line(&mut bus, 0);
+        assert_eq!(bus.agnus.current_frame_lines(), field_lines);
+        for vpos in 0..field_lines {
+            advance_to_line(&mut bus, vpos);
+            assert_eq!(
+                line_fetches(&bus, vpos),
+                (21..=last_shown).contains(&vpos),
+                "{field_lines}-line field, line {vpos}"
+            );
+        }
+    }
 }
 
 #[test]

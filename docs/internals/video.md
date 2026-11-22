@@ -1147,6 +1147,19 @@ routes the next stream's fields to the wrong parity. Kang Fu CD32's
 laced HAM8 intro screens are the regression example: with the phase
 wrong, its thin lettering rendered as "every other line missing".
 
+Native screenshots (`screenshot::render_native`) weave the current field
+with the one before it and keep no phase state of their own. The bus
+retains the last `WEAVE_FLIP_FIELDS` (four) laced fields before the
+captured one (`Bus::native_previous_fields`, reusing the oldest field's
+buffers so a wrap still copies one field), and the capture applies the
+same cross-seam measurement (`WeaveSeams`) over its playfield crop and
+every column to each of the four newest pairs of neighbouring fields.
+The short field takes the even rows only when all four pairs put it
+there; the LOF order stands otherwise. A single pair is not enough
+evidence: a picture scrolling vertically by about a field line per
+field between correctly ordered fields measures the wrong order
+smoother on every other pair.
+
 Progressive content is line-doubled without history. With phosphor
 persistence off, the common progressive path writes those doubled rows
 directly into the frontend-owned presentation buffer instead of filling
@@ -1863,7 +1876,13 @@ difference of the cumulative rounded timestamps from the clip's origin,
 so 3.33 cs frames at 30 fps come out as 3, 4, 3 and the clip's length
 stays within half a centisecond of the emulated interval; the last frame
 runs to the clip's end (the ring's newest frame plus one period, or the
-`--gif-after` window's end). The interactive save clones the ring and
+`--gif-after` window's end). Browsers hold a frame of 0 or 1 cs for
+10 cs, so no frame is written shorter than 2 cs: a frame the next one
+would replace sooner is dropped and the newer picture takes over its
+start, which keeps the cumulative timing (60 fps on 60 Hz fields comes
+out as 2, 3, 2, 3 with two frames in three kept). Only the last frame
+can be lengthened, by at most a centisecond; a last frame whose slot
+rounds to nothing is left out unless it is the clip's only frame. The interactive save clones the ring and
 encodes on a background thread, flashing the file name on the OSD when
 the write lands; the headless capture writes frames as they are taken,
 waiting for the renderer's exact frame like a frame dump, and finishes

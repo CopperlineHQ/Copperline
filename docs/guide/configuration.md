@@ -2000,7 +2000,11 @@ the presented picture for [Save Clip](ui.md#saving-a-gif-clip);
 `0` switches the ring and the menu item off. `clip_fps` (1 to 60) is the
 rate every clip is written at, the interactive one and headless
 `--gif-after` captures alike; the default `0` picks half the field rate,
-25 fps on PAL and 30 on NTSC. `clip_format` is what Save Clip writes:
+25 fps on PAL and 30 on NTSC. A GIF frame changes at most 50 times a
+second (browsers hold a shorter frame for a tenth of a second), so a
+faster rate, or more than about 45 fps on NTSC, drops frames from a
+GIF clip instead of playing slowly; an APNG keeps every frame up to
+60 fps. `clip_format` is what Save Clip writes:
 `"gif"` (the default) or `"apng"`, a lossless animated PNG; the Recording
 menu's **Clip Format** sets it too, and keeps the choice for the next
 launch. A headless `--gif-after` clip takes its format from its file's

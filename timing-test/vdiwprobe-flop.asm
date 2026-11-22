@@ -15,15 +15,13 @@
 ;     the bar's planes.)
 ;   - A window whose DIWSTOP line the beam never reaches (VSTOP values
 ;     below 128 address lines 256-383, the V8 convention) stays open only
-;     to the end of its own frame: the video standard's fixed line 312
-;     (PAL) / 262 (NTSC) forces a reset, so the display runs into the
-;     bottom border but the next frame's top starts closed until DIWSTRT
-;     matches again. The comparator is the fixed standard line, as vAmiga
-;     models it (an interlaced short field ends at 311 and is not
-;     force-reset; this progressive probe cannot separate the two, the
-;     interlace unit test pins the choice). Copperline originally carried
-;     the flop across the blank and lit the whole top of the frame, which
-;     this probe caught.
+;     to the end of its own frame: the frame's last line, 312 (PAL) /
+;     262 (NTSC) on this progressive display, forces a reset, so the
+;     display runs into the bottom border but the next frame's top starts
+;     closed until DIWSTRT matches again. (An interlaced short field
+;     resets on its own last line, one earlier; vdiwprobe-lace pins that.)
+;     Copperline originally carried the flop across the blank and lit the
+;     whole top of the frame, which this probe caught.
 ;
 ; Display: one bitplane of 8-on/8-off stripes; open rows show the stripe
 ; field, closed rows show the border. Copper events per frame:

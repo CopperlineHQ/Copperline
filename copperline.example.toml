@@ -896,6 +896,8 @@ video = "PAL"
 # clip_seconds: emulated seconds of the presented picture the window keeps
 # (default 10, up to 120); 0 switches the ring and the menu item off.
 # clip_fps: clip frame rate, 1 to 60 (default 0 = 25 on PAL, 30 on NTSC).
+# A GIF changes at most 50 times a second, so faster rates drop frames
+# from a GIF clip; an APNG keeps them.
 # clip_format: what Save Clip writes. "gif" (the default) plays anywhere
 # but holds 256 colours a frame; "apng" is a lossless animated PNG, usually
 # smaller, that every current browser animates. A headless --gif-after

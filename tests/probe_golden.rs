@@ -611,12 +611,21 @@ probe_tests! {
     golden_sprprobe_disarm => probe("sprprobe-disarm", "sprprobe-disarm.bin", 16.0);
     // The vertical display window is a set/reset flop: DIWSTOP rewrites
     // behind a closed flop never re-open it, a set/reset tie resets, and
-    // an unreachable DIWSTOP holds the window open only to the video
-    // standard's fixed line 312 (PAL), which forces a reset (the Kang Fu
+    // an unreachable DIWSTOP holds the window open only to the frame's
+    // last line, 312 (PAL), which forces a reset (the Kang Fu
     // CD32 screen-split regression class; the carried-across-vblank model
     // this probe caught lit the whole top of the frame).
     // vAmiga-verified byte-for-byte.
     golden_vdiwprobe_flop => probe("vdiwprobe-flop", "vdiwprobe-flop.bin", 16.0);
+    // Under LACE the frame's last line that forces the vertical flop's
+    // reset follows the field: an interlaced short field resets on its own
+    // last line (311), so a window stopping on the long field's last line
+    // (312) opens at DIWSTRT in both fields. A reset on the fixed line 312
+    // alone carried the short field's window into the long field's top
+    // (red rows here) and wove the Video Toaster 4.2 switcher's screen with
+    // its fields swapped. vAmiga is not a valid reference (it models the
+    // fixed line); see the probe header.
+    golden_vdiwprobe_lace => probe("vdiwprobe-lace", "vdiwprobe-lace.bin", 16.0);
     // A whole-frame empty window (DIWSTRT.V == DIWSTOP.V parked below the
     // visible area via DIWHIGH) never opens and fetches nothing, so every
     // row rides the synthesized no-capture render path; the level window

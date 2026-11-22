@@ -861,6 +861,16 @@ the frame's last raster line, which forces a reset, so the next frame's
 top starts closed. The Kang Fu CD32 screen-split class; the probe caught
 Copperline carrying the flop across the vertical blank and lighting the
 whole top of the frame. vAmiga-verified byte-for-byte), and
+`vdiwprobe-lace` (the same flop across interlaced fields: the frame's last
+line that forces the reset follows the field, so an interlaced short field
+resets on its own last line, 311, one before the long field's 312. A window
+stopping on line 312, which only the long field reaches, then opens at its
+DIWSTRT in both fields; COLOR01 is red above DIWSTRT, so only a window
+carried open from the short field into the long field's top shows red. The
+Video Toaster 4.2 switcher class, whose NTSC screen stops on line 262 and
+was woven with its fields swapped while the short field's window carried
+over. vAmiga resets on the fixed line only and is not a valid reference
+here; see the probe header), and
 `vdiwprobe-empty` (a whole-frame empty window, `DIWSTRT.V == DIWSTOP.V` on
 line 301 via `DIWHIGH`, never opens: bitplanes are blanked throughout the frame
 while `BRDRSPRT` sprites remain visible, verifying against *Nexus 7* transitions;

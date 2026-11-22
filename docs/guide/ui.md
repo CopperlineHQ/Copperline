@@ -1426,8 +1426,14 @@ standard, RAM size, or even a different Kickstart of the same machine
 (the ROM is fingerprinted) -- the load reconfigures to match the state
 and tells you so (the load message names the restored machine, e.g.
 "reconfigured to A1200 / 68EC020 / AGA / PAL"); your current config is
-not silently mixed in. Two caveats:
+not silently mixed in. Three caveats:
 
+- Firmware built into Copperline's own boards (the `[copperhf]` boot ROM
+  and the bundled `[hostsocket]` and `[zz9k]` boards) comes from the
+  running build, not the state. A state records which firmware it was
+  saved with, and a build whose firmware differs refuses to load it, since
+  the guest would hang; boot afresh instead (see
+  [troubleshooting](troubleshooting.md#a-save-state-will-not-load)).
 - Hard-drive images (HDF files) are referenced by path, not embedded.
   The state reopens the same file on load, so guest writes made to the
   hard drive *after* the snapshot are still visible after restoring --

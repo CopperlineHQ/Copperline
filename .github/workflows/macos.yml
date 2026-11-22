@@ -8,17 +8,9 @@ name: macOS
 # under Rosetta, which no other job executes), so it is scoped to the code and
 # packaging surface that affects the bundle.
 #
-# Two stages: a build matrix compiles the release binary for each Apple
-# architecture on its own runner, then the package job lipo-joins the two
-# slices, stages and signs the bundle, lays out the dmg, and smoke-tests it.
-# The shipping profile is fat LTO with one codegen unit, so each slice is a
-# mostly single-threaded compile of roughly twelve minutes on a hosted
-# 3-core runner, and building the two back to back on one runner simply
-# doubled that. One multi-target cargo invocation on one runner is not an
-# option either: the copperline crate alone peaks near 5 GB of resident
-# memory per target, so two concurrent compiles overrun the 7 GB hosted
-# runner and swap. One runner per slice halves the wall time for the same
-# total runner minutes.
+# Each architecture gets its own runner for the memory-intensive fat-LTO
+# build. The package job lipo-joins the slices, signs the bundle, creates
+# the dmg, and smoke-tests both architectures.
 #
 # The image is intentionally unsigned (no Developer ID, no notarization), so it
 # trips Gatekeeper on first launch; the bundled README.txt documents the
@@ -93,13 +85,19 @@ jobs:
           # ci.yml's native test build (or the other way round), and the
           # two architectures share nothing below the registry.
           key: macos-dmg-${{ matrix.target }}
-      - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Build release binaries
+        run: >-
+          cargo build --release --locked --timings --target ${{ matrix.target }}
+          --bin copperline --bin copperline-ctl --bin copperline-import-uae
+      - name: Upload build timings
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-timings-macos-dmg-${{ matrix.arch }}
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7
       - name: Upload slice for the package job
-        # The emulator plus its two command-line companions (copperline-ctl
-        # and copperline-import-uae are default-feature binaries, so the
-        # build above already produced them); build-dmg.sh lipo-joins each
-        # one into the bundle's Contents/MacOS.
         uses: actions/upload-artifact@v7
         with:
           name: macos-slice-${{ matrix.arch }}

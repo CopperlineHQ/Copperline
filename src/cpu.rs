@@ -9,7 +9,7 @@ use crate::memory::{
     ACCEL_RAM_BASE, AUTOCONFIG_BASE, AUTOCONFIG_SIZE, CHIP_RAM_BASE, CHIP_WINDOW_SIZE, ROM_BASE,
     SLOW_RAM_BASE, WCS_BASE,
 };
-use crate::savestate::{chunk, split};
+use crate::savestate::{board_rom, chunk, split};
 use anyhow::{anyhow, bail, Result};
 use log::{debug, trace};
 use m68k::core::memory::{BusFault, BusFaultKind};
@@ -396,6 +396,12 @@ struct Components {
     runtime: Option<MachineRuntimeState>,
     icache: Option<Option<Box<crate::cache::CpuCache>>>,
     dcache: Option<Option<Box<crate::cache::CpuCache>>>,
+    /// The built-in board firmware the state records; `None` for a state
+    /// written before the chunk existed.
+    board_roms: Option<board_rom::BoardRoms>,
+    /// Why the recorded firmware was refused. The sink stops the load with
+    /// a short error; this is the full one the load reports instead.
+    board_rom_mismatch: Option<anyhow::Error>,
 }
 
 impl chunk::ValueSink for Components {
@@ -408,6 +414,13 @@ impl chunk::ValueSink for Components {
             self.icache = Some(chunk::decode(&payload)?);
         } else if spec.tag == chunk::DCAC.tag {
             self.dcache = Some(chunk::decode(&payload)?);
+        } else if spec.tag == chunk::BROM.tag {
+            let recorded: board_rom::BoardRoms = chunk::decode(&payload)?;
+            if let Err(mismatch) = recorded.check() {
+                self.board_rom_mismatch = Some(mismatch);
+                bail!("the built-in board firmware differs from this build's");
+            }
+            self.board_roms = Some(recorded);
         } else {
             bail!(
                 "unexpected {} chunk in the state body",
@@ -1888,6 +1901,7 @@ impl M68kMachine {
         out.value(&chunk::MACH, &self.runtime_state())?;
         out.value(&chunk::ICAC, &self.bus.icache)?;
         out.value(&chunk::DCAC, &self.bus.dcache)?;
+        out.value(&chunk::BROM, &board_rom::BoardRoms::of(&self.bus.bus))?;
         split::BusSplitter::split(&self.bus.bus, out).map_err(|e| anyhow!("serializing bus: {e}"))
     }
 
@@ -1913,9 +1927,18 @@ impl M68kMachine {
         let mut components = Components::default();
         let mut joiner = split::BusJoiner::new(stream, migrations, &mut components);
         let restored: std::result::Result<Bus, _> = serde::Deserialize::deserialize(&mut joiner);
+        let seen = joiner.seen().to_vec();
         let bus = match restored {
-            Ok(bus) => bus,
+            Ok(bus) => {
+                joiner.finish()?;
+                bus
+            }
             Err(e) => {
+                drop(joiner);
+                // Refused firmware stopped the stream: report why in full.
+                if let Some(mismatch) = components.board_rom_mismatch.take() {
+                    return Err(mismatch);
+                }
                 // serde reports a required field a chunk lacks as "missing
                 // field `name`"; say which chunk should have carried it,
                 // or that the chunk itself is absent.
@@ -1927,7 +1950,7 @@ impl M68kMachine {
                     Some(field) => {
                         let spec = chunk::chunk_for_field(field);
                         let name = chunk::tag_name(spec.tag);
-                        if joiner.seen().contains(&spec.tag) {
+                        if seen.contains(&spec.tag) {
                             anyhow!("the {name} chunk ({}) has no `{field}` field", spec.name)
                         } else {
                             anyhow!("state has no {name} chunk ({})", spec.name)
@@ -1937,8 +1960,6 @@ impl M68kMachine {
                 });
             }
         };
-        let seen = joiner.seen().to_vec();
-        joiner.finish()?;
         // A required chunk whose fields all happened to default would have
         // slipped past the visitor; name it anyway.
         if let Some(missing) =
@@ -1954,6 +1975,7 @@ impl M68kMachine {
         let runtime = Components::need(components.runtime, &chunk::MACH)?;
         let icache = Components::need(components.icache, &chunk::ICAC)?;
         let dcache = Components::need(components.dcache, &chunk::DCAC)?;
+        let unchecked = board_rom::unchecked_warning(&bus, components.board_roms.as_ref());
         self.adopt_state(
             RestoredState {
                 cpu,
@@ -1963,7 +1985,11 @@ impl M68kMachine {
                 bus,
             },
             rollback,
-        )
+        )?;
+        if let Some(warning) = unchecked {
+            log::warn!("{warning}");
+        }
+        Ok(())
     }
 
     pub(crate) fn rollback_latches(&self) -> MachineRollbackState {

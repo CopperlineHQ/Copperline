@@ -485,7 +485,11 @@ control link plus a `Spectator`). Every control link checks a
 `(local, peer)` role pair, with role bytes 0 (host), 1 (guest) and 2
 (spectator). A receiver holds at most four complete messages; further chunks
 wait, selectively acknowledged, in its receive window until the session
-drains them. Each control message starts with a kind byte: 1 for JSON setup
+drains them. The sender's window stays anchored at the receiver's cumulative
+acknowledgement, so held chunks still count against it; while the receiver
+holds the very chunk it needs next, the sender resends only that oldest chunk
+on the retransmission timer, a probe that draws a fresh acknowledgement if
+the one reopening the window was lost. Each control message starts with a kind byte: 1 for JSON setup
 messages (`Hello`, `Offer`, `Watch`, `Verified`, `Start`, `Refused` and the
 `Swap` disk-change phases), 2 for the machine bundle, 3 for replacement disk
 bytes and 4 for feed bytes. A spectator's setup is the guest's: bundle in,

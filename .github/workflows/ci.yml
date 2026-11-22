@@ -24,23 +24,11 @@ env:
 # checks share one Linux job and one entry rather than one macOS entry each.
 jobs:
   build:
-    # A cold build (a new stable toolchain, or an evicted cache) takes 25 to
-    # 30 minutes on a hosted macOS runner, and only a build that finishes on
-    # main saves the cache that makes the following ones warm.
-    timeout-minutes: 45
-    # Keep the existing check name for branch-protection rules. The ci
-    # profile inherits release semantics without shipping-only fat LTO.
+    # Allow time for a cold build and the suites that follow it.
+    timeout-minutes: 75
     name: Build (release)
-    # Copperline is developed on macOS, so the main fan-out runs there. The
-    # other platforms have their own functional coverage: the linux-tests
-    # job below runs the unit suites and probe goldens on Linux, and the
-    # Windows workflow (.github/workflows/windows.yml) does the same on
-    # Windows alongside its packaged-zip smoke test.
-    #
-    # This job compiles everything once and hands the finished binaries to
-    # the test jobs below (needs: build) as a workflow artifact. Binaries,
-    # not a shared cargo cache: the test executables are plain libtest
-    # binaries and run fine without cargo.
+    # Compile once and run all macOS suites here to avoid queueing for
+    # additional runners between a successful build and its tests.
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -52,39 +40,117 @@ jobs:
           # its explicit --target artifacts cannot warm this native build.
           key: ci-macos
       - name: Compile test binaries
-        # cargo test also builds the ordinary binaries for integration tests,
-        # so a separate cargo build would duplicate work. Keep all asset-gated
-        # tests compiling (#[ignore] only affects execution). The JSON output
-        # maps each test target to its hash-suffixed executable so the binaries
-        # can be staged under stable names for the fan-out jobs.
-        #
-        # Every ordinary (non-test) binary goes to ci-bins/bin under its own
-        # file name. Integration tests spawn them through compile-time
-        # CARGO_BIN_EXE_<name> paths (target/ci/<name>), so the test jobs copy
-        # the whole directory back there; staging all of them, rather than a
-        # named list, keeps a new CARGO_BIN_EXE_* user from finding its
-        # binary missing.
+        id: compile
+        shell: bash
+        # Keep stable names for the hashed libtest executables. Integration
+        # tests find the ordinary binaries at Cargo's original paths.
         run: |
           cargo test --profile ci --locked --no-run --timings --message-format=json > cargo-test-build.json
-          mkdir -p ci-bins/bin
-          jq -r 'select(.reason == "compiler-artifact" and .executable != null)
-                   | [(.profile.test | tostring), .target.kind[0], .target.name, .executable] | @tsv' cargo-test-build.json \
-            | while IFS=$'\t' read -r test kind name exe; do
-                case "$test:$kind:$name" in
-                  false:bin:*)            cp "$exe" ci-bins/bin/ ;;
-                  true:lib:copperline)    cp "$exe" ci-bins/unit-lib ;;
-                  true:bin:*)             cp "$exe" "ci-bins/unit-bin-$name" ;;
-                  true:test:probe_golden) cp "$exe" ci-bins/probe_golden ;;
-                  true:test:*)            cp "$exe" "ci-bins/test-$name" ;;
+          mkdir ci-bins
+          jq -r 'select(.reason == "compiler-artifact" and .profile.test and .executable != null)
+                   | [.target.kind[0], .target.name, .executable] | @tsv' cargo-test-build.json \
+            | while IFS=$'\t' read -r kind name exe; do
+                case "$kind:$name" in
+                  lib:copperline)     ln -s "$exe" ci-bins/unit-lib ;;
+                  bin:*)              ln -s "$exe" "ci-bins/unit-bin-$name" ;;
+                  test:probe_golden)  ln -s "$exe" ci-bins/probe_golden ;;
+                  test:*)             ln -s "$exe" "ci-bins/test-$name" ;;
                 esac
               done
-          test -x ci-bins/bin/copperline
-          ls -l ci-bins ci-bins/bin
-      - name: Upload binaries for the test jobs
+      - name: Inspector UI tests
+        # Reuse the ordinary desktop build. Fail if its inspector suite is
+        # missing: a test-name filter otherwise succeeds with zero tests.
+        # These tests exercise egui input/layout without a GPU or window.
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./ci-bins/unit-lib video::window::egui_debugger:: | tee inspector-tests.txt
+          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' inspector-tests.txt
+      - name: Unit tests
+        run: |
+          ./ci-bins/unit-lib --skip video::window::egui_debugger::
+          for suite in ci-bins/unit-bin-*; do
+            "$suite"
+          done
+      - name: Integration tests
+        run: |
+          for suite in ci-bins/test-*; do
+            "$suite"
+          done
+          ./ci-bins/test-audio_stems_determinism --ignored
+      - name: Bundled-ROM end-to-end tests
+        # #[ignore]d because they boot an optimized emulator, not because
+        # they need local assets: each runs on the bundled AROS ROM and the
+        # committed guest fixtures. They are selected by name, since the same
+        # binaries hold tests that need Kickstart images, and the pass count
+        # is checked so a renamed or newly gated test cannot drop out with a
+        # green result.
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            ./ci-bins/test-run_boot --ignored aros_
+            ./ci-bins/test-coverage_run --ignored
+            ./ci-bins/test-diverge_e2e --ignored
+            ./ci-bins/test-mcp_stdio --ignored
+            ./ci-bins/test-dap_stdio --ignored --skip kick13
+          } | tee e2e-tests.txt
+          passed=$(awk '/^test result: ok\./ { total += $4 } END { print total + 0 }' e2e-tests.txt)
+          echo "end-to-end tests passed: $passed"
+          test "$passed" -eq 14
+      - name: Probe golden renders
+        id: probes
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        run: ./ci-bins/probe_golden
+      - name: Upload probe render diffs
+        # On a golden mismatch the test writes the actual renders and diff
+        # masks; surface them so the regression is reviewable from the run.
+        if: failure() && steps.probes.outcome == 'failure'
         uses: actions/upload-artifact@v7
         with:
-          name: ci-bins
-          path: ci-bins/
+          name: probe-golden-diffs
+          path: target/probe-golden/
+          if-no-files-found: ignore
+      - name: Restore cached DiagROM
+        # Run the smoke check even if a preceding test suite failed.
+        if: ${{ !cancelled() && steps.compile.outcome == 'success' }}
+        id: diagrom-cache
+        uses: actions/cache@v6
+        with:
+          path: diagrom.rom
+          key: diagrom-stable-v1.3
+      - name: Fetch DiagROM (stable V1.3)
+        id: fetch-diagrom
+        if: ${{ !cancelled() && steps.diagrom-cache.outcome == 'success' && steps.diagrom-cache.outputs.cache-hit != 'true' }}
+        env:
+          DIAGROM_URL: ${{ vars.DIAGROM_URL }}
+        run: |
+          curl -fsSL --retry 3 "${DIAGROM_URL:-https://www.diagrom.com/files/stable/DiagROM.zip}" -o DiagROM.zip
+          echo "a575f8fa69b1ac7fd566fcdcd19a68e53d472ac6c56d8a6a9489229882c5b208  DiagROM.zip" | shasum -a 256 -c
+          unzip -o DiagROM.zip DiagROM/DiagROM
+          mv DiagROM/DiagROM diagrom.rom
+          rm -rf DiagROM.zip DiagROM
+      - name: DiagROM boot smoke and menu image regression
+        if: ${{ !cancelled() && (steps.diagrom-cache.outputs.cache-hit == 'true' || steps.fetch-diagrom.outcome == 'success') }}
+        run: |
+          # Verify the extracted ROM on both the download and cache-hit paths.
+          echo "1803bfff5d866de7605dbcf8445b590f36ed7cb7ee92166b240907e488cf0ff7  diagrom.rom" | shasum -a 256 -c
+          # The banner confirms guest execution even if the screenshot is black.
+          ./target/ci/copperline diagrom.rom --noaudio --screenshot-after 6 diag.png > serial.log
+          grep -q "Amiga DiagROM" serial.log
+          test -s diag.png
+          mkdir -p test-assets
+          cp diagrom.rom test-assets/
+          ./ci-bins/test-image_regression diagrom --ignored --nocapture
+      - name: Upload boot screenshot
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: diagrom-boot
+          path: |
+            diag.png
+            serial.log
+          if-no-files-found: ignore
       - name: Upload build timings
         if: always()
         uses: actions/upload-artifact@v7
@@ -234,7 +300,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           key: msrv
           # A cold dev-profile build here finishes well inside the macOS
-          # fan-out's wall time, so its 1 GB target directory is not worth
+          # build's wall time, so its 1 GB target directory is not worth
           # an entry in the shared cache pool; keep only the registry.
           cache-targets: false
       - name: Build with MSRV
@@ -274,115 +340,6 @@ jobs:
           command-arguments: --hide-inclusion-graph
           # Duplicate-version and git-wildcard findings are deliberate
           # warnings; hide only their verbose dependency inclusion graphs.
-
-  unit-tests:
-    timeout-minutes: 30
-    name: Unit tests
-    needs: build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: ci-bins
-          path: ci-bins
-      - name: Inspector UI tests
-        # Reuse the ordinary desktop build. Fail if its inspector suite is
-        # missing: a test-name filter otherwise succeeds with zero tests.
-        # These tests exercise egui input/layout without a GPU or window.
-        shell: bash
-        run: |
-          set -euo pipefail
-          chmod +x ci-bins/* ci-bins/bin/*
-          ./ci-bins/unit-lib video::window::egui_debugger:: | tee inspector-tests.txt
-          grep -Eq '^test result: ok\. [1-9][0-9]* passed;' inspector-tests.txt
-      - name: Unit tests
-        # The inline #[cfg(test)] suites in the lib and binaries, prebuilt
-        # by the build job. Integration targets run in the next step;
-        # probe goldens have their own job below. The crate has no doctests.
-        # The GDB remote-protocol suite in
-        # src/gdbstub is part of unit-lib: gdb is a default feature.
-        # Inspector tests ran in the preceding step.
-        run: |
-          ./ci-bins/unit-lib --skip video::window::egui_debugger::
-          for suite in ci-bins/unit-bin-*; do
-            "$suite"
-          done
-      - name: Integration tests
-        # The suites spawn copperline, copperline-ctl, and the other ordinary
-        # binaries through compile-time CARGO_BIN_EXE_* paths under target/ci
-        # (the same absolute path in every job of this repo on hosted
-        # runners), so restore everything the build job staged there first.
-        run: |
-          mkdir -p target/ci
-          cp ci-bins/bin/* target/ci/
-          for suite in ci-bins/test-*; do
-            "$suite"
-          done
-          ./ci-bins/test-audio_stems_determinism --ignored
-      - name: Bundled-ROM end-to-end tests
-        # #[ignore]d because they boot an optimized emulator, not because
-        # they need local assets: each runs on the bundled AROS ROM and the
-        # committed guest fixtures. They are selected by name, since the same
-        # binaries hold tests that need Kickstart images, and the pass count
-        # is checked so a renamed or newly gated test cannot drop out with a
-        # green result.
-        shell: bash
-        run: |
-          set -euo pipefail
-          {
-            ./ci-bins/test-run_boot --ignored aros_
-            ./ci-bins/test-coverage_run --ignored
-            ./ci-bins/test-diverge_e2e --ignored
-            ./ci-bins/test-mcp_stdio --ignored
-            ./ci-bins/test-dap_stdio --ignored --skip kick13
-          } | tee e2e-tests.txt
-          passed=$(awk '/^test result: ok\./ { total += $4 } END { print total + 0 }' e2e-tests.txt)
-          echo "end-to-end tests passed: $passed"
-          test "$passed" -eq 14
-
-  probe-golden:
-    timeout-minutes: 30
-    name: Probe golden renders
-    needs: build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: ci-bins
-          path: ci-bins
-      - name: Probe golden renders
-        # tests/probe_golden.rs is fully self-contained (committed probe
-        # binaries booted on the bundled AROS ROM) and compares each probe's
-        # deterministic render pixel-for-pixel against the references in
-        # timing-test/golden/ -- the hardware-behaviour regression net
-        # (DDF/DIW placement and DDFSTRT-phase/scroll maps, raced
-        # copper-chunky COLOR00 trains, sprite serializer/DMA-FSM positions,
-        # BLTPRI CPU pacing bars, byte-write register mirroring, the CLXDAT
-        # collision matrix, and the 32 CPU/chip-bus timing rows). Each probe
-        # is its own #[test], so the boots run in parallel on the runner's
-        # cores. See timing-test/README.md "CI golden renders" for the
-        # re-bless workflow.
-        #
-        # The test harness spawns the emulator through the compile-time
-        # CARGO_BIN_EXE_copperline path, which on hosted runners is the
-        # same absolute path in every job of this repo -- hence the copy
-        # of the staged binaries into target/ci before running.
-        run: |
-          chmod +x ci-bins/* ci-bins/bin/*
-          mkdir -p target/ci
-          cp ci-bins/bin/* target/ci/
-          ./ci-bins/probe_golden
-      - name: Upload probe render diffs
-        # On a golden mismatch the test writes the actual renders and diff
-        # masks; surface them so the regression is reviewable from the run.
-        if: failure()
-        uses: actions/upload-artifact@v7
-        with:
-          name: probe-golden-diffs
-          path: target/probe-golden/
-          if-no-files-found: ignore
 
   hostsocket-plugin:
     timeout-minutes: 30
@@ -449,93 +406,13 @@ jobs:
         working-directory: crates/zz9k-plugin
         run: cargo test --locked
 
-  diagrom-smoke:
-    timeout-minutes: 30
-    name: DiagROM boot smoke
-    needs: build
-    runs-on: macos-latest
-    # DiagROM (diagrom.com) is freely downloadable but its author keeps
-    # redistribution to the official site, so it is fetched at run time
-    # (checksum-pinned, cached across runs) instead of being committed.
-    # The DIAGROM_URL repository variable optionally overrides the
-    # download location should the official URL move; the stable V1.3
-    # archive has been frozen upstream since 2023, so a checksum change
-    # means the pin below needs updating, not that the job is flaky.
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: ci-bins
-          path: ci-bins
-      - name: Install prebuilt binaries
-        # The image-regression harness spawns the emulator through the
-        # compile-time CARGO_BIN_EXE_copperline path, which on hosted
-        # runners is the same absolute path in every job of this repo --
-        # hence the copy of the staged binaries into target/ci.
-        run: |
-          chmod +x ci-bins/* ci-bins/bin/*
-          mkdir -p target/ci
-          cp ci-bins/bin/* target/ci/
-      - name: Restore cached DiagROM
-        id: diagrom-cache
-        uses: actions/cache@v6
-        with:
-          path: diagrom.rom
-          key: diagrom-stable-v1.3
-      - name: Fetch DiagROM (stable V1.3)
-        if: steps.diagrom-cache.outputs.cache-hit != 'true'
-        env:
-          DIAGROM_URL: ${{ vars.DIAGROM_URL }}
-        run: |
-          curl -fsSL --retry 3 "${DIAGROM_URL:-https://www.diagrom.com/files/stable/DiagROM.zip}" -o DiagROM.zip
-          echo "a575f8fa69b1ac7fd566fcdcd19a68e53d472ac6c56d8a6a9489229882c5b208  DiagROM.zip" | shasum -a 256 -c
-          unzip -o DiagROM.zip DiagROM/DiagROM
-          mv DiagROM/DiagROM diagrom.rom
-          rm -rf DiagROM.zip DiagROM
-      - name: Verify DiagROM checksum
-        # Runs on the cache-hit path too, so a corrupted or tampered cache
-        # entry cannot slip through (the step above only checks the freshly
-        # downloaded archive). This pin is the extracted ROM inside the
-        # checksum-pinned stable V1.3 zip.
-        run: |
-          echo "1803bfff5d866de7605dbcf8445b590f36ed7cb7ee92166b240907e488cf0ff7  diagrom.rom" | shasum -a 256 -c
-      - name: Boot smoke (serial banner + headless screenshot)
-        # DiagROM boots as a Kickstart replacement, so the ROM is passed
-        # positionally (the no-argument default is the bundled AROS ROM).
-        # DiagROM mirrors its diagnostics to the serial port, which the
-        # emulator routes to stdout by default; seeing the version banner
-        # proves the ROM's boot code actually executed, which a non-empty
-        # PNG alone does not (a black screen still writes one).
-        run: |
-          ./target/ci/copperline diagrom.rom --noaudio --screenshot-after 6 diag.png > serial.log
-          grep -q "Amiga DiagROM" serial.log
-          test -s diag.png
-      - name: DiagROM menu image regression
-        # The asset-gated integration test boots to the main menu and
-        # asserts the status bar's left-margin text columns survive.
-        run: |
-          mkdir -p test-assets
-          cp diagrom.rom test-assets/
-          ./ci-bins/test-image_regression diagrom --ignored --nocapture
-      - name: Upload boot screenshot
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: diagrom-boot
-          path: |
-            diag.png
-            serial.log
-          if-no-files-found: ignore
-
   linux-tests:
     timeout-minutes: 30
     # Preserve the required check name; the ci profile is release-derived.
     name: Linux tests (release)
     # Functional coverage on Linux: the inline unit suites and
     # tests/probe_golden.rs, whose pixel-exact golden comparisons prove the
-    # deterministic core renders identically on Linux. Runs the whole thing
-    # through cargo on an ubuntu runner rather than joining the macOS
-    # binary fan-out above (the prebuilt binaries are mach-o). No display
+    # deterministic core renders identically on Linux. No display
     # or GPU stack is needed: capture runs use the windowless path, so only
     # the ALSA/udev build dependencies are installed. The asset-gated
     # integration tests skip themselves (#[ignore]).

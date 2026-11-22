@@ -40,6 +40,55 @@ for the earlier release notes.
   found, and **Browse** picks a different one. These settings are kept
   when the machine model is changed.
 
+### Fixed
+
+- A save state now records the identity (length and SHA-256) of the board
+  firmware built into Copperline that its machine maps -- the
+  `copperhf.device` boot ROM, and the bundled HostSocket and zz9k boards'
+  plugin modules and HostSocket ROM -- in a new optional `BROM` chunk. A
+  build whose firmware differs refuses such a state with an error naming
+  the board and saying to boot afresh, instead of resuming the guest
+  against changed firmware and hanging it.
+- An interlaced screen whose display window stops on the long field's last
+  line (PAL 312, NTSC 262) no longer shows its two fields woven in the wrong
+  order. The vertical display window now closes on the last line of the
+  field being scanned, so an interlaced short field closes it one line
+  earlier instead of carrying it open into the next field, which started
+  that field's picture a line early. The Video Toaster 4.2 switcher screen
+  was the visible case. The A1000's original Agnus closes the window on
+  line zero of the next field instead, so there an open window now shows
+  each field's last line.
+- Native screenshots (`--native-screenshots`, the native screenshot
+  shortcut and the control protocol's `capture.screenshot` with
+  `native: true`) of interlaced software that alternates its per-field
+  images without reading the long-field flag are no longer combed one line
+  apart when the images landed on the opposite fields. As the window's
+  deinterlacer already did, the capture puts the short field on the even
+  rows when that order is clearly smoother on four consecutive pairs of
+  fields; blank, moving or ambiguous pictures keep the long-field order.
+  Kang Fu (CD32) showed its GREED splash text combed.
+- A netplay control link (setup, disk changes and the spectator feed) no
+  longer fails with "setup data exceeds receive window" when the receiver
+  holds a window of data behind messages its session has not taken yet,
+  as a spectator catching up on a long backlog could. The sender counted
+  those held packets as delivered and ran a whole window past what the
+  receiver could accept; it now waits for the receiver to take them.
+- An animated GIF clip no longer plays some frames slowly in web
+  browsers. A frame that the next one replaced a centisecond later got a
+  one-centisecond delay, which browsers show for ten; it happened at
+  `[recording] clip_fps` rates above 50, above about 45 on an NTSC
+  machine, and wherever frames were presented unevenly. No frame is now
+  shorter than two centiseconds: a frame replaced sooner is dropped, and
+  the clip keeps its length.
+
+### Compatibility
+
+- States written by 1.2.0 and earlier carry no firmware identities and load
+  as before, unchecked, with a warning naming the built-in firmware their
+  boards map. 1.2.0 skips the new chunk (with a log line), so the chunk
+  does not stop it reading states this build writes. Save states keep
+  container version 82 and every existing chunk keeps its version.
+
 ## 1.2.0 - 2026-11-21
 
 ### Added
