@@ -1503,7 +1503,11 @@ pub(in crate::video::ui) fn launcher_path_inherits(
     // The ROMs with bundled defaults read the same way: unset means the
     // bundled image (or, on the FMV row, no module at all), dimmed as
     // Copperline's answer.
-    if matches!(field, LauncherField::Rom | LauncherField::FmvRom) {
+    // And the ffmpeg: unset, it shows the one the search would run.
+    if matches!(
+        field,
+        LauncherField::Rom | LauncherField::FmvRom | LauncherField::RecordingFfmpeg
+    ) {
         return setup.path(field).is_none();
     }
     if field == LauncherField::ScsiRom {

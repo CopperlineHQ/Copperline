@@ -392,6 +392,30 @@ impl MachineSetup {
                 AudioFilterMode::On => "Enabled".to_string(),
                 AudioFilterMode::Off => "Disabled".to_string(),
             },
+            // The Recording menu's names for these, cut down to what the
+            // value box holds: the format, and what choosing it means.
+            F::RecordingClipFormat => match self.clip_format {
+                crate::gifclip::ClipFormat::Gif => "GIF (256 cols)",
+                crate::gifclip::ClipFormat::Apng => "APNG (lossless)",
+            }
+            .to_string(),
+            F::RecordingVideoFormat => match self.video_format {
+                crate::config::VideoFormat::Avi => "AVI (lossless)",
+                crate::config::VideoFormat::Mp4 => "MP4 (H.264)",
+            }
+            .to_string(),
+            F::RecordingClipSeconds => match self.clip_seconds {
+                0 => "Disabled".to_string(),
+                secs => format!("{secs} s"),
+            },
+            // Automatic names the rate it comes to on this machine.
+            F::RecordingClipFps => match self.clip_fps {
+                0 => format!(
+                    "Auto ({} fps)",
+                    crate::gifclip::default_clip_fps(self.video)
+                ),
+                fps => format!("{fps} fps"),
+            },
             F::Filesys0Boot | F::Filesys1Boot | F::Filesys2Boot | F::Filesys3Boot => {
                 let (slot, _) = filesys_slot(field).expect("boot field");
                 match self.filesys_bootpri[slot] {
@@ -1010,6 +1034,28 @@ impl MachineSetup {
                     usize::from(self.audio_stereo_separation),
                     forward,
                 ) as u8
+            }
+            F::RecordingClipFormat => {
+                self.clip_format = cycle_slice(
+                    &crate::gifclip::ClipFormat::MENU_ORDER,
+                    self.clip_format,
+                    forward,
+                )
+            }
+            F::RecordingVideoFormat => {
+                self.video_format = cycle_slice(
+                    &crate::config::VideoFormat::MENU_ORDER,
+                    self.video_format,
+                    forward,
+                )
+            }
+            F::RecordingClipSeconds => {
+                self.clip_seconds =
+                    cycle_nearest(&CLIP_SECONDS_STEPS, self.clip_seconds as usize, forward) as u32
+            }
+            F::RecordingClipFps => {
+                self.clip_fps =
+                    cycle_nearest(&CLIP_FPS_STEPS, self.clip_fps as usize, forward) as u32
             }
             field if Self::boot_field_drive(field).is_some() => {
                 // The arrows only move a live priority; a drive whose Bootable

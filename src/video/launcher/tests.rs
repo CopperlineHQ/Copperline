@@ -74,8 +74,6 @@ fn keys_without_launcher_rows_survive_run_and_save() {
          tv_v_centre = -2\n\
          [clipboard]\n\
          share = true\n\
-         [recording]\n\
-         clip_seconds = 5\n\
          [machine]\n\
          rtc_time = \"2005-03-18 01:58:29\"\n\
          rtc_frozen = true\n",
@@ -3963,17 +3961,19 @@ fn sub_pages_of_hdd_cd() {
 fn av_emu_categories() {
     use LauncherField as F;
     // Only "A/V & Emu" (the Audio default) is a strip tab; Video, Display,
-    // Emulation and Paths are its categories.
+    // Emulation, Paths and Recording are its categories.
     assert!(TABS.contains(&LauncherTab::AvAudio));
     assert!(!TABS.contains(&LauncherTab::AvVideo));
     assert!(!TABS.contains(&LauncherTab::AvDisplay));
     assert!(!TABS.contains(&LauncherTab::AvEmulation));
     assert!(!TABS.contains(&LauncherTab::AvPaths));
+    assert!(!TABS.contains(&LauncherTab::AvRecording));
     for t in [
         LauncherTab::AvVideo,
         LauncherTab::AvDisplay,
         LauncherTab::AvEmulation,
         LauncherTab::AvPaths,
+        LauncherTab::AvRecording,
     ] {
         // They keep the A/V strip entry lit and have no Back button --
         // categories switch between each other via the top nav row.
@@ -3990,10 +3990,12 @@ fn av_emu_categories() {
             ("Display", LauncherTab::AvDisplay),
             ("Emulation", LauncherTab::AvEmulation),
             ("Paths", LauncherTab::AvPaths),
+            ("Recording", LauncherTab::AvRecording),
         ]
     );
     assert_eq!(LauncherTab::AvVideo.nav_options(), nav);
     assert_eq!(LauncherTab::AvDisplay.nav_options(), nav);
+    assert_eq!(LauncherTab::AvRecording.nav_options(), nav);
     assert!(LauncherTab::AvAudio.has_top_nav());
     assert!(LauncherTab::Storage.has_top_nav());
     assert!(!LauncherTab::System.has_top_nav());
@@ -4020,6 +4022,181 @@ fn av_emu_categories() {
     assert!(page(LauncherTab::AvEmulation)
         .iter()
         .any(|r| r.field == F::PowerOn));
+    // Recording holds the clip and video settings, and nothing else does.
+    let recording = page(LauncherTab::AvRecording);
+    for field in [
+        F::RecordingClipFormat,
+        F::RecordingClipSeconds,
+        F::RecordingClipFps,
+        F::RecordingVideoFormat,
+        F::RecordingFfmpeg,
+    ] {
+        assert!(recording.iter().any(|r| r.field == field), "{field:?}");
+        for other in [
+            LauncherTab::AvAudio,
+            LauncherTab::AvVideo,
+            LauncherTab::AvDisplay,
+            LauncherTab::AvEmulation,
+            LauncherTab::AvPaths,
+        ] {
+            assert!(page(other).iter().all(|r| r.field != field), "{field:?}");
+        }
+    }
+}
+
+/// The Recording page owns `[recording]`: a configuration's choices load
+/// into its rows, reach the machine Run starts, and come back out of Save
+/// as they went in -- while an untouched page writes nothing at all.
+#[test]
+fn recording_page_round_trips_the_recording_section() {
+    use crate::config::VideoFormat;
+    use crate::gifclip::ClipFormat;
+    assert_eq!(
+        MachineSetup::default().to_raw().recording,
+        crate::config::RawRecording::default()
+    );
+
+    let raw = RawConfig::parse(
+        "[recording]\n\
+         clip_format = \"apng\"\n\
+         clip_seconds = 30\n\
+         clip_fps = 50\n\
+         video_format = \"mp4\"\n\
+         ffmpeg = \"/opt/tools/ffmpeg\"\n",
+    )
+    .unwrap();
+    let setup = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(setup.value_label(F::RecordingClipFormat), "APNG (lossless)");
+    assert_eq!(setup.value_label(F::RecordingClipSeconds), "30 s");
+    assert_eq!(setup.value_label(F::RecordingClipFps), "50 fps");
+    assert_eq!(setup.value_label(F::RecordingVideoFormat), "MP4 (H.264)");
+    assert_eq!(
+        setup.full_path_label(F::RecordingFfmpeg).as_deref(),
+        Some("/opt/tools/ffmpeg")
+    );
+
+    let cfg = setup.build_config().unwrap();
+    assert_eq!(cfg.recording.clip_format, ClipFormat::Apng);
+    assert_eq!(cfg.recording.clip_seconds, 30);
+    assert_eq!(cfg.recording.clip_fps, 50);
+    assert_eq!(cfg.recording.video_format, VideoFormat::Mp4);
+    assert_eq!(
+        cfg.recording.ffmpeg.as_deref(),
+        Some(Path::new("/opt/tools/ffmpeg"))
+    );
+
+    let out = setup.to_raw();
+    assert_eq!(out.recording, raw.recording);
+    let reread = RawConfig::parse(&out.to_toml_string().unwrap()).unwrap();
+    assert_eq!(reread.recording, raw.recording);
+}
+
+#[test]
+fn recording_rows_step_through_their_choices() {
+    let mut s = MachineSetup::default();
+
+    // The two formats flip between the Recording menu's own choices, and
+    // the default writes nothing.
+    assert_eq!(s.value_label(F::RecordingClipFormat), "GIF (256 cols)");
+    s.cycle(F::RecordingClipFormat, true);
+    assert_eq!(s.to_raw().recording.clip_format.as_deref(), Some("apng"));
+    s.cycle(F::RecordingClipFormat, true);
+    assert_eq!(s.to_raw().recording.clip_format, None);
+    assert_eq!(s.value_label(F::RecordingVideoFormat), "AVI (lossless)");
+    s.cycle(F::RecordingVideoFormat, false);
+    assert_eq!(s.to_raw().recording.video_format.as_deref(), Some("mp4"));
+    s.cycle(F::RecordingVideoFormat, false);
+    assert_eq!(s.to_raw().recording.video_format, None);
+
+    // The length runs from the ring off up to the longest accepted, and
+    // wraps at both ends.
+    assert_eq!(s.value_label(F::RecordingClipSeconds), "10 s");
+    s.cycle(F::RecordingClipSeconds, false);
+    assert_eq!(s.value_label(F::RecordingClipSeconds), "5 s");
+    s.cycle(F::RecordingClipSeconds, false);
+    assert_eq!(s.value_label(F::RecordingClipSeconds), "Disabled");
+    assert_eq!(s.to_raw().recording.clip_seconds, Some(0));
+    s.cycle(F::RecordingClipSeconds, false);
+    assert_eq!(s.clip_seconds, crate::gifclip::MAX_CLIP_SECONDS);
+    s.cycle(F::RecordingClipSeconds, true);
+    assert_eq!(s.value_label(F::RecordingClipSeconds), "Disabled");
+
+    // A hand-written length between two steps snaps to the nearer first.
+    let raw = RawConfig::parse("[recording]\nclip_seconds = 7\n").unwrap();
+    let mut odd = MachineSetup::from_raw(&raw).unwrap();
+    assert_eq!(odd.value_label(F::RecordingClipSeconds), "7 s");
+    odd.cycle(F::RecordingClipSeconds, true);
+    assert_eq!(odd.value_label(F::RecordingClipSeconds), "10 s");
+
+    // Automatic says what it comes to on this machine's standard.
+    assert_eq!(s.value_label(F::RecordingClipFps), "Auto (25 fps)");
+    s.cycle(F::Video, true);
+    assert_eq!(s.video, VideoStandard::Ntsc);
+    assert_eq!(s.value_label(F::RecordingClipFps), "Auto (30 fps)");
+    s.cycle(F::RecordingClipFps, true);
+    assert_eq!(s.value_label(F::RecordingClipFps), "10 fps");
+    assert_eq!(s.to_raw().recording.clip_fps, Some(10));
+    s.cycle(F::RecordingClipFps, false);
+    s.cycle(F::RecordingClipFps, false);
+    assert_eq!(s.clip_fps, crate::gifclip::MAX_CLIP_FPS);
+    MachineSetup::from_raw(&s.to_raw()).expect("every step validates");
+}
+
+/// Only an MP4 runs ffmpeg, so its row is there only for MP4. Unset, it
+/// names the ffmpeg the search found (or says there is none) without
+/// writing it; a chosen one is written whatever the format, so a spell
+/// on AVI does not forget it.
+#[test]
+fn ffmpeg_row_shows_for_mp4_and_names_the_ffmpeg_in_use() {
+    let mut s = MachineSetup::default();
+    assert!(s.row_hidden(F::RecordingFfmpeg));
+    s.cycle(F::RecordingVideoFormat, true);
+    assert_eq!(s.video_format, crate::config::VideoFormat::Mp4);
+    assert!(!s.row_hidden(F::RecordingFfmpeg));
+
+    s.ffmpeg_found = None;
+    assert_eq!(
+        s.full_path_label(F::RecordingFfmpeg).as_deref(),
+        Some("(not found)")
+    );
+    s.ffmpeg_found = Some(PathBuf::from("/usr/local/bin/ffmpeg"));
+    assert_eq!(
+        s.full_path_label(F::RecordingFfmpeg).as_deref(),
+        Some("/usr/local/bin/ffmpeg")
+    );
+    assert_eq!(s.path(F::RecordingFfmpeg), None);
+    assert_eq!(s.to_raw().recording.ffmpeg, None);
+
+    s.set_path(F::RecordingFfmpeg, PathBuf::from("/opt/ffmpeg-7/ffmpeg"));
+    assert_eq!(
+        s.full_path_label(F::RecordingFfmpeg).as_deref(),
+        Some("/opt/ffmpeg-7/ffmpeg")
+    );
+    s.cycle(F::RecordingVideoFormat, true);
+    assert!(s.row_hidden(F::RecordingFfmpeg));
+    assert_eq!(
+        s.to_raw().recording.ffmpeg.as_deref(),
+        Some("/opt/ffmpeg-7/ffmpeg")
+    );
+    s.clear_path(F::RecordingFfmpeg);
+    assert_eq!(s.to_raw().recording.ffmpeg, None);
+}
+
+/// Recording is host output, not machine: switching model resets the
+/// machine's settings and leaves these as they were, the same as when they
+/// had no rows and simply rode along.
+#[test]
+fn a_model_switch_keeps_the_recording_choices() {
+    let mut s = MachineSetup::default();
+    s.cycle(F::RecordingClipFormat, true);
+    s.cycle(F::RecordingClipSeconds, true);
+    s.cycle(F::RecordingClipFps, true);
+    s.cycle(F::RecordingVideoFormat, true);
+    s.set_path(F::RecordingFfmpeg, PathBuf::from("/opt/ffmpeg"));
+    let before = s.to_raw().recording;
+    assert_ne!(before, crate::config::RawRecording::default());
+    s.select_model(Some(MachineModel::A1200));
+    assert_eq!(s.to_raw().recording, before);
 }
 
 #[test]

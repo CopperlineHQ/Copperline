@@ -33,6 +33,12 @@ for the earlier release notes.
   smaller than the GIF, and frame timings are exact to the millisecond, so
   50 and 60 fps clips play at their real rate. Browsers show an APNG in an
   `<img>` tag like a GIF. GIF stays the default.
+- The configuration screen has a Recording page (A/V & Emu -> Recording)
+  for the `[recording]` section: the clip format (GIF or APNG), clip
+  length and frame rate, and the video format (AVI or MP4). With MP4
+  chosen it shows which ffmpeg the recording will use, or that none was
+  found, and **Browse** picks a different one. These settings are kept
+  when the machine model is changed.
 
 ## 1.2.0 - 2026-11-21
 

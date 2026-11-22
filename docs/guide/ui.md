@@ -950,7 +950,7 @@ The layout is:
     for a WASM plugin board's declared options.
   - *WHDLoad*: your game collection, and the settings games boot with (see
     [](whdload.md)).
-  - *A/V & Emu*: five pages switched on the top nav row, opening on Audio:
+  - *A/V & Emu*: six pages switched on the top nav row, opening on Audio:
     - **Audio**: output device, channel mode, stereo separation, filter,
       floppy sounds, their volume, and the floppy sound set (**Synthesized**
       or a WinUAE-format sample set from the `Floppy Sounds` folder).
@@ -987,6 +987,18 @@ The layout is:
       screenshot taken after moving the row lands where the row now says --
       and are written to the configuration by **Save**, **Save As** or
       **Save default** like everything else.
+    - **Recording**: the `[recording]` section (see
+      [](configuration.md#recording-config)). Under **Save Clip**, the
+      clip **Format** (**GIF (256 cols)** or **APNG (lossless)**), its
+      **Length** (**Disabled**, which turns the clip ring off, up to 120
+      s) and **Frame rate** (**Auto**, half the field rate, up to 60 fps);
+      under **Record Video**, the **Format** (**AVI (lossless)** or **MP4
+      (H.264)**). With MP4 chosen an **ffmpeg** row appears: dimmed, it
+      names the ffmpeg Copperline found on its own, or reads `(not found)`
+      when there is none and an MP4 recording would be kept as an AVI;
+      **Browse** chooses another and **Clear** goes back to the search.
+      These are the choices the Recording menu's **Clip Format** and
+      **Video Format** make, and a model switch leaves them as they are.
 - **Settings rows** (right pane). `[<]`/`[>]` step through a value (an
   on/off setting steps between **Enabled** and **Disabled**), and the
   **Browse** and **Clear** buttons set or remove a file path through a

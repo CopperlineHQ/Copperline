@@ -1059,7 +1059,7 @@ pub(in crate::video::ui) fn draw_launcher_row(
             let (browse, clear) = launcher_path_rects(rect, row_y);
             let value_x = launcher_control_x(rect);
             let avail = browse.x.saturating_sub(value_x + 8);
-            // The printer output and the Paths rows show a whole path
+            // The printer output, the ffmpeg and the Paths rows show a whole path
             // (clipped from the front if long, so the row never overflows
             // and the end -- which is the part that identifies it -- stays);
             // other path rows show the image file name.
@@ -1080,7 +1080,10 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 // `(default)`.
                 let reads_left = matches!(
                     r.field,
-                    LauncherField::Rom | LauncherField::FmvRom | LauncherField::ScsiRom
+                    LauncherField::Rom
+                        | LauncherField::FmvRom
+                        | LauncherField::ScsiRom
+                        | LauncherField::RecordingFfmpeg
                 ) || {
                     #[cfg(feature = "coppersynth")]
                     {

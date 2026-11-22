@@ -2017,6 +2017,10 @@ find by itself; left out (the default), it looks beside Copperline, on the
 `PATH` and in the usual package-manager folders. The `COPPERLINE_FFMPEG`
 environment variable outranks it for one run.
 
+The configuration screen's **A/V & Emu -> Recording** page edits every key
+in this section (see [the configuration screen](ui.md#machine-configuration-screen)), and
+writes it out with the rest of the configuration.
+
 The camera button and `Cmd+S` / `Alt+S` save the displayed picture with its
 current effects. Native screenshots use `Cmd+Option+S` on macOS or
 `Ctrl+Alt+S` on Linux/Windows; `--native-screenshots` selects native scheduled
