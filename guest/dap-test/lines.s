@@ -19,3 +19,7 @@ twice:
         section data,data
 value:
         dc.l    0
+; Named like the Debug Console's help command: Hover and Watch still
+; take it as the label.
+h:
+        dc.l    0

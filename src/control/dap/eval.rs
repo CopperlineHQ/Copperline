@@ -3,11 +3,24 @@
 //! The Debug Console / watch expression language, and breakpoint
 //! conditions. Small on purpose: registers (`d0`, `a7`, `sp`, `pc`,
 //! `sr`), symbols and variables by name, numbers (`$DFF000`, `0x1234`,
-//! `1234`, `%1010`), `+`, `-`, `*` / `/` on numbers, unary minus,
-//! memory reads `[expr]` (long), `[expr].w`, `[expr].b`, and
-//! parentheses. Breakpoint conditions are one comparison between two
-//! operands the machine can evaluate itself: `d0 == 5`, `[$100] != 0`,
-//! `a0 >= d1`.
+//! `1234`, `%1010`, `0b1010`), `+`, `-`, `*` / `/`, the bitwise `&`,
+//! `|`, `^`, `<<`, `>>`, `>>>` and `~` on numbers, unary minus, memory
+//! reads `[expr]` (long), `[expr].w`, `[expr].b`, and parentheses.
+//!
+//! The bitwise operators work as uae-dap's JavaScript evaluator does
+//! them: on the operands' low 32 bits as a signed long, with a shift
+//! count of its low five bits. `>>` shifts in the sign bit (as ASR);
+//! `>>>` shifts in zeroes (as LSR).
+//!
+//! The memory-reference forms of the UAE debug adapter (uae-dap, used
+//! by the Amiga Assembly VS Code extension for FS-UAE and WinUAE) parse
+//! too, so its users' watch expressions carry over: `@(expr[,size])`
+//! (unsigned, size 1, 2 or 4, default 4), `@s(expr[,size])` (signed),
+//! `#{expr}` (the long at the address) and `${expr}` (the expression
+//! itself, a symbol's address).
+//!
+//! Breakpoint conditions are one comparison between two operands the
+//! machine can evaluate itself: `d0 == 5`, `[$100] != 0`, `a0 >= d1`.
 
 use crate::debugger::{BreakCond, CondOp, CondOperand};
 
@@ -18,14 +31,26 @@ pub enum Expr {
     Register(u16),
     Name(String),
     Neg(Box<Expr>),
+    /// `~expr`: the bitwise complement.
+    Not(Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
     Mul(Box<Expr>, Box<Expr>),
     Div(Box<Expr>, Box<Expr>),
+    And(Box<Expr>, Box<Expr>),
+    Or(Box<Expr>, Box<Expr>),
+    Xor(Box<Expr>, Box<Expr>),
+    Shl(Box<Expr>, Box<Expr>),
+    /// `>>`: an arithmetic shift right.
+    Shr(Box<Expr>, Box<Expr>),
+    /// `>>>`: a logical shift right.
+    Ushr(Box<Expr>, Box<Expr>),
     /// `[expr].size`: a memory read of 1, 2 or 4 bytes.
     Mem(Box<Expr>, u8),
     /// `value.w` / `value.b`: the value masked to a word or byte.
     Mask(Box<Expr>, i64),
+    /// The low `size` bytes of a value, sign-extended (`@s(...)`).
+    SignExtend(Box<Expr>, u8),
 }
 
 pub fn register_number(name: &str) -> Option<u16> {
@@ -102,7 +127,66 @@ impl<'a> Parser<'a> {
         result
     }
 
+    /// `|`, `^`, `&`, then the shifts, binding more tightly in that
+    /// order, as in C.
     fn expr_inner(&mut self) -> Result<Expr, String> {
+        let mut lhs = self.bit_xor()?;
+        while self.eat_op("|", "|") {
+            let rhs = self.bit_xor()?;
+            lhs = Expr::Or(Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn bit_xor(&mut self) -> Result<Expr, String> {
+        let mut lhs = self.bit_and()?;
+        while self.eat_op("^", "") {
+            let rhs = self.bit_and()?;
+            lhs = Expr::Xor(Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn bit_and(&mut self) -> Result<Expr, String> {
+        let mut lhs = self.shift()?;
+        while self.eat_op("&", "&") {
+            let rhs = self.shift()?;
+            lhs = Expr::And(Box::new(lhs), Box::new(rhs));
+        }
+        Ok(lhs)
+    }
+
+    fn shift(&mut self) -> Result<Expr, String> {
+        let mut lhs = self.additive()?;
+        loop {
+            if self.eat_op("<<", "") {
+                let rhs = self.additive()?;
+                lhs = Expr::Shl(Box::new(lhs), Box::new(rhs));
+            } else if self.eat_op(">>>", "") {
+                let rhs = self.additive()?;
+                lhs = Expr::Ushr(Box::new(lhs), Box::new(rhs));
+            } else if self.eat_op(">>", "") {
+                let rhs = self.additive()?;
+                lhs = Expr::Shr(Box::new(lhs), Box::new(rhs));
+            } else {
+                return Ok(lhs);
+            }
+        }
+    }
+
+    /// Consume the operator `op` unless it is followed by `unless` (so
+    /// `&&` and `||` are not taken for `&` and `|`).
+    fn eat_op(&mut self, op: &str, unless: &str) -> bool {
+        self.skip_ws();
+        let rest = &self.src[self.pos..];
+        if !rest.starts_with(op) || (!unless.is_empty() && rest[op.len()..].starts_with(unless)) {
+            return false;
+        }
+        self.pos += op.len();
+        true
+    }
+
+    fn additive(&mut self) -> Result<Expr, String> {
         let mut lhs = self.term()?;
         loop {
             self.skip_ws();
@@ -155,6 +239,10 @@ impl<'a> Parser<'a> {
             Some('-') => {
                 self.pos += 1;
                 Ok(Expr::Neg(Box::new(self.unary()?)))
+            }
+            Some('~') => {
+                self.pos += 1;
+                Ok(Expr::Not(Box::new(self.unary()?)))
             }
             Some('*') => {
                 // C-style deref: a long.
@@ -211,16 +299,37 @@ impl<'a> Parser<'a> {
         }
         if c == '$' {
             self.pos += 1;
+            // uae-dap's `${expr}`: the expression itself.
+            if self.peek() == Some('{') {
+                return self.braced();
+            }
             return self.number(16);
+        }
+        if c == '#' {
+            // uae-dap's `#{expr}`: the long at the address.
+            self.pos += 1;
+            if self.peek() != Some('{') {
+                return Err("expected '{' after '#'".into());
+            }
+            return Ok(Expr::Mem(Box::new(self.braced()?), 4));
+        }
+        if c == '@' {
+            self.pos += 1;
+            return self.memory_reference();
         }
         if c == '%' {
             self.pos += 1;
             return self.number(2);
         }
         if c.is_ascii_digit() {
-            if self.src[self.pos..].starts_with("0x") || self.src[self.pos..].starts_with("0X") {
+            let rest = &self.src[self.pos..];
+            if rest.starts_with("0x") || rest.starts_with("0X") {
                 self.pos += 2;
                 return self.number(16);
+            }
+            if rest.starts_with("0b") || rest.starts_with("0B") {
+                self.pos += 2;
+                return self.number(2);
             }
             return self.number(10);
         }
@@ -240,6 +349,56 @@ impl<'a> Parser<'a> {
             });
         }
         Err(format!("unexpected '{c}'"))
+    }
+
+    /// `{expr}`, with the parser at the opening brace.
+    fn braced(&mut self) -> Result<Expr, String> {
+        self.pos += 1;
+        let e = self.expr()?;
+        if !self.eat('}') {
+            return Err("missing '}'".into());
+        }
+        Ok(e)
+    }
+
+    /// `(expr[,size])`, `s(expr[,size])` or `u(expr[,size])` after `@`:
+    /// a memory read of 1, 2 or 4 bytes (default 4), sign-extended for
+    /// `s`.
+    fn memory_reference(&mut self) -> Result<Expr, String> {
+        let signed = match self.peek() {
+            Some('s' | 'S') => {
+                self.pos += 1;
+                true
+            }
+            Some('u' | 'U') => {
+                self.pos += 1;
+                false
+            }
+            _ => false,
+        };
+        if self.peek() != Some('(') {
+            return Err("expected '(' after '@'".into());
+        }
+        self.pos += 1;
+        let address = self.expr()?;
+        let size = if self.eat(',') {
+            self.skip_ws();
+            match self.number(10)? {
+                Expr::Number(n @ (1 | 2 | 4)) => n as u8,
+                _ => return Err("memory reference size must be 1, 2 or 4".into()),
+            }
+        } else {
+            4
+        };
+        if !self.eat(')') {
+            return Err("missing ')'".into());
+        }
+        let read = Expr::Mem(Box::new(address), size);
+        Ok(if signed {
+            Expr::SignExtend(Box::new(read), size)
+        } else {
+            read
+        })
     }
 
     fn number(&mut self, radix: u32) -> Result<Expr, String> {
@@ -306,9 +465,35 @@ pub fn eval(e: &Expr, env: &mut dyn Env) -> Result<i64, String> {
         Expr::Register(r) => env.register(*r)?,
         Expr::Name(n) => env.name(n)?,
         Expr::Neg(inner) => eval(inner, env)?.wrapping_neg(),
+        Expr::Not(inner) => i64::from(!(eval(inner, env)? as i32)),
         Expr::Add(a, b) => eval(a, env)?.wrapping_add(eval(b, env)?),
         Expr::Sub(a, b) => eval(a, env)?.wrapping_sub(eval(b, env)?),
         Expr::Mul(a, b) => eval(a, env)?.wrapping_mul(eval(b, env)?),
+        // 32-bit signed operands and a five-bit shift count, as
+        // JavaScript's bitwise operators in uae-dap's evaluator.
+        Expr::And(a, b) => i64::from(eval(a, env)? as i32 & eval(b, env)? as i32),
+        Expr::Or(a, b) => i64::from(eval(a, env)? as i32 | eval(b, env)? as i32),
+        Expr::Xor(a, b) => i64::from(eval(a, env)? as i32 ^ eval(b, env)? as i32),
+        Expr::Shl(a, b) => {
+            let (value, count) = (eval(a, env)?, eval(b, env)?);
+            i64::from((value as i32).wrapping_shl(count as u32))
+        }
+        Expr::Shr(a, b) => {
+            let (value, count) = (eval(a, env)?, eval(b, env)?);
+            i64::from((value as i32).wrapping_shr(count as u32))
+        }
+        Expr::Ushr(a, b) => {
+            let (value, count) = (eval(a, env)?, eval(b, env)?);
+            i64::from((value as u32).wrapping_shr(count as u32))
+        }
+        Expr::SignExtend(inner, size) => {
+            let v = eval(inner, env)?;
+            match size {
+                1 => i64::from(v as u8 as i8),
+                2 => i64::from(v as u16 as i16),
+                _ => i64::from(v as u32 as i32),
+            }
+        }
         Expr::Div(a, b) => {
             let d = eval(b, env)?;
             if d == 0 {
@@ -436,6 +621,48 @@ mod tests {
         assert_eq!(run("*sp"), Ok(0x8004));
         assert_eq!(run("d0.w"), Ok(0x5678));
         assert_eq!(run("d0.b"), Ok(0x78));
+    }
+
+    #[test]
+    fn bitwise_operators_bind_like_c() {
+        assert_eq!(run("$F0 & $3C"), Ok(0x30));
+        assert_eq!(run("$F0 | $0F"), Ok(0xFF));
+        assert_eq!(run("$FF ^ $0F"), Ok(0xF0));
+        assert_eq!(run("1 << 4 + 1"), Ok(32));
+        assert_eq!(run("$100 >> 4"), Ok(0x10));
+        assert_eq!(run("1 | 2 & 3"), Ok(3));
+        assert_eq!(run("~0 & $FFFF"), Ok(0xFFFF));
+        // uae-dap's 32-bit semantics: a signed long, a five-bit count.
+        assert_eq!(run("$FFFFFFFF >> 1"), Ok(-1));
+        assert_eq!(run("$FFFFFFFF >>> 1"), Ok(0x7FFF_FFFF));
+        assert_eq!(run("-1 >>> 28"), Ok(0xF));
+        assert_eq!(run("1 << 32"), Ok(1));
+        assert_eq!(run("1 << 31"), Ok(-0x8000_0000));
+        assert_eq!(run("$100 >> 36"), Ok(0x10));
+        assert_eq!(run("1 << -1"), Ok(-0x8000_0000));
+        assert_eq!(run("$80000000 | 0"), Ok(-0x8000_0000));
+        assert_eq!(run("$1FFFFFFFF & $F"), Ok(0xF));
+        assert_eq!(run("~$FFFFFFFF"), Ok(0));
+        assert_eq!(run("0b1010"), Ok(10));
+        assert!(run("1 && 2").is_err());
+        assert!(run("1 || 2").is_err());
+    }
+
+    #[test]
+    fn uae_dap_memory_references_parse() {
+        // Fake reads return address + size.
+        assert_eq!(run("@($100)"), Ok(0x104));
+        assert_eq!(run("@($100,2)"), Ok(0x102));
+        assert_eq!(run("@u($100, 1)"), Ok(0x101));
+        // $FE + 1 = $FF read as a signed byte.
+        assert_eq!(run("@s($FE,1)"), Ok(-1));
+        assert_eq!(run("#{$100}"), Ok(0x104));
+        assert_eq!(run("${_start} + 2"), Ok(0x2002));
+        assert_eq!(run("@(d0.w + 2, 4)"), Ok(0x567E));
+        assert!(run("@($100,3)").is_err());
+        assert!(run("@[$100]").is_err());
+        assert!(run("#$100").is_err());
+        assert!(run("${_start").is_err());
     }
 
     #[test]

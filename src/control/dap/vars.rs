@@ -100,6 +100,12 @@ pub enum Node {
         ty: TypeId,
         frame: usize,
     },
+    /// The program's hunks.
+    Segments,
+    /// Variables computed when the reference was handed out: the rows
+    /// of a memory dump or disassembly from a console command or a
+    /// hover.
+    Rows(Vec<Value>),
 }
 
 /// Live `variablesReference`s, cleared at every stop.
@@ -126,8 +132,9 @@ impl VarStore {
     }
 }
 
-/// The `scopes` reply for a frame.
-pub fn scopes(store: &mut VarStore, frame: usize, has_info: bool) -> Value {
+/// The `scopes` reply for a frame. `has_segments`: the program is
+/// loaded, so its hunks have addresses.
+pub fn scopes(store: &mut VarStore, frame: usize, has_info: bool, has_segments: bool) -> Value {
     let mut out = vec![json!({
         "name": "Registers",
         "presentationHint": "registers",
@@ -147,6 +154,13 @@ pub fn scopes(store: &mut VarStore, frame: usize, has_info: bool) -> Value {
             "expensive": true,
         }));
     }
+    if has_segments {
+        out.push(json!({
+            "name": "Segments",
+            "variablesReference": store.add(Node::Segments),
+            "expensive": false,
+        }));
+    }
     out.push(json!({
         "name": "Chipset",
         "variablesReference": store.add(Node::Chipset),
@@ -159,40 +173,64 @@ fn hex32(v: u32) -> String {
     format!("0x{v:08X}")
 }
 
+/// The hidden fields a numeric variable carries until the session
+/// finishes the reply (`Session::finish_variables`): its raw value and
+/// width, for the *View as* formats and the label annotations.
+pub const RAW: &str = "_raw";
+pub const RAW_BITS: &str = "_bits";
+
+fn with_raw(mut v: Value, raw: u64, bits: u32) -> Value {
+    v[RAW] = Value::from(raw);
+    v[RAW_BITS] = Value::from(bits);
+    v
+}
+
 /// The register file of a frame as variables.
 pub fn registers(regs: &Registers, live: bool) -> Vec<Value> {
     let mut out = Vec::new();
     let hint = |kind: &str| json!({"kind": kind, "attributes": if live { json!([]) } else { json!(["readOnly"]) }});
     for i in 0..8 {
-        out.push(json!({
-            "name": format!("d{i}"),
-            "value": format!("{} ({})", hex32(regs.d[i]), regs.d[i] as i32),
-            "type": "long",
-            "evaluateName": format!("d{i}"),
-            "variablesReference": 0,
-            "presentationHint": hint("data"),
-        }));
+        out.push(with_raw(
+            json!({
+                "name": format!("d{i}"),
+                "value": format!("{} ({})", hex32(regs.d[i]), regs.d[i] as i32),
+                "type": "long",
+                "evaluateName": format!("d{i}"),
+                "variablesReference": 0,
+                "presentationHint": hint("data"),
+            }),
+            u64::from(regs.d[i]),
+            32,
+        ));
     }
     for i in 0..8 {
-        out.push(json!({
-            "name": format!("a{i}"),
-            "value": hex32(regs.a[i]),
-            "type": "address",
-            "evaluateName": format!("a{i}"),
-            "variablesReference": 0,
-            "memoryReference": format!("0x{:X}", regs.a[i]),
-            "presentationHint": hint("data"),
-        }));
+        out.push(with_raw(
+            json!({
+                "name": format!("a{i}"),
+                "value": hex32(regs.a[i]),
+                "type": "address",
+                "evaluateName": format!("a{i}"),
+                "variablesReference": 0,
+                "memoryReference": format!("0x{:X}", regs.a[i]),
+                "presentationHint": hint("data"),
+            }),
+            u64::from(regs.a[i]),
+            32,
+        ));
     }
-    out.push(json!({
-        "name": "pc",
-        "value": hex32(regs.pc),
-        "type": "address",
-        "evaluateName": "pc",
-        "variablesReference": 0,
-        "memoryReference": format!("0x{:X}", regs.pc),
-        "presentationHint": hint("data"),
-    }));
+    out.push(with_raw(
+        json!({
+            "name": "pc",
+            "value": hex32(regs.pc),
+            "type": "address",
+            "evaluateName": "pc",
+            "variablesReference": 0,
+            "memoryReference": format!("0x{:X}", regs.pc),
+            "presentationHint": hint("data"),
+        }),
+        u64::from(regs.pc),
+        32,
+    ));
     out
 }
 
@@ -238,7 +276,7 @@ pub fn status_register(store: &mut VarStore, sr: u16, live: bool) -> Value {
     if !live {
         value["presentationHint"] = json!({"kind": "data", "attributes": ["readOnly"]});
     }
-    value
+    with_raw(value, u64::from(sr), 16)
 }
 
 pub fn sr_flags(sr: u16) -> String {
@@ -284,17 +322,21 @@ pub fn chipset(bridge: &Bridge) -> Vec<Value> {
         if let Some(regs) = dump["registers"].as_array() {
             for register in regs {
                 let v = register["value"].as_u64().unwrap_or(0);
-                out.push(json!({
-                    "name": register["name"],
-                    "value": format!("0x{v:04X}"),
-                    "offset": register["offset"],
-                    "access": register["access"],
-                    "chipset": register["chipset"],
-                    "description": register["summary"],
-                    "documentation": register["documentation"],
-                    "variablesReference": 0,
-                    "presentationHint": {"attributes": ["readOnly"]},
-                }));
+                out.push(with_raw(
+                    json!({
+                        "name": register["name"],
+                        "value": format!("0x{v:04X}"),
+                        "offset": register["offset"],
+                        "access": register["access"],
+                        "chipset": register["chipset"],
+                        "description": register["summary"],
+                        "documentation": register["documentation"],
+                        "variablesReference": 0,
+                        "presentationHint": {"attributes": ["readOnly"]},
+                    }),
+                    v,
+                    16,
+                ));
             }
         }
     }
@@ -373,6 +415,30 @@ pub struct Rendered {
     pub ty: String,
     pub children: Option<Node>,
     pub memory: Option<u32>,
+    /// An integer's or pointer's raw value and width in bits.
+    pub raw: Option<(u64, u32)>,
+}
+
+impl Rendered {
+    /// The DAP variable for this value under `name`.
+    fn variable(self, store: &mut VarStore, name: &str, evaluate_name: Option<&str>) -> Value {
+        let mut v = json!({
+            "name": name,
+            "value": self.value,
+            "type": self.ty,
+            "variablesReference": self.children.map_or(0, |n| store.add(n)),
+        });
+        if let Some(evaluate_name) = evaluate_name {
+            v["evaluateName"] = Value::from(evaluate_name);
+        }
+        if let Some(addr) = self.memory {
+            v["memoryReference"] = Value::from(format!("0x{addr:X}"));
+        }
+        match self.raw {
+            Some((raw, bits)) => with_raw(v, raw, bits),
+            None => v,
+        }
+    }
 }
 
 /// Render the value of type `ty` at `addr`.
@@ -386,12 +452,13 @@ pub fn render(
     let ty_name = info.type_name(ty);
     let resolved = info.resolve_type(ty);
     let Some(desc) = resolved.and_then(|id| info.types.get(id)) else {
-        let v = mem.read32(addr).map_or("<unreadable>".into(), hex32);
+        let long = mem.read32(addr);
         return Rendered {
-            value: v,
+            value: long.map_or("<unreadable>".into(), hex32),
             ty: ty_name,
             children: None,
             memory: Some(addr),
+            raw: long.map(|v| (u64::from(v), 32)),
         };
     };
     let mut rendered = Rendered {
@@ -399,10 +466,16 @@ pub fn render(
         ty: ty_name,
         children: None,
         memory: Some(addr),
+        raw: None,
     };
     match desc {
         TypeDesc::Base { size, encoding, .. } => {
             rendered.value = render_base(mem, addr, *size, *encoding);
+            if !matches!(encoding, Encoding::Float | Encoding::Bool) && (1..=8).contains(size) {
+                rendered.raw = mem
+                    .read(addr, *size as usize)
+                    .map(|b| (u64::from_be_bytes(low_eight(&b)), size * 8));
+            }
         }
         TypeDesc::Pointer { target, .. } => {
             let Some(ptr) = mem.read32(addr) else {
@@ -410,6 +483,7 @@ pub fn render(
                 return rendered;
             };
             rendered.value = format!("0x{ptr:X}");
+            rendered.raw = Some((u64::from(ptr), 32));
             let target_desc = info.resolve_type(*target).and_then(|t| info.types.get(t));
             if ptr == 0 {
                 // NULL: nothing to look through.
@@ -578,28 +652,25 @@ pub fn variable_value(
 ) -> Value {
     match place {
         Ok(Place::Memory(addr)) => {
-            let r = render(info, mem, ty, addr, frame_index);
-            let mut v = json!({
-                "name": name,
-                "value": r.value,
-                "type": r.ty,
-                "evaluateName": name,
-                "variablesReference": r.children.map_or(0, |n| store.add(n)),
-            });
-            if let Some(addr) = r.memory {
-                v["memoryReference"] = Value::from(format!("0x{addr:X}"));
-            }
-            v
+            render(info, mem, ty, addr, frame_index).variable(store, name, Some(name))
         }
         Ok(Place::Register(reg)) => {
-            let value = frame.regs.get(reg).map_or("<unknown>".into(), hex32);
-            json!({
+            let raw = frame.regs.get(reg);
+            let value = raw.map_or("<unknown>".into(), hex32);
+            let v = json!({
                 "name": name,
                 "value": format!("{value} (in {})", eval::register_name(reg)),
                 "type": info.type_name(ty),
                 "evaluateName": name,
                 "variablesReference": 0,
-            })
+            });
+            match raw {
+                Some(raw) => {
+                    let bits = info.type_size(ty).map_or(32, |s| s.clamp(1, 4) * 8);
+                    with_raw(v, u64::from(raw), bits)
+                }
+                None => v,
+            }
         }
         Err(why) => json!({
             "name": name,
@@ -625,16 +696,7 @@ pub fn typed_children(
         return out;
     };
     let push = |out: &mut Vec<Value>, store: &mut VarStore, name: String, r: Rendered| {
-        let mut v = json!({
-            "name": name,
-            "value": r.value,
-            "type": r.ty,
-            "variablesReference": r.children.map_or(0, |n| store.add(n)),
-        });
-        if let Some(addr) = r.memory {
-            v["memoryReference"] = Value::from(format!("0x{addr:X}"));
-        }
-        out.push(v);
+        out.push(r.variable(store, &name, None));
     };
     match desc {
         TypeDesc::Struct { members, .. } => {
@@ -746,17 +808,47 @@ pub fn globals(
         let Some(addr) = info.runtime(sym.at) else {
             continue;
         };
-        let value = mem.read32(addr).map_or("<unreadable>".into(), hex32);
-        out.push(json!({
+        let long = mem.read32(addr);
+        let v = json!({
             "name": sym.name,
-            "value": value,
+            "value": long.map_or("<unreadable>".into(), hex32),
             "type": "long",
             "evaluateName": sym.name,
             "variablesReference": 0,
             "memoryReference": format!("0x{addr:X}"),
-        }));
+        });
+        out.push(match long {
+            Some(long) => with_raw(v, u64::from(long), 32),
+            None => v,
+        });
     }
     out
+}
+
+/// The Segments scope: each hunk of the loaded program, uae-dap's
+/// `Seg0`, `Seg1`... names, with its address, size and kind.
+pub fn segments(info: &DebugInfo) -> Vec<Value> {
+    info.bases()
+        .iter()
+        .zip(&info.hunks)
+        .enumerate()
+        .map(|(i, (&base, hunk))| {
+            let kind = hunk.kind.name();
+            with_raw(
+                json!({
+                    "name": format!("Seg{i}"),
+                    "value": format!("{} ({} bytes, {kind})", hex32(base), hunk.size),
+                    "type": "address",
+                    "evaluateName": format!("${base:X}"),
+                    "variablesReference": 0,
+                    "memoryReference": format!("0x{base:X}"),
+                    "presentationHint": {"kind": "data", "attributes": ["readOnly"]},
+                }),
+                u64::from(base),
+                32,
+            )
+        })
+        .collect()
 }
 
 /// A symbol's address, for the hover on a bare label.

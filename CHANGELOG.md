@@ -10,6 +10,23 @@ for the earlier release notes.
 
 ### Added
 
+- The DAP adapter serves the debugger features the Amiga Assembly VS Code
+  extension (`prb28.amiga-assembly`) offers for FS-UAE and WinUAE, so its
+  `emulatorType: "copperline"` sessions get them too. The Debug Console
+  and Watch take the UAE debug adapter's commands: `m address[,size[,
+  wordSize[,rowSize]]][,ab|a|b|d|c]` dumps memory (or disassembles it),
+  `M address=bytes` writes memory from the Debug Console, `d` and `c`
+  disassemble CPU code and Copper lists, and `h` prints help.
+  Expressions accept its memory references (`@(addr[,size])`,
+  `@s(...)`, `#{addr}`, `${expr}`), `0b` binary numbers and the bitwise
+  operators with uae-dap's 32-bit semantics. Hovering a label, or
+  watching a label or address register, expands to the memory there. The
+  extension's *Disassemble memory* and *Disassemble copper memory*
+  commands and its *View as Decimal / Hex / Binary* menu work. The
+  Variables view gains a Segments scope with the program's hunks, address
+  registers and PC show the program label they point into
+  (`<twice+$8>`), and the Debug Console completes register, symbol and
+  variable names (see docs/debugger/dap.md, "Debugger commands").
 - Crashes in the IDE debugger: when an exception breakpoint stops a program
   (an address error, an illegal instruction), the DAP adapter unwinds
   through the exception stack frame, so the call stack continues from the

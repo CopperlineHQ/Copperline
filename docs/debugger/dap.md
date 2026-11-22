@@ -135,10 +135,11 @@ configuration says. Arguments:
 | `sourceMap` | `{"/build/prefix": "/host/prefix"}` for sources recorded under another path. |
 | `coverage` | An lcov `.info` path: the emulator counts every instruction the program retires from its first instruction to its exit and writes line/function coverage there when it exits or the session stops (`--coverage`, with `sourceMap` applied; see [Guest code coverage](profiling.md#guest-coverage)). Launch only. |
 | `cwd`, `timeoutMs` | The emulator's working directory, and how long to wait for its control endpoint (default 60 s). |
+| `memoryFormats` | The memory dump behind a hover and a Watch entry on a label, as the UAE debug adapter takes it: `{"hover": {"length": 24, "wordLength": 2, "rowLength": 4, "mode": "ab"}, "watch": {"length": 104, ...}}` (these are the defaults; `length: 0` turns a dump off). See [Debugger commands](#dap-commands). Launch and attach. |
 
 `attach` connects to a running emulator through `controlInfo` (the
 `--control-info` file) or `address` + `token`, and takes `program`,
-`symbolFile`, `sourceMap`, `entryPoint` and `stopOnEntry` the same way
+`symbolFile`, `sourceMap`, `entryPoint`, `memoryFormats` and `stopOnEntry` the same way
 (`stopOnEntry` defaults to false here). `windowed` (default true) says the
 emulator has a window, so the adapter polls for a pause or resume made
 there; set it to false for a headless `--control` session. When the program is already
@@ -232,10 +233,11 @@ global(s), call-frame info`.
 | Step Over / Into / Out | `step_over` / `step` / `step_out`, repeated until the source line changes (statement granularity) or once (instruction granularity). Step Out while the PC is in Kickstart uses `run_until {"pc_outside": true}` to return to program code. Stepping into code without lines runs it to its return. A line that outgrows 64 single steps (a loop) gets temporary breakpoints on the function's other lines and the return address instead. |
 | Step Back / Reverse Continue | `reverse_step` / `reverse_continue` from the snapshot ring (see [Reverse debugging](reverse.md)); Step Back also repeats until the line changes (bounded to 32 single reverse steps per request). The adapter takes a snapshot (`reverse_anchor`) at every stop a run ends in, so stepping back replays from there: the boot volume `--run` stages is a host directory mount, whose traffic a replay from an older snapshot could not reproduce. |
 | Call stack | Call-frame information when the DWARF has it, else a scan of the stack for return addresses that follow a `JSR`/`BSR`. Frames beyond the innermost are looked up at the call site. ROM frames use live names such as `[exec] AllocMem+$12`, derived from the running guest rather than a per-ROM symbol file. At a caught exception the stack continues through the exception stack frame into the code it interrupted (see [Crashes](#dap-crashes)). |
-| Scopes | Registers (D0-D7, A0-A7, PC, SR with its flags, plus FP0-FP7/FPCR/FPSR/FPIAR when an FPU is fitted), Locals, Globals, Chipset (every custom register and the beam position). |
+| Scopes | Registers (D0-D7, A0-A7, PC, SR with its flags, plus FP0-FP7/FPCR/FPSR/FPIAR when an FPU is fitted; an address register or PC inside the program shows its label, such as `<twice+$8>`), Locals, Globals, Segments (each hunk of the loaded program: address, size and kind), Chipset (every custom register and the beam position). |
 | Disassembly | `disasm`; each instruction text ends in its theoretical cycle count or range, while a precise profile measures additional contention actually encountered. |
 | Set variable | `regs.set` for the innermost frame's registers; `mem.write` for base-type variables and members. |
-| Evaluate / hover / watch | Registers, variables and symbols by name, numbers (`$DFF000`, `0x1234`, `%1010`), `+ - * /`, `[expr]` / `[expr].w` / `[expr].b` memory reads, `d0.w`. In the Debug Console, `!method {json}` sends a raw control-protocol request and prints the reply (`!status`, `!beam.get`, `!capture.screenshot {"path": "/tmp/s.png"}`). |
+| Evaluate / hover / watch | Registers, variables and symbols by name, numbers (`$DFF000`, `0x1234`, `%1010`, `0b1010`), `+ - * /`, the bitwise `& \| ^ << >> >>> ~` (on 32-bit signed values with a five-bit shift count, as in uae-dap: `>>` keeps the sign bit, `>>>` shifts in zeroes), `[expr]` / `[expr].w` / `[expr].b` memory reads, `d0.w`, and the UAE debug adapter's `@(expr[,size])`, `@s(expr[,size])`, `#{expr}` and `${expr}`. A hover or Watch entry on a label, and a Watch entry on an address register, expands to the memory there. The Debug Console also runs the [debugger commands](#dap-commands) `m`, `M`, `d`, `c` and `h`, and Watch runs `m`, `d` and `c`. In the Debug Console, `!method {json}` sends a raw control-protocol request and prints the reply (`!status`, `!beam.get`, `!capture.screenshot {"path": "/tmp/s.png"}`). |
+| Completions | The Debug Console completes register names and the program's functions, symbols and globals. |
 | Memory view | `mem.read` / `mem.write` (base64). |
 | Disassembly view | `disasm`, with program symbols, source lines, and live ROM/LVO names; backward disassembly anchors at the nearest program or ROM function start. |
 | Jump to cursor | `regs.set {"reg": "pc"}`. |
@@ -243,12 +245,82 @@ global(s), call-frame info`.
 | CPU profiling | Custom `copperline/profile {"frames": N}` -> precise `profile.start`, `step_frame` quanta until `profile.status` reports the N frames written (bounded; a quantum resumed after a breakpoint can end inside the same video frame), `profile.stop`, and a merged `.cpuprofile` path. |
 | Coverage | The `coverage` launch argument -> the emulator's `--coverage` run; the emulator writes the lcov file to that path when the program exits or the session ends. |
 | Modules / loaded sources | The program with its first hunk's address, and the source files its debug information names. |
+| `disassembledFileContents`, `modifyVariableFormat` | The Amiga Assembly extension's custom requests; see [Debugger commands](#dap-commands). |
 
 A stop from a breakpoint set in the Debug workspace, or from a `catch`,
 `reg_watch`, beam trap or Copper breakpoint set through `!break.add`, is
 reported as a breakpoint with the machine's description. In a windowed
 session the IDE picks up a pause or resume made from the window within a
 second.
+
+(dap-commands)=
+## Debugger commands
+
+The [Amiga Assembly](https://github.com/prb28/vscode-amiga-assembly)
+extension debugs with FS-UAE and WinUAE through the UAE debug adapter
+(uae-dap), and can select Copperline instead with `emulatorType:
+"copperline"`. Copperline's adapter accepts the same debugger commands, so a
+Debug Console or Watch habit carries over. They work with any client, and
+with Copperline's own extension too:
+
+| Command | Effect |
+|---|---|
+| `m address[,size=16[,wordSize=4[,rowSize=4]]][,mode]` | Dump `size` bytes in groups of `wordSize` bytes, `rowSize` groups per line. `mode` is `ab` (hexadecimal and ASCII, the default), `b`, `a`, or `d` / `c` to disassemble the range as CPU or Copper instructions instead. |
+| `M address=bytes` | Write bytes, given as hexadecimal digits: `M $5c50=0ff534`. Only the Debug Console writes, as Watch evaluates its entries again at every refresh. The reply counts the bytes the machine took: ROM and device registers are skipped. |
+| `d address[,size=16]` | Disassemble the CPU instructions in `size` bytes. |
+| `c address[,size=16]` | Disassemble the Copper instructions in `size` bytes; the address `1` or `2` means the list COP1LC or COP2LC points to. |
+| `h [command]` | Help in the Debug Console; `h expressions` lists the expression syntax. In Hover and Watch, `h` and `H` are names, such as a label called `h`. |
+
+Every argument is an expression: `m CList,CListE-CList`, `m a0,64,2,8,b`,
+`d pc,32`. A command is its letter followed by a space, so a variable named
+`d` still evaluates (`d + 1`). In the Debug Console the output is printed in
+full; in Watch the first row is the value and the rows expand beneath it,
+updated at every stop. A command covers at most 64 KiB.
+
+```text
+> M value=12345678
+wrote 4 byte(s) at $00C39FE0
+> m value,8,2,4
+$00C39FE0: 1234 5678 0000 0000 | .4Vx....
+> d start,6
+start:
+$00C39FC0: 7000                 MOVEQ #$0,D0 ; 4 cyc
+$00C39FC2: 7203                 MOVEQ #$3,D1 ; 4 cyc
+$00C39FC4: 6106                 BSR.B $C39FCC ; 18 cyc
+> c 1,8
+$00003A48: 00E0 0000  MOVE  #$0000,$DFF0E0
+$00003A4C: 0100 0200  MOVE  #$0200,$DFF100
+```
+
+As in uae-dap, hovering a label shows its address and expands to the 24
+bytes there, and a label or an address register added to Watch expands to
+104 bytes; the `memoryFormats` launch argument changes both. From
+version 1.9.1 the extension passes its
+`amiga-assembly.display.memoryFormat.hover` and `.watch` settings as that
+argument.
+
+The extension's commands use two custom requests:
+
+- **Disassemble memory** and **Disassemble copper memory** open a
+  `.dbgasm` document whose name holds the request
+  (`FRAME__ADDRESS__COUNT.dbgasm`, `copper_ADDRESS__COUNT.dbgasm`, or
+  `seg_N.dbgasm` for a whole hunk). `disassembledFileContents {"path"}`
+  returns its text: the instructions, one per line, with a line for each
+  label (at most 4096 instructions, or 65536 for a whole hunk). These
+  documents are listings; set breakpoints in the Disassembly view.
+- **View as Decimal / Hex / Binary** on a variable sends
+  `modifyVariableFormat {"variableInfo": {"variable": {"name"}},
+  "variableDisplayFormat": 0|1|2}` (binary, decimal, hexadecimal). The
+  variable's name, in any scope (a register, a custom register, a global),
+  then shows in that format for the rest of the session, in Watch too; the
+  adapter sends `invalidated` so the views refresh.
+
+The extension's DISASSEMBLED MEMORY panel fills in a Copperline session
+from extension 1.9.1: at each stop the extension asks the adapter for the
+top frame and 25 instructions from its PC with the standard `stackTrace`
+and `disassemble` requests. In earlier versions only the built-in UAE
+adapter fills it, so it stays empty in a Copperline session; the
+Disassembly view shows the same instructions.
 
 (dap-crashes)=
 ## Crashes
