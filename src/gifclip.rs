@@ -21,6 +21,14 @@
 //! covers, and a stretch that presented no frames (a warp burst) plays as
 //! one long delay rather than a burst of catch-up frames.
 //!
+//! Browsers show a frame whose delay is 0 or 1 cs for 10 cs, so no frame
+//! is written shorter than [`MIN_GIF_DELAY_CS`]: a frame that would be
+//! replaced sooner gives its slot to the newer picture. A clip rate above
+//! 50 fps (or 60 Hz fields thinned to more than about 45 fps) therefore
+//! drops frames instead of playing them slowly. Only the final frame can
+//! be lengthened by this, by at most a centisecond: a final frame whose
+//! slot rounds to nothing is left out unless it is the only one.
+//!
 //! Everything here is a pure function of the frames and their timestamps,
 //! so the same emulated run produces a byte-identical file.
 
@@ -36,9 +44,14 @@ use crate::chipset::agnus::VideoStandard;
 pub const DEFAULT_CLIP_SECONDS: u32 = 10;
 /// Upper bound on `[recording] clip_seconds` / `--gif-seconds`.
 pub const MAX_CLIP_SECONDS: u32 = 120;
-/// Upper bound on `[recording] clip_fps`: a GIF cannot usefully exceed the
-/// field rate, and browsers clamp delays shorter than 2 cs anyway.
+/// Upper bound on `[recording] clip_fps`: a clip cannot usefully exceed
+/// the field rate. A GIF plays at most 50 frames per second (see
+/// [`MIN_GIF_DELAY_CS`]); faster rates drop frames rather than slow down.
 pub const MAX_CLIP_FPS: u32 = 60;
+/// The shortest frame delay a GIF is written with. Browsers show a frame
+/// of 0 or 1 cs for 10 cs, which would play those frames ten times too
+/// slowly, so 2 cs (50 fps) is the fastest a GIF frame can change.
+pub const MIN_GIF_DELAY_CS: i64 = 2;
 /// Memory ceiling for the interactive ring. Indexed frames of the full
 /// 716-column presentation are ~385 KiB, so ten seconds at 25 fps of
 /// constantly changing pictures is under 100 MiB; the budget only bites
@@ -377,6 +390,9 @@ pub struct GifWriter<W: Write> {
     height: usize,
     origin: Option<f64>,
     pending: Option<ClipFrame>,
+    /// Where the pending frame starts, in rounded centiseconds from the
+    /// origin. A newer frame that took over its slot keeps this start.
+    pending_start_cs: i64,
     frames_written: u32,
     /// Scratch for a frame whose size differs from the canvas.
     resample: Vec<u32>,
@@ -406,6 +422,7 @@ impl<W: Write> GifWriter<W> {
             height,
             origin: None,
             pending: None,
+            pending_start_cs: 0,
             frames_written: 0,
             resample: Vec::new(),
         })
@@ -416,25 +433,41 @@ impl<W: Write> GifWriter<W> {
     }
 
     /// Queue `frame`; the previously queued frame is written with the
-    /// delay up to this one.
+    /// delay up to this one. When that delay would be shorter than
+    /// [`MIN_GIF_DELAY_CS`], the queued frame is dropped instead and
+    /// `frame` takes over its start, so the newer picture shows a little
+    /// early rather than every frame after it running late.
     pub fn push(&mut self, frame: ClipFrame) -> Result<()> {
+        let origin = *self.origin.get_or_insert(frame.t);
+        let start = centis(frame.t - origin);
         if let Some(prev) = self.pending.take() {
-            let delay = self.delay_between(prev.t, frame.t);
+            let delay = start - self.pending_start_cs;
+            if delay < MIN_GIF_DELAY_CS {
+                self.pending = Some(frame);
+                return Ok(());
+            }
             self.write(&prev, delay)?;
         }
-        self.origin.get_or_insert(frame.t);
+        self.pending_start_cs = start;
         self.pending = Some(frame);
         Ok(())
     }
 
     /// Write the last queued frame -- shown until `end` (default: one clip
-    /// period after it) -- and the trailer, returning the sink and the
-    /// number of frames written.
+    /// period after it), and for at least [`MIN_GIF_DELAY_CS`] -- and the
+    /// trailer, returning the sink and the number of frames written. A
+    /// last frame whose slot rounds to no time at all (the clip ends
+    /// within half a centisecond of its start) is left out when an earlier
+    /// frame was written, since holding it for the minimum would only
+    /// lengthen the loop.
     pub fn finish(mut self, end: Option<f64>) -> Result<(W, u32)> {
         if let Some(last) = self.pending.take() {
             let end = end.unwrap_or(last.t + 1.0 / f64::from(self.fps));
-            let delay = self.delay_between(last.t, end);
-            self.write(&last, delay)?;
+            let origin = self.origin.unwrap_or(last.t);
+            let delay = centis(end - origin) - self.pending_start_cs;
+            if delay > 0 || self.frames_written == 0 {
+                self.write(&last, delay)?;
+            }
         }
         let out = self
             .encoder
@@ -443,16 +476,10 @@ impl<W: Write> GifWriter<W> {
         Ok((out, self.frames_written))
     }
 
-    /// Centiseconds between two timestamps as the difference of their
-    /// cumulative rounded offsets from the clip's origin, never below 1.
-    fn delay_between(&self, from: f64, to: f64) -> u16 {
-        let origin = self.origin.unwrap_or(from);
-        let a = ((from - origin) * 100.0).round();
-        let b = ((to - origin) * 100.0).round();
-        (b - a).clamp(1.0, f64::from(u16::MAX)) as u16
-    }
-
-    fn write(&mut self, frame: &ClipFrame, delay: u16) -> Result<()> {
+    /// Write `frame` shown for `delay_cs` centiseconds, held within what a
+    /// GIF delay can carry and browsers honour.
+    fn write(&mut self, frame: &ClipFrame, delay_cs: i64) -> Result<()> {
+        let delay = delay_cs.clamp(MIN_GIF_DELAY_CS, i64::from(u16::MAX)) as u16;
         let fitted;
         let pixels = if frame.width == self.width && frame.height == self.height {
             &frame.pixels
@@ -513,6 +540,11 @@ pub fn write_clip(path: &Path, frames: &[ClipFrame], fps: u32, end: Option<f64>)
     out.flush()
         .with_context(|| format!("flushing clip {}", path.display()))?;
     Ok(written)
+}
+
+/// `secs` rounded to whole centiseconds, the unit of a GIF frame delay.
+fn centis(secs: f64) -> i64 {
+    (secs * 100.0).round() as i64
 }
 
 /// Pick a default filename for an interactive clip.
@@ -782,6 +814,95 @@ mod tests {
         let delays: Vec<u16> = decode(&bytes).iter().map(|f| f.delay).collect();
         assert_eq!(&delays[..6], &[3, 4, 3, 3, 4, 3]);
         assert_eq!(delays.iter().map(|&d| u32::from(d)).sum::<u32>(), 100);
+    }
+
+    /// One second of 60 Hz fields thinned to `fps`, each frame a new
+    /// picture, written as a GIF ending at 1.0 s; returns the delays.
+    fn ntsc_second_delays(fps: u32) -> Vec<u16> {
+        let mut selector = FrameSelector::new(fps);
+        let frames: Vec<ClipFrame> = (0..60u32)
+            .filter(|&i| selector.take(f64::from(i) / 60.0))
+            .map(|i| ClipFrame::new(f64::from(i) / 60.0, 2, 2, &solid(2, 2, rgba(i as u8, 0, 0))))
+            .collect();
+        let (bytes, _) = encode(&frames, fps, Some(1.0));
+        decode(&bytes).iter().map(|f| f.delay).collect()
+    }
+
+    #[test]
+    fn no_frame_is_shorter_than_two_centiseconds() {
+        // 60 fps on 60 Hz fields is 1.67 cs a frame: cumulative rounding
+        // alone gives 2, 1, 2, 2, 1, ... and browsers would hold every
+        // 1 cs frame for 10 cs. 50 fps on 60 Hz fields lands on uneven
+        // fields and has the same problem.
+        for fps in [50, 60] {
+            let delays = ntsc_second_delays(fps);
+            assert!(
+                delays.iter().all(|&d| d >= 2),
+                "{fps} fps: delays {delays:?}"
+            );
+            assert_eq!(
+                delays.iter().map(|&d| u32::from(d)).sum::<u32>(),
+                100,
+                "{fps} fps keeps the clip's length"
+            );
+        }
+        // At 60 fps two frames in three survive, alternating 2 and 3 cs.
+        assert_eq!(&ntsc_second_delays(60)[..4], &[2, 3, 2, 3]);
+        // 30 fps on the same fields never needed it.
+        assert_eq!(ntsc_second_delays(30).len(), 30);
+    }
+
+    #[test]
+    fn a_frame_replaced_too_soon_gives_its_slot_to_the_newer_picture() {
+        let red = rgba(255, 0, 0);
+        let green = rgba(0, 255, 0);
+        let blue = rgba(0, 0, 255);
+        let frames = vec![
+            ClipFrame::new(0.0, 2, 2, &solid(2, 2, red)),
+            ClipFrame::new(0.02, 2, 2, &solid(2, 2, green)),
+            // One centisecond after green: green is dropped and blue
+            // starts where green would have.
+            ClipFrame::new(0.03, 2, 2, &solid(2, 2, blue)),
+        ];
+        let (bytes, written) = encode(&frames, 50, Some(0.06));
+        assert_eq!(written, 2);
+        let decoded = decode(&bytes);
+        assert_eq!(
+            decoded.iter().map(|f| f.delay).collect::<Vec<_>>(),
+            vec![2, 4]
+        );
+        assert_eq!(&decoded[1].buffer[..4], &blue.to_le_bytes());
+    }
+
+    #[test]
+    fn the_final_frame_is_held_for_at_least_two_centiseconds() {
+        let frames = vec![
+            ClipFrame::new(0.0, 2, 2, &solid(2, 2, rgba(1, 1, 1))),
+            ClipFrame::new(0.02, 2, 2, &solid(2, 2, rgba(2, 2, 2))),
+        ];
+        // The clip ends a centisecond after the last frame: the frame is
+        // kept and held for the minimum instead.
+        let (bytes, _) = encode(&frames, 60, Some(0.03));
+        let delays: Vec<u16> = decode(&bytes).iter().map(|f| f.delay).collect();
+        assert_eq!(delays, vec![2, 2]);
+    }
+
+    #[test]
+    fn a_final_frame_with_no_time_left_is_left_out() {
+        let frames = vec![
+            ClipFrame::new(0.0, 2, 2, &solid(2, 2, rgba(1, 1, 1))),
+            ClipFrame::new(0.04, 2, 2, &solid(2, 2, rgba(2, 2, 2))),
+        ];
+        // The clip ends a millisecond after the last frame, so both round
+        // to 4 cs: holding that frame for the minimum would make a 41 ms
+        // clip loop every 60 ms.
+        let (bytes, written) = encode(&frames, 25, Some(0.041));
+        let delays: Vec<u16> = decode(&bytes).iter().map(|f| f.delay).collect();
+        assert_eq!((delays, written), (vec![4], 1));
+        // A clip's only frame is still written, held for the minimum.
+        let (bytes, written) = encode(&frames[..1], 25, Some(0.0));
+        let delays: Vec<u16> = decode(&bytes).iter().map(|f| f.delay).collect();
+        assert_eq!((delays, written), (vec![MIN_GIF_DELAY_CS as u16], 1));
     }
 
     #[test]

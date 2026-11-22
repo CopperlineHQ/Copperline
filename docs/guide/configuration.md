@@ -1999,8 +1999,10 @@ the presented picture for [Save Clip as GIF](ui.md#saving-a-gif-clip);
 `0` switches the ring and the menu item off. `clip_fps` (1 to 60) is the
 rate every GIF clip is written at, the interactive one and headless
 `--gif-after` captures alike; the default `0` picks half the field rate,
-25 fps on PAL and 30 on NTSC. Clips land in the `[paths] recordings`
-folder.
+25 fps on PAL and 30 on NTSC. A GIF frame changes at most 50 times a
+second (browsers hold a shorter frame for a tenth of a second), so a
+faster rate, or more than about 45 fps on NTSC, drops frames instead of
+playing slowly. Clips land in the `[paths] recordings` folder.
 
 `video_format` is what [Record Video](ui.md#recording-video) writes:
 `"avi"` (the default), the recorder's lossless ZMBV and PCM AVI, or
