@@ -294,7 +294,10 @@ $00003A4C: 0100 0200  MOVE  #$0200,$DFF100
 
 As in uae-dap, hovering a label shows its address and expands to the 24
 bytes there, and a label or an address register added to Watch expands to
-104 bytes; the `memoryFormats` launch argument changes both.
+104 bytes; the `memoryFormats` launch argument changes both. From
+version 1.9.1 the extension passes its
+`amiga-assembly.display.memoryFormat.hover` and `.watch` settings as that
+argument.
 
 The extension's commands use two custom requests:
 
@@ -312,9 +315,12 @@ The extension's commands use two custom requests:
   then shows in that format for the rest of the session, in Watch too; the
   adapter sends `invalidated` so the views refresh.
 
-The extension's own DISASSEMBLED MEMORY panel is filled by its built-in
-UAE adapter and stays empty in a Copperline session; the Disassembly view
-shows the same instructions.
+The extension's DISASSEMBLED MEMORY panel fills in a Copperline session
+from extension 1.9.1: at each stop the extension asks the adapter for the
+top frame and 25 instructions from its PC with the standard `stackTrace`
+and `disassemble` requests. In earlier versions only the built-in UAE
+adapter fills it, so it stays empty in a Copperline session; the
+Disassembly view shows the same instructions.
 
 (dap-crashes)=
 ## Crashes
