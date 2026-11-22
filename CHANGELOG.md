@@ -15,11 +15,12 @@ for the earlier release notes.
   `emulatorType: "copperline"` sessions get them too. The Debug Console
   and Watch take the UAE debug adapter's commands: `m address[,size[,
   wordSize[,rowSize]]][,ab|a|b|d|c]` dumps memory (or disassembles it),
-  `M address=bytes` writes memory, `d` and `c` disassemble CPU code and
-  Copper lists, and `h` prints help. Expressions accept its memory
-  references (`@(addr[,size])`, `@s(...)`, `#{addr}`, `${expr}`), `0b`
-  binary numbers and the bitwise operators. Hovering a label, or watching
-  a label or address register, expands to the memory there. The
+  `M address=bytes` writes memory from the Debug Console, `d` and `c`
+  disassemble CPU code and Copper lists, and `h` prints help.
+  Expressions accept its memory references (`@(addr[,size])`,
+  `@s(...)`, `#{addr}`, `${expr}`), `0b` binary numbers and the bitwise
+  operators with uae-dap's 32-bit semantics. Hovering a label, or
+  watching a label or address register, expands to the memory there. The
   extension's *Disassemble memory* and *Disassemble copper memory*
   commands and its *View as Decimal / Hex / Binary* menu work. The
   Variables view gains a Segments scope with the program's hunks, address

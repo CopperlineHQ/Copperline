@@ -236,7 +236,7 @@ global(s), call-frame info`.
 | Scopes | Registers (D0-D7, A0-A7, PC, SR with its flags, plus FP0-FP7/FPCR/FPSR/FPIAR when an FPU is fitted; an address register or PC inside the program shows its label, such as `<twice+$8>`), Locals, Globals, Segments (each hunk of the loaded program: address, size and kind), Chipset (every custom register and the beam position). |
 | Disassembly | `disasm`; each instruction text ends in its theoretical cycle count or range, while a precise profile measures additional contention actually encountered. |
 | Set variable | `regs.set` for the innermost frame's registers; `mem.write` for base-type variables and members. |
-| Evaluate / hover / watch | Registers, variables and symbols by name, numbers (`$DFF000`, `0x1234`, `%1010`, `0b1010`), `+ - * /`, the bitwise `& \| ^ << >> ~`, `[expr]` / `[expr].w` / `[expr].b` memory reads, `d0.w`, and the UAE debug adapter's `@(expr[,size])`, `@s(expr[,size])`, `#{expr}` and `${expr}`. A hover or Watch entry on a label, and a Watch entry on an address register, expands to the memory there. The Debug Console and Watch also run the [debugger commands](#dap-commands) `m`, `M`, `d`, `c` and `h`. In the Debug Console, `!method {json}` sends a raw control-protocol request and prints the reply (`!status`, `!beam.get`, `!capture.screenshot {"path": "/tmp/s.png"}`). |
+| Evaluate / hover / watch | Registers, variables and symbols by name, numbers (`$DFF000`, `0x1234`, `%1010`, `0b1010`), `+ - * /`, the bitwise `& \| ^ << >> >>> ~` (on 32-bit signed values with a five-bit shift count, as in uae-dap: `>>` keeps the sign bit, `>>>` shifts in zeroes), `[expr]` / `[expr].w` / `[expr].b` memory reads, `d0.w`, and the UAE debug adapter's `@(expr[,size])`, `@s(expr[,size])`, `#{expr}` and `${expr}`. A hover or Watch entry on a label, and a Watch entry on an address register, expands to the memory there. The Debug Console also runs the [debugger commands](#dap-commands) `m`, `M`, `d`, `c` and `h`, and Watch runs `m`, `d` and `c`. In the Debug Console, `!method {json}` sends a raw control-protocol request and prints the reply (`!status`, `!beam.get`, `!capture.screenshot {"path": "/tmp/s.png"}`). |
 | Completions | The Debug Console completes register names and the program's functions, symbols and globals. |
 | Memory view | `mem.read` / `mem.write` (base64). |
 | Disassembly view | `disasm`, with program symbols, source lines, and live ROM/LVO names; backward disassembly anchors at the nearest program or ROM function start. |
@@ -266,10 +266,10 @@ with Copperline's own extension too:
 | Command | Effect |
 |---|---|
 | `m address[,size=16[,wordSize=4[,rowSize=4]]][,mode]` | Dump `size` bytes in groups of `wordSize` bytes, `rowSize` groups per line. `mode` is `ab` (hexadecimal and ASCII, the default), `b`, `a`, or `d` / `c` to disassemble the range as CPU or Copper instructions instead. |
-| `M address=bytes` | Write bytes, given as hexadecimal digits: `M $5c50=0ff534`. |
+| `M address=bytes` | Write bytes, given as hexadecimal digits: `M $5c50=0ff534`. Only the Debug Console writes, as Watch evaluates its entries again at every refresh. The reply counts the bytes the machine took: ROM and device registers are skipped. |
 | `d address[,size=16]` | Disassemble the CPU instructions in `size` bytes. |
 | `c address[,size=16]` | Disassemble the Copper instructions in `size` bytes; the address `1` or `2` means the list COP1LC or COP2LC points to. |
-| `h [command]` | Help; `h expressions` lists the expression syntax. |
+| `h [command]` | Help in the Debug Console; `h expressions` lists the expression syntax. In Hover and Watch, `h` and `H` are names, such as a label called `h`. |
 
 Every argument is an expression: `m CList,CListE-CList`, `m a0,64,2,8,b`,
 `d pc,32`. A command is its letter followed by a space, so a variable named

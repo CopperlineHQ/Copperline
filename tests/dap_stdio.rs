@@ -115,6 +115,18 @@ impl Client {
         reply["body"].clone()
     }
 
+    /// The message of a request the adapter refuses.
+    fn fail(&mut self, command: &str, arguments: Value) -> String {
+        let seq = self.send(command, arguments);
+        let reply = self.wait(
+            command,
+            |m| m["type"] == "response" && m["request_seq"] == seq,
+            Duration::from_secs(120),
+        );
+        assert_eq!(reply["success"], false, "{command}: {reply}");
+        reply["message"].as_str().unwrap_or("").to_string()
+    }
+
     fn event(&self, name: &str) -> Value {
         self.wait(
             name,
@@ -716,6 +728,20 @@ fn dap_serves_the_uae_dap_commands_of_the_amiga_assembly_extension() {
     let invalidated = c.event("invalidated");
     assert_eq!(invalidated["areas"], json!(["variables"]));
     assert_eq!(repl(&mut c, "@(value)"), "0x12345678 (305419896)");
+    // Watch evaluates its entries again on every refresh, which a
+    // write's invalidation triggers: M writes only from the console.
+    let watched = c.fail(
+        "evaluate",
+        json!({"expression": "M value=00000000", "context": "watch"}),
+    );
+    assert!(watched.contains("only from the Debug Console"), "{watched}");
+    assert_eq!(repl(&mut c, "@(value)"), "0x12345678 (305419896)");
+    // The reply counts the bytes the machine took: none of the ROM's.
+    let rom = c.fail(
+        "evaluate",
+        json!({"expression": "M $F80000=EE", "context": "repl"}),
+    );
+    assert_eq!(rom, "nothing written: $00F80000 is not RAM");
     assert_eq!(repl(&mut c, "#{value}"), "0x12345678 (305419896)");
     assert_eq!(repl(&mut c, "@s(value+3,1)"), "0x78 (120)");
     assert_eq!(repl(&mut c, "@(value,2) >> 8 & $F0"), "0x10 (16)");
@@ -737,6 +763,13 @@ fn dap_serves_the_uae_dap_commands_of_the_amiga_assembly_extension() {
     );
     assert!(repl(&mut c, "h").contains("Memory dump"));
     assert!(repl(&mut c, "h m").contains("rowSize"));
+    // The probe's label h is still a name in Hover and Watch.
+    let h = repl(&mut c, "h+0");
+    for context in ["hover", "watch"] {
+        let shown = c.call("evaluate", json!({"expression": "h", "context": context}));
+        assert_eq!(shown["result"], h.as_str(), "{context}: {shown}");
+        assert!(shown["variablesReference"].as_i64().unwrap() > 0, "{shown}");
+    }
 
     // Hovering a label shows its address and expands to its memory;
     // so does an address register in Watch.
@@ -772,6 +805,25 @@ fn dap_serves_the_uae_dap_commands_of_the_amiga_assembly_extension() {
     let copper = document(&mut c, "copper_1__4.dbgasm");
     assert!((1..=4).contains(&copper.lines().count()), "{copper}");
     assert!(document(&mut c, "seg_0.dbgasm").contains("\ntwice:\n"));
+    // A list whose end-of-list WAIT is the last entry of a copper.list
+    // batch (255 MOVEs, then the end) stops there, before the MOVEs
+    // after it. Built in the unused stack below SP, which nothing runs
+    // over while the machine is paused.
+    let list: String = std::iter::repeat_n("01800000", 255)
+        .chain(["FFFFFFFE", "01820000", "01820000"])
+        .collect();
+    let wrote = repl(&mut c, &format!("M a7-$800={list}"));
+    assert!(wrote.starts_with("wrote 1032 byte(s) at $"), "{wrote}");
+    c.event("invalidated");
+    let listing = repl(&mut c, "c a7-$800,1032");
+    assert_eq!(listing.lines().count(), 256, "{listing}");
+    assert!(
+        listing.lines().last().unwrap().contains(" FFFF FFFE "),
+        "{listing}"
+    );
+    let at = wrote.rsplit('$').next().unwrap();
+    let copper = document(&mut c, &format!("copper_${at}__258.dbgasm"));
+    assert_eq!(copper, format!("{listing}\n"));
 
     // The registers: PC is annotated with its label, and View as Binary
     // on d1 sticks.
@@ -797,6 +849,34 @@ fn dap_serves_the_uae_dap_commands_of_the_amiga_assembly_extension() {
         "{registers:?}"
     );
     assert_eq!(repl(&mut c, "d1"), format!("0b{:032b}", 6));
+    // An edit's reply keeps the format.
+    let (reference, _) = registers_of_frame(&mut c, &top);
+    let edited = c.call(
+        "setVariable",
+        json!({"variablesReference": reference, "name": "d1", "value": "12"}),
+    );
+    assert_eq!(edited["value"], format!("0b{:032b}", 12), "{edited}");
+    // SR in Watch has the Registers view's 16 bits.
+    let frames = c.call("stackTrace", json!({"threadId": 1}));
+    let top = frames["stackFrames"][0].clone();
+    let (_, registers) = registers_of_frame(&mut c, &top);
+    let sr = named(&registers, "sr").clone();
+    c.call(
+        "modifyVariableFormat",
+        json!({"variableInfo": {"variable": sr}, "variableDisplayFormat": 0}),
+    );
+    c.event("invalidated");
+    let (_, registers) = registers_of_frame(&mut c, &top);
+    let shown = named(&registers, "sr")["value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(shown.len(), 2 + 16, "{shown}");
+    let watched = c.call(
+        "evaluate",
+        json!({"expression": "sr", "context": "watch", "frameId": top["id"]}),
+    );
+    assert_eq!(watched["result"], shown.as_str(), "{watched}");
 
     // The program's hunks.
     let scopes = c.call("scopes", json!({"frameId": top["id"]}));
@@ -825,6 +905,16 @@ fn dap_serves_the_uae_dap_commands_of_the_amiga_assembly_extension() {
     let completions = c.call(
         "completions",
         json!({"text": "m va", "column": 5, "frameId": top["id"]}),
+    );
+    assert_eq!(
+        completions["targets"],
+        json!([{"label": "value", "type": "variable", "start": 3, "length": 2}]),
+        "{completions}"
+    );
+    // The cursor's line of a multi-line input, its start a column there.
+    let completions = c.call(
+        "completions",
+        json!({"text": "x\nm va", "line": 2, "column": 5, "frameId": top["id"]}),
     );
     assert_eq!(
         completions["targets"],

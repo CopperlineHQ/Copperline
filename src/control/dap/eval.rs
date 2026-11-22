@@ -4,8 +4,13 @@
 //! conditions. Small on purpose: registers (`d0`, `a7`, `sp`, `pc`,
 //! `sr`), symbols and variables by name, numbers (`$DFF000`, `0x1234`,
 //! `1234`, `%1010`, `0b1010`), `+`, `-`, `*` / `/`, the bitwise `&`,
-//! `|`, `^`, `<<`, `>>` and `~` on numbers, unary minus, memory reads
-//! `[expr]` (long), `[expr].w`, `[expr].b`, and parentheses.
+//! `|`, `^`, `<<`, `>>`, `>>>` and `~` on numbers, unary minus, memory
+//! reads `[expr]` (long), `[expr].w`, `[expr].b`, and parentheses.
+//!
+//! The bitwise operators work as uae-dap's JavaScript evaluator does
+//! them: on the operands' low 32 bits as a signed long, with a shift
+//! count of its low five bits. `>>` shifts in the sign bit (as ASR);
+//! `>>>` shifts in zeroes (as LSR).
 //!
 //! The memory-reference forms of the UAE debug adapter (uae-dap, used
 //! by the Amiga Assembly VS Code extension for FS-UAE and WinUAE) parse
@@ -36,7 +41,10 @@ pub enum Expr {
     Or(Box<Expr>, Box<Expr>),
     Xor(Box<Expr>, Box<Expr>),
     Shl(Box<Expr>, Box<Expr>),
+    /// `>>`: an arithmetic shift right.
     Shr(Box<Expr>, Box<Expr>),
+    /// `>>>`: a logical shift right.
+    Ushr(Box<Expr>, Box<Expr>),
     /// `[expr].size`: a memory read of 1, 2 or 4 bytes.
     Mem(Box<Expr>, u8),
     /// `value.w` / `value.b`: the value masked to a word or byte.
@@ -154,6 +162,9 @@ impl<'a> Parser<'a> {
             if self.eat_op("<<", "") {
                 let rhs = self.additive()?;
                 lhs = Expr::Shl(Box::new(lhs), Box::new(rhs));
+            } else if self.eat_op(">>>", "") {
+                let rhs = self.additive()?;
+                lhs = Expr::Ushr(Box::new(lhs), Box::new(rhs));
             } else if self.eat_op(">>", "") {
                 let rhs = self.additive()?;
                 lhs = Expr::Shr(Box::new(lhs), Box::new(rhs));
@@ -454,32 +465,26 @@ pub fn eval(e: &Expr, env: &mut dyn Env) -> Result<i64, String> {
         Expr::Register(r) => env.register(*r)?,
         Expr::Name(n) => env.name(n)?,
         Expr::Neg(inner) => eval(inner, env)?.wrapping_neg(),
-        Expr::Not(inner) => !eval(inner, env)?,
+        Expr::Not(inner) => i64::from(!(eval(inner, env)? as i32)),
         Expr::Add(a, b) => eval(a, env)?.wrapping_add(eval(b, env)?),
         Expr::Sub(a, b) => eval(a, env)?.wrapping_sub(eval(b, env)?),
         Expr::Mul(a, b) => eval(a, env)?.wrapping_mul(eval(b, env)?),
-        Expr::And(a, b) => eval(a, env)? & eval(b, env)?,
-        Expr::Or(a, b) => eval(a, env)? | eval(b, env)?,
-        Expr::Xor(a, b) => eval(a, env)? ^ eval(b, env)?,
-        // A count outside 0..64 shifts every bit out (leaving 0, or -1
-        // for a negative value shifted right) rather than wrapping.
+        // 32-bit signed operands and a five-bit shift count, as
+        // JavaScript's bitwise operators in uae-dap's evaluator.
+        Expr::And(a, b) => i64::from(eval(a, env)? as i32 & eval(b, env)? as i32),
+        Expr::Or(a, b) => i64::from(eval(a, env)? as i32 | eval(b, env)? as i32),
+        Expr::Xor(a, b) => i64::from(eval(a, env)? as i32 ^ eval(b, env)? as i32),
         Expr::Shl(a, b) => {
             let (value, count) = (eval(a, env)?, eval(b, env)?);
-            if (0..64).contains(&count) {
-                value << count
-            } else {
-                0
-            }
+            i64::from((value as i32).wrapping_shl(count as u32))
         }
         Expr::Shr(a, b) => {
             let (value, count) = (eval(a, env)?, eval(b, env)?);
-            if (0..64).contains(&count) {
-                value >> count
-            } else if value < 0 {
-                -1
-            } else {
-                0
-            }
+            i64::from((value as i32).wrapping_shr(count as u32))
+        }
+        Expr::Ushr(a, b) => {
+            let (value, count) = (eval(a, env)?, eval(b, env)?);
+            i64::from((value as u32).wrapping_shr(count as u32))
         }
         Expr::SignExtend(inner, size) => {
             let v = eval(inner, env)?;
@@ -627,8 +632,17 @@ mod tests {
         assert_eq!(run("$100 >> 4"), Ok(0x10));
         assert_eq!(run("1 | 2 & 3"), Ok(3));
         assert_eq!(run("~0 & $FFFF"), Ok(0xFFFF));
-        assert_eq!(run("1 << 64"), Ok(0));
-        assert_eq!(run("-1 >> 70"), Ok(-1));
+        // uae-dap's 32-bit semantics: a signed long, a five-bit count.
+        assert_eq!(run("$FFFFFFFF >> 1"), Ok(-1));
+        assert_eq!(run("$FFFFFFFF >>> 1"), Ok(0x7FFF_FFFF));
+        assert_eq!(run("-1 >>> 28"), Ok(0xF));
+        assert_eq!(run("1 << 32"), Ok(1));
+        assert_eq!(run("1 << 31"), Ok(-0x8000_0000));
+        assert_eq!(run("$100 >> 36"), Ok(0x10));
+        assert_eq!(run("1 << -1"), Ok(-0x8000_0000));
+        assert_eq!(run("$80000000 | 0"), Ok(-0x8000_0000));
+        assert_eq!(run("$1FFFFFFFF & $F"), Ok(0xF));
+        assert_eq!(run("~$FFFFFFFF"), Ok(0));
         assert_eq!(run("0b1010"), Ok(10));
         assert!(run("1 && 2").is_err());
         assert!(run("1 || 2").is_err());

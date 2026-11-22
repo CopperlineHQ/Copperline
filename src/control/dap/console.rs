@@ -316,7 +316,8 @@ Commands (the UAE debug adapter's, usable in the Debug Console and Watch):
   m address[,size=16[,wordSize=4[,rowSize=4]]][,ab]  Memory dump; ab: bytes and ASCII
                                                      (default), b: bytes, a: ASCII,
                                                      d: CPU or c: Copper disassembly
-  M address=bytes                                    Memory set (bytes in hexadecimal)
+  M address=bytes                                    Memory set (bytes in hexadecimal;
+                                                     Debug Console only)
   d address[,size=16]                                Disassemble size bytes of CPU code
   c address[,size=16]                                Disassemble size bytes of a Copper list
   h command|expressions                              Detailed help
@@ -343,7 +344,9 @@ m address[,size=16[,wordSize=4[,rowSize=4]]][,mode]
         .to_string(),
         "M" => "\
 M address=bytes
-  Write bytes, given as hexadecimal digits, from address.
+  Write bytes, given as hexadecimal digits, from address. Only the Debug
+  Console writes: Watch evaluates its entries again at every refresh.
+  ROM and device bytes are skipped; the reply counts the bytes written.
   M $5c50=0ff534        three bytes at $5c50
   M MyLabel=4e71        a NOP at MyLabel
 "
@@ -365,7 +368,9 @@ c address[,size=16]
 Expressions:
   registers d0-d7, a0-a7, sp, fp, pc, sr; symbols and variables by name
   numbers: 1234, $DFF000, 0xDFF000, %1010, 0b1010
-  operators: + - * / & | ^ << >> ~, unary -, parentheses
+  operators: + - * / & | ^ << >> >>> ~, unary -, parentheses
+  & | ^ << >> >>> ~ work on 32-bit signed values with a five-bit shift
+  count, as in uae-dap; >> keeps the sign bit, >>> shifts in zeroes
   memory: [addr] (long), [addr].w, [addr].b, *addr
           @(addr[,size=4]) unsigned, @s(addr[,size=4]) signed (size 1, 2 or 4)
           #{addr} (the long at addr), ${expr} (the expression's value)

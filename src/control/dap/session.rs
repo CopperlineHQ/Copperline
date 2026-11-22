@@ -1270,7 +1270,7 @@ impl Session {
             "loadedSources" => Ok(json!({"sources": self.loaded_sources()})),
             "exceptionInfo" => self.exception_info(),
             "source" => Err("source content is not available from the adapter".into()),
-            "completions" => self.completions(args, columns_at_1),
+            "completions" => self.completions(args, lines_at_1, columns_at_1),
             // The Amiga Assembly extension's requests, as uae-dap serves
             // them for FS-UAE and WinUAE.
             "disassembledFileContents" => self.disassembled_file_contents(args),
@@ -2136,7 +2136,10 @@ impl Session {
                 self.call("regs.set", json!({"reg": name, "value": value as u32}))?;
                 self.frames.clear();
                 let _ = reg;
-                Ok(json!({"value": format!("0x{:08X}", value as u32)}))
+                let text = self
+                    .rendered_value(reference, &name)
+                    .unwrap_or_else(|| format!("0x{:08X}", value as u32));
+                Ok(json!({"value": text}))
             }
             Some(Node::Registers { .. }) => {
                 Err("only the innermost frame's registers can be set".into())
@@ -2173,10 +2176,28 @@ impl Session {
                     "mem.write",
                     json!({"addr": addr, "data": proto::encode_hex(&bytes), "encoding": "hex"}),
                 )?;
-                Ok(json!({"value": format!("{value}")}))
+                let text = self
+                    .rendered_value(reference, &name)
+                    .unwrap_or_else(|| format!("{value}"));
+                Ok(json!({"value": text}))
             }
             _ => Err("not settable".into()),
         }
+    }
+
+    /// `name`'s value as a `variables` request on `reference` renders it
+    /// now, so an edit's reply keeps the entry's *View as* format and
+    /// label.
+    fn rendered_value(&mut self, reference: i64, name: &str) -> Option<String> {
+        let listing = self
+            .variables(&json!({"variablesReference": reference}))
+            .ok()?;
+        listing["variables"]
+            .as_array()?
+            .iter()
+            .find(|v| v["name"] == name)?["value"]
+            .as_str()
+            .map(str::to_string)
     }
 
     // -----------------------------------------------------------------
@@ -2202,7 +2223,12 @@ impl Session {
             return Err("empty expression".into());
         }
         let context = args["context"].as_str().unwrap_or("repl");
-        let command = console::parse(&text).transpose()?;
+        let command = match console::parse(&text).transpose()? {
+            // Help is a Debug Console command. In Hover and Watch a bare
+            // `h` or `H` is a name, such as a label called h.
+            Some(Command::Help(_)) if context != "repl" => None,
+            command => command,
+        };
         if let Some(Command::Help(topic)) = &command {
             return Ok(json!({"result": console::help(topic.as_deref()), "variablesReference": 0}));
         }
@@ -2272,6 +2298,10 @@ impl Session {
         };
         let unsigned = value as u32;
         let mut result = match format {
+            // SR at the width the Registers view gives it.
+            Some(format) if expr == eval::Expr::Register(16) => {
+                format.render(u64::from(unsigned & 0xFFFF), 16)
+            }
             Some(format) => format.render(u64::from(unsigned), 32),
             None => format!("0x{unsigned:X} ({value})"),
         };
@@ -2403,21 +2433,38 @@ impl Session {
                 }
             }
             Command::Set { address, bytes } => {
+                // Watch entries are evaluated again on every refresh, and
+                // the write's own invalidation would trigger one: a
+                // write there would repeat for as long as the session
+                // stays paused.
+                if context != "repl" {
+                    return Err("M writes memory only from the Debug Console".into());
+                }
                 let addr = self.address_at(&address, frame)?;
-                self.call(
+                let reply = self.call(
                     "mem.write",
                     json!({"addr": addr, "data": proto::encode_hex(&bytes), "encoding": "hex"}),
                 )?;
+                // ROM, overlay ROM and device bytes are skipped.
+                let written = reply["written"].as_u64().unwrap_or(0);
+                if written == 0 {
+                    return Err(format!("nothing written: ${addr:08X} is not RAM"));
+                }
                 // Register-relative frames and cached values may have
                 // moved under the write.
                 self.frames.clear();
                 if self.client_invalidated {
                     self.defer_event("invalidated", json!({"areas": ["variables"]}));
                 }
-                return Ok(json!({
-                    "result": format!("wrote {} byte(s) at ${addr:08X}", bytes.len()),
-                    "variablesReference": 0,
-                }));
+                let result = if written < bytes.len() as u64 {
+                    format!(
+                        "wrote {written} of {} byte(s) at ${addr:08X}: the others are not RAM",
+                        bytes.len()
+                    )
+                } else {
+                    format!("wrote {written} byte(s) at ${addr:08X}")
+                };
+                return Ok(json!({"result": result, "variablesReference": 0}));
             }
             Command::Disassemble { address, size } => {
                 let addr = self.address_at(&address, frame)?;
@@ -2548,19 +2595,24 @@ impl Session {
         let mut rows = Vec::new();
         let mut at = addr & !1;
         let mut mem = GuestMem::new(&self.bridge);
-        while rows.len() < count {
+        let mut ended = false;
+        while rows.len() < count && !ended {
             let want = (count - rows.len()).min(PER_CALL);
             let v = self.call("copper.list", json!({"addr": at, "max": want}))?;
             let entries = v["entries"].as_array().cloned().unwrap_or_default();
             for entry in &entries {
                 let a = entry["addr"].as_u64().unwrap_or(0) as u32;
-                let words = mem.read32(a).map_or_else(
+                let word = mem.read32(a);
+                let words = word.map_or_else(
                     || "????????".into(),
                     |w| format!("{:04X} {:04X}", w >> 16, w & 0xFFFF),
                 );
                 let text = entry["text"].as_str().unwrap_or("??");
                 rows.push(Row::at(a, format!("{words}  {text}")));
                 at = a.wrapping_add(4);
+                // The end-of-list WAIT, as copper.list stops at it: it
+                // may also be a batch's last entry.
+                ended = matches!(word, Some(0xFFFF_FFFE | 0xFFFF_FFFF));
             }
             if entries.len() < want {
                 break;
@@ -2649,8 +2701,24 @@ impl Session {
 
     /// Debug Console completions: registers, then the program's
     /// functions, symbols and globals, for the word before the cursor.
-    fn completions(&mut self, args: &Value, columns_at_1: bool) -> Result<Value, String> {
-        let text = args["text"].as_str().unwrap_or("");
+    /// The cursor is `column` of `line` (the first line when absent),
+    /// and a target's `start` is a column of that line.
+    fn completions(
+        &mut self,
+        args: &Value,
+        lines_at_1: bool,
+        columns_at_1: bool,
+    ) -> Result<Value, String> {
+        let line = args["line"]
+            .as_u64()
+            .map_or(0, |l| (l as usize).saturating_sub(usize::from(lines_at_1)));
+        let text = args["text"]
+            .as_str()
+            .unwrap_or("")
+            .split('\n')
+            .nth(line)
+            .unwrap_or("");
+        let text = text.strip_suffix('\r').unwrap_or(text);
         let base = usize::from(columns_at_1);
         let utf16_len = text.encode_utf16().count();
         let column = args["column"]
