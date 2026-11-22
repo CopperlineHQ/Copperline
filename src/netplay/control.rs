@@ -58,6 +58,11 @@ fn message_limit(role: u8) -> usize {
 struct Outgoing {
     bytes: Vec<u8>,
     sent: Option<Instant>,
+    /// The peer selectively acknowledged this chunk: it holds it past a
+    /// missing chunk or a full message queue, so it is not resent, but it
+    /// still occupies the peer's receive window until the cumulative
+    /// acknowledgement passes it.
+    held: bool,
 }
 
 pub(super) struct Control<T> {
@@ -212,10 +217,21 @@ impl<T: Transport> Control<T> {
             let ack = u64::from_le_bytes(bytes[30..38].try_into()?);
             let mask = u32::from_le_bytes(bytes[38..42].try_into()?);
             ensure!(ack <= self.next_send, "peer acknowledged unsent setup data");
-            let outstanding = self.outgoing.len();
-            self.outgoing
-                .retain(|&n, _| n >= ack && (n - ack >= WINDOW || mask & (1 << (n - ack)) == 0));
-            if self.outgoing.len() < outstanding {
+            let mut answered = false;
+            self.outgoing.retain(|&n, packet| {
+                if n < ack {
+                    answered = true;
+                    return false;
+                }
+                if n - ack < WINDOW && mask & (1 << (n - ack)) != 0 {
+                    // Holding the very chunk it needs next means the peer
+                    // waits on its own session, not on loss: it is there.
+                    answered |= !packet.held || n == ack;
+                    packet.held = true;
+                }
+                true
+            });
+            if answered {
                 self.proven = true;
                 self.acknowledged = Some(now);
             }
@@ -261,8 +277,9 @@ impl<T: Transport> Control<T> {
         if self.ack_pending && self.inner.send(&self.packet(0, &[]))? {
             self.ack_pending = false;
         }
-        // Keep the window anchored at the oldest unacknowledged sequence,
-        // including selectively acknowledged packets after a missing chunk.
+        // Keep the window anchored at the peer's cumulative acknowledgement:
+        // held chunks still fill its receive window, so a sender that slid
+        // past them would send what the peer must refuse.
         let base = self
             .outgoing
             .first_key_value()
@@ -283,6 +300,7 @@ impl<T: Transport> Control<T> {
                 Outgoing {
                     bytes: chunk,
                     sent: None,
+                    held: false,
                 },
             );
             self.next_send = self
@@ -298,13 +316,18 @@ impl<T: Transport> Control<T> {
                 self.send_offset = 0;
             }
         }
+        // Held chunks are not resent, except the oldest outstanding one: when
+        // the peer holds the chunk it needs next, that probe draws a fresh
+        // acknowledgement even if the one that would reopen the window was
+        // lost.
         let due: Vec<_> = self
             .outgoing
             .iter()
-            .filter(|(_, packet)| {
-                packet
-                    .sent
-                    .is_none_or(|sent| now.duration_since(sent) >= RESEND)
+            .filter(|&(&seq, packet)| {
+                (!packet.held || seq == base)
+                    && packet
+                        .sent
+                        .is_none_or(|sent| now.duration_since(sent) >= RESEND)
             })
             .map(|(&seq, _)| seq)
             .collect();
@@ -615,6 +638,105 @@ mod tests {
             }
         }
         assert!(spectator.take_message().is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn a_sender_stays_within_the_window_of_chunks_its_peer_holds() -> Result<()> {
+        fn deliver(from: &mut PacketQueue, to: &mut PacketQueue) -> Result<usize> {
+            let mut count = 0;
+            while let Some(packet) = from.pop() {
+                to.push(&packet)?;
+                count += 1;
+            }
+            Ok(count)
+        }
+        fn sequence(packet: &[u8]) -> u64 {
+            u64::from_le_bytes(packet[22..30].try_into().unwrap())
+        }
+        let session = [3; 16];
+        let mut host = Control::new(PacketQueue::default(), session, ROLE_HOST, ROLE_SPECTATOR);
+        let mut spectator =
+            Control::new(PacketQueue::default(), session, ROLE_SPECTATOR, ROLE_HOST);
+        host.proven = true;
+        let start = Instant::now();
+        // QUEUE small messages fill the spectator's message queue.
+        for n in 0..QUEUE {
+            host.send_message(vec![n as u8; 3])?;
+        }
+        host.poll_at(start)?;
+        assert_eq!(deliver(&mut host.inner, &mut spectator.inner)?, QUEUE);
+        spectator.poll_at(start)?;
+        deliver(&mut spectator.inner, &mut host.inner)?;
+        host.poll_at(start)?;
+        assert_eq!(spectator.messages.len(), QUEUE);
+        let base = spectator.next_receive;
+        // A long message behind them: one window of its chunks waits at the
+        // spectator, every one selectively acknowledged, including the chunk
+        // the spectator needs next.
+        let payload: Vec<_> = (0..CHUNK * 40).map(|n| (n % 251) as u8).collect();
+        host.send_message(payload.clone())?;
+        host.poll_at(start)?;
+        assert_eq!(
+            deliver(&mut host.inner, &mut spectator.inner)?,
+            WINDOW as usize
+        );
+        spectator.poll_at(start)?;
+        assert_eq!(spectator.incoming.len(), WINDOW as usize);
+        assert_eq!(
+            spectator.next_receive, base,
+            "nothing passed to the session"
+        );
+        deliver(&mut spectator.inner, &mut host.inner)?;
+        // Those chunks still occupy the spectator's receive window, so the
+        // host sends nothing past it however the chunks were acknowledged.
+        host.poll_at(start)?;
+        assert!(
+            host.inner.pop().is_none(),
+            "host ran past the peer's window"
+        );
+        assert!(host.sending());
+        // While the spectator holds the whole window the host probes with
+        // the oldest chunk alone, so a lost acknowledgement cannot stall it.
+        let mut now = start + RESEND;
+        host.poll_at(now)?;
+        let probe = host.inner.pop().unwrap();
+        assert!(host.inner.pop().is_none(), "one probe, not the window");
+        assert_eq!(sequence(&probe), base);
+        // An answer that only repeats the held chunks still proves the
+        // spectator is there.
+        spectator.inner.push(&probe)?;
+        spectator.poll_at(now)?;
+        deliver(&mut spectator.inner, &mut host.inner)?;
+        host.poll_at(now)?;
+        assert_eq!(host.unacknowledged_for(now), Duration::ZERO);
+        // The session drains its queue; the acknowledgement that opens the
+        // window is lost, and the next probe recovers it.
+        for n in 0..QUEUE {
+            assert_eq!(spectator.take_message(), Some(vec![n as u8; 3]));
+        }
+        spectator.poll_at(now)?;
+        assert!(spectator.incoming.is_empty());
+        assert!(deliver(&mut spectator.inner, &mut PacketQueue::default())? > 0);
+        now += RESEND;
+        host.poll_at(now)?;
+        assert_eq!(deliver(&mut host.inner, &mut spectator.inner)?, 1);
+        spectator.poll_at(now)?;
+        let mut received = None;
+        for _ in 0..8 {
+            deliver(&mut spectator.inner, &mut host.inner)?;
+            host.poll_at(now)?;
+            deliver(&mut host.inner, &mut spectator.inner)?;
+            spectator.poll_at(now)?;
+            if let Some(message) = spectator.take_message() {
+                received = Some(message);
+                break;
+            }
+        }
+        assert_eq!(received, Some(payload));
+        deliver(&mut spectator.inner, &mut host.inner)?;
+        host.poll_at(now)?;
+        assert!(!host.sending());
         Ok(())
     }
 }
