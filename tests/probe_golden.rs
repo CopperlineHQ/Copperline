@@ -461,11 +461,12 @@ fn a4000_replays_ongoing_z3_dma() {
         if resume {
             cmd.arg("--load-state").arg(&mid);
         } else {
-            cmd.args(["--save-state-after", "20"]).arg(&mid);
+            // The guest has verified the buffer and entered the continuous DMA loop.
+            cmd.args(["--save-state-after", "7"]).arg(&mid);
         }
-        cmd.args(["--save-state-after", "21"])
+        cmd.args(["--save-state-after", "8"])
             .arg(path(&format!("{label}.clstate")))
-            .args(["--screenshot-after", "21"])
+            .args(["--screenshot-after", "8"])
             .arg(path(&format!("{label}.png")));
         let output = common::output_with_timeout(&mut cmd, Duration::from_secs(120)).unwrap();
         assert!(
@@ -508,7 +509,7 @@ macro_rules! probe_tests {
 }
 
 probe_tests! {
-    golden_buster_z3_dma => Probe { name: "buster-z3-dma", program: "buster-z3-dma.bin", seconds: 24.0, machine: Machine::A4000Buster };
+    golden_buster_z3_dma => Probe { name: "buster-z3-dma", program: "buster-z3-dma.bin", seconds: 7.0, machine: Machine::A4000Buster };
     golden_ntsc_aga_sprites => Probe { name: "ntsc-aga-sprites", program: "agashres-sprites.bin", seconds: 16.0, machine: Machine::AgaNtsc };
     golden_jit_bus_boundary => Probe { name: "jit-bus-boundary", program: "jit-bus-boundary.bin", seconds: 16.0, machine: Machine::Jit };
     golden_timing_test => probe("timing-test", "test.bin", 32.0);
