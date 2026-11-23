@@ -183,6 +183,8 @@ pub struct Config {
     pub denise_revision: DeniseRevision,
     /// Selected machine profile, if a `[machine]` section was given.
     pub machine: Option<MachineModel>,
+    /// Expansion bus controller fitted to the motherboard.
+    pub buster: crate::buster::Revision,
     pub gate_array: GateArray,
     /// Memory controller fitted: a Ramsey on the big-box machines.
     pub mem_controller: MemController,
@@ -2721,6 +2723,8 @@ impl RomId {
 /// swapped Kickstart of the same machine shape is still flagged.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MachineDescriptor {
+    #[serde(default)]
+    pub buster_revision: crate::buster::Revision,
     pub cpu: CpuModel,
     pub chip_ram_bytes: usize,
     pub fast_ram_bytes: usize,
@@ -2747,6 +2751,7 @@ impl Default for MachineDescriptor {
     /// the loaded `Config` and the in-memory ROM.
     fn default() -> Self {
         Self {
+            buster_revision: Default::default(),
             cpu: CpuModel::M68000,
             chip_ram_bytes: 512 * 1024,
             fast_ram_bytes: 0,
@@ -2829,6 +2834,12 @@ impl MachineDescriptor {
         let mut diffs = Vec::new();
         if self.machine != other.machine {
             diffs.push(format!("profile {:?} -> {:?}", self.machine, other.machine));
+        }
+        if self.buster_revision != other.buster_revision {
+            diffs.push(format!(
+                "Buster {:?} -> {:?}",
+                self.buster_revision, other.buster_revision
+            ));
         }
         if self.cpu != other.cpu {
             diffs.push(format!("cpu {:?} -> {:?}", self.cpu, other.cpu));
@@ -3008,6 +3019,7 @@ impl Default for Config {
             agnus_revision: AgnusRevision::Ecs8372Rev4,
             denise_revision: DeniseRevision::Ocs,
             machine: None,
+            buster: crate::buster::Revision::Absent,
             gate_array: GateArray::None,
             mem_controller: MemController::None,
             rom_scsi_device_disable: false,
@@ -3297,6 +3309,7 @@ impl Config {
     /// [`MachineDescriptor::set_rom_fingerprint`] once the machine is built.
     pub fn descriptor(&self) -> MachineDescriptor {
         MachineDescriptor {
+            buster_revision: self.buster,
             cpu: self.cpu,
             chip_ram_bytes: self.chip_ram_bytes,
             fast_ram_bytes: self.fast_ram_bytes,

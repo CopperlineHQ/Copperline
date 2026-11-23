@@ -89,13 +89,16 @@ protocol's `signals` field (comma-separated, default `all`):
 | Group | Recorded variables |
 |---|---|
 | `beam` | `vpos[15:0]`, `hpos[7:0]`, `frame[31:0]` |
-| `bus` | `owner[3:0]`, `owner_name`, `dmacon[15:0]`, `data[15:0]` |
+| `bus` | `owner[3:0]`, `owner_name`, `buster_requests[5:0]`, `buster_grant[5:0]`, `dmacon[15:0]`, `data[15:0]` |
 | `cpu` | `addr[23:0]`, `kind` (fetch/read/write/custom), `rw`, `wait_cck[15:0]` |
 | `copper` | `pc[23:0]`, `state` (run/wait/skip/jump/stop) |
 | `blitter` | `busy`, `slot` (pipeline phase A/B/C/D, line mode, fill), `apt/bpt/cpt/dpt[23:0]` |
 | `regs` | `off[8:0]`, `value[15:0]`, `source` (cpu/copper), `strobe` |
 | `irq` | `ipl[2:0]`, `intreq[15:0]`, `intena[15:0]` |
 | `audio` | `channel[1:0]`, `strobe` |
+
+The Buster masks use bit 0 for expansion slot 1 through bit 4 for slot 5.
+Bit 5 identifies the local master. A zero grant means the CPU can own the bus.
 
 ## Viewing in GTKWave
 

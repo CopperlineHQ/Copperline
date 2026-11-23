@@ -53,7 +53,8 @@
 //!
 //! `dma_read` copies `len` bytes from Amiga address `addr` into the plugin's
 //! linear memory at `ptr`; `dma_write` copies the other way. Both use the
-//! shared 24-bit chip/slow/Zorro decode in [`crate::zorro_device`].
+//! RAM decode in [`crate::zorro_device`]. On a Buster machine the slot
+//! requests DMA grants at its Zorro width. See `docs/zorro.md`.
 //! `net_send`/`net_recv` move whole Ethernet frames between the plugin's
 //! linear memory and the manifest's configured [`NetConfig`] backend.
 //! `resource_write` is `resource_read`'s counterpart: it copies `len` bytes
@@ -133,6 +134,10 @@
 //! capture). Save-state replay of a plugin is only guaranteed within one
 //! wasmtime build; the version is pinned in `Cargo.toml`.
 
+mod dma;
+use dma::DmaPort;
+
+#[cfg(test)]
 use crate::memory::Memory;
 use crate::net::{make_backend, NetBackend, NetConfig};
 use crate::zorro_device::{DeviceHost, ZorroDevice};
@@ -165,13 +170,12 @@ const MAX_BOARD_WINDOW_BYTES: usize = 256 * 1024 * 1024;
 const MAX_LINEAR_MEMORY_BYTES: usize = MAX_BOARD_WINDOW_BYTES + 64 * 1024 * 1024;
 const MAX_TABLE_ELEMENTS: usize = 65_536;
 
-/// Store data for host imports. The Amiga-memory pointer is stored as a
-/// `usize` (0 = none) so the store stays `Send`; it is set to the live
-/// `&mut Memory` only for the duration of a plugin call (see [`WasmRuntime::enter`]).
+/// Per-instance Wasmtime imports and host resources.
 struct HostCtx {
     limits: StoreLimits,
-    /// Address of the live `Memory`, valid only during a plugin call.
-    mem: usize,
+    /// Stack address of the active DmaHost in WasmRuntime::invoke. Stored
+    /// as an integer so an inactive Store can move between emulator threads.
+    host: usize,
     name: String,
     /// Host network backend for a NIC plugin (the `net` capability). A host
     /// resource, not serialized: brought up fresh from the manifest's
@@ -305,7 +309,7 @@ impl WasmRuntime {
                     .tables(1)
                     .instances(1)
                     .build(),
-                mem: 0,
+                host: 0,
                 name: manifest.name.clone(),
                 net,
                 config: manifest.config.clone(),
@@ -387,22 +391,48 @@ impl WasmRuntime {
         self.store.data_mut().cleanup_resources();
     }
 
-    fn commit_dma(&mut self, host: &mut DeviceHost) {
-        let pending = std::mem::take(&mut self.store.data_mut().pending_dma);
-        self.store.data_mut().pending_dma_bytes = 0;
-        for (addr, buf) in pending {
-            host.dma_write(addr, &buf);
+    fn invoke(&mut self, call: BoardCall, mut host: DmaHost<'_, '_>) -> u32 {
+        if self.faulted {
+            return u32::MAX;
         }
-    }
-
-    /// Point the store at the live Amiga memory for the duration of a call.
-    fn enter(&mut self, mem: &mut Memory) {
-        self.store.data_mut().mem = mem as *mut Memory as usize;
-    }
-
-    /// Clear the Amiga-memory pointer once a call returns.
-    fn leave(&mut self) {
-        self.store.data_mut().mem = 0;
+        // The store can only reach this exclusive, stack-scoped borrow while
+        // Wasmtime executes synchronously. No host pointer enters a snapshot.
+        self.store.data_mut().host = &mut host as *mut DmaHost as usize;
+        refuel(&mut self.store);
+        let result = match call {
+            BoardCall::Read(off, size) => self.exports.read.as_ref().map(|f| {
+                f.call(&mut self.store, (off as i32, size as i32))
+                    .map(|v| v as u32)
+            }),
+            BoardCall::Write(off, size, v) => self.exports.write.as_ref().map(|f| {
+                f.call(&mut self.store, (off as i32, size as i32, v as i32))
+                    .map(|()| 0)
+            }),
+            BoardCall::Tick(cck) => self
+                .exports
+                .tick
+                .as_ref()
+                .map(|f| f.call(&mut self.store, cck as i32).map(|()| 0)),
+        };
+        self.store.data_mut().host = 0;
+        let Some(result) = result else {
+            return u32::MAX;
+        };
+        let ctx = self.store.data_mut();
+        let writes = std::mem::take(&mut ctx.pending_dma);
+        let bytes = std::mem::take(&mut ctx.pending_dma_bytes);
+        match result.and_then(|v| {
+            if !writes.is_empty() {
+                host.commit(writes, bytes)?;
+            }
+            Ok(v)
+        }) {
+            Ok(v) => v,
+            Err(e) => {
+                self.trigger_fault(&e.to_string());
+                u32::MAX
+            }
+        }
     }
 
     /// Snapshot linear memory and its current page count.
@@ -720,7 +750,7 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
             "env",
             "dma_read",
             |mut caller: Caller<'_, HostCtx>, addr: i32, ptr: i32, len: i32| -> Result<()> {
-                if caller.data().mem == 0 {
+                if caller.data().host == 0 {
                     anyhow::bail!("dma_read called outside of active host transaction");
                 }
                 // Validate the destination window before allocating, so a
@@ -730,13 +760,17 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
                 let mem_size = caller_memory(&mut caller)?.data_size(&caller);
                 let (_, len) = checked_wasm_window(ptr, len, mem_size)?;
                 let mut buf = vec![0u8; len];
-                with_amiga_memory(&caller, |amiga| {
-                    DeviceHost::new(amiga).dma_read(addr as u32, &mut buf);
-                });
+                let mut fuel = caller.get_fuel()?;
+                // SAFETY: invoke installed this exclusive borrow for this
+                // synchronous call. No import retains it after returning.
+                let host = unsafe { &mut *(caller.data().host as *mut DmaHost<'_, '_>) };
+                let mask = host.address_mask();
+                host.read(addr as u32, &mut buf, &mut fuel)?;
+                caller.set_fuel(fuel)?;
 
-                for (r_start, r_end, r_off) in dma_segments(addr as u32, len) {
+                for (r_start, r_end, r_off) in dma_segments(addr as u32, len, mask) {
                     for (p_addr, p_buf) in &caller.data().pending_dma {
-                        for (p_start, p_end, p_off) in dma_segments(*p_addr, p_buf.len()) {
+                        for (p_start, p_end, p_off) in dma_segments(*p_addr, p_buf.len(), mask) {
                             if r_start < p_end && p_start < r_end {
                                 let overlap_start = r_start.max(p_start);
                                 let overlap_end = r_end.min(p_end);
@@ -759,7 +793,7 @@ fn register_host_fns(linker: &mut Linker<HostCtx>, caps: WasmCaps) -> Result<()>
             "env",
             "dma_write",
             |mut caller: Caller<'_, HostCtx>, addr: i32, ptr: i32, len: i32| -> Result<()> {
-                if caller.data().mem == 0 {
+                if caller.data().host == 0 {
                     anyhow::bail!("dma_write called outside of active host transaction");
                 }
                 let memory = caller_memory(&mut caller)?;
@@ -1854,21 +1888,6 @@ fn poll_socket_mask(socket: &Socket) -> i32 {
     mask
 }
 
-/// Run `f` with the live Amiga memory the store currently points at. No-op when
-/// the pointer is unset (a plugin should only DMA from within a host call).
-fn with_amiga_memory(caller: &Caller<'_, HostCtx>, f: impl FnOnce(&mut Memory)) {
-    let mem = caller.data().mem;
-    if mem == 0 {
-        return;
-    }
-    // SAFETY: `mem` is the address of the `&mut Memory` set by `WasmRuntime::enter`
-    // for the duration of this plugin call (see the ZorroDevice impl below). It is
-    // not aliased while the plugin runs -- the outer DeviceHost is not touched
-    // until the call returns -- and is cleared to 0 afterwards.
-    let amiga = unsafe { &mut *(mem as *mut Memory) };
-    f(amiga);
-}
-
 /// Validate a plugin-supplied `[ptr, ptr+len)` window against the plugin's
 /// current linear-memory size, returning the clamped `(ptr, len)`. `ptr`
 /// and `len` are plugin-controlled and unrelated to how much memory the
@@ -1885,21 +1904,22 @@ fn checked_wasm_window(ptr: i32, len: i32, mem_size: usize) -> Result<(usize, us
     Ok((ptr, len))
 }
 
-fn dma_segments(addr: u32, len: usize) -> impl Iterator<Item = (u64, u64, usize)> {
-    let (seg1, seg2) = if len == 0 {
-        (None, None)
-    } else {
-        let first_len = len.min((u32::MAX - addr) as usize + 1);
-        let start = addr as u64;
-        let s1 = Some((start, start + first_len as u64, 0));
-        let s2 = if first_len < len {
-            Some((0, (len - first_len) as u64, first_len))
-        } else {
-            None
-        };
-        (s1, s2)
-    };
-    seg1.into_iter().chain(seg2)
+/// Non-wrapping intervals, including the 24-bit wrap on Zorro II. A
+/// plugin buffer may span the address space more than once.
+fn dma_segments(addr: u32, len: usize, mask: u32) -> impl Iterator<Item = (u64, u64, usize)> {
+    let mut start = u64::from(addr & mask);
+    let end = u64::from(mask) + 1;
+    let mut offset = 0;
+    std::iter::from_fn(move || {
+        if offset == len {
+            return None;
+        }
+        let n = (len - offset).min(usize::try_from(end - start).unwrap_or(usize::MAX));
+        let segment = (start, start + n as u64, offset);
+        start = 0;
+        offset += n;
+        Some(segment)
+    })
 }
 
 /// Read `len` bytes from the plugin's linear memory at `ptr`.
@@ -1936,10 +1956,78 @@ fn caller_memory(caller: &mut Caller<'_, HostCtx>) -> Result<WasmMemory> {
 /// module is recompiled from its path and the image replayed.
 pub struct WasmBoard {
     module_path: PathBuf,
-    rt: RefCell<WasmRuntime>,
+    // Taken out during a bus-aware call: Buster can service this board's
+    // DMA port and competing cards while the plugin is on the host stack.
+    rt: Option<Box<RefCell<WasmRuntime>>>,
+    pub(crate) dma: DmaPort,
+    deferred_ticks: u32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum BoardCall {
+    Read(u32, usize),
+    Write(u32, usize, u32),
+    Tick(u32),
+}
+
+enum DmaHost<'a, 'm> {
+    Direct(&'a mut DeviceHost<'m>),
+    Machine(&'a mut crate::bus::Bus, usize),
+    Slave(&'a mut DmaPort),
+}
+
+impl DmaHost<'_, '_> {
+    fn address_mask(&mut self) -> u32 {
+        let version = match self {
+            Self::Direct(_) => None,
+            Self::Machine(bus, index) => bus.wasm_port(*index).version,
+            Self::Slave(port) => port.version,
+        };
+        if version == Some(crate::zorro::ZorroVersion::II) {
+            0x00ff_ffff
+        } else {
+            u32::MAX
+        }
+    }
+
+    fn read(&mut self, addr: u32, bytes: &mut Vec<u8>, fuel: &mut u64) -> Result<()> {
+        match self {
+            Self::Direct(host) => host.dma_read(addr, bytes),
+            Self::Machine(bus, index) => bus.wasm_dma_read(*index, addr, bytes, fuel)?,
+            // A board responding as a slave to another master cannot acquire
+            // the bus inside that same strobe. Float its DMA data inputs.
+            Self::Slave(_) => bytes.fill(0xff),
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self, writes: Vec<(u32, Vec<u8>)>, bytes: usize) -> Result<()> {
+        match self {
+            Self::Direct(host) => {
+                for (addr, buf) in writes {
+                    host.dma_write(addr, &buf);
+                }
+                Ok(())
+            }
+            Self::Machine(bus, index) => bus.wasm_port(*index).submit(writes, bytes),
+            Self::Slave(port) => port.submit(writes, bytes),
+        }
+    }
 }
 
 impl WasmBoard {
+    fn runtime(&self) -> &RefCell<WasmRuntime> {
+        self.rt.as_deref().expect("plugin runtime available")
+    }
+
+    pub(crate) fn defer_tick(&mut self, clocks: u32) {
+        self.deferred_ticks = self.deferred_ticks.saturating_add(clocks);
+    }
+
+    pub(crate) fn can_dma(&self) -> bool {
+        self.runtime().borrow().manifest.caps.dma
+    }
+
     /// Load and instantiate a plugin module from a `.wasm` file.
     pub fn from_file(path: &Path, manifest: WasmManifest) -> Result<Self> {
         crate::hostbind::opened_named(
@@ -2005,7 +2093,9 @@ impl WasmBoard {
         let rt = WasmRuntime::new(engine, module, manifest, mode)?;
         Ok(Self {
             module_path: path.to_path_buf(),
-            rt: RefCell::new(rt),
+            rt: Some(Box::new(RefCell::new(rt))),
+            dma: DmaPort::default(),
+            deferred_ticks: 0,
         })
     }
 
@@ -2021,7 +2111,7 @@ impl WasmBoard {
         } else if self.module_path == Path::new(crate::zz9k::BUNDLED_ZZ9K_WASM) {
             roms.push(BuiltinRom::Zz9kPlugin);
         }
-        let rt = self.rt.borrow();
+        let rt = self.runtime().borrow();
         let manifest = &rt.manifest;
         if manifest.file_keys.iter().any(|key| {
             manifest.config.get(key).map(String::as_str)
@@ -2035,7 +2125,13 @@ impl WasmBoard {
     /// Call an exported function that takes no Amiga memory, returning its
     /// `i32` result (0 if the export is absent or traps).
     fn call_flag(&self, sel: impl FnOnce(&Exports) -> Option<TypedFunc<(), i32>>) -> bool {
-        let mut rt = self.rt.borrow_mut();
+        if self.dma.queued_bytes != 0 {
+            return false;
+        }
+        let Some(rt) = self.rt.as_ref() else {
+            return false;
+        };
+        let mut rt = rt.borrow_mut();
         if rt.faulted {
             return false;
         }
@@ -2055,76 +2151,31 @@ impl WasmBoard {
     }
 }
 
+impl WasmBoard {
+    fn call_as_slave(&mut self, call: BoardCall, host: &mut DeviceHost) -> u32 {
+        let Some(rt) = self.rt.as_mut() else {
+            return u32::MAX;
+        };
+        let host = if self.dma.version.is_some() {
+            DmaHost::Slave(&mut self.dma)
+        } else {
+            DmaHost::Direct(host)
+        };
+        rt.get_mut().invoke(call, host)
+    }
+}
+
 impl ZorroDevice for WasmBoard {
     fn read(&mut self, off: u32, size: usize, host: &mut DeviceHost) -> u32 {
-        let rt = self.rt.get_mut();
-        if rt.faulted {
-            return 0xFFFF_FFFF;
-        }
-        let Some(func) = rt.exports.read.clone() else {
-            return 0xFFFF_FFFF;
-        };
-        rt.enter(host.memory_mut());
-        refuel(&mut rt.store);
-        let result = func.call(&mut rt.store, (off as i32, size as i32));
-        rt.leave();
-        match result {
-            Ok(v) => {
-                rt.commit_dma(host);
-                v as u32
-            }
-            Err(e) => {
-                rt.store.data_mut().clear_pending_dma();
-                rt.trigger_fault(&format!("read trapped: {e}"));
-                0xFFFF_FFFF
-            }
-        }
+        self.call_as_slave(BoardCall::Read(off, size), host)
     }
 
     fn write(&mut self, off: u32, size: usize, value: u32, host: &mut DeviceHost) {
-        let rt = self.rt.get_mut();
-        if rt.faulted {
-            return;
-        }
-        let Some(func) = rt.exports.write.clone() else {
-            return;
-        };
-        rt.enter(host.memory_mut());
-        refuel(&mut rt.store);
-        let result = func.call(&mut rt.store, (off as i32, size as i32, value as i32));
-        rt.leave();
-        match result {
-            Ok(()) => {
-                rt.commit_dma(host);
-            }
-            Err(e) => {
-                rt.store.data_mut().clear_pending_dma();
-                rt.trigger_fault(&format!("write trapped: {e}"));
-            }
-        }
+        self.call_as_slave(BoardCall::Write(off, size, value), host);
     }
 
     fn tick(&mut self, cck: u32, host: &mut DeviceHost) {
-        let rt = self.rt.get_mut();
-        if rt.faulted {
-            return;
-        }
-        let Some(func) = rt.exports.tick.clone() else {
-            return;
-        };
-        rt.enter(host.memory_mut());
-        refuel(&mut rt.store);
-        let result = func.call(&mut rt.store, cck as i32);
-        rt.leave();
-        match result {
-            Ok(()) => {
-                rt.commit_dma(host);
-            }
-            Err(e) => {
-                rt.store.data_mut().clear_pending_dma();
-                rt.trigger_fault(&format!("tick trapped: {e}"));
-            }
-        }
+        self.call_as_slave(BoardCall::Tick(cck), host);
     }
 
     fn int2_line(&self) -> bool {
@@ -2136,7 +2187,15 @@ impl ZorroDevice for WasmBoard {
     }
 
     fn reset(&mut self) {
-        if let Err(e) = self.rt.get_mut().reset() {
+        self.dma.reset();
+        self.deferred_ticks = 0;
+        if let Err(e) = self
+            .rt
+            .as_mut()
+            .expect("idle plugin during reset")
+            .get_mut()
+            .reset()
+        {
             log::error!("wasm: plugin reset failed: {e}");
         }
     }
@@ -2190,11 +2249,15 @@ struct WasmBoardState {
     next_socket_id: i32,
     #[serde(default)]
     faulted: bool,
+    #[serde(default)]
+    writes: dma::Writes,
+    #[serde(default)]
+    deferred_ticks: u32,
 }
 
 impl Serialize for WasmBoard {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut rt = self.rt.borrow_mut();
+        let mut rt = self.runtime().borrow_mut();
         let (pages, bytes) = rt.snapshot();
         let state = WasmBoardState {
             module_path: self.module_path.clone(),
@@ -2203,6 +2266,8 @@ impl Serialize for WasmBoard {
             bytes,
             next_socket_id: rt.next_socket_id(),
             faulted: rt.faulted,
+            writes: self.dma.writes.clone(),
+            deferred_ticks: self.deferred_ticks,
         };
         state.serialize(serializer)
     }
@@ -2222,14 +2287,17 @@ impl<'de> Deserialize<'de> for WasmBoard {
             crate::hostbind::Kind::Plugin,
             &host_binding(&state.module_path, &state.manifest),
         );
-        let board = WasmBoard::from_file_with_mode(&state.module_path, state.manifest, mode)
+        let mut board = WasmBoard::from_file_with_mode(&state.module_path, state.manifest, mode)
             .map_err(serde::de::Error::custom)?;
-        let mut rt = board.rt.borrow_mut();
+        let mut rt = board.runtime().borrow_mut();
         rt.restore(state.pages, &state.bytes)
             .map_err(serde::de::Error::custom)?;
         rt.set_next_socket_id(state.next_socket_id);
         rt.faulted = state.faulted;
         drop(rt);
+        board.dma.queued_bytes = state.writes.validate().map_err(serde::de::Error::custom)?;
+        board.dma.writes = state.writes;
+        board.deferred_ticks = state.deferred_ticks;
         Ok(board)
     }
 }
@@ -2465,7 +2533,7 @@ mod tests {
         for _ in 0..2 {
             assert_eq!(board.read(1, 0, &mut host), 1);
             assert_eq!(board.read(max_pages, 0, &mut host), u32::MAX);
-            let mut rt = board.rt.borrow_mut();
+            let mut rt = board.runtime().borrow_mut();
             assert_eq!(rt.memory.size(&rt.store), 2);
             assert!(!rt.faulted, "a denied memory.grow returns -1 to the plugin");
             assert!(rt.restore(max_pages as u64 + 1, &[]).is_err());
@@ -2473,7 +2541,7 @@ mod tests {
             let (pages, bytes) = rt.snapshot();
             drop(rt);
             board.reset();
-            board.rt.borrow_mut().restore(pages, &bytes).unwrap();
+            board.runtime().borrow_mut().restore(pages, &bytes).unwrap();
             assert_eq!(board.read(max_pages, 0, &mut host), u32::MAX);
             board.reset();
         }
@@ -2500,7 +2568,7 @@ mod tests {
         let mut board = WasmBoard::from_file(&path, manifest("bounded-init", false)).unwrap();
         let mut mem = empty_memory();
         assert_eq!(board.read(0, 0, &mut DeviceHost::new(&mut mem)), u32::MAX);
-        let rt = board.rt.borrow();
+        let rt = board.runtime().borrow();
         assert_eq!(rt.memory.size(&rt.store), 1);
         std::fs::remove_file(path).unwrap();
     }
@@ -2556,7 +2624,7 @@ mod tests {
     "#;
 
     fn runtime_probe(board: &WasmBoard) -> (bool, bool, i32) {
-        let mut rt = board.rt.borrow_mut();
+        let mut rt = board.runtime().borrow_mut();
         let faulted = rt.faulted;
         let has_network_backend = rt.store.data().net.is_some();
         let read = rt.exports.read.clone().unwrap();
@@ -2588,10 +2656,10 @@ mod tests {
         let mut host = DeviceHost::new(&mut mem);
 
         board.tick(1, &mut host);
-        assert!(board.rt.borrow().faulted);
+        assert!(board.runtime().borrow().faulted);
 
         board.tick(1, &mut host);
-        assert!(board.rt.borrow().faulted);
+        assert!(board.runtime().borrow().faulted);
 
         assert_eq!(board.read(0, 2, &mut host), 0xFFFF_FFFF);
         assert!(!board.int2_line());
@@ -2599,10 +2667,10 @@ mod tests {
 
         let snapshot = bincode::serialize(&board).unwrap();
         let restored: WasmBoard = bincode::deserialize(&snapshot).unwrap();
-        assert!(restored.rt.borrow().faulted);
+        assert!(restored.runtime().borrow().faulted);
 
         board.reset();
-        assert!(!board.rt.borrow().faulted);
+        assert!(!board.runtime().borrow().faulted);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -2616,10 +2684,10 @@ mod tests {
         let mut host = DeviceHost::new(&mut mem);
 
         board.tick(1, &mut host);
-        assert!(board.rt.borrow().store.data().net.is_none());
+        assert!(board.runtime().borrow().store.data().net.is_none());
 
         board.reset();
-        assert!(board.rt.borrow().store.data().net.is_some());
+        assert!(board.runtime().borrow().store.data().net.is_some());
 
         let _ = std::fs::remove_file(&path);
     }
@@ -2664,10 +2732,10 @@ mod tests {
         let mut host = DeviceHost::new(&mut mem);
 
         board.write(0, 4, 0, &mut host);
-        assert!(board.rt.borrow().faulted);
+        assert!(board.runtime().borrow().faulted);
         assert_eq!(mem.chip_ram[0..4], [0, 0, 0, 0]);
-        assert_eq!(board.rt.borrow().store.data().pending_dma.len(), 0);
-        assert_eq!(board.rt.borrow().store.data().pending_dma_bytes, 0);
+        assert_eq!(board.runtime().borrow().store.data().pending_dma.len(), 0);
+        assert_eq!(board.runtime().borrow().store.data().pending_dma_bytes, 0);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2694,9 +2762,9 @@ mod tests {
             let mut host = DeviceHost::new(&mut mem);
             board.write(0, 4, 0, &mut host);
         }
-        assert!(!board.rt.borrow().faulted);
+        assert!(!board.runtime().borrow().faulted);
 
-        let mut rt = board.rt.borrow_mut();
+        let mut rt = board.runtime().borrow_mut();
         let memory = rt.memory;
         let mut wasm_buf = vec![0u8; 4];
         memory.read(&mut rt.store, 16, &mut wasm_buf).unwrap();
@@ -2718,7 +2786,7 @@ mod tests {
         let mut host = DeviceHost::new(&mut mem);
 
         board.tick(1, &mut host);
-        assert!(board.rt.borrow().faulted);
+        assert!(board.runtime().borrow().faulted);
 
         let iterations = 100_000;
         let start = std::time::Instant::now();
@@ -2760,7 +2828,7 @@ mod tests {
         let nanos_healthy = elapsed_healthy.as_nanos() as f64 / iterations as f64;
 
         board_faulted.tick(1, &mut host);
-        assert!(board_faulted.rt.borrow().faulted);
+        assert!(board_faulted.runtime().borrow().faulted);
 
         let start_faulted = std::time::Instant::now();
         for _ in 0..iterations {
@@ -2827,9 +2895,9 @@ mod tests {
         let mut host = DeviceHost::new(&mut mem);
 
         board.write(0, 0, 5000, &mut host);
-        assert!(board.rt.borrow().faulted);
-        assert_eq!(board.rt.borrow().store.data().pending_dma.len(), 0);
-        assert_eq!(board.rt.borrow().store.data().pending_dma_bytes, 0);
+        assert!(board.runtime().borrow().faulted);
+        assert_eq!(board.runtime().borrow().store.data().pending_dma.len(), 0);
+        assert_eq!(board.runtime().borrow().store.data().pending_dma_bytes, 0);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -2861,9 +2929,9 @@ mod tests {
         let mut host = DeviceHost::new(&mut mem);
 
         board.write(0, 0, 300, &mut host);
-        assert!(board.rt.borrow().faulted);
-        assert_eq!(board.rt.borrow().store.data().pending_dma.len(), 0);
-        assert_eq!(board.rt.borrow().store.data().pending_dma_bytes, 0);
+        assert!(board.runtime().borrow().faulted);
+        assert_eq!(board.runtime().borrow().store.data().pending_dma.len(), 0);
+        assert_eq!(board.runtime().borrow().store.data().pending_dma_bytes, 0);
 
         let _ = std::fs::remove_file(&path);
     }
@@ -2908,9 +2976,9 @@ mod tests {
         let mut host = DeviceHost::new(&mut mem);
 
         assert!(!board.int2_line());
-        assert!(board.rt.borrow().faulted);
-        assert_eq!(board.rt.borrow().store.data().pending_dma.len(), 0);
-        assert_eq!(board.rt.borrow().store.data().pending_dma_bytes, 0);
+        assert!(board.runtime().borrow().faulted);
+        assert_eq!(board.runtime().borrow().store.data().pending_dma.len(), 0);
+        assert_eq!(board.runtime().borrow().store.data().pending_dma_bytes, 0);
 
         board.write(0, 4, 123, &mut host);
         assert_eq!(mem.chip_ram[0..4], [0, 0, 0, 0]);
@@ -2920,16 +2988,16 @@ mod tests {
 
     #[test]
     fn dma_segments_handles_non_wrapping_and_wrapping_ranges() {
-        let segs: Vec<_> = dma_segments(100, 4).collect();
+        let segs: Vec<_> = dma_segments(100, 4, u32::MAX).collect();
         assert_eq!(segs, vec![(100, 104, 0)]);
 
-        let segs: Vec<_> = dma_segments(0xFFFF_FFFE, 4).collect();
+        let segs: Vec<_> = dma_segments(0xFFFF_FFFE, 4, u32::MAX).collect();
         assert_eq!(segs, vec![(0xFFFF_FFFE, 0x1_0000_0000, 0), (0, 2, 2)]);
 
-        let segs: Vec<_> = dma_segments(0xFFFF_FFFF, 1).collect();
+        let segs: Vec<_> = dma_segments(0xFFFF_FFFF, 1, u32::MAX).collect();
         assert_eq!(segs, vec![(0xFFFF_FFFF, 0x1_0000_0000, 0)]);
 
-        let segs: Vec<_> = dma_segments(0, 0).collect();
+        let segs: Vec<_> = dma_segments(0, 0, u32::MAX).collect();
         assert!(segs.is_empty());
     }
 
@@ -2958,9 +3026,9 @@ mod tests {
         let mut host = DeviceHost::new(&mut mem);
 
         board.write(0, 4, 0, &mut host);
-        assert!(!board.rt.borrow().faulted);
+        assert!(!board.runtime().borrow().faulted);
 
-        let mut rt = board.rt.borrow_mut();
+        let mut rt = board.runtime().borrow_mut();
         let memory = rt.memory;
         let mut wasm_buf = vec![0u8; 3];
         memory.read(&mut rt.store, 16, &mut wasm_buf).unwrap();
@@ -3614,7 +3682,7 @@ mod tests {
         assert_eq!(board.read(0, 4, &mut host) as i32, RESOURCE_WRITE_IO);
 
         // Nothing above faulted the board -- the plugin is still live.
-        assert!(!board.rt.borrow().faulted);
+        assert!(!board.runtime().borrow().faulted);
 
         let _ = std::fs::remove_file(&path);
     }

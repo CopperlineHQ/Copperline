@@ -3,9 +3,8 @@
 //! Zorro expansion bus: an ordered autoconfig chain of boards.
 //!
 //! Boards appear one at a time in the Zorro II configuration space at
-//! $E80000 (the A1200/A600/A500 path; this emulator has no native Zorro III
-//! backplane, so Zorro III boards configure through the same window, as
-//! expansion.library does on real 32-bit machines). Each board exposes the
+//! $E80000. Super Buster also decodes native Zorro III configuration at
+//! $FF000000, with the low nibble selected by A8. Each board exposes the
 //! nibble-encoded autoconfig ROM until the system ROM either assigns it a base
 //! address or shuts it up, at which point the next unconfigured board
 //! appears.
@@ -25,6 +24,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub const AUTOCONFIG_BASE: u64 = 0x00E8_0000;
+pub const Z3_CONFIG_BASE: u32 = 0xff00_0000;
 pub const AUTOCONFIG_SIZE: u64 = 0x0001_0000;
 
 const AUTOCONFIG_ROM_BYTES: usize = 16;
@@ -46,8 +46,18 @@ const ERFF_ZORRO_III: u8 = 1 << 4;
 // Configuration registers (physical offsets in the config window).
 const EC_Z3_BASEADDRESS_PHYS: u64 = 0x44;
 const EC_BASEADDRESS_PHYS: u64 = 0x48;
+#[cfg(test)]
 const EC_BASEADDRESS_LO_PHYS: u64 = 0x4A;
 const EC_SHUTUP_PHYS: u64 = 0x4C;
+
+impl ZorroVersion {
+    pub(crate) fn width(self) -> usize {
+        match self {
+            Self::II => 2,
+            Self::III => 4,
+        }
+    }
+}
 
 /// Copperline's registered Amiga expansion manufacturer ID (dec0de
 /// Consulting, 5192 / 0x1448). The same ID labels the real ROMulus
@@ -68,9 +78,7 @@ const PRODUCT_SERVICES: u8 = 0x05;
 /// TCP/IP stack; see `crate::hostsocket`).
 const PRODUCT_HOSTSOCKET: u8 = 0x06;
 /// The MHI virtual MPEG audio decoder board (`crate::mhi`, `[mhi]`); see
-/// `docs/internals/mhi.md`. Gated like its only consumer,
-/// [`BoardDescriptor::mhi`], so a no-`mhi` build stays warning-free.
-#[cfg(feature = "mhi")]
+/// `docs/internals/mhi.md`.
 const PRODUCT_MHI: u8 = 0x07;
 /// The copperhf.device virtual block-storage board (`crate::copperhf`); see
 /// `COPPERHF-DEVICE-PLAN.md`.
@@ -144,6 +152,18 @@ pub enum BoardBacking {
     Device(usize),
 }
 
+/// Static responses wired by an expansion card. Waits are additional
+/// colour clocks before the slave completes each transfer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SlaveTiming {
+    pub wait_cck: u16,
+    pub ovr: bool,
+    pub mtack: bool,
+    pub config_in_z2: bool,
+    pub cache_inhibit: bool,
+}
+
 /// The autoconfig identity and backing of one expansion board.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BoardSpec {
@@ -162,6 +182,10 @@ pub struct BoardSpec {
     pub memory_space: bool,
     /// Another autoconfig identity belonging to this physical board follows.
     pub chained: bool,
+    /// Whether this function occupies a backplane connector. Older states
+    /// predate this field and identify built-in virtual boards by identity.
+    #[serde(default)]
+    pub connector: Option<bool>,
     /// The board cannot be removed from the autoconfig chain by writing
     /// `ec_Shutup` (ERFF_NOSHUTUP).
     pub no_shutup: bool,
@@ -170,6 +194,8 @@ pub struct BoardSpec {
     /// Autoboot: ERTF_DIAGVALID with er_InitDiagVec pointing at the
     /// DiagArea inside the configured board space.
     pub diag_vec: Option<u16>,
+    #[serde(default)]
+    pub timing: SlaveTiming,
 }
 
 impl BoardSpec {
@@ -190,8 +216,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: false,
+            connector: Some(true),
             no_shutup: true,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: Some(0x0080),
         }
     }
@@ -209,8 +237,10 @@ impl BoardSpec {
             memlist: true,
             memory_space: true,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -228,8 +258,13 @@ impl BoardSpec {
             memlist: true,
             memory_space: true,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming {
+                mtack: true,
+                ..Default::default()
+            },
             diag_vec: None,
         }
     }
@@ -255,8 +290,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -276,8 +313,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -299,8 +338,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -324,8 +365,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -352,8 +395,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: Some(crate::copperhf::DIAG_OFFSET),
         }
     }
@@ -382,8 +427,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -405,8 +452,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: Some(0x2000),
         }
     }
@@ -429,8 +478,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: Some(0x0200),
         }
     }
@@ -456,8 +507,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: Some(crate::filesys::DIAG_OFFSET),
         }
     }
@@ -481,8 +534,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: Some(crate::hostsocket::DIAG_OFFSET),
         }
     }
@@ -516,8 +571,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: has_rom.then_some(diag_vec),
         }
     }
@@ -542,8 +599,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: has_rom.then_some(0x0001),
         }
     }
@@ -565,8 +624,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -596,8 +657,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: true,
+            connector: Some(true),
             no_shutup: false,
             window: 1,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -624,8 +687,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -645,8 +710,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: true,
+            connector: Some(true),
             no_shutup: false,
             window: 1,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -664,8 +731,10 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
@@ -686,13 +755,73 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
+            timing: SlaveTiming::default(),
             diag_vec: None,
         }
     }
 
+    pub(crate) fn uses_connector(&self) -> bool {
+        self.connector.unwrap_or_else(|| {
+            let id = (self.manufacturer, self.product, self.name.as_str());
+            !matches!(
+                id,
+                (COPPERLINE_MANUFACTURER_ID, PRODUCT_FAST_RAM, "fast RAM")
+                    | (COPPERLINE_MANUFACTURER_ID, PRODUCT_Z3_RAM, "Zorro III RAM")
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_COPPERLINE_ID,
+                        "Copperline"
+                    )
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_SERVICES,
+                        "Copperline services"
+                    )
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_HOSTSOCKET,
+                        "HostSocket bsdsocket.library"
+                    )
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_MHI,
+                        "MHI MPEG audio decoder"
+                    )
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_COPPERHF,
+                        "copperhf.device"
+                    )
+                    | (
+                        crate::z3660::Z3660_MANUFACTURER_ID,
+                        crate::z3660::Z3660_PRODUCT,
+                        "Z3660 RTG"
+                    )
+                    | (0x144a, 11, "SF2000 SD card controller")
+            )
+        })
+    }
+
     fn validate(&self) -> Result<()> {
+        if self.timing.ovr
+            && !(self.version == ZorroVersion::II && self.backing == BoardBacking::Ram)
+        {
+            bail!(
+                "board {:?}: ovr requires a Zorro II RAM aperture",
+                self.name
+            );
+        }
+        if self.timing.mtack
+            && !(self.version == ZorroVersion::III && self.backing == BoardBacking::Ram)
+        {
+            bail!(
+                "board {:?}: mtack requires a Zorro III RAM aperture",
+                self.name
+            );
+        }
         if self.window > 0x0f {
             bail!(
                 "board {:?}: device window tag must fit in four bits",
@@ -761,7 +890,23 @@ struct Board {
 /// The autoconfig chain plus the configured boards' address windows.
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ZorroChain {
+    #[serde(skip)]
+    pub(crate) controller: crate::buster::Revision,
+    #[serde(skip)]
+    has_waits: bool,
+    #[serde(skip)]
+    has_ovr: bool,
     boards: Vec<Board>,
+    // One /CFGIN is active at a time. A byte-wide Z3 PIC latches the
+    // address across two writes, in opposite orders in the two apertures.
+    #[serde(default)]
+    config_high: Option<u8>,
+    #[serde(default)]
+    config_low: u8,
+    #[serde(skip)]
+    conflicts: Vec<(u64, u64)>,
+    #[serde(skip)]
+    local_conflicts: Vec<(u64, u64)>,
     /// Configured RAM windows, rebuilt whenever a board's state changes:
     /// (base, len, board index). Kept flat so the CPU's per-access lookup
     /// is a scan over at most a handful of entries.
@@ -772,6 +917,75 @@ pub struct ZorroChain {
 }
 
 impl ZorroChain {
+    /// AutoConfig functions on one physical card share a request pin.
+    pub(crate) fn physical_slot(&self, device: usize) -> Option<usize> {
+        let mut slot = 0;
+        for spec in self
+            .boards
+            .iter()
+            .map(|b| &b.spec)
+            .filter(|s| s.uses_connector())
+        {
+            if spec.backing == BoardBacking::Device(device) {
+                return Some(slot);
+            }
+            if !spec.chained {
+                slot += 1;
+            }
+        }
+        None
+    }
+
+    pub(crate) fn override_ram(&self, addr: u32, len: usize) -> Option<(usize, usize)> {
+        if !self.has_ovr {
+            return None;
+        }
+        self.region_at(addr, len)
+            .filter(|&(idx, _)| self.boards[idx].spec.timing.ovr)
+    }
+
+    pub(crate) fn cacheable_ram(&self, addr: u32) -> bool {
+        self.region_at(addr, 1).is_some_and(|(idx, _)| {
+            let spec = &self.boards[idx].spec;
+            !self.controller.super_buster()
+                || match spec.version {
+                    ZorroVersion::II => crate::buster::Z2_MEMORY.contains(&addr),
+                    ZorroVersion::III => !spec.timing.cache_inhibit,
+                }
+        })
+    }
+
+    pub(crate) fn burst_ram(&self, addr: u32) -> bool {
+        self.region_at(addr, 16)
+            .is_some_and(|(idx, _)| self.boards[idx].spec.timing.mtack)
+    }
+
+    pub(crate) fn slave_wait(&self, addr: u32) -> u32 {
+        if !self.has_waits {
+            return 0;
+        }
+        self.regions
+            .iter()
+            .chain(&self.device_regions)
+            .find_map(|&(base, len, idx)| {
+                let board = &self.boards[idx].spec;
+                (addr.wrapping_sub(base) < len && self.selected(board.version, addr))
+                    .then_some(u32::from(board.timing.wait_cck))
+            })
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn ram_version(&self, idx: usize) -> ZorroVersion {
+        self.boards[idx].spec.version
+    }
+
+    pub(crate) fn device_version(&self, slot: usize) -> Option<ZorroVersion> {
+        self.boards
+            .iter()
+            .find(|b| b.spec.backing == BoardBacking::Device(slot))
+            .map(|b| b.spec.version)
+    }
+
     pub fn add_board(&mut self, spec: BoardSpec) -> Result<()> {
         spec.validate()?;
         let ram = match spec.backing {
@@ -870,24 +1084,39 @@ impl ZorroChain {
     /// clears each board's autoconfig latch, including shut-up boards, but
     /// expansion RAM keeps its contents so reset-surviving structures work.
     pub fn warm_reset(&mut self) {
+        self.config_high = None;
+        self.config_low = 0;
         for board in &mut self.boards {
             board.state = BoardState::Unconfigured;
         }
+        self.has_waits = false;
+        self.has_ovr = false;
         self.regions.clear();
         self.device_regions.clear();
+        self.conflicts.clear();
+        self.local_conflicts.clear();
     }
 
     fn current(&self) -> Option<usize> {
-        self.boards
-            .iter()
-            .position(|b| b.state == BoardState::Unconfigured)
+        self.boards.iter().position(|b| {
+            b.state == BoardState::Unconfigured
+                && !(self.controller == crate::buster::Revision::A2000
+                    && b.spec.version == ZorroVersion::III)
+        })
     }
 
-    fn rebuild_regions(&mut self) {
+    pub(crate) fn rebuild_regions(&mut self) {
+        self.has_waits = false;
+        self.has_ovr = false;
         self.regions.clear();
         self.device_regions.clear();
+        self.conflicts.clear();
+        self.local_conflicts.clear();
         for (idx, board) in self.boards.iter().enumerate() {
             if let BoardState::Configured { base } = board.state {
+                self.has_waits |= board.spec.timing.wait_cck != 0;
+                self.has_ovr |=
+                    self.controller == crate::buster::Revision::A2000 && board.spec.timing.ovr;
                 match board.spec.backing {
                     BoardBacking::Ram => {
                         if !board.ram.is_empty() {
@@ -901,6 +1130,78 @@ impl ZorroChain {
                 }
             }
         }
+        // Only exceptional mappings enter the CPU's collision lookup. Build
+        // the intersections once rather than scanning every board on a fetch.
+        if self.controller == crate::buster::Revision::Absent {
+            return;
+        }
+        let mut mapped = Vec::new();
+        if let Some(idx) = self.current() {
+            let base = self.config_base(idx);
+            mapped.push((base, base + AUTOCONFIG_SIZE, idx));
+        }
+        for (idx, board) in self.boards.iter().enumerate() {
+            let BoardState::Configured { base } = board.state else {
+                continue;
+            };
+            let start = u64::from(base);
+            let end = start + board.spec.size_bytes as u64;
+            for &(lo, hi) in self.controller.decode_ranges(board.spec.version) {
+                let a = start.max(lo);
+                let b = end.min(hi);
+                if a < b {
+                    mapped.push((a, b, idx));
+                }
+            }
+        }
+        for (i, &(start, end, idx)) in mapped.iter().enumerate() {
+            let backing = self.boards[idx].spec.backing;
+            for &(lo, hi, other) in &mapped[..i] {
+                if idx == other
+                    || (matches!(backing, BoardBacking::Device(_))
+                        && backing == self.boards[other].spec.backing)
+                {
+                    continue;
+                }
+                if start < hi && lo < end {
+                    self.conflicts.push((start.max(lo), end.min(hi)));
+                }
+            }
+            if self.controller == crate::buster::Revision::A2000
+                && !self.boards[idx].spec.timing.ovr
+            {
+                for (lo, hi) in crate::buster::LOCAL_RANGES {
+                    if start < hi && lo < end {
+                        self.local_conflicts.push((start.max(lo), end.min(hi)));
+                    }
+                }
+            }
+        }
+    }
+
+    fn selected(&self, version: ZorroVersion, addr: u32) -> bool {
+        self.controller == crate::buster::Revision::Absent
+            || self
+                .controller
+                .decode_ranges(version)
+                .iter()
+                .any(|&(lo, hi)| lo <= u64::from(addr) && u64::from(addr) < hi)
+    }
+
+    pub(crate) fn has_collisions(&self, revision: crate::buster::Revision) -> bool {
+        revision != crate::buster::Revision::Absent
+            && (!self.conflicts.is_empty()
+                || (revision == crate::buster::Revision::A2000 && !self.local_conflicts.is_empty()))
+    }
+
+    pub(crate) fn collision(&self, revision: crate::buster::Revision, addr: u32, len: u32) -> bool {
+        if revision == crate::buster::Revision::Absent {
+            return false;
+        }
+        let hits =
+            |&(lo, hi): &(u64, u64)| u64::from(addr) < hi && lo < u64::from(addr) + u64::from(len);
+        self.conflicts.iter().any(hits)
+            || (revision == crate::buster::Revision::A2000 && self.local_conflicts.iter().any(hits))
     }
 
     // ----- configured RAM windows ----------------------------------------
@@ -910,7 +1211,9 @@ impl ZorroChain {
     pub fn region_at(&self, addr: u32, size: usize) -> Option<(usize, usize)> {
         for &(base, len, idx) in &self.regions {
             let off = addr.wrapping_sub(base);
-            if u64::from(off) + size as u64 <= u64::from(len) {
+            if u64::from(off) + size as u64 <= u64::from(len)
+                && self.selected(self.boards[idx].spec.version, addr)
+            {
                 return Some((idx, off as usize));
             }
         }
@@ -1005,7 +1308,9 @@ impl ZorroChain {
     pub fn device_region_at(&self, addr: u32, size: usize) -> Option<(BoardBacking, u32)> {
         for &(base, len, idx) in &self.device_regions {
             let off = addr.wrapping_sub(base);
-            if u64::from(off) + size as u64 <= u64::from(len) {
+            if u64::from(off) + size as u64 <= u64::from(len)
+                && self.selected(self.boards[idx].spec.version, addr)
+            {
                 let window = u32::from(self.boards[idx].spec.window) << DEVICE_WINDOW_SHIFT;
                 return Some((self.boards[idx].spec.backing, off | window));
             }
@@ -1015,84 +1320,107 @@ impl ZorroChain {
 
     // ----- autoconfig window ----------------------------------------------
 
+    fn config_base(&self, idx: usize) -> u64 {
+        let spec = &self.boards[idx].spec;
+        if self.controller.super_buster()
+            && spec.version == ZorroVersion::III
+            && !spec.timing.config_in_z2
+        {
+            u64::from(Z3_CONFIG_BASE)
+        } else {
+            AUTOCONFIG_BASE
+        }
+    }
+
+    pub(crate) fn native_config(&self, addr: u32) -> bool {
+        addr.wrapping_sub(Z3_CONFIG_BASE) < AUTOCONFIG_SIZE as u32
+            && self
+                .current()
+                .is_some_and(|i| self.config_base(i) == u64::from(Z3_CONFIG_BASE))
+    }
+
     pub fn config_read(&self, addr: u64, size: usize) -> u64 {
         let Some(idx) = self.current() else {
             return floating_bus(size);
         };
-        let off = addr.wrapping_sub(AUTOCONFIG_BASE) & (AUTOCONFIG_SIZE - 1);
-        match size {
-            1 => self.config_read_byte(idx, off) as u64,
-            2 => {
-                let hi = self.config_read_byte(idx, off) as u16;
-                let lo = self.config_read_byte(idx, off + 1) as u16;
-                ((hi << 8) | lo) as u64
-            }
-            4 => {
-                let b0 = self.config_read_byte(idx, off) as u32;
-                let b1 = self.config_read_byte(idx, off + 1) as u32;
-                let b2 = self.config_read_byte(idx, off + 2) as u32;
-                let b3 = self.config_read_byte(idx, off + 3) as u32;
-                ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) as u64
-            }
-            _ => floating_bus(size),
+        if addr & !(AUTOCONFIG_SIZE - 1) != self.config_base(idx) {
+            return floating_bus(size);
         }
+        let native = addr >> 16 == u64::from(Z3_CONFIG_BASE >> 16);
+        let off = addr & (AUTOCONFIG_SIZE - 1);
+        (0..size).fold(0, |v, i| {
+            let lane = off + i as u64;
+            // In Z3 space A8 selects the low nibble; DS3 carries both.
+            let b = if native {
+                if lane & !0x17c == 0 {
+                    self.config_read_byte(idx, (lane & 0x7c) | ((lane & 0x100) >> 7))
+                } else {
+                    0xff
+                }
+            } else {
+                self.config_read_byte(idx, lane)
+            };
+            (v << 8) | u64::from(b)
+        })
     }
 
     pub fn config_write(&mut self, addr: u64, size: usize, val: u64) {
         let Some(idx) = self.current() else {
             return;
         };
-        let off = addr.wrapping_sub(AUTOCONFIG_BASE) & (AUTOCONFIG_SIZE - 1);
+        if addr & !(AUTOCONFIG_SIZE - 1) != self.config_base(idx) {
+            return;
+        }
+        let off = addr & (AUTOCONFIG_SIZE - 1);
         let data_byte = match size {
             1 => (val & 0xFF) as u8,
             2 | 4 => ((val >> ((size - 1) * 8)) & 0xFF) as u8,
             _ => return,
         };
+        let native = addr >> 16 == u64::from(Z3_CONFIG_BASE >> 16);
+        if native && (off >= 0x80 || off & 3 != 0) {
+            return;
+        }
         let board = &mut self.boards[idx];
-        match off & 0x7E {
-            EC_Z3_BASEADDRESS_PHYS => {
-                // Zorro III boards take a 16-bit write of the base address
-                // high word here, which both assigns and configures.
-                if board.spec.version == ZorroVersion::III && size >= 2 {
-                    let base = ((val & 0xFFFF) as u32) << 16;
-                    board.state = BoardState::Configured { base };
-                    log::info!(
-                        "zorro III board {:?} autoconfigured at {:#010X}",
-                        board.spec.name,
-                        base
-                    );
-                    self.rebuild_regions();
-                }
+        let z3 = board.spec.version == ZorroVersion::III;
+        let page = match off & 0x7f {
+            EC_Z3_BASEADDRESS_PHYS if z3 && size >= 2 => (val >> ((size - 2) * 8)) as u16,
+            EC_Z3_BASEADDRESS_PHYS if z3 && native => {
+                u16::from_be_bytes([data_byte, self.config_low])
             }
-            EC_BASEADDRESS_PHYS => {
-                // Zorro II boards take the base high byte here, which both
-                // assigns and configures.
-                if board.spec.version == ZorroVersion::II {
-                    let base = u32::from(data_byte) << 16;
-                    board.state = BoardState::Configured { base };
-                    log::info!(
-                        "zorro II board {:?} autoconfigured at {:#010X}",
-                        board.spec.name,
-                        base
-                    );
-                    self.rebuild_regions();
-                }
+            EC_Z3_BASEADDRESS_PHYS if z3 => {
+                self.config_high = Some(data_byte);
+                return;
             }
-            EC_BASEADDRESS_LO_PHYS => {
-                // The system ROM writes the low nibble here before the full byte
-                // goes to ec_BaseAddress. Not needed for memory boards, but
-                // accepting it keeps the register sequence faithful.
-            }
-            EC_SHUTUP_PHYS => {
-                if board.spec.no_shutup {
+            EC_BASEADDRESS_PHYS if z3 => {
+                self.config_low = data_byte;
+                let Some(high) = self.config_high.filter(|_| !native) else {
                     return;
-                }
+                };
+                u16::from_be_bytes([high, data_byte])
+            }
+            EC_BASEADDRESS_PHYS => u16::from(data_byte),
+            EC_SHUTUP_PHYS if !board.spec.no_shutup => {
                 board.state = BoardState::ShutUp;
+                self.config_high = None;
+                self.config_low = 0;
                 log::debug!("zorro board {:?} shut up", board.spec.name);
                 self.rebuild_regions();
+                return;
             }
-            _ => {}
-        }
+            // The byte-wide latch already receives both nibbles on D7..0.
+            _ => return,
+        };
+        let base = u32::from(page) << 16;
+        board.state = BoardState::Configured { base };
+        self.config_high = None;
+        self.config_low = 0;
+        log::info!(
+            "zorro {:?} board {:?} autoconfigured at {base:#010X}",
+            board.spec.version,
+            board.spec.name
+        );
+        self.rebuild_regions();
     }
 
     fn config_read_byte(&self, idx: usize, off: u64) -> u8 {
@@ -1225,6 +1553,8 @@ fn floating_bus(size: usize) -> u64 {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBoardMeta {
+    #[serde(default)]
+    timing: SlaveTiming,
     name: String,
     zorro: u8,
     #[serde(rename = "type")]
@@ -1379,8 +1709,10 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memlist: raw.memlist.unwrap_or(true),
                 memory_space: true,
                 chained: false,
+                connector: Some(true),
                 no_shutup: false,
                 window: 0,
+                timing: raw.timing,
                 diag_vec: None,
             };
             spec.validate()
@@ -1430,8 +1762,10 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memlist: raw.memlist.unwrap_or(false),
                 memory_space: false,
                 chained: false,
+                connector: Some(true),
                 no_shutup: false,
                 window: 0,
+                timing: raw.timing,
                 diag_vec: raw.diag_vec,
             };
             spec.validate()
@@ -1597,6 +1931,40 @@ mod tests {
             chain.add_board(spec).unwrap();
         }
         chain
+    }
+
+    #[test]
+    fn buster_slot_order_skips_virtual_boards_and_groups_chained_functions() -> Result<()> {
+        let mut chain = ZorroChain::default();
+        let mut legacy = BoardSpec::hostsocket();
+        legacy.connector = None;
+        for spec in [
+            BoardSpec::fast_ram(65536),
+            BoardSpec::copperline_id(),
+            BoardSpec::z3_ram(1 << 20),
+            BoardSpec::copperline_services(1),
+            BoardSpec::copperhf(2),
+            legacy,
+        ] {
+            chain.add_board(spec)?;
+        }
+        #[cfg(feature = "mhi")]
+        chain.add_board(BoardSpec::mhi(3))?;
+        chain.add_board(BoardSpec::picasso2_vram(4, 1 << 20))?;
+        chain.add_board(BoardSpec::picasso2_regs(4))?;
+        // External metadata can even share a built-in's product identity.
+        let mut metadata = BoardSpec::hostsocket();
+        metadata.connector = Some(true);
+        metadata.backing = BoardBacking::Device(5);
+        chain.add_board(metadata)?;
+        chain.add_board(BoardSpec::a4091(6))?;
+        for index in 0..4 {
+            assert_eq!(chain.physical_slot(index), None);
+        }
+        assert_eq!(chain.physical_slot(4), Some(0));
+        assert_eq!(chain.physical_slot(5), Some(1));
+        assert_eq!(chain.physical_slot(6), Some(2));
+        Ok(())
     }
 
     #[test]
@@ -2259,5 +2627,97 @@ mod tests {
             err.to_string().contains("window-tagged aperture"),
             "{err:#}"
         );
+    }
+}
+
+#[cfg(test)]
+mod buster_tests {
+    use super::*;
+    use crate::buster::Revision;
+
+    #[test]
+    fn native_config_selects_low_nibbles_on_a8_and_releases_the_chain() {
+        let mut c = ZorroChain {
+            controller: Revision::Rev7,
+            ..Default::default()
+        };
+        c.add_board(BoardSpec::z3_ram(16 << 20)).unwrap();
+        c.add_board(BoardSpec::fast_ram(512 << 10)).unwrap();
+        let base = u64::from(Z3_CONFIG_BASE);
+        c.config_write(AUTOCONFIG_BASE + 0x44, 2, 0x3000);
+        assert_eq!(c.config_read(AUTOCONFIG_BASE, 1), 0xff);
+        for off in (0..64).step_by(4) {
+            assert_eq!(
+                c.config_read(base + off, 1),
+                u64::from(c.config_read_byte(0, off))
+            );
+            assert_eq!(
+                c.config_read(base + off + 0x100, 1),
+                u64::from(c.config_read_byte(0, off + 2))
+            );
+            assert_eq!(c.config_read(base + off + 2, 1), 0xff);
+        }
+        c.config_write(base + 0x44, 2, 0x4000);
+        assert_eq!(c.region_at(0x40000000, 4), Some((0, 0)));
+        assert!(!c.native_config(Z3_CONFIG_BASE));
+    }
+
+    #[test]
+    fn cache_inhibit_follows_ioz2_and_the_z3_slave_pin() {
+        let mut c = ZorroChain {
+            controller: Revision::Rev11,
+            ..Default::default()
+        };
+        for base in [0x200000, 0xa00000, 0xe90000] {
+            c.add_board_configured_at(BoardSpec::fast_ram(65536), base)
+                .unwrap();
+        }
+        assert!(c.cacheable_ram(0x200002));
+        assert!(!c.cacheable_ram(0xa00002));
+        assert!(!c.cacheable_ram(0xe90002));
+        let mut spec = BoardSpec::z3_ram(65536);
+        spec.timing.cache_inhibit = true;
+        c.add_board_configured_at(spec, 0x40000000).unwrap();
+        assert!(!c.cacheable_ram(0x40000004));
+    }
+
+    #[test]
+    fn byte_wide_z3_address_latch_commits_on_the_apertures_final_strobe() {
+        for (aperture, first, second) in [
+            (AUTOCONFIG_BASE, (0x44, 0x40), (0x48, 0x12)),
+            (u64::from(Z3_CONFIG_BASE), (0x48, 0x12), (0x44, 0x40)),
+        ] {
+            let mut c = ZorroChain {
+                controller: Revision::Rev11,
+                ..Default::default()
+            };
+            let mut spec = BoardSpec::z3_ram(65536);
+            spec.timing.config_in_z2 = aperture == AUTOCONFIG_BASE;
+            c.add_board(spec).unwrap();
+            c.config_write(aperture + first.0, 1, first.1);
+            assert_eq!(c.region_at(0x40120000, 4), None);
+            c.config_write(aperture + second.0, 1, second.1);
+            assert_eq!(c.region_at(0x40120000, 4), Some((0, 0)));
+        }
+    }
+
+    #[test]
+    fn multiple_slot_and_local_claims_raise_berr_on_the_decoded_bus() {
+        for rev in [Revision::A2000, Revision::Rev7] {
+            let mut c = ZorroChain {
+                controller: rev,
+                ..Default::default()
+            };
+            for _ in 0..3 {
+                c.add_board_configured_at(BoardSpec::fast_ram(512 << 10), 0x200000)
+                    .unwrap();
+            }
+            assert!(c.collision(rev, 0x200000, 2));
+            assert!(!c.collision(rev, 0x280000, 2));
+            c.add_board_configured_at(BoardSpec::fast_ram(512 << 10), 0)
+                .unwrap();
+            assert_eq!(c.collision(rev, 0x1000, 2), rev == Revision::A2000);
+            assert_eq!(c.region_at(0x1000, 2).is_some(), rev == Revision::A2000);
+        }
     }
 }

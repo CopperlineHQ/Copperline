@@ -215,14 +215,30 @@ manifest capabilities; importing one that was not granted fails to load):
 DMA transfers (`dma_read`/`dma_write`) are permitted only inside an active
 host transaction (`read`, `write`, `tick`). A DMA call from `init` traps and
 makes instantiation fail; one from an interrupt query (`int2`, `int6`) traps
-and takes the board offline. Within a transaction, `dma_write` buffers
-transfers in a host-side journal, bounded to 4,096 transfers and 16 MiB per
-callback so a plugin cannot exhaust host memory, and the journal is committed
-to Amiga memory only when the callback returns successfully. If the plugin
-traps (out of fuel, a panic, or any other trap), the uncommitted writes are
-discarded and Amiga memory is untouched. `dma_read` overlays the pending
-writes, so a plugin reads its own writes, including across the 32-bit address
-wrap (`0xFFFF_FFFF` -> `0x0000_0000`).
+and takes the board offline. Within a transaction, `dma_write` journals up to
+4,096 transfers and 16 MiB. A successful return submits the journal in order.
+A trap discards that callback's journal. A read sees the callback's earlier
+writes, including accesses that wrap at the end of the address space.
+
+The bundled HostSocket service commits its writes before the doorbell
+returns and accepts full 32-bit guest pointers on every profile.
+
+On a Buster backplane, a physical plugin claims the bus for each DMA buffer. Zorro II
+drives a 24-bit address and transfers up to two bytes per cycle. Zorro III
+drives 32 bits and transfers up to four bytes per cycle on revision 9 or 11.
+Chip and slow RAM also wait for the Agnus CPU port. The synchronous
+`dma_read` import samples memory on granted cycles, including any wait for
+earlier writes. Board ticks wait across an indivisible CPU instruction. An
+immediate read requested by a register callback during a CPU lock or while
+serving another expansion master sees open bus. Revision 7 accepts
+Zorro III slave cards. Configuring a Zorro III card with the DMA capability
+requires revision 9 or 11.
+
+Submitted writes become visible to the guest as their cycles complete.
+The outstanding write queue has the same limits as the journal. Interrupt
+queries wait for outstanding writes to drain so a completion interrupt can
+safely publish a DMA buffer. Save states retain the queue and byte offset.
+The import signatures are the same on machines with and without Buster.
 
 ### Fault isolation and lifecycle
 
@@ -812,6 +828,7 @@ In-tree functional boards implement the `ZorroDevice` trait
            chained: false,
            no_shutup: false,
            window: 0,
+           timing: SlaveTiming::default(),
            diag_vec: None,
        }
    }
@@ -835,3 +852,26 @@ In-tree functional boards implement the `ZorroDevice` trait
 Keep the hardware-first rule in mind: boards model autoconfig hardware
 behaviour, and anything guest-visible (IDs, sizes, ROM bytes) should match
 what a real board of that class would expose.
+
+### Slave timing on Buster backplanes
+
+An optional `[timing]` table in board metadata describes the signals the
+card supplies when addressed. `wait_cck` adds colour clocks to each
+transfer (Zorro II XRDY or delayed Zorro III DTACK). For Zorro II RAM,
+`ovr = true` asserts OVR on a decoded access and suppresses the B2000
+motherboard response. Other cards responding at that address still collide.
+For Zorro III RAM, `mtack = true` accepts a Level II cache-line burst and
+`cache_inhibit = true` inhibits CPU caching. On Zorro II, Super Buster
+inhibits caching in its I/O windows and drives both read strobes in the
+`$200000-$9FFFFF` memory window.
+Zorro III cards configure at `$FF000000` on Super Buster. Set
+`config_in_z2 = true` for a card wired to configure at `$00E80000`.
+The card responds to one aperture while CFGIN is asserted.
+These signals default to zero in board metadata. The built-in Zorro III
+RAM board accepts bursts.
+
+```toml
+[timing]
+wait_cck = 1
+mtack = true
+```

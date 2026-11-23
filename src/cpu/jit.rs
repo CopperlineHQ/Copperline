@@ -91,7 +91,13 @@ impl CpuBus {
     /// Local RAM and ROM, `None` when `addr` is not memory at all. A write
     /// stops here: one aimed at a board's boot ROM is a device access.
     fn jit_plain_memory(&self, addr: u32, size: usize) -> Option<bool> {
+        if self.bus.buster.pending() || self.bus.buster.cpu_locked {
+            return Some(false);
+        }
         self.classify_plain_memory(addr, size).map(|region| {
+            if matches!(region, PlainMemRegion::ZorroRam(..)) {
+                return self.bus.buster.revision == crate::buster::Revision::Absent;
+            }
             matches!(
                 region,
                 PlainMemRegion::Rom(_)
@@ -110,7 +116,7 @@ impl CpuBus {
     /// like Kickstart; the precise loop keeps the board's bus timing and
     /// never asks.
     pub(super) fn board_plain_rom(&self, addr: u32, size: usize) -> Option<&[u8]> {
-        if !self.jit_enabled {
+        if !self.jit_enabled || self.bus.buster.revision != crate::buster::Revision::Absent {
             return None;
         }
         let (crate::zorro::BoardBacking::Device(slot), off) =
@@ -374,7 +380,9 @@ impl M68kMachine {
             let (budget, horizon) = if local_code {
                 let horizon = self.bus.bus.jit_event_horizon_cck();
                 (self.jit_batch_budget(remaining, horizon) as u32, horizon)
-            } else if self.jit_clock_divisor_q16 == 0 {
+            } else if self.jit_clock_divisor_q16 == 0 || self.bus.bus.buster.wired {
+                // With a master fitted, an MMIO strobe can raise a request.
+                // Shared-code lumps have no per-instruction boundary hook.
                 (1, 1)
             } else {
                 (remaining.min(JIT_SHARED_BATCH_INSTRUCTIONS) as u32, 1)

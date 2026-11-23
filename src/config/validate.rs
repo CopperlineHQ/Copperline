@@ -1533,7 +1533,7 @@ impl TryFrom<RawConfig> for Config {
             (Some(true), None) => Some(PathBuf::from(BUNDLED_FMV_ROM)),
             (Some(false) | None, None) => defaults.fmv_rom_path,
         };
-        Ok(Config {
+        let cfg = Config {
             host_disks,
             pcmcia,
             rom_path: raw
@@ -1582,6 +1582,16 @@ impl TryFrom<RawConfig> for Config {
             agnus_revision,
             denise_revision,
             machine,
+            buster: match (raw.machine.buster_revision, machine) {
+                (None, _) => defaults.buster,
+                (Some(rev), Some(MachineModel::A3000 | MachineModel::A4000)) => match rev {
+                    7 => crate::buster::Revision::Rev7,
+                    9 => crate::buster::Revision::Rev9,
+                    11 => crate::buster::Revision::Rev11,
+                    _ => anyhow::bail!("[machine] buster_revision must be 7, 9 or 11"),
+                },
+                _ => anyhow::bail!("[machine] buster_revision needs an A3000 or A4000"),
+            },
             gate_array: defaults.gate_array,
             ide_a4000: defaults.ide_a4000,
             sdmac: defaults.sdmac,
@@ -1699,7 +1709,64 @@ impl TryFrom<RawConfig> for Config {
             video_slot_preview_overlay,
             video_slot_flyer,
             paths: raw.paths,
-        })
+        };
+        cfg.validate_buster_boards()?;
+        Ok(cfg)
+    }
+}
+
+impl Config {
+    pub(crate) fn validate_buster_boards(&self) -> Result<()> {
+        use crate::buster::Revision;
+        if self.buster == Revision::Absent {
+            return Ok(());
+        }
+        let a4091 = self.scsi.enabled() && self.scsi.controller == ScsiController::A4091;
+        let boards = self
+            .zorro_boards
+            .iter()
+            .chain(self.wasm_boards.iter().map(|w| &w.spec));
+        if self.buster == Revision::A2000
+            && (a4091
+                || self.z3_ram_bytes != 0
+                || matches!(self.rtg, RtgCard::Z3660 | RtgCard::GraffityZ3)
+                || boards.clone().any(|b| b.version == ZorroVersion::III))
+        {
+            bail!("the A2000 backplane accepts Zorro II cards only; select an A3000 or A4000 for Zorro III RAM, RTG or expansion boards");
+        }
+        if self.buster == Revision::Rev7 {
+            let master = if a4091 {
+                Some("A4091")
+            } else {
+                self.wasm_boards
+                    .iter()
+                    .find(|w| w.spec.version == ZorroVersion::III && w.manifest.caps.dma)
+                    .map(|w| w.spec.name.as_str())
+            };
+            if let Some(name) = master {
+                bail!(
+                    "{name} needs Zorro III bus mastering; set [machine] buster_revision = 9 or 11"
+                );
+            }
+        }
+        let builtin_cards = [
+            self.scsi.enabled() && self.scsi.controller.is_zorro_board(),
+            self.lide.enabled(),
+            self.a2065_net.is_some(),
+            self.toccata,
+            self.video_slot_flyer,
+            !matches!(self.rtg, RtgCard::None | RtgCard::Z3660),
+            self.fmv_rom_path.is_some(),
+        ];
+        let slots = builtin_cards.into_iter().filter(|fitted| *fitted).count()
+            + boards
+                .filter(|spec| spec.uses_connector() && !spec.chained)
+                .count();
+        let capacity = if self.buster == Revision::A2000 { 5 } else { 4 };
+        if slots > capacity {
+            bail!("configuration fits {slots} physical Zorro cards in {capacity} expansion slots; remove a card");
+        }
+        Ok(())
     }
 }
 
@@ -2106,6 +2173,12 @@ pub fn parse_machine_model(s: &str) -> Result<MachineModel> {
 pub fn machine_profile_defaults(model: MachineModel) -> Config {
     let mut d = Config {
         machine: Some(model),
+        buster: match model {
+            MachineModel::A2000 => crate::buster::Revision::A2000,
+            MachineModel::A3000 => crate::buster::Revision::Rev7,
+            MachineModel::A4000 => crate::buster::Revision::Rev11,
+            _ => crate::buster::Revision::Absent,
+        },
         ..Config::default()
     };
     match model {

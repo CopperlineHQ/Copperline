@@ -20,8 +20,7 @@
 //! instruction boundaries and before any data-cache read hit; see cpu.rs.)
 //! Under `[cpu] jit` the core also reads and writes the fastmem window
 //! directly, so neither cache holds lines inside it while the core has it
-//! (`CpuBus::keep_caches_out_of_window`). We do not model burst timing (IBE/DBE
-//! are stored but inert on the 030).
+//! (`CpuBus::keep_caches_out_of_window`). A Level II Buster can fill a line from burst-capable Zorro III RAM.
 //!
 //! A hit serves the access with no bus cycle, which is the real effect that
 //! matters on an Amiga: cached fetches stop competing with DMA for the chip
@@ -145,6 +144,8 @@ pub struct CpuCache {
     /// CACR freeze bit (FI/FD): hits are served, misses do not allocate.
     /// Always false on the 040, which has no freeze bit.
     pub frozen: bool,
+    #[serde(default)]
+    pub(crate) burst: bool,
 }
 
 impl Default for CpuCache {
@@ -161,6 +162,7 @@ impl CpuCache {
             cache: LongwordCache::new(lines),
             enabled: false,
             frozen: false,
+            burst: false,
         }
     }
 

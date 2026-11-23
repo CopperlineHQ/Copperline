@@ -1409,6 +1409,7 @@ mod tests {
     fn round_trips_the_machine_descriptor() {
         let path = temp_state("descriptor");
         let descriptor = MachineDescriptor {
+            buster_revision: crate::buster::Revision::Rev11,
             cpu: CpuModel::M68EC020,
             chip_ram_bytes: 2 * 1024 * 1024,
             fast_ram_bytes: 8 * 1024 * 1024,
@@ -1417,7 +1418,7 @@ mod tests {
             accel_ram_bytes: 32 * 1024 * 1024,
             chipset: crate::config::Chipset::Aga,
             video_standard: crate::chipset::agnus::VideoStandard::Ntsc,
-            machine: Some(crate::config::MachineModel::A1200),
+            machine: Some(crate::config::MachineModel::A4000),
             rom: crate::config::RomId::of(b"a fake kickstart image"),
             extended_rom: Some(crate::config::RomId::of(b"a fake extended rom")),
         };

@@ -3090,7 +3090,14 @@ impl Emulator {
             accounting.slice_cck = accounting
                 .slice_cck
                 .min(idle_cck.saturating_add(run.bus_advanced_cck));
+            let before = self.bus().emulated_cck();
             self.bus_mut().advance_cpu_idle_devices(idle_cck);
+            let elapsed = self.bus().emulated_cck() - before;
+            let dma_wait = elapsed
+                .saturating_sub(u64::from(idle_cck))
+                .min(u64::from(u32::MAX)) as u32;
+            accounting.slice_cck = accounting.slice_cck.saturating_add(dma_wait);
+            accounting.device_cck = accounting.device_cck.saturating_add(dma_wait);
         }
         // `refresh_irq_line` applies any deferred timed-device color clocks
         // before sampling the interrupt line (see its body), so a device
@@ -4050,6 +4057,7 @@ fn build_machine_inner(
     rom_optional: bool,
     netplay: bool,
 ) -> Result<Emulator> {
+    cfg.validate_buster_boards()?;
     let open_disk = |path: &std::path::Path,
                      name: &str,
                      bus: &'static str,
@@ -4659,6 +4667,7 @@ fn build_machine_inner(
         log::warn!("[audio] stereo_separation is ignored while channel_mode is mono");
     }
     let mut bus = Bus::new(mem, paula, floppy);
+    bus.buster.revision = cfg.buster;
     bus.set_ram_init(cfg.ram_init);
     // The printer attaches here (its byte sink is `Send`). A sampler owns a
     // cpal capture stream that is `!Send` on some hosts, so the frontend builds
@@ -4900,9 +4909,8 @@ fn build_machine_inner(
             );
         }
     }
-    if !devices.is_empty() {
-        bus.attach_devices(devices);
-    }
+    bus.attach_devices(devices);
+    bus.wire_buster()?;
     bus.input.set_port_device(0, cfg.port_devices[0]);
     bus.input.set_port_device(1, cfg.port_devices[1]);
     info!(

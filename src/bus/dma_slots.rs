@@ -29,6 +29,7 @@ impl Bus {
         let hpos = self.agnus.hpos;
         if limit < 2
             || !(0x34..0xe2).contains(&hpos)
+            || self.buster_pending()
             || self.blitter.busy
             || self.cpu_posted_write_debt != 0
             || self.chip_bus_observers_on
@@ -274,6 +275,20 @@ impl Bus {
                 // stalled behind it, so every quantum that passes it over
                 // counts towards the blitter's yield.
                 self.note_cpu_request_passed_over();
+            }
+        }
+        if self.buster_pending() && !self.buster.cpu_driving {
+            let available = owner == ChipBusOwner::Idle
+                || (owner == ChipBusOwner::Blitter && self.blitter_yields_to_waiting_cpu());
+            if self.service_buster(
+                available
+                    && forced_owner.is_none()
+                    && self.emulated_cck >= self.cpu_chip_port_free_at,
+            ) {
+                // An external master drives the 68000 side of Agnus's CPU port.
+                self.cpu_chip_port_free_at = self.emulated_cck + u64::from(CHIP_BUS_SLOT_CCK);
+                owner = ChipBusOwner::Cpu;
+                self.note_cpu_granted_chip_bus_cycle();
             }
         }
         if diag_blt_slots() && self.blitter.busy {
@@ -1782,6 +1797,15 @@ impl Bus {
         add_agnus_tick(&mut self.pending_device_tick, tick);
     }
 
+    pub(super) fn recycle_device_trace_spans(&mut self, mut spans: Vec<BusTraceSpan>) {
+        // A synchronous board DMA read can advance the chipset while the
+        // timed callbacks run. Keep the spans generated for that next batch.
+        if self.pending_device_trace_spans.is_empty() {
+            spans.clear();
+            self.pending_device_trace_spans = spans;
+        }
+    }
+
     /// Apply any deferred timed-device color clocks (see `record_slice_bus_
     /// advance`). Called before every device-register observation (CIA, custom,
     /// and other peripheral reads/writes) and at each instruction boundary, so
@@ -1797,7 +1821,6 @@ impl Bus {
         let tick = std::mem::take(&mut self.pending_device_tick);
         let spans = std::mem::take(&mut self.pending_device_trace_spans);
         self.tick_timed_devices(cck, tick, &spans);
-        self.pending_device_trace_spans = spans;
-        self.pending_device_trace_spans.clear();
+        self.recycle_device_trace_spans(spans);
     }
 }

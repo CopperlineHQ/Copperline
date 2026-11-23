@@ -30,7 +30,7 @@ What is captured:
 
 | Component | Contents |
 |---|---|
-| `CpuCore` | registers, SR flags, prefetch queue, pending interrupt/stop state, MMU/CACR state, cycle-timing configuration, `cpu_type` and address mask |
+| `CpuCore` | registers, SR flags, prefetch queue, pending interrupt/stop state, MMU/CACR state including resident 68030 and 68040/68060 ATC entries, cycle-timing configuration, `cpu_type` and address mask |
 | `MachineRuntimeState` | the `M68kMachine` fields outside the core: `last_cacr`, `sync_cck_on`, `cpu_clocks_per_cck`, `cpu_clock_carry`, `stop_poll_phase`, `jit_window_bank` (the fast-RAM bank the JIT fastmem window covers while code runs outside fast RAM; it decides which fast-RAM accesses allocate cache lines, and saves without it read `None`), and the live CPU interrupt-sampling latches (`sampled_irq_level`, `ipl_sample_held`, `ipl_latched_level`) |
 | `icache` / `dcache` | the CPU cache models (`Option<Box<CpuCache>>`, `None` when absent or opted out). When the state carries `None`, load keeps the running machine's cache model, if it has one, and re-derives its enable and freeze bits from the restored CACR |
 | `Bus` | chip, slow, motherboard, and accelerator RAM, ROM and extended ROM, Zorro boards (including their RAM), both CIAs, RTC, Agnus/Copper/Denise/Paula/blitter state, floppy controller with in-memory disk images, Gayle IDE and its PCMCIA card (an SRAM card's contents included), A2091 SCSI, Akiko/CDTV with NVRAM, beam-event capture buffers, DMA pointers, interrupt latches, and the bus-arbitration counters |
@@ -164,6 +164,7 @@ deliberately *not* fingerprinted, but missing storage is still caught on
 load: HDF/CD images reopen by path and fail the load cleanly if absent
 (see below).
 
+(built-in-board-firmware)=
 ### Built-in board firmware
 
 Most board ROMs travel in the state with their board, because the board
@@ -379,7 +380,7 @@ before it arrived complete.
 | `CART` | bus fields | `cartridge` |
 | `AKIK` | bus fields | `akiko` |
 | `CDTV` | bus fields | `cdtv` |
-| `ZORR` | bus fields | `devices` (every `BoardDevice`) |
+| `ZORR` | bus fields | `devices` (including in-flight A4091 SCRIPTS transfers and the queued buffers and byte offset of WebAssembly DMA) and `buster` (revision, owner, registrations, fairness and outstanding waits) |
 | `KEYB` | bus fields | `keyboard` (the 6500/1 MCU model) |
 | `INPT` | bus fields | `input` (controller ports) |
 | `BUS ` | bus rest | every other `Bus` field: DMA arbitration, interrupt latches, beam-event capture, presentation windows, diagnostics |
@@ -508,7 +509,10 @@ Three things are versioned, at three rates:
   reordered fields, and widened integers. Unknown chunks are skipped, so a
   build may add a chunk without invalidating its states for older builds.
 
-CIA-A and CIA-B chunks are version 2; other chunks remain version 1.
+The CIA-A, CIA-B and ZORR chunks are version 2. Loading a version 1
+ZORR chunk selects the earlier machine without expansion arbitration.
+An older CPU chunk without a 68040/68060 ATC field starts with an empty
+translation cache.
 The CIA migration replaces the old active-low PB pulse fields with explicit
 active-high pulse fields. In pulse mode it preserves the saved physical pin
 level on load, then lets an inherited high expire on the next E edge under

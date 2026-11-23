@@ -1005,3 +1005,13 @@ The render also depends on the JIT's memory mapping: ROM runs through a
 direct region and is kept out of the cache models, which places the
 bootstrap's markers a few pixels differently than caching ROM would.
 Batching idle chipset spans must leave the render byte-identical.
+
+
+`buster-z3-dma` boots an A4000 with the A4091 as its first Zorro III board.
+It starts a 4 KiB SCRIPTS memory move between chip RAM buffers. The CPU
+checks the head while the tail is still clear, waits for the SCRIPTS interrupt
+and checks every longword. The settled green frame requires all three checks.
+The card then repeats the transfer while the CPU spins. The
+`a4000_replays_ongoing_z3_dma` regression saves this workload at seven
+emulated seconds and compares the full machine and display one second
+later after restoring the save. The run uses the bundled AROS ROM and an empty SCSI bus.

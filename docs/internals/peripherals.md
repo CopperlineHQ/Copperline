@@ -259,7 +259,8 @@ cache, unless the CDB sets FUA) has the data. The A2091 and SDMAC report
 the chip's next timed event to the idle fast-forward. Completion interrupts
 are delivered after a short emulated delay, and INT2 is the level `CNTR_INTEN && ISTR &
 (INTS|E_INT)` fed to Paula's PORTS latch each tick. DMAC bus-master
-cycles are not yet arbitrated against the CPU (TODO in `a2091.rs`).
+cycles on the A2000, A3000 and A4000 take one word per expansion grant.
+See [Buster and Super Buster](timing.md#buster-and-super-buster).
 
 The bundled ROM's driver runs inquiry, sense, and mode commands with
 asynchronous PIO. Sector transfers use the DMAC when the buffer address and

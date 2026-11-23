@@ -531,6 +531,8 @@ struct WaveVars {
     frame: Option<VarId>,
     bus_owner: Option<VarId>,
     bus_owner_s: Option<VarId>,
+    buster_requests: Option<VarId>,
+    buster_grant: Option<VarId>,
     dmacon: Option<VarId>,
     bus_data: Option<VarId>,
     cpu_addr: Option<VarId>,
@@ -562,6 +564,8 @@ pub struct QuantumSample {
     pub hpos: u32,
     pub frame: u64,
     pub owner_index: u8,
+    pub buster_requests: u8,
+    pub buster_grant: u8,
     pub owner_name: &'static str,
     pub dmacon: u16,
     pub data_bus: u16,
@@ -618,6 +622,8 @@ impl WaveCapture {
             vars.bus_owner = Some(writer.add_wire(4, "owner")?);
             vars.bus_owner_s = Some(writer.add_string("owner_name")?);
             vars.dmacon = Some(writer.add_wire(16, "dmacon")?);
+            vars.buster_requests = Some(writer.add_wire(6, "buster_requests")?);
+            vars.buster_grant = Some(writer.add_wire(6, "buster_grant")?);
             vars.bus_data = Some(writer.add_wire(16, "data")?);
             writer.upscope()?;
         }
@@ -759,6 +765,8 @@ impl WaveCapture {
         set(v.vpos, u64::from(s.vpos as u16));
         set(v.hpos, u64::from(s.hpos as u8));
         set(v.frame, s.frame & 0xFFFF_FFFF);
+        set(v.buster_requests, u64::from(s.buster_requests));
+        set(v.buster_grant, u64::from(s.buster_grant));
         set(v.bus_owner, u64::from(s.owner_index));
         set(v.dmacon, u64::from(s.dmacon));
         set(v.bus_data, u64::from(s.data_bus));

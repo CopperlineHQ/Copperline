@@ -76,6 +76,7 @@ enum Machine {
     Aga,
     /// A1200 profile exercising NTSC field geometry.
     AgaNtsc,
+    A4000Buster,
 }
 
 /// One golden-render probe: name, main-program binary, emulated seconds
@@ -166,9 +167,10 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         Machine::Jit => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
-        Machine::Aga | Machine::AgaNtsc => "revision = \"AGA\"\n",
+        Machine::Aga | Machine::AgaNtsc | Machine::A4000Buster => "revision = \"AGA\"\n",
     };
     let (cpu, memory) = match machine {
+        Machine::A4000Buster => ("68040", "chip = \"2M\"\n"),
         Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
         Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
         Machine::Aga | Machine::AgaNtsc => ("68EC020", "chip = \"2M\"\n"),
@@ -178,13 +180,21 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
     } else {
         ""
     };
-    let (profile, video) = if matches!(machine, Machine::AgaNtsc) {
+    let (profile, video) = if matches!(machine, Machine::A4000Buster) {
         (
-            "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n",
+            format!(
+                "[machine]\nprofile = \"A4000\"\nbattmem = '{}'\n[scsi]\ncontroller = \"a4091\"\n[rtg]\ncard = \"none\"\n",
+                adf.with_extension("nvram").display()
+            ),
+            "PAL",
+        )
+    } else if matches!(machine, Machine::AgaNtsc) {
+        (
+            "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n".to_owned(),
             "NTSC",
         )
     } else {
-        ("", "PAL")
+        (String::new(), "PAL")
     };
     format!(
         "rom = \"<bundled-aros>\"\n\
@@ -315,6 +325,15 @@ fn run_probe(p: &Probe) {
     let shot_path = capture_probe(p, &work);
     let golden_path = golden_dir.join(format!("{name}.png"));
     let actual = load_png(&shot_path).expect("load capture");
+    if matches!(p.machine, Machine::A4000Buster) {
+        let center =
+            (actual.height as usize / 2 * actual.width as usize + actual.width as usize / 2) * 4;
+        assert_eq!(
+            &actual.data[center..center + 4],
+            &[34, 204, 68, 255],
+            "the guest must observe partial DMA and verify the final buffer"
+        );
+    }
     if matches!(p.machine, Machine::AgaNtsc) {
         // Require the source probe's visible 4:4:2:1 sprite staircase even
         // when blessing, so a failed boot cannot become a blank reference.
@@ -410,6 +429,70 @@ fn run_probe(p: &Probe) {
     );
 }
 
+/// Re-run the green probe's continuous DMA from a saved 68040 machine.
+/// A lost ATC entry adds table walks after restore and shifts the A4091's
+/// grant even if the screenshot still matches.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
+fn a4000_replays_ongoing_z3_dma() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name);
+    let adf = path("buster.adf");
+    let disk = build_adf(
+        include_bytes!("../timing-test/boot.bin"),
+        include_bytes!("../timing-test/buster-z3-dma.bin"),
+    );
+    fs::write(&adf, disk).unwrap();
+    let cfg = path("a4000.toml");
+    fs::write(&cfg, probe_config(&adf, Machine::A4000Buster)).unwrap();
+    let mid = path("mid.clstate");
+    for (label, resume) in [("continuous", false), ("resumed", true)] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_copperline"));
+        cmd.current_dir(repo_root())
+            .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
+            .args([
+                "--factory",
+                "--noaudio",
+                "--rtc-time",
+                "2001-01-01 00:00:00",
+                "--config",
+            ])
+            .arg(&cfg);
+        if resume {
+            cmd.arg("--load-state").arg(&mid);
+        } else {
+            // The guest has verified the buffer and entered the continuous DMA loop.
+            cmd.args(["--save-state-after", "7"]).arg(&mid);
+        }
+        cmd.args(["--save-state-after", "8"])
+            .arg(path(&format!("{label}.clstate")))
+            .args(["--screenshot-after", "8"])
+            .arg(path(&format!("{label}.png")));
+        let output = common::output_with_timeout(&mut cmd, Duration::from_secs(120)).unwrap();
+        assert!(
+            output.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // A boot failure could replay just as deterministically. The green
+    // screen is reached only after the guest verifies every copied word.
+    let shot = load_png(&path("continuous.png")).unwrap();
+    let center = 4 * ((shot.height / 2) * shot.width + shot.width / 2) as usize;
+    assert_eq!(&shot.data[center..center + 4], &[0x22, 0xcc, 0x44, 0xff]);
+    let expected = fs::read(path("continuous.clstate")).unwrap();
+    let resumed = fs::read(path("resumed.clstate")).unwrap();
+    let body = copperline::savestate::machine_body_offset;
+    assert!(
+        expected[body(&expected).unwrap()..] == resumed[body(&resumed).unwrap()..],
+        "the machine state diverged after restore"
+    );
+    assert!(
+        fs::read(path("continuous.png")).unwrap() == fs::read(path("resumed.png")).unwrap(),
+        "the display diverged after restore"
+    );
+}
+
 /// One `#[test]` per probe so the harness parallelises the emulator boots
 /// (the shared work is per-probe; there is no cross-probe state).
 macro_rules! probe_tests {
@@ -426,6 +509,7 @@ macro_rules! probe_tests {
 }
 
 probe_tests! {
+    golden_buster_z3_dma => Probe { name: "buster-z3-dma", program: "buster-z3-dma.bin", seconds: 7.0, machine: Machine::A4000Buster };
     golden_ntsc_aga_sprites => Probe { name: "ntsc-aga-sprites", program: "agashres-sprites.bin", seconds: 16.0, machine: Machine::AgaNtsc };
     golden_jit_bus_boundary => Probe { name: "jit-bus-boundary", program: "jit-bus-boundary.bin", seconds: 16.0, machine: Machine::Jit };
     golden_timing_test => probe("timing-test", "test.bin", 32.0);

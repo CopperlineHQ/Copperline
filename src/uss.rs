@@ -367,6 +367,10 @@ impl UssFile {
         };
         let raw: config::RawConfig = toml::from_str(&format!("[machine]\nmodel = \"{model}\"\n[chipset]\nrevision = \"{chipset}\"\n[cpu]\nmodel = \"{}\"\n[memory]\nchip = \"{}K\"\nslow = \"{}K\"\nfast = \"0\"\n", cpu_name, self.size(b"CRAM") / 1024, self.size(b"BRAM") / 1024))?;
         let hardware = config::Config::try_from(raw)?;
+        // USS identifies the motherboard but carries no Buster revision.
+        if cfg.machine != hardware.machine {
+            cfg.buster = hardware.buster;
+        }
         cfg.machine = hardware.machine;
         cfg.cpu = hardware.cpu;
         cfg.cpu_clock_mhz = hardware.cpu_clock_mhz;
@@ -489,7 +493,15 @@ impl UssFile {
                 bank.copy_from_slice(bytes);
             }
         }
+        // USS supplies configured RAM banks only. Discard expansion devices
+        // and grants from the previous machine before installing that chain.
+        bus.devices.clear();
+        if let Some(local) = &mut bus.sdmac {
+            local.reset();
+        }
+        bus.buster.reset();
         bus.mem.zorro = zorro;
+        bus.wire_buster()?;
         bus.cia_a = ciaa;
         bus.cia_b = ciab;
         // CHPX bit 0 validates its flag word; bit 1 is the live ROM overlay.
@@ -750,6 +762,33 @@ mod tests {
         }
         bytes.extend_from_slice(b"END \0\0\0\x08");
         assert!(UssFile::parse(&bytes).is_err());
+    }
+
+    #[cfg(feature = "gdb")]
+    #[test]
+    fn import_replaces_the_configured_expansion_bus() -> Result<()> {
+        use crate::buster::Revision;
+        use crate::zorro::BoardSpec;
+        use crate::zorro_device::BoardDevice;
+        let mut emu = crate::gdbstub::testkit::emulator_with_loadseg_program();
+        let state = UssFile::parse(&fixture(&emu.bus().mem.rom, false))?;
+        let bus = emu.bus_mut();
+        bus.buster.revision = Revision::Rev11;
+        let index = bus.devices.len();
+        bus.mem.zorro.add_board(BoardSpec::a4091(index))?;
+        bus.devices
+            .push(BoardDevice::A4091(crate::a4091::A4091::new(vec![
+                0;
+                65536
+            ])?));
+        bus.wire_buster()?;
+        assert!(bus.buster.wired);
+        state.apply(&mut emu)?;
+        assert_eq!(emu.bus().mem.zorro.controller, Revision::Rev11);
+        assert_eq!(emu.bus().buster.devices, [None; 5]);
+        assert!(emu.bus().devices.is_empty());
+        assert!(!emu.bus().buster.pending());
+        Ok(())
     }
 
     #[cfg(feature = "gdb")]

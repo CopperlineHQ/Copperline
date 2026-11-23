@@ -177,6 +177,12 @@ impl Hardware {
                     }
                     .into(),
                 ),
+                buster_revision: match cfg.buster {
+                    crate::buster::Revision::Rev7 => Some(7),
+                    crate::buster::Revision::Rev9 => Some(9),
+                    crate::buster::Revision::Rev11 => Some(11),
+                    _ => None,
+                },
                 rom_scsi_device_disable: Some(cfg.rom_scsi_device_disable),
             },
             chipset: RawChipset {

@@ -1016,6 +1016,7 @@ fn raw_config_serialize_round_trips() {
             rtc_frozen: Some(true),
             battmem: Some("battmem.nvram".to_string()),
             mem_controller: Some("ramsey-07".to_string()),
+            buster_revision: None,
             rom_scsi_device_disable: Some(true),
         },
         cpu: RawCpu {
@@ -7109,4 +7110,87 @@ fn bad_drive_profiles_are_rejected() {
     let twice = "[[drive_profile]]\nid = \"x\"\nbase = \"wd-ac2120\"\n\
                  [[drive_profile]]\nid = \"x\"\nbase = \"wd-ac2120\"\n";
     assert!(format!("{:#}", parse_config(twice).unwrap_err()).contains("defined twice"));
+}
+
+#[test]
+fn buster_follows_the_motherboard_and_accepts_super_buster_upgrades() {
+    use crate::buster::Revision::*;
+    for (profile, expected) in [
+        ("A500", Absent),
+        ("A2000", A2000),
+        ("A3000", Rev7),
+        ("A4000", Rev11),
+    ] {
+        let toml = format!("[machine]\nprofile = \"{profile}\"\n");
+        assert_eq!(parse_config(&toml).unwrap().buster, expected);
+        for (number, rev) in [(7, Rev7), (9, Rev9), (11, Rev11)] {
+            let cfg = parse_config(&format!("{toml}buster_revision = {number}"));
+            if matches!(profile, "A3000" | "A4000") {
+                assert_eq!(cfg.unwrap().descriptor().buster_revision, rev);
+            } else {
+                assert!(cfg.is_err());
+            }
+        }
+        assert!(parse_config(&format!("{toml}buster_revision = 8")).is_err());
+    }
+}
+
+#[test]
+fn buster_rejects_unreachable_boards_and_accepts_supported_upgrades() -> Result<()> {
+    let a2000 = "[machine]\nprofile='A2000'\n[cpu]\nmodel='68030'\n";
+    for extra in [
+        "[memory]\nz3='1M'",
+        "[rtg]\ncard='graffityz3'",
+        "[scsi]\ncontroller='a4091'",
+        "[zz9k]\nenabled=true\nzorro=3",
+    ] {
+        let err = parse_config(&format!("{a2000}{extra}")).unwrap_err();
+        assert!(err.to_string().contains("A2000 backplane"), "{err:#}");
+    }
+    let a3000 = "[machine]\nprofile='A3000'\n";
+    let scsi = "[scsi]\ncontroller='a4091'";
+    assert!(parse_config(&format!("{a3000}{scsi}"))
+        .unwrap_err()
+        .to_string()
+        .contains("buster_revision = 9 or 11"));
+    parse_config(&format!("{a3000}buster_revision=9\n{scsi}"))?;
+    let mut cfg = parse_config(&format!("{a3000}[memory]\nz3='1M'"))?;
+    let mut plugin =
+        crate::zz9k::board_config(crate::zorro::ZorroVersion::III, 4 << 20, false, None);
+    plugin.manifest.caps.dma = true;
+    cfg.wasm_boards.push(plugin);
+    assert!(cfg
+        .validate_buster_boards()
+        .unwrap_err()
+        .to_string()
+        .contains("buster_revision"));
+    cfg.wasm_boards[0].manifest.caps.dma = false;
+    cfg.validate_buster_boards()?;
+    // The default accelerator RTG function leaves all four Zorro slots free.
+    for _ in 0..3 {
+        let mut spec = BoardSpec::fast_ram(65536);
+        spec.connector = Some(true);
+        cfg.zorro_boards.push(spec);
+    }
+    cfg.validate_buster_boards()?;
+    cfg.toccata = true;
+    assert!(cfg
+        .validate_buster_boards()
+        .unwrap_err()
+        .to_string()
+        .contains("5 physical Zorro cards in 4 expansion slots"));
+    let mut a2000 = parse_config(a2000)?;
+    for _ in 0..5 {
+        let mut board = BoardSpec::fast_ram(65536);
+        board.connector = Some(true);
+        a2000.zorro_boards.push(board);
+    }
+    a2000.validate_buster_boards()?;
+    a2000.toccata = true;
+    assert!(a2000
+        .validate_buster_boards()
+        .unwrap_err()
+        .to_string()
+        .contains("6 physical Zorro cards in 5 expansion slots"));
+    Ok(())
 }

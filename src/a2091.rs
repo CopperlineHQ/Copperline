@@ -20,10 +20,8 @@
 //! ROM; the ROM image is required because it carries the DiagArea and the
 //! scsi.device driver itself.
 //!
-//! DMA moves data between the WD33C93 and Amiga memory within the access
-//! that completes the handshake (no chip-bus stealing is modeled).
-//! TODO: arbitrate DMAC bus-master cycles against the CPU on the expansion
-//! bus for cycle-accurate transfer timing.
+//! DMA moves data between the WD33C93 and Amiga memory one word per granted bus cycle
+//! on Buster-equipped systems.
 
 use crate::memory::Memory;
 use crate::scsi::{DmaDir, ScsiTarget, Wd33c93};
@@ -60,6 +58,8 @@ pub struct A2091 {
     acr: u32,
     dawr: u8,
     dma_active: bool,
+    #[serde(skip)]
+    pub(crate) arbitrated: bool,
     dma_warned: bool,
     activity: bool,
     /// Set when `pump_dma` wrote guest memory this tick; the ZorroDevice
@@ -92,6 +92,7 @@ impl A2091 {
             acr: 0,
             dawr: 0,
             dma_active: false,
+            arbitrated: false,
             dma_warned: false,
             activity: false,
             wrote_memory: false,
@@ -334,41 +335,67 @@ impl A2091 {
     /// Move every byte the WD33C93 currently offers/wants between its data
     /// path and Amiga memory, a word per DMAC cycle, while DMA is started.
     fn pump_dma(&mut self, mem: &mut Memory) {
-        if !self.dma_active {
-            return;
+        if !self.arbitrated {
+            while self.request_address().is_some() {
+                self.transfer_word(mem);
+            }
         }
-        while let Some(dir) = self.wd.dma_request() {
-            if self.wd.dma_remaining() == 0 {
-                break;
+    }
+
+    pub(crate) fn take_dma_write(&mut self) -> bool {
+        std::mem::take(&mut self.wrote_memory)
+    }
+
+    pub(crate) fn request_address(&self) -> Option<u32> {
+        (self.dma_active && self.wd.dma_request().is_some() && self.wd.dma_remaining() != 0)
+            .then_some(self.acr & DMA_ADDR_MASK)
+    }
+
+    pub(crate) fn transfer_word(&mut self, mem: &mut Memory) {
+        self.transfer_with(|chip, addr, write| match write {
+            Some(w) => {
+                chip.dma_write_word(mem, addr, w);
+                w
             }
-            self.activity = true;
-            let addr = self.acr & DMA_ADDR_MASK;
-            match dir {
-                DmaDir::In => {
-                    let b0 = self.wd.dma_in_byte();
-                    let b1 = if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
-                        self.wd.dma_in_byte()
-                    } else {
-                        // Odd byte counts still write a full word; the pad
-                        // byte is whatever the FIFO carries (zero here).
-                        0
-                    };
-                    self.dma_write_word(mem, addr, (u16::from(b0) << 8) | u16::from(b1));
+            None => chip.dma_read_word(mem, addr),
+        });
+    }
+
+    pub(crate) fn release_on_bus_error(&mut self) {
+        self.dma_active = false;
+    }
+
+    pub(crate) fn transfer_with(&mut self, cycle: impl FnOnce(&mut Self, u32, Option<u16>) -> u16) {
+        let Some(dir) = self.wd.dma_request() else {
+            return;
+        };
+        self.activity = true;
+        let addr = self.acr & DMA_ADDR_MASK;
+        match dir {
+            DmaDir::In => {
+                let b0 = self.wd.dma_in_byte();
+                let b1 = if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
+                    self.wd.dma_in_byte()
+                } else {
+                    // Odd byte counts still write a full word; the pad
+                    // byte is whatever the FIFO carries (zero here).
+                    0
+                };
+                cycle(self, addr, Some(u16::from_be_bytes([b0, b1])));
+            }
+            DmaDir::Out => {
+                let w = cycle(self, addr, None);
+                self.wd.dma_out_byte((w >> 8) as u8);
+                if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
+                    self.wd.dma_out_byte(w as u8);
                 }
-                DmaDir::Out => {
-                    let w = self.dma_read_word(mem, addr);
-                    self.wd.dma_out_byte((w >> 8) as u8);
-                    if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
-                        self.wd.dma_out_byte(w as u8);
-                    }
-                }
             }
-            self.acr = (self.acr.wrapping_add(2)) & 0x00FF_FFFF;
-            // The word counter only runs with CNTR TCEN set (and only the
-            // DMAC-01 raised E_INT at terminal count; this is a DMAC-02).
-            if self.cntr & CNTR_TCEN != 0 && self.wtc > 0 {
-                self.wtc -= 1;
-            }
+        }
+        self.acr = (self.acr.wrapping_add(2)) & 0x00FF_FFFF;
+        // The word counter only runs with CNTR TCEN set (and only the
+        // DMAC-01 raised E_INT at terminal count; this is a DMAC-02).
+        if self.cntr & CNTR_TCEN != 0 && self.wtc > 0 {
+            self.wtc -= 1;
         }
     }
 

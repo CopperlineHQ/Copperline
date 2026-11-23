@@ -183,6 +183,76 @@ aligned longword use the AGA fetch latch and do not request or wait for the
 same value twice. This read/write asymmetry is covered by
 `aga_68020_chip_reads_wait_for_data_but_writes_are_posted`.
 
+### Buster and Super Buster
+
+The expansion arbiter runs on the machine clock. A2091 DMA consumes one
+16-bit word per transfer while the controller owns the bus. A4091 instruction fetch, table lookup, SCSI
+payload and the read and write halves of a memory move each consume
+bus cycles. A transfer to chip RAM competes for the same Agnus port as
+a CPU access. Disk mechanics can drop the request between transfers.
+DMA to local fast RAM or another expansion card leaves Agnus free.
+The A3000 Super DMAC requests the local channel. It has priority at
+an arbitration boundary, followed by Zorro III and Zorro II.
+
+On a B2000 the first requesting slot wins and holds ownership through
+its transfer. Two responding cards, or an expansion response alongside
+the DIP's internal address decode, generate a bus error. Super Buster
+qualifies the card response with the motherboard address select and
+rotates service among waiting Zorro II cards. Level II (9/11) schedules
+up to eight completed cycles per Zorro III grant. A master asserting LOCK
+retains its grant until an unlocked cycle completes. An unclaimed grant
+expires after 16 colour clocks (about 4.5 us). The specification gives
+"several microseconds" for this interval. Once the master asserts FCS,
+slave wait states no longer count against the grant deadline. Revision 7 can address a
+Zorro III slave, but cannot grant a Zorro III master. Revision 11 services
+one registered Zorro III master at a time. Revision 9 models a registration
+coincident with the start of a Zorro III slave cycle by blocking further
+Zorro III grants until reset.
+
+Zorro II presents a 16-bit port. Super Buster presents a 32-bit Zorro III
+port and the native AutoConfig aperture at `$FF000000`, where A8 selects
+the low nibble. A burst-enabled cache can fill four longwords from Zorro III
+RAM on a Level II controller, starting with the demanded longword and
+wrapping within its 16-byte line. External boards describe their slave wait,
+OVR and MTACK signals in [board metadata](../zorro.md#slave-timing-on-buster-backplanes).
+An A4091 can DMA to chip, motherboard,
+accelerator and Zorro III RAM, read system ROM and access another Zorro III
+card's registers. An incompatible Zorro II target raises the
+53C710 bus-fault status. The board's interrupt output drives INT2. If the
+guest has programmed the vector latch at board offset `$880003`, a Level II
+acknowledge polls the active slots and takes the first responding vector.
+
+The timing unit is the colour clock. Nominal ready-slave timings and
+registration overlap are quantized to that unit. The model does not
+resolve the propagation delays of a specific daughterboard or the
+sub-clock synchronizer failures reported for particular revision 9 cards.
+Memory TAS, CAS and CAS2 hold the CPU grant across the operand transfers,
+including both addresses of CAS2. A bus fault releases the grant before
+the exception frame is written. A locked operand read reaches the bus even on a data-cache hit. The
+68030 refreshes a cacheable operand and the 68040/060 evicts the matching
+line. A locked chip write waits for its Agnus slot before the CPU releases
+Buster.
+Register TAS leaves arbitration free.
+
+The bundled HostSocket service reads and writes full 32-bit guest pointers
+synchronously when the guest rings its doorbell. DMA-capable WebAssembly
+expansion cards use their physical slot's request line and
+bus width. Reads sample guest RAM at each grant. Successful callbacks
+queue their writes for transfer, and their interrupt outputs become
+visible after the queue drains. A save during a grant preserves the
+slot owner, arbitration history and the byte cursor of the active card.
+The 68040 MMU also retains resident translations across a save, preserving
+the bus clocks of later accesses. A pre-Buster state resumes its original
+DMA timing. [WebAssembly DMA interface](../zorro.md#module-abi)
+
+Hardware references include [LIV2's B2000 replacement RTL](https://github.com/LIV2/Bluster/blob/dev/RTL/Bluster.v),
+[Commodore's A4000/A3000 Hardware Developer Notes](https://amiga.net.au/files/Tech_Amiga/Commodore_A4000-A3000_Hardware_Developer_Notes_v1.11_ocr.pdf),
+[the Zorro III bus specification](https://www.devili.iki.fi/mirrors/haynie/zorroiii/docs/zorro3.pdf),
+[Haynie's Fat Buster II design specification](https://github.com/nonarkitten/amiga_replacement_project/blob/master/buster/390539-0x_Fat_Buster_specification.pdf),
+[Haynie on the production revisions](https://bboah.claunia.com/buster.html),
+[E3B's production DMA observations](https://www.e3b.de/usb/main_faq_e.html),
+and the [A4091 board PALs](https://github.com/A4091/a4091-logic).
+
 ### Deferred timed-device ticks
 
 The chipset and beam advance every colour clock, but the *timed devices*
@@ -720,10 +790,9 @@ the tested normal/fill readback; line-texture controls expose additional flag
 behaviour that remains under investigation. The historical game-specific
 examples are removed as evidence for the rule.
 
-A 68000 `TAS` read-modify-write is unsafe on chip RAM (the HRM warns
-against it); the `m68k` backend exposes it as a byte read then a byte
-write, so Copperline models `TAS` against chip RAM as two separately
-Agnus-arbitrated accesses, each subject to the same back-pressure rule.
+The HRM cautions against 68000 `TAS` on chip RAM. Its read and write
+each need an Agnus slot. Buster holds off other expansion masters
+through the internal clocks and both operand strobes.
 Tests: `blithog_clear_busy_blitter_yields_to_cpu_only_after_starvation`,
 `bltpri_cpu_uses_first_d_bubble_but_waits_for_bus_accesses`,
 `bltpri_line_blit_bresenham_cycles_stay_cpu_available`,
