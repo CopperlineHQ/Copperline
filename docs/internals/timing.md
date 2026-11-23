@@ -246,6 +246,7 @@ the bus clocks of later accesses. A pre-Buster state resumes its original
 DMA timing. [WebAssembly DMA interface](../zorro.md#module-abi)
 
 Hardware references include [LIV2's B2000 replacement RTL](https://github.com/LIV2/Bluster/blob/dev/RTL/Bluster.v),
+[Commodore's A4000/A3000 Hardware Developer Notes](https://amiga.net.au/files/Tech_Amiga/Commodore_A4000-A3000_Hardware_Developer_Notes_v1.11_ocr.pdf),
 [the Zorro III bus specification](https://www.devili.iki.fi/mirrors/haynie/zorroiii/docs/zorro3.pdf),
 [Haynie's Fat Buster II design specification](https://github.com/nonarkitten/amiga_replacement_project/blob/master/buster/390539-0x_Fat_Buster_specification.pdf),
 [Haynie on the production revisions](https://bboah.claunia.com/buster.html),

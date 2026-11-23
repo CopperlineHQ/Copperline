@@ -1752,19 +1752,19 @@ impl Config {
         let builtin_cards = [
             self.scsi.enabled() && self.scsi.controller.is_zorro_board(),
             self.lide.enabled(),
-            self.sf2000sd.enabled(),
             self.a2065_net.is_some(),
             self.toccata,
             self.video_slot_flyer,
-            self.rtg != RtgCard::None,
+            !matches!(self.rtg, RtgCard::None | RtgCard::Z3660),
             self.fmv_rom_path.is_some(),
         ];
         let slots = builtin_cards.into_iter().filter(|fitted| *fitted).count()
             + boards
                 .filter(|spec| spec.uses_connector() && !spec.chained)
                 .count();
-        if slots > 5 {
-            bail!("configuration fits {slots} physical Zorro cards on a backplane with five Buster request lines; remove a card");
+        let capacity = if self.buster == Revision::A2000 { 5 } else { 4 };
+        if slots > capacity {
+            bail!("configuration fits {slots} physical Zorro cards in {capacity} expansion slots; remove a card");
         }
         Ok(())
     }

@@ -556,9 +556,11 @@ controller uses the local DMA input and works with the stock revision 7.
 A WebAssembly card with the `dma` capability uses the same revision rules
 as a physical card of its configured Zorro generation. The configuration
 loader rejects Zorro III cards on the A2000 and Zorro III bus masters on
-revision 7. Physical cards share five modeled request inputs. Chained
-functions on one card share its input. Built-in fast and Z3 RAM, ID,
-services, CopperHF, MHI and HostSocket leave all inputs available.
+revision 7. The A2000 has five Zorro connectors and the desktop A3000
+and A4000 have four. Chained functions share their card's connector.
+Built-in fast and Z3 RAM, ID, services, CopperHF, MHI and HostSocket
+leave those connectors available, as do the Z3660 RTG and SF2000 SD
+functions on their accelerator boards.
 See [expansion bus timing](../internals/timing.md#buster-and-super-buster).
 
 The `A2000` profile models the B2000 Rev 6.x motherboard, the revision most

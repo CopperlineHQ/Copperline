@@ -7166,7 +7166,7 @@ fn buster_rejects_unreachable_boards_and_accepts_supported_upgrades() -> Result<
         .contains("buster_revision"));
     cfg.wasm_boards[0].manifest.caps.dma = false;
     cfg.validate_buster_boards()?;
-    // The profile's RTG board and this plugin occupy two connectors.
+    // The default accelerator RTG function leaves all four Zorro slots free.
     for _ in 0..3 {
         let mut spec = BoardSpec::fast_ram(65536);
         spec.connector = Some(true);
@@ -7178,6 +7178,19 @@ fn buster_rejects_unreachable_boards_and_accepts_supported_upgrades() -> Result<
         .validate_buster_boards()
         .unwrap_err()
         .to_string()
-        .contains("6 physical Zorro cards"));
+        .contains("5 physical Zorro cards in 4 expansion slots"));
+    let mut a2000 = parse_config(a2000)?;
+    for _ in 0..5 {
+        let mut board = BoardSpec::fast_ram(65536);
+        board.connector = Some(true);
+        a2000.zorro_boards.push(board);
+    }
+    a2000.validate_buster_boards()?;
+    a2000.toccata = true;
+    assert!(a2000
+        .validate_buster_boards()
+        .unwrap_err()
+        .to_string()
+        .contains("6 physical Zorro cards in 5 expansion slots"));
     Ok(())
 }

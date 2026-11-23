@@ -599,7 +599,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
-            connector: Some(true),
+            connector: Some(false),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -624,7 +624,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
-            connector: Some(true),
+            connector: Some(false),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -765,17 +765,43 @@ impl BoardSpec {
 
     pub(crate) fn uses_connector(&self) -> bool {
         self.connector.unwrap_or_else(|| {
-            self.manufacturer != COPPERLINE_MANUFACTURER_ID
-                || !matches!(
-                    (self.product, self.name.as_str()),
-                    (PRODUCT_FAST_RAM, "fast RAM")
-                        | (PRODUCT_Z3_RAM, "Zorro III RAM")
-                        | (PRODUCT_COPPERLINE_ID, "Copperline")
-                        | (PRODUCT_SERVICES, "Copperline services")
-                        | (PRODUCT_HOSTSOCKET, "HostSocket bsdsocket.library")
-                        | (PRODUCT_MHI, "MHI MPEG audio decoder")
-                        | (PRODUCT_COPPERHF, "copperhf.device")
-                )
+            let id = (self.manufacturer, self.product, self.name.as_str());
+            !matches!(
+                id,
+                (COPPERLINE_MANUFACTURER_ID, PRODUCT_FAST_RAM, "fast RAM")
+                    | (COPPERLINE_MANUFACTURER_ID, PRODUCT_Z3_RAM, "Zorro III RAM")
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_COPPERLINE_ID,
+                        "Copperline"
+                    )
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_SERVICES,
+                        "Copperline services"
+                    )
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_HOSTSOCKET,
+                        "HostSocket bsdsocket.library"
+                    )
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_MHI,
+                        "MHI MPEG audio decoder"
+                    )
+                    | (
+                        COPPERLINE_MANUFACTURER_ID,
+                        PRODUCT_COPPERHF,
+                        "copperhf.device"
+                    )
+                    | (
+                        crate::z3660::Z3660_MANUFACTURER_ID,
+                        crate::z3660::Z3660_PRODUCT,
+                        "Z3660 RTG"
+                    )
+                    | (0x144a, 11, "SF2000 SD card controller")
+            )
         })
     }
 
