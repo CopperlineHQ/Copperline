@@ -4,7 +4,7 @@
 
 `M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core with
 locked operand bus cycles and serializable MMU translations.
-[Pinned core revision](https://github.com/LinuxJedi/m68k-rs/commit/d5bfb1b4ae902267e0ff508b652fd7a268866719)
+[Pinned core revision](https://github.com/CopperlineHQ/m68k-rs/commit/d5bfb1b4ae902267e0ff508b652fd7a268866719)
 
 The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
