@@ -6,7 +6,7 @@
 locked operand bus cycles and serializable MMU translations.
 The exact commit is also tagged
 [copperline-buster-0.17.3-1](https://github.com/CopperlineHQ/m68k-rs/tree/copperline-buster-0.17.3-1).
-Switch back to crates.io when a release includes
+Switch back to the published crate when a release includes
 [upstream PR #269](https://github.com/benletchford/m68k-rs/pull/269).
 
 The core sees
