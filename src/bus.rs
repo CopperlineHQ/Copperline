@@ -415,8 +415,8 @@ struct DisplaySpriteDmaState {
     /// the stale side, and with DMA off an armed channel keeps displaying
     /// this line until a CTL fetch or poke disarms it.
     last_line: Option<DisplaySpriteLineData>,
-    /// Display line of the last DATA fetch: with SSCAN2 the hardware
-    /// fetches on every other line and redisplays in between.
+    /// Diagnostic history retained for save-state compatibility. DMA
+    /// eligibility comes from SPRxPOS and the current vertical comparator.
     last_data_fetch_vpos: i32,
     /// DATA word(s) fetched by the sprite's first DMA slot, sampled at that
     /// slot's beam time, awaiting the second slot to assemble the line.
@@ -7214,6 +7214,34 @@ impl Bus {
         self.credit_cpu_off_chip_access(cck);
     }
 
+    pub(crate) fn ramsey_clock(&self) -> u64 {
+        self.emulated_cck * u64::from(crate::ramsey::CLOCKS_PER_CCK)
+            + u64::from(
+                self.cpu_chip_clock_phase * crate::ramsey::CLOCKS_PER_CCK / self.cpu_clocks_per_cck,
+            )
+    }
+
+    pub(crate) fn ramsey_access(&mut self, addr: u32, burst_beat: bool) {
+        let now = self.ramsey_clock();
+        let ramsey = self.ramsey.as_mut().expect("Ramsey owns this RAM cycle");
+        ramsey.advance_to(now);
+        let clocks = if burst_beat {
+            2
+        } else {
+            ramsey.access_clocks(addr)
+        };
+        if self.cpu_bus_arbitration_enabled {
+            let total = clocks * self.cpu_clocks_per_cck + ramsey.clock_remainder;
+            ramsey.clock_remainder = total % crate::ramsey::CLOCKS_PER_CCK;
+            let cpu_clocks = total / crate::ramsey::CLOCKS_PER_CCK;
+            self.charge_cpu_clocks_to_cck(cpu_clocks);
+            if self.cpu_short_bus_cycle && self.cpu_access_phase_sync {
+                self.cpu_bus_overlap_clocks =
+                    self.cpu_bus_overlap_clocks.saturating_add(cpu_clocks);
+            }
+        }
+    }
+
     /// Advance the chipset for a CPU access to a motherboard peripheral (CIA,
     /// RTC, autoconfig, undecoded space). These stay on the slow motherboard
     /// bus no matter how fast the CPU is clocked, so bill the stock 68000
@@ -8154,6 +8182,20 @@ impl Bus {
     pub fn next_audio_irq_cck(&self) -> Option<u32> {
         let cck = self.paula.next_audio_irq_cck(self.agnus.dmacon)?;
         Some(cck.saturating_sub(self.audio_pending_cck).max(1))
+    }
+
+    pub(crate) fn gary_interrupts_disabled(&self) -> bool {
+        self.gary.as_ref().is_some_and(|g| g.interrupts_disabled)
+    }
+
+    pub(crate) fn chipset_ipl(&self) -> u8 {
+        if self.gary_interrupts_disabled()
+            || self.paula.intena & crate::chipset::paula::INT_MASTER == 0
+        {
+            0
+        } else {
+            pending_ipl(self.paula.intena & self.cpu_visible_intreq())
+        }
     }
 
     pub fn cpu_visible_intreq(&self) -> u16 {
@@ -9416,7 +9458,7 @@ impl Bus {
             vpos: self.agnus.vpos,
             hpos: self.agnus.hpos,
         });
-        let ipl = pending_ipl(self.paula.intena & self.cpu_visible_intreq());
+        let ipl = self.chipset_ipl();
         let trace = if self.current_frame_bus_trace.frame == position.frame {
             Some(&mut self.current_frame_bus_trace)
         } else {
@@ -9493,9 +9535,7 @@ impl Bus {
                     cck: position.cck,
                     vpos: position.vpos,
                     hpos: position.hpos,
-                    ipl: ipl_override.unwrap_or_else(|| {
-                        pending_ipl(self.paula.intena & self.cpu_visible_intreq())
-                    }),
+                    ipl: ipl_override.unwrap_or_else(|| self.chipset_ipl()),
                 });
             }
         }
@@ -9544,13 +9584,32 @@ impl Bus {
         (events, self.bus_event_next_sequence, dropped)
     }
 
+    /// Display blank endpoints in 35 ns ticks. ECS uses Agnus's external
+    /// blank. Lisa compares its own fine horizontal position when enabled.
+    pub(crate) fn display_horizontal_blank(&self) -> Option<(u32, u32)> {
+        if !self.denise_is_lisa() {
+            return self
+                .agnus
+                .programmable_horizontal_blank()
+                .map(|(a, b)| (8 * a, 8 * b));
+        }
+        if self.denise.bplcon0 & 1 == 0 || self.denise.bplcon3 & 1 == 0 {
+            return None;
+        }
+        let [start, stop] = self.denise.horizontal_blank;
+        let fine_ticks = |word: u16| ((word & 0xff) << 3) | ((word >> 8) & 7);
+        let start = start.map_or(self.agnus.hbstrt() * 8, fine_ticks);
+        let stop = stop.map_or(self.agnus.hbstop() * 8, fine_ticks);
+        (start != stop).then_some((u32::from(start), u32::from(stop)))
+    }
+
     fn beam_trace_events_at(&self, vpos: u32, hpos: u32) -> u32 {
         let mut events = self.ddf_trace_events_at(hpos);
-        if let Some((start, stop)) = self.agnus.programmable_horizontal_blank() {
-            if hpos == start {
+        if let Some((start, stop)) = self.display_horizontal_blank() {
+            if hpos == start / 8 {
                 events |= BUS_EVENT_HBS;
             }
-            if hpos == stop {
+            if hpos == stop / 8 {
                 events |= BUS_EVENT_HBE;
             }
         }

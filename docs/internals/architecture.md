@@ -439,8 +439,15 @@ nothing else answers: the ranger space above the fitted slow RAM in
 slow-RAM sizing depends on this: exec probes each 256K step by writing
 INTENA at `$xxF09A` and reading INTENAR at `$xxF01C`, extending RAM until
 the mirror answers -- on a floating bus KS 1.2 sizes RAM into unmapped
-space and dies on a yellow screen. Machines with a Gayle or Fat
-Gary/Ramsey decode the space properly and have no mirror.
+space and dies on a yellow screen. Gayle does not select these aliases.
+Fat Gary selects the custom chips at `$C00000–$CFFFFF` and
+`$DFC000–$DFFFFF`. Its separate interrupt-enable latch occupies the four
+4 KiB pages immediately below the latter window.
+
+While CIA-A asserts OVL, classic Gary selects ROM throughout the low 2 MiB.
+The 512 KiB ROM window repeats four times, and writes leave the underlying
+chip RAM intact. On Fat Gary the overlay ends at `$07FFFF`. The A1000 has
+its own boot ROM and writable control store.
 
 The `A2000` profile fits the B2000 Rev 6.x motherboard, with an 8372A
 Agnus, OCS Denise, 1 MiB of chip RAM, an MSM6242 clock and the DIP Buster.

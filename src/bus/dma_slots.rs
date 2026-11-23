@@ -345,7 +345,7 @@ impl Bus {
                     hpos,
                     BUS_RECORD_REFRESH,
                     0,
-                    0x01FE,
+                    self.refresh_strobe(hpos),
                     0,
                     0,
                     0,
@@ -535,7 +535,7 @@ impl Bus {
                 owner,
                 self.blitter.busy,
                 cpu_wait,
-                pending_ipl(self.paula.intena & self.cpu_visible_intreq()),
+                self.chipset_ipl(),
             );
             let beam_events = self.beam_trace_events_at(self.agnus.vpos, hpos);
             if beam_events != 0 {
@@ -1152,6 +1152,56 @@ impl Bus {
         None
     }
 
+    /// RGA strobes share the refresh slots. They carry sync information to
+    /// Denise/Lisa without allocating any additional chip-bus cycles.
+    fn refresh_strobe(&self, hpos: u32) -> u16 {
+        let a = &self.agnus;
+        if hpos != 1 {
+            return if hpos == 3 && a.lol { 0x03e } else { 0x1fe };
+        }
+        let pal = a.video_standard() == VideoStandard::Pal;
+        let equ_lines = if pal {
+            8 + u32::from(a.current_frame_lines() == crate::chipset::agnus::PAL_LINES)
+        } else {
+            10
+        };
+        let ecs = a.revision().is_ecs();
+        // Original Agnus starts equalization on line 1. ECS can start it
+        // at the frame boundary. Programmable composite sync or blanking
+        // disables the hardwired equalization sequence.
+        let first_equ = u32::from(!ecs);
+        if (!ecs
+            || a.beamcon0()
+                & (crate::chipset::agnus::BEAMCON0_VARCSYEN
+                    | crate::chipset::agnus::BEAMCON0_BLANKEN)
+                == 0)
+            && (first_equ..first_equ + equ_lines).contains(&a.vpos)
+        {
+            return 0x038;
+        }
+        let blank = if let Some((start, stop)) = a.programmable_vertical_blank() {
+            // The RGA strobe precedes the vertical comparator on this line.
+            let previous = if a.vpos == 0 {
+                a.current_frame_lines() - 1
+            } else {
+                a.vpos - 1
+            };
+            if start < stop {
+                (start..stop).contains(&previous)
+            } else {
+                previous >= start || previous < stop
+            }
+        } else {
+            let first_blank = u32::from(!self.mem.wcs.is_empty());
+            (first_blank..first_blank + if pal { 26 } else { 21 }).contains(&a.vpos)
+        };
+        if blank {
+            0x03a
+        } else {
+            0x03c
+        }
+    }
+
     pub(super) fn refresh_slot_active_at(hpos: u32) -> bool {
         // The OCS Agnus does 4 memory-refresh cycles per line, on ODD color
         // clocks in the fixed-DMA row (HRM DMA time-slot chart:
@@ -1279,7 +1329,8 @@ impl Bus {
         // A channel uses its slots when it is fetching data this line, or on
         // its vstop line where the slots fetch the next POS/CTL control word.
         let state = &self.display_dma_sprite_state[sprite];
-        state.dma_enabled || self.agnus.vpos as i32 == state.vstop
+        let line = self.agnus.vpos as i32;
+        line == state.vstop || (state.dma_enabled && !self.sprite_scan_repeat_line(state, line))
     }
 
     pub(super) fn record_bitplane_dmacon_write(&mut self, previous: u16) {

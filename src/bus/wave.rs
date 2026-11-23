@@ -8,7 +8,7 @@
 //! while no capture is armed.
 
 use super::{BeamWriteSource, Bus, ChipBusOwner, CpuBusAccessKind, CHIP_BUS_OWNER_NAMES};
-use crate::chipset::paula::{pending_ipl, INT_MASTER, PAULA_CLOCK_HZ};
+use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::waveform::{QuantumSample, Trigger, WaveCapture, WaveOptions, WaveStatus};
 
 impl Bus {
@@ -115,12 +115,7 @@ impl Bus {
         if !self.wave.as_deref().is_some_and(WaveCapture::is_capturing) {
             return;
         }
-        let pending = self.paula.intena & self.cpu_visible_intreq();
-        let ipl = if self.paula.intena & INT_MASTER == 0 {
-            0
-        } else {
-            pending_ipl(pending)
-        };
+        let ipl = self.chipset_ipl();
         let audio_channel = if matches!(owner, ChipBusOwner::Audio) {
             Self::audio_dma_channel_at(self.agnus.hpos).map(|channel| channel as u8)
         } else {

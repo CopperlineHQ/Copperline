@@ -96,7 +96,7 @@ SPR_LINES   equ ($04a-$02a)/2   ; SSCAN2 repeats each fetched data row
         lea SPR1,a0
         move.w #$2a40,(a0)+       ; POS: HSTART=128
         move.w #$4a00,(a0)+       ; CTL
-        move.w #SPR_LINES-1,d0
+        move.w #2*SPR_LINES-1,d0  ; SH10 clear: one data pair per beam line
 .spr1line:
         clr.w (a0)+               ; DATA
         move.w #$ffff,(a0)+       ; DATB: colour 18

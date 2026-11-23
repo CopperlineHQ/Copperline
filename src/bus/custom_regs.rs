@@ -230,7 +230,13 @@ impl Bus {
             0x1C0 if self.blitter_ecs_registers_enabled() => Some(self.agnus.htotal()),
             0x1DC if self.blitter_ecs_registers_enabled() => Some(self.agnus.beamcon0()),
             0x1C2 if self.blitter_ecs_registers_enabled() => Some(self.agnus.hsstop()),
+            0x1C4 if self.denise_is_lisa() && self.denise.horizontal_blank[0].is_some() => {
+                self.denise.horizontal_blank[0]
+            }
             0x1C4 if self.blitter_ecs_registers_enabled() => Some(self.agnus.hbstrt()),
+            0x1C6 if self.denise_is_lisa() && self.denise.horizontal_blank[1].is_some() => {
+                self.denise.horizontal_blank[1]
+            }
             0x1C6 if self.blitter_ecs_registers_enabled() => Some(self.agnus.hbstop()),
             0x1C8 if self.blitter_ecs_registers_enabled() => Some(self.agnus.vtotal()),
             0x1CA if self.blitter_ecs_registers_enabled() => Some(self.agnus.vsstop()),
@@ -1042,11 +1048,17 @@ impl Bus {
                 if self.blitter_ecs_registers_enabled() {
                     self.agnus.write_hbstrt(val);
                 }
+                if self.denise_is_lisa() {
+                    self.denise.horizontal_blank[0] = Some(val & 0x7ff);
+                }
                 false
             }
             0x1C6 => {
                 if self.blitter_ecs_registers_enabled() {
                     self.agnus.write_hbstop(val);
+                }
+                if self.denise_is_lisa() {
+                    self.denise.horizontal_blank[1] = Some(val & 0x7ff);
                 }
                 false
             }

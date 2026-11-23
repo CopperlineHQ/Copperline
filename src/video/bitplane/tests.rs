@@ -235,7 +235,9 @@ fn programmable_blanking_blanks_vbstrt_vbstop_rows_under_varvben() {
     let mut fb = vec![FILL; FB_PIXELS];
     apply_programmable_blanking(
         agnus.programmable_vertical_blank(),
-        agnus.programmable_horizontal_blank(),
+        agnus
+            .programmable_horizontal_blank()
+            .map(|(a, b)| (a * 8, b * 8)),
         &mut fb,
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
@@ -252,7 +254,9 @@ fn programmable_blanking_blanks_vbstrt_vbstop_rows_under_varvben() {
     let mut fb = vec![FILL; FB_PIXELS];
     apply_programmable_blanking(
         agnus.programmable_vertical_blank(),
-        agnus.programmable_horizontal_blank(),
+        agnus
+            .programmable_horizontal_blank()
+            .map(|(a, b)| (a * 8, b * 8)),
         &mut fb,
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
@@ -284,7 +288,7 @@ fn content_rect_trims_to_the_blanking_the_frame_shows() {
     assert_eq!((trimmed.x0, trimmed.x1), (0x40, 0x200));
     // Horizontal blank over colour clocks 0x40..0x48 = framebuffer
     // columns 0x3E..0x5E: the envelope's left edge is inside it.
-    let hblank = Some((0x40u32, 0x48u32));
+    let hblank = Some((0x40 * 8, 0x48 * 8));
     let trimmed = trim_content_rect_to_blanking(rect, None, hblank, 312, PAL_VISIBLE_LINE0)
         .expect("envelope survives");
     assert_eq!(trimmed.x0, ((0x90 - DIW_HSTART_FB0) * 2) as usize);
@@ -328,7 +332,9 @@ fn programmable_blanking_blanks_hbstrt_hbstop_columns_under_blanken() {
     let mut fb = vec![FILL; FB_PIXELS];
     apply_programmable_blanking(
         agnus.programmable_vertical_blank(),
-        agnus.programmable_horizontal_blank(),
+        agnus
+            .programmable_horizontal_blank()
+            .map(|(a, b)| (a * 8, b * 8)),
         &mut fb,
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
@@ -359,7 +365,8 @@ fn programmable_blanking_requires_ecs_and_wraps() {
     let mut fb = vec![FILL; FB_PIXELS];
     apply_programmable_blanking(
         ocs.programmable_vertical_blank(),
-        ocs.programmable_horizontal_blank(),
+        ocs.programmable_horizontal_blank()
+            .map(|(a, b)| (a * 8, b * 8)),
         &mut fb,
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,
@@ -376,7 +383,8 @@ fn programmable_blanking_requires_ecs_and_wraps() {
     let mut fb = vec![FILL; FB_PIXELS];
     apply_programmable_blanking(
         ecs.programmable_vertical_blank(),
-        ecs.programmable_horizontal_blank(),
+        ecs.programmable_horizontal_blank()
+            .map(|(a, b)| (a * 8, b * 8)),
         &mut fb,
         PAL_VISIBLE_LINE0,
         FB_HEIGHT,

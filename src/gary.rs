@@ -68,6 +68,9 @@ pub struct Gary {
     timeout_enabled: bool,
     /// COLDBOOT: this reset was a cold start.
     coldboot: bool,
+    /// Inverted so an older save state defaults to the reset level on /IENA.
+    #[serde(default)]
+    pub(crate) interrupts_disabled: bool,
 }
 
 impl Gary {
@@ -77,6 +80,7 @@ impl Gary {
             berr_on_timeout: false,
             timeout_enabled: false,
             coldboot: true,
+            interrupts_disabled: false,
         }
     }
 

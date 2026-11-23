@@ -79,8 +79,12 @@ FMODE `10` page mode duplicates the first 16-bit word while advancing the
 pointer by the full 32-bit width. Fetch bandwidth also bounds valid AGA plane
 counts: FMODE0 permits 8/4/2 planes in lo-res/hi-res/SHRES, FMODE1-2 permits
 8/8/4, and FMODE3 permits eight in every resolution. An overprogrammed count
-fetches no bitplanes rather than clamping. FMODE's BSCAN2 and SSCAN2 bits
-repeat bitplane and sprite data on successive display lines. SSCAN2 also masks
+fetches no bitplanes rather than clamping. BSCAN2 controls bitplane scan
+doubling. With SSCAN2 set, SPRxPOS.SH10 selects doubling independently
+for each sprite. Alice fetches that sprite's data only on lines whose
+parity matches its vertical start. Lisa displays the held words on the
+other lines, and those chip-bus slots are free. A channel with SH10 clear
+continues fetching every line. SSCAN2 also masks
 the high bit of Lisa's sprite horizontal comparator: HSTART `$100..$1FF`
 aliases `$000..$0FF` while the bit is active. DblPAL/DblNTSC modes rely on that
 alias for the Workbench pointer. DMA sprite data becomes armed at its channel's
@@ -95,6 +99,13 @@ these same beam-timed decisions. A sprite widened by FMODE's SPR32/SPAGEM
 bits collides over every word its serializer shifts out, 32 or 64 sprite
 pixels, the same pixels the renderer draws; a manually written SPRxDATA
 word repeats across that width in both paths.
+
+Lisa has its own HBSTRT and HBSTOP comparators. Bits 7–0 select the colour
+clock and bits 10–8 select one of its eight 35 ns samples. BPLCON0.ECSENA
+and BPLCON3.EXTBLKEN enable the programmable horizontal output blank.
+Wrapped windows can blank both edges of the image. The native SHRES canvas
+preserves a transition within a single hi-res pixel. ECS Agnus retains its
+whole-clock comparator. [Commodore AA chipset specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/Specifications_AA_Chipset-Manual-ENG.pdf)
 
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as

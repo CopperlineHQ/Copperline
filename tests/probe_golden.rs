@@ -76,6 +76,7 @@ enum Machine {
     Aga,
     /// A1200 profile exercising NTSC field geometry.
     AgaNtsc,
+    A4000,
     A4000Buster,
 }
 
@@ -167,10 +168,12 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         Machine::Jit => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
-        Machine::Aga | Machine::AgaNtsc | Machine::A4000Buster => "revision = \"AGA\"\n",
+        Machine::Aga | Machine::AgaNtsc | Machine::A4000 | Machine::A4000Buster => {
+            "revision = \"AGA\"\n"
+        }
     };
     let (cpu, memory) = match machine {
-        Machine::A4000Buster => ("68040", "chip = \"2M\"\n"),
+        Machine::A4000 | Machine::A4000Buster => ("68040", "chip = \"2M\"\n"),
         Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
         Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
         Machine::Aga | Machine::AgaNtsc => ("68EC020", "chip = \"2M\"\n"),
@@ -180,10 +183,15 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
     } else {
         ""
     };
-    let (profile, video) = if matches!(machine, Machine::A4000Buster) {
+    let (profile, video) = if matches!(machine, Machine::A4000 | Machine::A4000Buster) {
+        let scsi = if matches!(machine, Machine::A4000Buster) {
+            "[scsi]\ncontroller = \"a4091\"\n"
+        } else {
+            ""
+        };
         (
             format!(
-                "[machine]\nprofile = \"A4000\"\nbattmem = '{}'\n[scsi]\ncontroller = \"a4091\"\n[rtg]\ncard = \"none\"\n",
+                "[machine]\nprofile = \"A4000\"\nbattmem = '{}'\n{scsi}[rtg]\ncard = \"none\"\n",
                 adf.with_extension("nvram").display()
             ),
             "PAL",
@@ -325,14 +333,50 @@ fn run_probe(p: &Probe) {
     let shot_path = capture_probe(p, &work);
     let golden_path = golden_dir.join(format!("{name}.png"));
     let actual = load_png(&shot_path).expect("load capture");
-    if matches!(p.machine, Machine::A4000Buster) {
+    if matches!(p.machine, Machine::A4000 | Machine::A4000Buster) || name == "gary-overlay" {
         let center =
             (actual.height as usize / 2 * actual.width as usize + actual.width as usize / 2) * 4;
         assert_eq!(
             &actual.data[center..center + 4],
             &[34, 204, 68, 255],
-            "the guest must observe partial DMA and verify the final buffer"
+            "{name}: the guest must finish its checks and paint the success colour"
         );
+    }
+    if name == "lisa-scanblank" {
+        assert_eq!((actual.width, actual.height), (1432, 313));
+        let pixel = |x: usize, y: usize| {
+            let offset = (y * actual.width as usize + x) * 4;
+            &actual.data[offset..offset + 3]
+        };
+        // CCK $60 plus 3/8 and 5/8, at native 35 ns sample pitch.
+        for x in 378..=381 {
+            assert_eq!(
+                pixel(x, 0),
+                if (379..381).contains(&x) {
+                    [0, 0, 0]
+                } else {
+                    [0, 0, 255]
+                }
+            );
+        }
+        for row in 0..32 {
+            assert_eq!(
+                pixel(332, 81 + row),
+                if row % 4 < 2 {
+                    [255, 0, 0]
+                } else {
+                    [0, 0, 255]
+                }
+            );
+            assert_eq!(
+                pixel(460, 81 + row),
+                if row % 2 == 0 {
+                    [0, 255, 0]
+                } else {
+                    [0, 0, 255]
+                }
+            );
+        }
     }
     if matches!(p.machine, Machine::AgaNtsc) {
         // Require the source probe's visible 4:4:2:1 sprite staircase even
@@ -586,6 +630,9 @@ probe_tests! {
     // HSTART $165 aliases $065 while $080 remains distinct (the DblPAL
     // High Res Laced invisible-pointer regression class, issue #270);
     // FS-UAE-verified exact placement.
+    golden_gary_overlay => probe("gary-overlay", "gary-overlay.bin", 16.0);
+    golden_fatgary_ramsey => Probe { name: "fatgary-ramsey", program: "fatgary-ramsey.bin", seconds: 8.0, machine: Machine::A4000 };
+    golden_lisa_scanblank => probe_aga("lisa-scanblank", "lisa-scanblank.bin", 16.0);
     golden_dblpal_hires_lace => probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
     // Alice wide-fetch addressing: FMODE 10 duplicates the first word and
     // supplied low address bits alias phases inside 32-bit fetches.

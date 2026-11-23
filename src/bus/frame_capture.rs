@@ -973,10 +973,14 @@ impl Bus {
 
     /// With SSCAN2 the hardware fetches sprite data on every other display
     /// line and redisplays the previous fetch in between.
-    fn sprite_scan_repeat_line(&self, state: &DisplaySpriteDmaState, beam_y: i32) -> bool {
+    pub(super) fn sprite_scan_repeat_line(
+        &self,
+        state: &DisplaySpriteDmaState,
+        beam_y: i32,
+    ) -> bool {
         sprite_scan_doubled(self.agnus.fmode())
-            && state.last_data_fetch_vpos != unset_sprite_line_marker()
-            && beam_y == state.last_data_fetch_vpos + 1
+            && state.pos & 0x80 != 0
+            && (beam_y ^ state.vstrt) & 1 != 0
     }
 
     /// First hardware sprite slot ($15+4N). On the channel's vstop line the

@@ -3886,6 +3886,9 @@ impl M68kMachine {
         if bus.cartridge_nmi_pending() {
             return 7;
         }
+        if bus.gary_interrupts_disabled() {
+            return 0;
+        }
         let pulse = bus.cpu_masked_irq_pulse();
         if bus.paula.intena & INT_MASTER == 0 && pulse == 0 {
             return 0;
@@ -4082,15 +4085,18 @@ impl CpuBus {
     /// it just cleared. KS 1.2 trusts that test alone, so a floating bus
     /// there makes it size RAM to $DC0000 and crash into unmapped space
     /// (yellow screen); KS 1.3 added a write/read-back check that also
-    /// stops on a floating bus. The big-box bus controllers decode this
-    /// space properly instead of mirroring -- Gayle (A600/A1200) claims it
-    /// and Fat Gary/Ramsey (A3000/A4000) time unanswered cycles out -- so
-    /// machines with any of them get no mirror.
+    /// stops on a floating bus. Gayle does not select these aliases. Fat
+    /// Gary selects custom registers in the $C0-$CF and $DFC-$DFF pages.
     fn custom_reg_page_offset(&self, addr: u32) -> Option<u32> {
-        if range_contains(CUSTOM_BASE, CUSTOM_SIZE, addr) {
-            return Some(addr & 0xFFF);
+        if self.bus.gary.is_some() {
+            return ((0x00df_c000..0x00e0_0000).contains(&addr)
+                || (0x00c0_0000..0x00d0_0000).contains(&addr))
+            .then_some(addr & 0x1ff);
         }
-        if self.bus.gayle.is_some() || self.bus.ramsey.is_some() || self.bus.gary.is_some() {
+        if range_contains(CUSTOM_BASE, CUSTOM_SIZE, addr) {
+            return Some(addr & 0xfff);
+        }
+        if self.bus.gayle.is_some() || self.bus.ramsey.is_some() {
             return None;
         }
         let ranger = (0x00C0_0000..0x00D8_0000).contains(&addr)
@@ -4286,6 +4292,17 @@ impl CpuBus {
             return;
         }
         self.bus.cpu_external_access(Self::access_words(size));
+    }
+
+    fn bill_motherboard_ram(&mut self, addr: u32, size: usize) {
+        if addr < 0x0700_0000 || self.bus.ramsey.is_none() {
+            self.bill_external_access(size);
+        } else if !self.jit_enabled {
+            let last = (addr + size as u32 - 1) & !3;
+            for beat in ((addr & !3)..=last).step_by(4) {
+                self.bus.ramsey_access(beat, false);
+            }
+        }
     }
 
     fn bill_zorro(
@@ -4508,21 +4525,39 @@ impl CpuBus {
         if let Some(cache) = cache.as_deref_mut() {
             cache.fill_after_miss(addr, size, |long| self.peek_long(long));
             let line = addr & !15;
-            if cache.burst
-                && !self.bus.buster.cpu_locked
-                && cache.enabled
-                && !cache.frozen
-                && self.bus.buster.revision.z3_master()
-                && self.bus.mem.zorro.burst_ram(line)
-            {
+            if cache.burst && !self.bus.buster.cpu_locked && cache.enabled && !cache.frozen {
+                let ramsey_ram = (0x0700_0000..0x0800_0000).contains(&line)
+                    && matches!(
+                        self.classify_plain_memory(line, 16),
+                        Some(PlainMemRegion::MbRam(_))
+                    );
+                let follows = if ramsey_ram {
+                    let now = self.bus.ramsey_clock();
+                    self.bus.ramsey.as_mut().map_or(0, |r| {
+                        r.advance_to(now);
+                        r.burst_followups(addr)
+                    })
+                } else if self.bus.buster.revision.z3_master() && self.bus.mem.zorro.burst_ram(line)
+                {
+                    3
+                } else {
+                    0
+                };
                 // The first longword was billed by the demand read. Buster
                 // increments EA3:2, wrapping within the same 16-byte line.
                 // All four data strobes share one /FCS. No other master
                 // can acquire the bus between the demand and the wrap.
                 let driving = std::mem::replace(&mut self.bus.buster.cpu_driving, true);
-                for step in 1..4 {
+                for step in 1..=follows {
                     let next = line | ((addr.wrapping_add(4 * step)) & 12);
-                    cache.fill_after_miss(next, 4, |long| self.read_bus_cycle(long, 4, kind));
+                    if ramsey_ram {
+                        if !self.jit_enabled {
+                            self.bus.ramsey_access(next, true);
+                        }
+                        cache.fill_after_miss(next, 4, |long| self.peek_long(long));
+                    } else {
+                        cache.fill_after_miss(next, 4, |long| self.read_bus_cycle(long, 4, kind));
+                    }
                 }
                 self.bus.buster.cpu_driving = driving;
             }
@@ -4591,12 +4626,22 @@ impl CpuBus {
             || self.bus.cartridge.as_ref().is_some_and(|c| c.decodes(addr))
     }
 
+    fn first_memory_beat(&self, addr: u32, size: usize) -> usize {
+        if self.bus.mem.overlay && (addr & 0x7ffff) + size as u32 > 0x80000 {
+            if let Some(off) = self.overlay_rom_offset(addr, 1) {
+                return (self.bus.mem.rom.len() - off).min(size);
+            }
+        }
+        if self.bus.buster.revision != crate::buster::Revision::Absent {
+            return self.bus.zorro_first_beat(addr, size);
+        }
+        size
+    }
+
     fn read_sized_uncached(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
-        if self.bus.buster.revision != crate::buster::Revision::Absent
-            && size > 1
-            && (size > 2 || address & 1 != 0)
-        {
-            let first = self.bus.zorro_first_beat(self.mask(address), size);
+        if size > 1 && (size > 2 || address & 1 != 0) {
+            let addr = self.mask(address);
+            let first = self.first_memory_beat(addr, size);
             if first < size {
                 let hi = self.read_sized_uncached(address, first, kind);
                 let lo = self.read_sized_uncached(
@@ -4646,10 +4691,7 @@ impl CpuBus {
                 return read_be(self.bus.mem.zorro.board_ram(board), off, size);
             }
             Some(PlainMemRegion::MbRam(off)) => {
-                // Ramsey-controlled motherboard RAM (A3000/A4000): 32-bit
-                // local RAM off the chip bus, at uncontended external speed
-                // like expansion RAM.
-                self.bill_external_access(size);
+                self.bill_motherboard_ram(addr, size);
                 return read_be(&self.bus.mem.mb_ram, off, size);
             }
             Some(PlainMemRegion::AccelRam(off)) => {
@@ -4755,7 +4797,9 @@ impl CpuBus {
         }
         if size == 1 && self.bus.ramsey.is_some() && crate::ramsey::decodes(addr) {
             self.bus.cpu_slow_external_access(1);
-            if let Some(ramsey) = self.bus.ramsey.as_ref() {
+            let now = self.bus.ramsey_clock();
+            if let Some(ramsey) = self.bus.ramsey.as_mut() {
+                ramsey.advance_to(now);
                 return u32::from(ramsey.read_byte(addr));
             }
         }
@@ -4988,11 +5032,9 @@ impl CpuBus {
     }
 
     fn write_sized_unobserved(&mut self, address: u32, size: usize, value: u32) {
-        if self.bus.buster.revision != crate::buster::Revision::Absent
-            && size > 1
-            && (size > 2 || address & 1 != 0)
-        {
-            let first = self.bus.zorro_first_beat(self.mask(address), size);
+        if size > 1 && (size > 2 || address & 1 != 0) {
+            let addr = self.mask(address);
+            let first = self.first_memory_beat(addr, size);
             if first < size {
                 self.write_sized_unobserved(address, first, value >> ((size - first) * 8));
                 self.write_sized_unobserved(
@@ -5072,7 +5114,7 @@ impl CpuBus {
                 return;
             }
             Some(PlainMemRegion::MbRam(off)) => {
-                self.bill_external_access(size);
+                self.bill_motherboard_ram(addr, size);
                 write_be(&mut self.bus.mem.mb_ram, off, size, value);
                 return;
             }
@@ -5169,6 +5211,15 @@ impl CpuBus {
                 self.bus.overlay_disable_pending = true;
                 self.bus.slice_preempted = true;
             }
+            if effect.enable_overlay
+                && self.bus.gayle.is_none()
+                && self.bus.akiko.is_none()
+                && self.bus.mem.wcs.is_empty()
+            {
+                self.bus.mem.overlay = true;
+                self.bus.overlay_disable_pending = false;
+                self.bus.slice_preempted = true;
+            }
             if effect.timer_started {
                 self.bus.slice_preempted = true;
             }
@@ -5253,6 +5304,13 @@ impl CpuBus {
             }
             return;
         }
+        if self.bus.gary.is_some() && addr & !0x3000 == 0x00df_809a && size <= 2 {
+            self.bill_external_access(size);
+            let high_byte = value >> ((size - 1) * 8);
+            self.bus.gary.as_mut().unwrap().interrupts_disabled = high_byte & 0x80 == 0;
+            self.bus.slice_preempted = true;
+            return;
+        }
         if size == 1 && self.bus.gary.is_some() && crate::gary::decodes(addr) {
             self.bus.cpu_slow_external_access(1);
             if let Some(gary) = self.bus.gary.as_mut() {
@@ -5262,8 +5320,9 @@ impl CpuBus {
         }
         if size == 1 && self.bus.ramsey.is_some() && crate::ramsey::decodes(addr) {
             self.bus.cpu_slow_external_access(1);
+            let now = self.bus.ramsey_clock();
             if let Some(ramsey) = self.bus.ramsey.as_mut() {
-                ramsey.write_byte(addr, value as u8);
+                ramsey.write_at(addr, value as u8, now);
             }
             return;
         }
@@ -5433,7 +5492,19 @@ impl CpuBus {
         if !self.bus.mem.overlay {
             return None;
         }
-        region_offset(self.bus.mem.rom.len(), CHIP_RAM_BASE, addr, size)
+        let classic_gary = self.bus.gary.is_none()
+            && self.bus.ramsey.is_none()
+            && self.bus.gayle.is_none()
+            && self.bus.akiko.is_none()
+            && self.bus.mem.wcs.is_empty();
+        // Gary selects ROM for all of bank zero; the ROM address pins
+        // repeat its 512 KiB image. Fat Gary decodes only the first image.
+        let rom_addr = if classic_gary && u64::from(addr) < CHIP_WINDOW_SIZE {
+            addr & 0x7ffff
+        } else {
+            addr
+        };
+        region_offset(self.bus.mem.rom.len(), CHIP_RAM_BASE, rom_addr, size)
     }
 }
 
@@ -5451,6 +5522,11 @@ impl CpuBus {
             return;
         }
         let nmi = self.bus.cartridge_nmi_pending();
+        if !nmi && self.bus.gary_interrupts_disabled() {
+            self.sampled_irq_level = 0;
+            self.sampled_operand_irq_level = 0;
+            return;
+        }
         let master_enabled = self.bus.paula.intena & INT_MASTER != 0;
         if master_enabled && self.bus.cia_irq_forwarding_due() {
             self.flush_timed_devices_dcache_coherent();
@@ -6427,6 +6503,51 @@ fn write_be(bytes: &mut [u8], off: usize, size: usize, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ramsey_cpu_data_cycles_and_cache_wrap_follow_the_control_latch() -> Result<()> {
+        use crate::ramsey::*;
+        let mut m = machine_with_program_model(0x400, &[0x4e71], CpuModel::M68030)?;
+        let b = &mut m.bus;
+        b.bus.set_cpu_clocks_per_cck(7);
+        b.bus.set_cpu_bus_arbitration_enabled(true);
+        b.bus.mem.mb_ram.resize(4 << 20, 0);
+        b.bus
+            .attach_ramsey(Ramsey::new(RamseyRevision::Rev7, 4 << 20));
+        let base = b.bus.mem.mb_ram_base() as u32;
+        let cost = |b: &mut CpuBus, addr| {
+            let before = b.bus.ramsey_clock();
+            let _ = b.read_long(addr);
+            b.bus.ramsey_clock() - before
+        };
+        assert_eq!(cost(b, base), 5);
+        for (control, first, behind) in [
+            (CONTROL_BURST, 7, 11),
+            (CONTROL_BURST | CONTROL_WRAP, 11, 0),
+        ] {
+            b.write_byte(RAMSEY_CONTROL, control | CONTROL_RAMSIZE);
+            b.bus.advance_devices(24);
+            assert_eq!(b.read_byte(RAMSEY_CONTROL), control | CONTROL_RAMSIZE);
+            b.dcache = Some(Box::default());
+            b.apply_cache_control((1 << 12) | (1 << 8), 0, 0);
+            assert_eq!(cost(b, base + 8), first);
+            assert_eq!(cost(b, base), behind);
+        }
+        b.dcache = None;
+        b.write_byte(RAMSEY_CONTROL, CONTROL_PAGE | CONTROL_RAMSIZE);
+        // Start just after a refresh so all three transfers fit in one open-row interval.
+        let until_refresh = 154 - b.bus.ramsey_clock() % 154;
+        b.bus.advance_devices(until_refresh.div_ceil(7) as u32);
+        assert_eq!(cost(b, base), 5);
+        assert_eq!(cost(b, base + 4), 3);
+        assert_eq!(cost(b, base + 4096), 7);
+        b.bus.advance_devices(24);
+        assert_eq!(cost(b, base + 4096), 5);
+        b.write_byte(RAMSEY_CONTROL, CONTROL_SKIP);
+        b.bus.advance_devices(24);
+        assert_eq!(cost(b, base), 4);
+        Ok(())
+    }
 
     #[test]
     fn buster_port_width_wait_and_burst_reach_the_cpu_bus() -> Result<()> {
@@ -8864,21 +8985,73 @@ mod tests {
     }
 
     #[test]
-    fn gayle_and_fat_gary_machines_do_not_mirror_custom_registers() {
-        // Gayle (A600/A1200) and Fat Gary/Ramsey (A3000/A4000) decode the
-        // chip-register space properly, so the ranger space floats instead
-        // of mirroring the custom registers.
-        let mut gayle_bus = test_bus(reset_rom(0, 0));
-        gayle_bus.attach_gayle(crate::gayle::Gayle::new(0xD0));
-        let mut fat_gary_bus = test_bus(reset_rom(0, 0));
-        fat_gary_bus.attach_gary(crate::gary::Gary::new());
-        for machine_bus in [gayle_bus, fat_gary_bus] {
-            let mut bus = cpu_bus(machine_bus);
-            bus.write_word(0x00DF_F09A, 0x8004);
-            bus.bus.data_bus = 0xA53C;
-            assert_eq!(bus.read_word(0x00CB_F01C), 0xA53C, "floating bus");
-            bus.write_word(0x00CB_F09A, 0x3FFF);
-            assert_eq!(bus.read_word(0x00DF_F01C), 0x0004, "INTENA untouched");
+    fn gayle_and_fat_gary_drive_different_custom_selects() {
+        for fat in [false, true] {
+            let mut machine = test_bus(reset_rom(0, 0));
+            if fat {
+                machine.attach_gary(crate::gary::Gary::new());
+            } else {
+                machine.attach_gayle(crate::gayle::Gayle::new(0xd0));
+            }
+            let mut b = cpu_bus(machine);
+            for base in [0xc10000, 0xcbf000, 0xcffe00, 0xdfc000, 0xdfd000, 0xdfe000] {
+                b.write_word(0xdff09a, 0x3fff);
+                b.write_word(base + 0x9a, 0x8004);
+                assert_eq!(b.read_word(0xdff01c), if fat { 4 } else { 0 }, "{base:x}");
+                b.bus.data_bus = 0xa53c;
+                assert_eq!(b.read_word(base + 0x1c), if fat { 4 } else { 0xa53c });
+            }
+            for base in [0xd00000, 0xdf7000, 0xdf8000, 0xdfb000] {
+                b.bus.data_bus = 0xa53c;
+                assert_eq!(b.read_word(base + 0x1c), 0xa53c);
+            }
+        }
+    }
+
+    #[test]
+    fn fat_gary_iena_gates_cpu_pins_and_preserves_paula_requests() {
+        let mut machine = test_bus(reset_rom(0, 0));
+        machine.attach_gary(crate::gary::Gary::new());
+        let mut b = cpu_bus(machine);
+        b.bus.paula.intena = INT_MASTER | INT_VERTB;
+        b.bus.paula.intreq = INT_VERTB;
+        for base in [0xdf8000, 0xdf9000, 0xdfa000, 0xdfb000] {
+            b.write_word(base + 0x9a, 0);
+            b.write_byte(base + 0x9b, 0xff);
+            b.sample_ipl();
+            assert_eq!(b.sampled_irq_level, 0);
+            assert_eq!(b.bus.chipset_ipl(), 0);
+            assert_eq!(b.bus.paula.intreq & INT_VERTB, INT_VERTB);
+            b.write_byte(base + 0x9a, 0x80);
+            b.sample_ipl();
+            assert_eq!(b.sampled_irq_level, 3);
+        }
+    }
+
+    #[test]
+    fn classic_gary_boot_rom_repeats_over_two_megabytes() {
+        for fat in [false, true] {
+            let mut machine = test_bus(reset_rom(0, 0));
+            if fat {
+                machine.attach_gary(crate::gary::Gary::new());
+            }
+            machine.mem.overlay = true;
+            machine.mem.chip_ram.resize(2 << 20, 0);
+            machine.mem.rom[..2].copy_from_slice(&[0x11, 0x22]);
+            machine.mem.rom[0x7fffe..].copy_from_slice(&[0x33, 0x44]);
+            let mut b = cpu_bus(machine);
+            for addr in [0x80000, 0x100000, 0x180000] {
+                b.write_word(addr, 0xaa55);
+                assert_eq!(b.read_word(addr), if fat { 0xaa55 } else { 0x1122 });
+                assert_eq!(b.peek_byte(addr), if fat { 0xaa } else { 0x11 });
+            }
+            assert_eq!(
+                b.read_long(0x7fffe),
+                if fat { 0x3344aa55 } else { 0x33441122 }
+            );
+            b.write_long(0x7fffe, 0x56789abc);
+            b.bus.mem.overlay = false;
+            assert_eq!(b.read_word(0x80000), if fat { 0x9abc } else { 0 });
         }
     }
 
