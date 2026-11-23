@@ -220,15 +220,19 @@ and takes the board offline. Within a transaction, `dma_write` journals up to
 A trap discards that callback's journal. A read sees the callback's earlier
 writes, including accesses that wrap at the end of the address space.
 
-On a Buster backplane, the slot claims the bus for each DMA buffer. Zorro II
+The bundled HostSocket service commits its writes before the doorbell
+returns and accepts full 32-bit guest pointers on every profile.
+
+On a Buster backplane, a physical plugin claims the bus for each DMA buffer. Zorro II
 drives a 24-bit address and transfers up to two bytes per cycle. Zorro III
 drives 32 bits and transfers up to four bytes per cycle on revision 9 or 11.
 Chip and slow RAM also wait for the Agnus CPU port. The synchronous
 `dma_read` import samples memory on granted cycles, including any wait for
 earlier writes. Board ticks wait across an indivisible CPU instruction. An
 immediate read requested by a register callback during a CPU lock or while
-serving another expansion master sees open bus. A Zorro III card on revision
-7 can respond to register accesses but cannot master DMA.
+serving another expansion master sees open bus. Revision 7 accepts
+Zorro III slave cards. Configuring a Zorro III card with the DMA capability
+requires revision 9 or 11.
 
 Submitted writes become visible to the guest as their cycles complete.
 The outstanding write queue has the same limits as the journal. Interrupt
@@ -859,7 +863,7 @@ motherboard response. Other cards responding at that address still collide.
 For Zorro III RAM, `mtack = true` accepts a Level II cache-line burst and
 `cache_inhibit = true` inhibits CPU caching. On Zorro II, Super Buster
 inhibits caching in its I/O windows and drives both read strobes in the
-`$200000–$9FFFFF` memory window.
+`$200000-$9FFFFF` memory window.
 Zorro III cards configure at `$FF000000` on Super Buster. Set
 `config_in_z2 = true` for a card wired to configure at `$00E80000`.
 The card responds to one aperture while CFGIN is asserted.

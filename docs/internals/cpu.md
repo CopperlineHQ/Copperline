@@ -4,7 +4,10 @@
 
 `M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core with
 locked operand bus cycles and serializable MMU translations.
-[Pinned core revision](https://github.com/CopperlineHQ/m68k-rs/commit/d5bfb1b4ae902267e0ff508b652fd7a268866719)
+The exact commit is also tagged
+[copperline-buster-0.17.3-1](https://github.com/CopperlineHQ/m68k-rs/tree/copperline-buster-0.17.3-1).
+Switch back to crates.io when a release includes
+[upstream PR #269](https://github.com/benletchford/m68k-rs/pull/269).
 
 The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
@@ -434,7 +437,7 @@ destination 1 to end the locked transfer. The programmer's reference
 names destination 1, while the 68040 user's manual describes the last
 operand read. The external operand order has yet to be verified on
 silicon. [M68000 Family Programmer's Reference Manual, p. 4-68](https://www.nxp.com/docs/en/reference-manual/M68000PRM.pdf)
-and [M68040 User's Manual, §7.4.5](https://www.nxp.com/docs/en/reference-manual/MC68040UM.pdf)
+and [M68040 User's Manual, section 7.4.5](https://www.nxp.com/docs/en/reference-manual/MC68040UM.pdf)
 
 The boundary callback is a no-op for ordinary embedders; Copperline uses
 it to keep hardware accesses ordered without calling the host from every

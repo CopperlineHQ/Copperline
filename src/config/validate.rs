@@ -1533,7 +1533,7 @@ impl TryFrom<RawConfig> for Config {
             (Some(true), None) => Some(PathBuf::from(BUNDLED_FMV_ROM)),
             (Some(false) | None, None) => defaults.fmv_rom_path,
         };
-        Ok(Config {
+        let cfg = Config {
             host_disks,
             pcmcia,
             rom_path: raw
@@ -1709,7 +1709,64 @@ impl TryFrom<RawConfig> for Config {
             video_slot_preview_overlay,
             video_slot_flyer,
             paths: raw.paths,
-        })
+        };
+        cfg.validate_buster_boards()?;
+        Ok(cfg)
+    }
+}
+
+impl Config {
+    pub(crate) fn validate_buster_boards(&self) -> Result<()> {
+        use crate::buster::Revision;
+        if self.buster == Revision::Absent {
+            return Ok(());
+        }
+        let a4091 = self.scsi.enabled() && self.scsi.controller == ScsiController::A4091;
+        let boards = self
+            .zorro_boards
+            .iter()
+            .chain(self.wasm_boards.iter().map(|w| &w.spec));
+        if self.buster == Revision::A2000
+            && (a4091
+                || self.z3_ram_bytes != 0
+                || matches!(self.rtg, RtgCard::Z3660 | RtgCard::GraffityZ3)
+                || boards.clone().any(|b| b.version == ZorroVersion::III))
+        {
+            bail!("the A2000 backplane accepts Zorro II cards only; select an A3000 or A4000 for Zorro III RAM, RTG or expansion boards");
+        }
+        if self.buster == Revision::Rev7 {
+            let master = if a4091 {
+                Some("A4091")
+            } else {
+                self.wasm_boards
+                    .iter()
+                    .find(|w| w.spec.version == ZorroVersion::III && w.manifest.caps.dma)
+                    .map(|w| w.spec.name.as_str())
+            };
+            if let Some(name) = master {
+                bail!(
+                    "{name} needs Zorro III bus mastering; set [machine] buster_revision = 9 or 11"
+                );
+            }
+        }
+        let builtin_cards = [
+            self.scsi.enabled() && self.scsi.controller.is_zorro_board(),
+            self.lide.enabled(),
+            self.sf2000sd.enabled(),
+            self.a2065_net.is_some(),
+            self.toccata,
+            self.video_slot_flyer,
+            self.rtg != RtgCard::None,
+            self.fmv_rom_path.is_some(),
+        ];
+        let slots = builtin_cards.into_iter().filter(|fitted| *fitted).count()
+            + boards
+                .filter(|spec| spec.uses_connector() && !spec.chained)
+                .count();
+        if slots > 5 {
+            bail!("configuration fits {slots} physical Zorro cards on a backplane with five Buster request lines; remove a card");
+        }
+        Ok(())
     }
 }
 

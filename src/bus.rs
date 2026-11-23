@@ -8019,6 +8019,11 @@ impl Bus {
     /// bus/MMIO accesses end the burst independently. Keep a 64-CCK ceiling for
     /// asynchronous host devices whose arrivals cannot be predicted.
     pub(crate) fn jit_event_horizon_cck(&self) -> u32 {
+        // A physical plugin can request the bus from its very next tick.
+        #[cfg(feature = "wasm-boards")]
+        if self.buster.wasm_slots != 0 {
+            return 1;
+        }
         [
             Some(64),
             // Timer and alarm events, and a staged interrupt's arrival at

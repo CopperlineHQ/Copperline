@@ -201,8 +201,8 @@ qualifies the card response with the motherboard address select and
 rotates service among waiting Zorro II cards. Level II (9/11) schedules
 up to eight completed cycles per Zorro III grant. A master asserting LOCK
 retains its grant until an unlocked cycle completes. An unclaimed grant
-expires after 16 colour clocks (about 4.5 µs). The specification gives
-“several microseconds” for this interval. Once the master asserts FCS,
+expires after 16 colour clocks (about 4.5 us). The specification gives
+"several microseconds" for this interval. Once the master asserts FCS,
 slave wait states no longer count against the grant deadline. Revision 7 can address a
 Zorro III slave, but cannot grant a Zorro III master. Revision 11 services
 one registered Zorro III master at a time. Revision 9 models a registration
@@ -234,7 +234,9 @@ line. A locked chip write waits for its Agnus slot before the CPU releases
 Buster.
 Register TAS leaves arbitration free.
 
-DMA-capable WebAssembly cards use their physical slot's request line and
+The bundled HostSocket service reads and writes full 32-bit guest pointers
+synchronously when the guest rings its doorbell. DMA-capable WebAssembly
+expansion cards use their physical slot's request line and
 bus width. Reads sample guest RAM at each grant. Successful callbacks
 queue their writes for transfer, and their interrupt outputs become
 visible after the queue drains. A save during a grant preserves the

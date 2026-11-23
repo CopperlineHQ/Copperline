@@ -78,9 +78,7 @@ const PRODUCT_SERVICES: u8 = 0x05;
 /// TCP/IP stack; see `crate::hostsocket`).
 const PRODUCT_HOSTSOCKET: u8 = 0x06;
 /// The MHI virtual MPEG audio decoder board (`crate::mhi`, `[mhi]`); see
-/// `docs/internals/mhi.md`. Gated like its only consumer,
-/// [`BoardDescriptor::mhi`], so a no-`mhi` build stays warning-free.
-#[cfg(feature = "mhi")]
+/// `docs/internals/mhi.md`.
 const PRODUCT_MHI: u8 = 0x07;
 /// The copperhf.device virtual block-storage board (`crate::copperhf`); see
 /// `COPPERHF-DEVICE-PLAN.md`.
@@ -184,6 +182,10 @@ pub struct BoardSpec {
     pub memory_space: bool,
     /// Another autoconfig identity belonging to this physical board follows.
     pub chained: bool,
+    /// Whether this function occupies a backplane connector. Older states
+    /// predate this field and identify built-in virtual boards by identity.
+    #[serde(default)]
+    pub connector: Option<bool>,
     /// The board cannot be removed from the autoconfig chain by writing
     /// `ec_Shutup` (ERFF_NOSHUTUP).
     pub no_shutup: bool,
@@ -214,6 +216,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: false,
+            connector: Some(true),
             no_shutup: true,
             window: 0,
             timing: SlaveTiming::default(),
@@ -234,6 +237,7 @@ impl BoardSpec {
             memlist: true,
             memory_space: true,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -254,6 +258,7 @@ impl BoardSpec {
             memlist: true,
             memory_space: true,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming {
@@ -285,6 +290,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -307,6 +313,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -331,6 +338,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -357,6 +365,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -386,6 +395,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -417,6 +427,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -441,6 +452,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -466,6 +478,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -494,6 +507,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -520,6 +534,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(false),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -556,6 +571,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -583,6 +599,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -607,6 +624,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -639,6 +657,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: true,
+            connector: Some(true),
             no_shutup: false,
             window: 1,
             timing: SlaveTiming::default(),
@@ -668,6 +687,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -690,6 +710,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: true,
             chained: true,
+            connector: Some(true),
             no_shutup: false,
             window: 1,
             timing: SlaveTiming::default(),
@@ -710,6 +731,7 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
@@ -733,11 +755,28 @@ impl BoardSpec {
             memlist: false,
             memory_space: false,
             chained: false,
+            connector: Some(true),
             no_shutup: false,
             window: 0,
             timing: SlaveTiming::default(),
             diag_vec: None,
         }
+    }
+
+    pub(crate) fn uses_connector(&self) -> bool {
+        self.connector.unwrap_or_else(|| {
+            self.manufacturer != COPPERLINE_MANUFACTURER_ID
+                || !matches!(
+                    (self.product, self.name.as_str()),
+                    (PRODUCT_FAST_RAM, "fast RAM")
+                        | (PRODUCT_Z3_RAM, "Zorro III RAM")
+                        | (PRODUCT_COPPERLINE_ID, "Copperline")
+                        | (PRODUCT_SERVICES, "Copperline services")
+                        | (PRODUCT_HOSTSOCKET, "HostSocket bsdsocket.library")
+                        | (PRODUCT_MHI, "MHI MPEG audio decoder")
+                        | (PRODUCT_COPPERHF, "copperhf.device")
+                )
+        })
     }
 
     fn validate(&self) -> Result<()> {
@@ -852,18 +891,15 @@ pub struct ZorroChain {
 }
 
 impl ZorroChain {
-    /// Slot order is the AutoConfig order of physical cards. Chained functions
-    /// share a slot. The emulator identification and host services functions
-    /// have no connector or request pin on the backplane.
+    /// AutoConfig functions on one physical card share a request pin.
     pub(crate) fn physical_slot(&self, device: usize) -> Option<usize> {
         let mut slot = 0;
-        for board in &self.boards {
-            let spec = &board.spec;
-            if spec.manufacturer == COPPERLINE_MANUFACTURER_ID
-                && matches!(spec.product, PRODUCT_COPPERLINE_ID | PRODUCT_SERVICES)
-            {
-                continue;
-            }
+        for spec in self
+            .boards
+            .iter()
+            .map(|b| &b.spec)
+            .filter(|s| s.uses_connector())
+        {
             if spec.backing == BoardBacking::Device(device) {
                 return Some(slot);
             }
@@ -1647,6 +1683,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memlist: raw.memlist.unwrap_or(true),
                 memory_space: true,
                 chained: false,
+                connector: Some(true),
                 no_shutup: false,
                 window: 0,
                 timing: raw.timing,
@@ -1699,6 +1736,7 @@ pub fn load_board_metadata(path: &Path) -> Result<LoadedZorroBoard> {
                 memlist: raw.memlist.unwrap_or(false),
                 memory_space: false,
                 chained: false,
+                connector: Some(true),
                 no_shutup: false,
                 window: 0,
                 timing: raw.timing,
@@ -1867,6 +1905,40 @@ mod tests {
             chain.add_board(spec).unwrap();
         }
         chain
+    }
+
+    #[test]
+    fn buster_slot_order_skips_virtual_boards_and_groups_chained_functions() -> Result<()> {
+        let mut chain = ZorroChain::default();
+        let mut legacy = BoardSpec::hostsocket();
+        legacy.connector = None;
+        for spec in [
+            BoardSpec::fast_ram(65536),
+            BoardSpec::copperline_id(),
+            BoardSpec::z3_ram(1 << 20),
+            BoardSpec::copperline_services(1),
+            BoardSpec::copperhf(2),
+            legacy,
+        ] {
+            chain.add_board(spec)?;
+        }
+        #[cfg(feature = "mhi")]
+        chain.add_board(BoardSpec::mhi(3))?;
+        chain.add_board(BoardSpec::picasso2_vram(4, 1 << 20))?;
+        chain.add_board(BoardSpec::picasso2_regs(4))?;
+        // External metadata can even share a built-in's product identity.
+        let mut metadata = BoardSpec::hostsocket();
+        metadata.connector = Some(true);
+        metadata.backing = BoardBacking::Device(5);
+        chain.add_board(metadata)?;
+        chain.add_board(BoardSpec::a4091(6))?;
+        for index in 0..4 {
+            assert_eq!(chain.physical_slot(index), None);
+        }
+        assert_eq!(chain.physical_slot(4), Some(0));
+        assert_eq!(chain.physical_slot(5), Some(1));
+        assert_eq!(chain.physical_slot(6), Some(2));
+        Ok(())
     }
 
     #[test]

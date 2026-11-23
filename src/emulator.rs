@@ -4057,6 +4057,7 @@ fn build_machine_inner(
     rom_optional: bool,
     netplay: bool,
 ) -> Result<Emulator> {
+    cfg.validate_buster_boards()?;
     let open_disk = |path: &std::path::Path,
                      name: &str,
                      bus: &'static str,

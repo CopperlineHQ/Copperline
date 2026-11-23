@@ -91,7 +91,7 @@ impl CpuBus {
     /// Local RAM and ROM, `None` when `addr` is not memory at all. A write
     /// stops here: one aimed at a board's boot ROM is a device access.
     fn jit_plain_memory(&self, addr: u32, size: usize) -> Option<bool> {
-        if self.bus.buster.wired {
+        if self.bus.buster.pending() || self.bus.buster.cpu_locked {
             return Some(false);
         }
         self.classify_plain_memory(addr, size).map(|region| {
@@ -380,7 +380,9 @@ impl M68kMachine {
             let (budget, horizon) = if local_code {
                 let horizon = self.bus.bus.jit_event_horizon_cck();
                 (self.jit_batch_budget(remaining, horizon) as u32, horizon)
-            } else if self.jit_clock_divisor_q16 == 0 {
+            } else if self.jit_clock_divisor_q16 == 0 || self.bus.bus.buster.wired {
+                // With a master fitted, an MMIO strobe can raise a request.
+                // Shared-code lumps have no per-instruction boundary hook.
                 (1, 1)
             } else {
                 (remaining.min(JIT_SHARED_BATCH_INSTRUCTIONS) as u32, 1)

@@ -554,7 +554,11 @@ buster_revision = 11
 For an A4091 on an A3000, select revision 11. The motherboard SCSI
 controller uses the local DMA input and works with the stock revision 7.
 A WebAssembly card with the `dma` capability uses the same revision rules
-as a physical card of its configured Zorro generation.
+as a physical card of its configured Zorro generation. The configuration
+loader rejects Zorro III cards on the A2000 and Zorro III bus masters on
+revision 7. Physical cards share five modeled request inputs. Chained
+functions on one card share its input. Built-in fast and Z3 RAM, ID,
+services, CopperHF, MHI and HostSocket leave all inputs available.
 See [expansion bus timing](../internals/timing.md#buster-and-super-buster).
 
 The `A2000` profile models the B2000 Rev 6.x motherboard, the revision most
@@ -816,8 +820,11 @@ clock_mhz = 14.0    # optional; defaults to the model's stock speed
   behaves like an ideal accelerator running at `clock_mhz`: one
   instruction per CPU clock with zero-wait fast RAM and ROM, so a 50 MHz
   68040 delivers on the order of 50 MIPS (raise `clock_mhz` for more).
-  The boot ROMs of Copperline's own `[copperhf]` and `[[filesys]]` boards
-  count as ROM here, so their drivers run at CPU speed too.
+  On A2000, A3000 and A4000 profiles, Zorro RAM and board ROM use the
+  Buster bus path so each transfer observes the card width and wait states.
+  Motherboard RAM, accelerator RAM and Kickstart retain their direct JIT
+  windows while the bus is idle. A pending DMA grant or locked CPU operand
+  suspends those windows. Other profiles also accelerate plain board ROMs.
   The CPU runs ahead of the chipset in batches that end at the next
   hardware event or chip-bus access, and interrupts are recognized only
   there, so chip-level races and cycle-counted effects no longer line up;

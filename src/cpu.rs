@@ -4312,6 +4312,8 @@ impl CpuBus {
         };
         let clocks = clocks + self.bus.mem.zorro.slave_wait(addr);
         if width == 4 && self.bus.buster.revision == crate::buster::Revision::Rev9 {
+            // Only requests raised during this strobe overlap its first CCK.
+            self.flush_timed_devices_dcache_coherent();
             self.bus.buster.slave_start = true;
             self.bus.cpu_peripheral_clocks(1);
             self.bus.buster.slave_start = false;
@@ -5531,7 +5533,8 @@ impl CpuBus {
     /// memory before direct access resumes.
     fn jit_windows_allowed(&self) -> bool {
         self.jit_enabled
-            && !self.bus.buster.wired
+            && !self.bus.buster.pending()
+            && !self.bus.buster.cpu_locked
             && !self.bus.mem.zorro.has_collisions(self.bus.buster.revision)
             && self.bus.cpu_short_bus_cycle()
             && self.dbg_memw_addr.is_none()
@@ -5738,7 +5741,7 @@ impl CpuBus {
     /// the live interrupt level, not the per-access sample.
     #[inline]
     fn jit_local_read(&mut self, address: u32, size: usize, fetch: bool) -> Option<u32> {
-        if self.jit_local.count == 0 || self.bus.buster.cpu_locked {
+        if self.jit_local.count == 0 || self.bus.buster.cpu_locked || self.bus.buster.pending() {
             return None;
         }
         let (region, off) = self
@@ -5762,7 +5765,7 @@ impl CpuBus {
     /// store aimed at ROM takes the ordinary path, which drops it.
     #[inline]
     fn jit_local_write(&mut self, address: u32, size: usize, value: u32) -> bool {
-        if self.jit_local.count == 0 || self.bus.buster.cpu_locked {
+        if self.jit_local.count == 0 || self.bus.buster.cpu_locked || self.bus.buster.pending() {
             return false;
         }
         let Some((region, off)) = self
@@ -6620,9 +6623,14 @@ mod tests {
             (func (export "write") (param $off i32) (param i32) (param $v i32)
                 (if (i32.eq (local.get $off) (i32.const 12)) (then
                     (i32.store (i32.const 84) (i32.const 1))))
+                (if (i32.eq (local.get $off) (i32.const 20)) (then
+                    (i32.store (i32.const 88) (i32.const 1))))
                 (i32.store (i32.const 80) (local.get $v)))
             (func (export "tick") (param $cck i32)
                 (i32.store (i32.const 92) (i32.add (i32.load (i32.const 92)) (local.get $cck)))
+                (if (i32.load (i32.const 88)) (then
+                    (i32.store (i32.const 88) (i32.const 0))
+                    (call $out (i32.const 8192) (i32.const 0) (i32.const 16))))
                 (if (i32.load (i32.const 84)) (then
                     (i32.store (i32.const 84) (i32.const 0))
                     (call $in (i32.const 8192) (i32.const 64) (i32.const 16)))))
@@ -6668,6 +6676,79 @@ mod tests {
             b.bus.wire_buster()?;
             b.bus.set_cpu_bus_arbitration_enabled(true);
             Ok((dir, b, base))
+        }
+
+        #[test]
+        fn hostsocket_doorbell_completes_into_motherboard_ram() -> Result<()> {
+            let (_dir, mut b, _) = plugin_bus(ZorroVersion::III, Revision::Rev11)?;
+            let host = crate::hostsocket::board_config(
+                crate::net::NetConfig::Loopback,
+                None,
+                Some("bigbox"),
+                None,
+                None,
+                None,
+                None,
+            );
+            let mut spec = host.spec;
+            spec.backing = crate::zorro::BoardBacking::Device(1);
+            let base = 0xe90000;
+            b.bus.mem.zorro.add_board_configured_at(spec, base)?;
+            b.bus.devices.push(BoardDevice::Wasm(WasmBoard::from_file(
+                &host.wasm_path,
+                host.manifest,
+            )?));
+            b.bus.mem.fit_mb_ram(4 << 20);
+            b.bus.wire_buster()?;
+            assert_eq!(b.bus.buster.devices, [Some(0), None, None, None, None]);
+            let args = b.bus.mem.mb_ram_base() as u32;
+            b.write_long(args + 4, args + 64);
+            b.write_long(args + 8, 16);
+            b.write_long(base + 0x7c00, args);
+            b.write_long(base + 0x7c04, 31); // CALL_GETHOSTNAME
+            assert_eq!(&b.bus.mem.mb_ram[64..71], b"bigbox\0");
+            assert!(!b.bus.buster.pending());
+            Ok(())
+        }
+
+        #[test]
+        fn rev9_registration_during_a_z3_slave_strobe_wedges_until_reset() -> Result<()> {
+            for rev in [Revision::Rev9, Revision::Rev11] {
+                let (_dir, mut b, base) = plugin_bus(ZorroVersion::III, rev)?;
+                // This doorbell arms a request for the next plugin tick.
+                b.write_long(base + 20, 1);
+                b.read_long(base + 8);
+                assert_eq!(b.bus.buster.accepts_z3_request(), rev == Revision::Rev11);
+                b.bus.advance_chipset(128);
+                assert_eq!(
+                    b.bus.mem.chip_ram[0x2000],
+                    if rev == Revision::Rev11 { b'a' } else { 0 }
+                );
+                b.bus.buster.reset();
+                assert!(b.bus.buster.accepts_z3_request());
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn idle_master_keeps_local_jit_windows_until_a_device_requests_dma() -> Result<()> {
+            let (_dir, mut b, base) = plugin_bus(ZorroVersion::III, Revision::Rev11)?;
+            b.bus.set_cpu_short_bus_cycle(true);
+            b.bus.mem.fit_mb_ram(4 << 20);
+            let addr = b.bus.mem.mb_ram_base() as u32;
+            b.jit_enabled = true;
+            assert_eq!(b.jit_fast_mem().unwrap().base, addr);
+            assert!(b.jit_extra_regions().iter().any(Option::is_some));
+            b.begin_test_jit_batch();
+            b.read_byte(base); // The plugin requests DMA during this access.
+            assert!(b.jit_bus_boundary);
+            assert!(b.bus.buster.pending());
+            assert!(b.jit_local_read(addr, 4, false).is_none());
+            assert!(b.jit_fast_mem().is_none());
+            assert!(b.jit_extra_regions().iter().all(Option::is_none));
+            b.bus.advance_chipset(128);
+            assert_eq!(b.jit_fast_mem().unwrap().base, addr);
+            Ok(())
         }
 
         #[test]

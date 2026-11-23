@@ -57,6 +57,7 @@ pub fn board_spec(slot: usize) -> BoardSpec {
         memlist: false,
         memory_space: false,
         chained: false,
+        connector: Some(true),
         no_shutup: false,
         window: 0,
         timing: Default::default(),

@@ -34,25 +34,19 @@ impl Bus {
             self.buster.wired = fitted;
         }
         for (index, board) in self.devices.iter_mut().enumerate() {
+            let slot = fitted
+                .then(|| self.mem.zorro.physical_slot(index))
+                .flatten();
             match board {
-                BoardDevice::A2091(d) => d.arbitrated = fitted,
-                BoardDevice::A4091(d) => d.arbitrated = fitted,
+                BoardDevice::A2091(d) => d.arbitrated = slot.is_some(),
+                BoardDevice::A4091(d) => d.arbitrated = slot.is_some(),
                 #[cfg(feature = "wasm-boards")]
                 BoardDevice::Wasm(d) if d.can_dma() => {
-                    d.dma.version = if fitted {
-                        self.mem.zorro.device_version(index)
-                    } else {
-                        None
-                    };
+                    d.dma.version = slot.and_then(|_| self.mem.zorro.device_version(index));
                 }
                 _ => continue,
             }
-            if fitted {
-                let slot = self
-                    .mem
-                    .zorro
-                    .physical_slot(index)
-                    .ok_or_else(|| anyhow::anyhow!("DMA controller has no Zorro slot"))?;
+            if let Some(slot) = slot {
                 let pin = self.buster.devices.get_mut(slot).ok_or_else(|| {
                     anyhow::anyhow!("DMA controller exceeds the five Buster request lines")
                 })?;

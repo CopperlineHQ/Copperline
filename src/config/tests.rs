@@ -7134,3 +7134,50 @@ fn buster_follows_the_motherboard_and_accepts_super_buster_upgrades() {
         assert!(parse_config(&format!("{toml}buster_revision = 8")).is_err());
     }
 }
+
+#[test]
+fn buster_rejects_unreachable_boards_and_accepts_supported_upgrades() -> Result<()> {
+    let a2000 = "[machine]\nprofile='A2000'\n[cpu]\nmodel='68030'\n";
+    for extra in [
+        "[memory]\nz3='1M'",
+        "[rtg]\ncard='graffityz3'",
+        "[scsi]\ncontroller='a4091'",
+        "[zz9k]\nenabled=true\nzorro=3",
+    ] {
+        let err = parse_config(&format!("{a2000}{extra}")).unwrap_err();
+        assert!(err.to_string().contains("A2000 backplane"), "{err:#}");
+    }
+    let a3000 = "[machine]\nprofile='A3000'\n";
+    let scsi = "[scsi]\ncontroller='a4091'";
+    assert!(parse_config(&format!("{a3000}{scsi}"))
+        .unwrap_err()
+        .to_string()
+        .contains("buster_revision = 9 or 11"));
+    parse_config(&format!("{a3000}buster_revision=9\n{scsi}"))?;
+    let mut cfg = parse_config(&format!("{a3000}[memory]\nz3='1M'"))?;
+    let mut plugin =
+        crate::zz9k::board_config(crate::zorro::ZorroVersion::III, 4 << 20, false, None);
+    plugin.manifest.caps.dma = true;
+    cfg.wasm_boards.push(plugin);
+    assert!(cfg
+        .validate_buster_boards()
+        .unwrap_err()
+        .to_string()
+        .contains("buster_revision"));
+    cfg.wasm_boards[0].manifest.caps.dma = false;
+    cfg.validate_buster_boards()?;
+    // The profile's RTG board and this plugin occupy two connectors.
+    for _ in 0..3 {
+        let mut spec = BoardSpec::fast_ram(65536);
+        spec.connector = Some(true);
+        cfg.zorro_boards.push(spec);
+    }
+    cfg.validate_buster_boards()?;
+    cfg.toccata = true;
+    assert!(cfg
+        .validate_buster_boards()
+        .unwrap_err()
+        .to_string()
+        .contains("6 physical Zorro cards"));
+    Ok(())
+}
