@@ -20,76 +20,18 @@
 use crate::chipset::paula::{CdAudioRing, MhiAudioRing, ToccataAudioRing};
 use crate::memory::{Memory, ACCEL_RAM_BASE, SLOW_RAM_BASE};
 
-/// DMA bus-master word read: the chip / slow / motherboard / accelerator /
-/// Zorro-board RAM decode a Zorro DMA controller sees. Returns `None` when the
-/// (word-aligned) address is
-/// not backed by RAM, leaving the unmapped sentinel and warn policy to the
-/// caller. Word reads require both bytes in range, matching the hardware word
-/// access; the last odd byte of a region therefore does not satisfy a word.
+/// Read a big-endian word when both lanes select the same bank.
 pub(crate) fn dma_read_word(mem: &Memory, addr: u32) -> Option<u16> {
-    let a = addr as usize;
-    if a + 1 < mem.chip_ram.len() {
-        return Some((u16::from(mem.chip_ram[a]) << 8) | u16::from(mem.chip_ram[a + 1]));
-    }
-    let slow = SLOW_RAM_BASE as usize;
-    if a >= slow && a + 1 < slow + mem.slow_ram.len() {
-        let o = a - slow;
-        return Some((u16::from(mem.slow_ram[o]) << 8) | u16::from(mem.slow_ram[o + 1]));
-    }
-    let mb = mem.mb_ram_base() as usize;
-    if a >= mb && a - mb + 1 < mem.mb_ram.len() {
-        let o = a - mb;
-        return Some((u16::from(mem.mb_ram[o]) << 8) | u16::from(mem.mb_ram[o + 1]));
-    }
-    let accel = ACCEL_RAM_BASE as usize;
-    if a >= accel && a - accel + 1 < mem.accel_ram.len() {
-        let o = a - accel;
-        return Some((u16::from(mem.accel_ram[o]) << 8) | u16::from(mem.accel_ram[o + 1]));
-    }
-    if let Some((board, off)) = mem.zorro.region_at(addr, 2) {
-        let ram = mem.zorro.board_ram(board);
-        return Some((u16::from(ram[off]) << 8) | u16::from(ram[off + 1]));
-    }
-    None
+    let word = dma_ram_bytes(mem, addr, 2)?;
+    Some(u16::from_be_bytes([word[0], word[1]]))
 }
 
-/// 24-bit DMA bus-master word write. Returns `false` when the target is not
-/// backed by RAM (so the caller can warn and drop, as the hardware does).
 pub(crate) fn dma_write_word(mem: &mut Memory, addr: u32, w: u16) -> bool {
-    let a = addr as usize;
-    if a + 1 < mem.chip_ram.len() {
-        mem.chip_ram[a] = (w >> 8) as u8;
-        mem.chip_ram[a + 1] = w as u8;
-        return true;
-    }
-    let slow = SLOW_RAM_BASE as usize;
-    if a >= slow && a + 1 < slow + mem.slow_ram.len() {
-        let o = a - slow;
-        mem.slow_ram[o] = (w >> 8) as u8;
-        mem.slow_ram[o + 1] = w as u8;
-        return true;
-    }
-    let mb = mem.mb_ram_base() as usize;
-    if a >= mb && a - mb + 1 < mem.mb_ram.len() {
-        let o = a - mb;
-        mem.mb_ram[o] = (w >> 8) as u8;
-        mem.mb_ram[o + 1] = w as u8;
-        return true;
-    }
-    let accel = ACCEL_RAM_BASE as usize;
-    if a >= accel && a - accel + 1 < mem.accel_ram.len() {
-        let o = a - accel;
-        mem.accel_ram[o] = (w >> 8) as u8;
-        mem.accel_ram[o + 1] = w as u8;
-        return true;
-    }
-    if let Some((board, off)) = mem.zorro.region_at(addr, 2) {
-        let ram = mem.zorro.board_ram_mut(board);
-        ram[off] = (w >> 8) as u8;
-        ram[off + 1] = w as u8;
-        return true;
-    }
-    false
+    let Some(word) = dma_ram_bytes_mut(mem, addr, 2) else {
+        return false;
+    };
+    word.copy_from_slice(&w.to_be_bytes());
+    true
 }
 
 /// Which RAM bank a DMA range resolved to (see [`dma_ram_range`]).
@@ -104,9 +46,7 @@ enum DmaBank {
 
 /// The bank and offset holding the whole DMA range `[addr, addr + len)`, or
 /// `None` when no single RAM bank holds all of it (it straddles two banks,
-/// or touches unmapped space). Banks are tried in [`dma_write_word`]'s order
-/// and never overlap, so a range that resolves here is exactly the bytes
-/// word-by-word accesses would reach.
+/// or touches unmapped space). All DMA access sizes share this decode.
 ///
 /// Those accesses wrap at the top of the 32-bit address space, so a range
 /// that runs past it is no single bank's either, even where a board's
@@ -117,6 +57,9 @@ fn dma_ram_range(mem: &Memory, addr: u32, len: usize) -> Option<(DmaBank, usize)
     let end = a.checked_add(u64::try_from(len).ok()?)?;
     if end > 1 << 32 {
         return None;
+    }
+    if let Some((idx, off)) = mem.zorro.override_ram(addr, len) {
+        return Some((DmaBank::Zorro(idx), off));
     }
     let fits = |base: u64, bank_len: usize| a >= base && end - base <= bank_len as u64;
     if fits(0, mem.chip_ram.len()) {
@@ -137,60 +80,40 @@ fn dma_ram_range(mem: &Memory, addr: u32, len: usize) -> Option<(DmaBank, usize)
         .map(|(board, off)| (DmaBank::Zorro(board), off))
 }
 
-/// 24-bit DMA bus-master byte read (the CDTV diagnostic peek uses this).
-/// Returns `None` when the address is not backed by RAM. Byte reads only need
-/// the single byte in range, so the bounds differ from the word read above.
-pub(crate) fn dma_read_byte(mem: &Memory, addr: u32) -> Option<u8> {
-    let a = addr as usize;
-    if a < mem.chip_ram.len() {
-        return Some(mem.chip_ram[a]);
-    }
-    let slow = SLOW_RAM_BASE as usize;
-    if a >= slow && a < slow + mem.slow_ram.len() {
-        return Some(mem.slow_ram[a - slow]);
-    }
-    let mb = mem.mb_ram_base() as usize;
-    if a >= mb && a - mb < mem.mb_ram.len() {
-        return Some(mem.mb_ram[a - mb]);
-    }
-    let accel = ACCEL_RAM_BASE as usize;
-    if a >= accel && a - accel < mem.accel_ram.len() {
-        return Some(mem.accel_ram[a - accel]);
-    }
-    if let Some((board, off)) = mem.zorro.region_at(addr, 1) {
-        return Some(mem.zorro.board_ram(board)[off]);
-    }
-    None
+fn dma_ram_bytes(mem: &Memory, addr: u32, len: usize) -> Option<&[u8]> {
+    let (bank, off) = dma_ram_range(mem, addr, len)?;
+    let ram: &[u8] = match bank {
+        DmaBank::Chip => &mem.chip_ram,
+        DmaBank::Slow => &mem.slow_ram,
+        DmaBank::Motherboard => &mem.mb_ram,
+        DmaBank::Accelerator => &mem.accel_ram,
+        DmaBank::Zorro(board) => mem.zorro.board_ram(board),
+    };
+    Some(&ram[off..off + len])
 }
 
-/// 24-bit DMA bus-master byte write. Returns `false` when the target is not
-/// backed by RAM.
+fn dma_ram_bytes_mut(mem: &mut Memory, addr: u32, len: usize) -> Option<&mut [u8]> {
+    let (bank, off) = dma_ram_range(mem, addr, len)?;
+    let ram: &mut [u8] = match bank {
+        DmaBank::Chip => &mut mem.chip_ram,
+        DmaBank::Slow => &mut mem.slow_ram,
+        DmaBank::Motherboard => &mut mem.mb_ram,
+        DmaBank::Accelerator => &mut mem.accel_ram,
+        DmaBank::Zorro(board) => mem.zorro.board_ram_mut(board),
+    };
+    Some(&mut ram[off..off + len])
+}
+
+pub(crate) fn dma_read_byte(mem: &Memory, addr: u32) -> Option<u8> {
+    Some(dma_ram_bytes(mem, addr, 1)?[0])
+}
+
 pub(crate) fn dma_write_byte(mem: &mut Memory, addr: u32, b: u8) -> bool {
-    let a = addr as usize;
-    if a < mem.chip_ram.len() {
-        mem.chip_ram[a] = b;
-        return true;
-    }
-    let slow = SLOW_RAM_BASE as usize;
-    if a >= slow && a < slow + mem.slow_ram.len() {
-        mem.slow_ram[a - slow] = b;
-        return true;
-    }
-    let mb = mem.mb_ram_base() as usize;
-    if a >= mb && a - mb < mem.mb_ram.len() {
-        mem.mb_ram[a - mb] = b;
-        return true;
-    }
-    let accel = ACCEL_RAM_BASE as usize;
-    if a >= accel && a - accel < mem.accel_ram.len() {
-        mem.accel_ram[a - accel] = b;
-        return true;
-    }
-    if let Some((board, off)) = mem.zorro.region_at(addr, 1) {
-        mem.zorro.board_ram_mut(board)[off] = b;
-        return true;
-    }
-    false
+    let Some(byte) = dma_ram_bytes_mut(mem, addr, 1) else {
+        return false;
+    };
+    byte[0] = b;
+    true
 }
 
 /// Where the video beam is, for a board that keeps time by the field (the
@@ -419,31 +342,16 @@ impl<'a> DeviceHost<'a> {
     /// one copy, with word or byte accesses left for a range that straddles
     /// banks or touches unmapped space.
     pub fn dma_ram(&self, addr: u32, len: usize) -> Option<&[u8]> {
-        let (bank, off) = dma_ram_range(self.mem, addr, len)?;
-        let ram: &[u8] = match bank {
-            DmaBank::Chip => &self.mem.chip_ram,
-            DmaBank::Slow => &self.mem.slow_ram,
-            DmaBank::Motherboard => &self.mem.mb_ram,
-            DmaBank::Accelerator => &self.mem.accel_ram,
-            DmaBank::Zorro(board) => self.mem.zorro.board_ram(board),
-        };
-        Some(&ram[off..off + len])
+        dma_ram_bytes(self.mem, addr, len)
     }
 
     /// Writable [`Self::dma_ram`]. A range that resolves counts as a DMA
     /// write for the CPU data-cache invalidation (`wrote_memory`).
     pub fn dma_ram_mut(&mut self, addr: u32, len: usize) -> Option<&mut [u8]> {
-        let (bank, off) = dma_ram_range(self.mem, addr, len)?;
+        let data = dma_ram_bytes_mut(self.mem, addr, len)?;
         self.touched_memory = true;
         self.wrote_memory = true;
-        let ram: &mut [u8] = match bank {
-            DmaBank::Chip => &mut self.mem.chip_ram,
-            DmaBank::Slow => &mut self.mem.slow_ram,
-            DmaBank::Motherboard => &mut self.mem.mb_ram,
-            DmaBank::Accelerator => &mut self.mem.accel_ram,
-            DmaBank::Zorro(board) => self.mem.zorro.board_ram_mut(board),
-        };
-        Some(&mut ram[off..off + len])
+        Some(data)
     }
 
     /// Bulk DMA read into `buf` starting at Amiga `addr` (byte-granular 24-bit

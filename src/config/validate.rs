@@ -1582,6 +1582,16 @@ impl TryFrom<RawConfig> for Config {
             agnus_revision,
             denise_revision,
             machine,
+            buster: match (raw.machine.buster_revision, machine) {
+                (None, _) => defaults.buster,
+                (Some(rev), Some(MachineModel::A3000 | MachineModel::A4000)) => match rev {
+                    7 => crate::buster::Revision::Rev7,
+                    9 => crate::buster::Revision::Rev9,
+                    11 => crate::buster::Revision::Rev11,
+                    _ => anyhow::bail!("[machine] buster_revision must be 7, 9 or 11"),
+                },
+                _ => anyhow::bail!("[machine] buster_revision needs an A3000 or A4000"),
+            },
             gate_array: defaults.gate_array,
             ide_a4000: defaults.ide_a4000,
             sdmac: defaults.sdmac,
@@ -2106,6 +2116,12 @@ pub fn parse_machine_model(s: &str) -> Result<MachineModel> {
 pub fn machine_profile_defaults(model: MachineModel) -> Config {
     let mut d = Config {
         machine: Some(model),
+        buster: match model {
+            MachineModel::A2000 => crate::buster::Revision::A2000,
+            MachineModel::A3000 => crate::buster::Revision::Rev7,
+            MachineModel::A4000 => crate::buster::Revision::Rev11,
+            _ => crate::buster::Revision::Absent,
+        },
         ..Config::default()
     };
     match model {

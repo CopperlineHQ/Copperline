@@ -2051,6 +2051,7 @@ impl M68kMachine {
             mut bus,
         } = state;
 
+        bus.wire_buster()?;
         bus.adopt_host_resources(&mut self.bus.bus)?;
         bus.adopt_ui_debug_state(&mut self.bus.bus);
         // The interrupt sample belongs to the restored timeline, never to
@@ -3912,8 +3913,7 @@ impl M68kMachine {
             let vector_addr = self
                 .cpu
                 .vbr
-                .wrapping_add(0x60)
-                .wrapping_add(u32::from(level) * 4);
+                .wrapping_add(u32::from(bus.quick_vector(level).unwrap_or(24 + level)) * 4);
             if self.bus.peek_long(vector_addr) == 0 {
                 return 0;
             }
@@ -3995,6 +3995,9 @@ impl CpuBus {
     }
 
     fn classify_plain_memory(&self, addr: u32, size: usize) -> Option<PlainMemRegion> {
+        if let Some((idx, off)) = self.bus.mem.zorro.override_ram(addr, size) {
+            return Some(PlainMemRegion::ZorroRam(idx, off));
+        }
         if let Some(off) = self.overlay_rom_offset(addr, size) {
             return Some(PlainMemRegion::OverlayRom(off));
         }
@@ -4285,6 +4288,41 @@ impl CpuBus {
         self.bus.cpu_external_access(Self::access_words(size));
     }
 
+    fn bill_zorro(
+        &mut self,
+        version: crate::zorro::ZorroVersion,
+        addr: u32,
+        size: usize,
+        ram: bool,
+    ) {
+        if self.bus.buster.revision == crate::buster::Revision::Absent {
+            if ram {
+                self.bill_external_access(size);
+            } else {
+                self.bus.cpu_slow_external_access(Self::access_words(size));
+            }
+            return;
+        }
+        let width = version.width();
+        let beats = ((addr as usize & (width - 1)) + size).div_ceil(width) as u32;
+        let clocks = if width == 2 || self.bus.buster.revision == crate::buster::Revision::Rev7 {
+            2
+        } else {
+            1
+        };
+        let clocks = clocks + self.bus.mem.zorro.slave_wait(addr);
+        if width == 4 && self.bus.buster.revision == crate::buster::Revision::Rev9 {
+            self.bus.buster.slave_start = true;
+            self.bus.cpu_peripheral_clocks(1);
+            self.bus.buster.slave_start = false;
+            if beats * clocks > 1 {
+                self.bus.cpu_peripheral_clocks(beats * clocks - 1);
+            }
+        } else {
+            self.bus.cpu_peripheral_clocks(beats * clocks);
+        }
+    }
+
     /// Latch the last word the CPU drove onto (or sampled from) the shared
     /// data bus: undriven (unmapped) reads float to this value. A byte
     /// cycle drives one lane while the other keeps its previous charge.
@@ -4312,20 +4350,17 @@ impl CpuBus {
         };
     }
 
-    /// Consume a debugger-injected bus fault covering this access, if
-    /// one is armed. The access does not reach memory when it fires, so
-    /// the guest sees exactly what an undecoded address gives it.
-    fn check_injected_fault(
-        &mut self,
-        address: u32,
-        len: u32,
-        write: bool,
-    ) -> Result<(), BusFault> {
-        if !self.bus.bus_faults_armed() {
-            return Ok(());
-        }
+    /// A physical select collision or an injected fault raises BERR before
+    /// the responding devices can consume this access.
+    fn check_bus_fault(&mut self, address: u32, len: u32, write: bool) -> Result<(), BusFault> {
         let addr = self.mask(address);
-        if self.bus.take_injected_fault(addr, len, write) {
+        if self
+            .bus
+            .mem
+            .zorro
+            .collision(self.bus.buster.revision, addr, len)
+            || (self.bus.bus_faults_armed() && self.bus.take_injected_fault(addr, len, write))
+        {
             return Err(BusFault {
                 kind: BusFaultKind::BusError,
                 address: addr,
@@ -4452,6 +4487,24 @@ impl CpuBus {
         };
         if let Some(cache) = cache.as_deref_mut() {
             cache.fill_after_miss(addr, size, |long| self.peek_long(long));
+            let line = addr & !15;
+            if cache.burst
+                && cache.enabled
+                && !cache.frozen
+                && self.bus.buster.revision.z3_master()
+                && self.bus.mem.zorro.burst_ram(line)
+            {
+                // The first longword was billed by the demand read. Buster
+                // increments EA3:2, wrapping within the same 16-byte line.
+                // All four data strobes share one /FCS. No other master
+                // can acquire the bus between the demand and the wrap.
+                let driving = std::mem::replace(&mut self.bus.buster.cpu_driving, true);
+                for step in 1..4 {
+                    let next = line | ((addr.wrapping_add(4 * step)) & 12);
+                    cache.fill_after_miss(next, 4, |long| self.read_bus_cycle(long, 4, kind));
+                }
+                self.bus.buster.cpu_driving = driving;
+            }
         }
         match kind {
             CpuBusAccessKind::Fetch => self.icache = cache,
@@ -4469,7 +4522,7 @@ impl CpuBus {
             return false;
         }
         self.chip_window_offset(addr, 1).is_some()
-            || self.bus.mem.zorro.region_at(addr, 1).is_some()
+            || self.bus.mem.zorro.cacheable_ram(addr)
             || region_offset(self.bus.mem.slow_ram.len(), SLOW_RAM_BASE, addr, 1).is_some()
             || region_offset(
                 self.bus.mem.mb_ram.len(),
@@ -4497,7 +4550,7 @@ impl CpuBus {
         if self.overlay_rom_offset(addr, 1).is_some() {
             return false;
         }
-        self.bus.mem.zorro.region_at(addr, 1).is_some()
+        self.bus.mem.zorro.cacheable_ram(addr)
             || region_offset(
                 self.bus.mem.mb_ram.len(),
                 self.bus.mem.mb_ram_base(),
@@ -4518,6 +4571,31 @@ impl CpuBus {
     }
 
     fn read_sized_uncached(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
+        if self.bus.buster.revision != crate::buster::Revision::Absent
+            && size > 1
+            && (size > 2 || address & 1 != 0)
+        {
+            let first = self.bus.zorro_first_beat(self.mask(address), size);
+            if first < size {
+                let hi = self.read_sized_uncached(address, first, kind);
+                let lo = self.read_sized_uncached(
+                    address.wrapping_add(first as u32),
+                    size - first,
+                    kind,
+                );
+                return (hi << ((size - first) * 8)) | lo;
+            }
+        }
+        if !self.bus.buster.wired || self.bus.buster.cpu_driving {
+            return self.read_bus_cycle(address, size, kind);
+        }
+        self.bus.begin_buster_cpu_cycle();
+        let value = self.read_bus_cycle(address, size, kind);
+        self.bus.buster.cpu_driving = false;
+        value
+    }
+
+    fn read_bus_cycle(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
         let addr = self.mask(address);
         match self.classify_plain_memory(addr, size) {
             Some(PlainMemRegion::OverlayRom(off)) => {
@@ -4543,9 +4621,7 @@ impl CpuBus {
                 return sampled.unwrap_or_else(|| read_be(&self.bus.mem.chip_ram, off, size));
             }
             Some(PlainMemRegion::ZorroRam(board, off)) => {
-                // Expansion (Zorro) RAM runs at external-bus speed, off the
-                // chip bus, exactly like the old fixed fast RAM mapping.
-                self.bill_external_access(size);
+                self.bill_zorro(self.bus.mem.zorro.ram_version(board), addr, size, true);
                 return read_be(self.bus.mem.zorro.board_ram(board), off, size);
             }
             Some(PlainMemRegion::MbRam(off)) => {
@@ -4703,14 +4779,38 @@ impl CpuBus {
             if let Some(rom) = self.board_plain_rom(addr, size) {
                 return read_be(rom, 0, size);
             }
-            self.bus.cpu_slow_external_access(Self::access_words(size));
+            self.bill_zorro(
+                self.bus
+                    .mem
+                    .zorro
+                    .device_version(slot)
+                    .expect("mapped board"),
+                addr,
+                size,
+                false,
+            );
             let (value, activity) = {
                 let mem = &mut self.bus.mem;
                 let dev = &mut self.bus.devices[slot];
                 let mut host = crate::zorro_device::DeviceHost::for_slot(mem, slot);
-                let v = crate::zorro_device::ZorroDevice::read(dev, off, size, &mut host);
+                // MEMZ2 asserts both read strobes. IOZ2 preserves the CPU byte lanes.
+                let v = if size == 1
+                    && self.bus.buster.revision.super_buster()
+                    && crate::buster::Z2_MEMORY.contains(&addr)
+                    && !dev.whole_operand()
+                {
+                    let word = crate::zorro_device::ZorroDevice::read(dev, off & !1, 2, &mut host);
+                    if off & 1 == 0 {
+                        (word >> 8) & 0xff
+                    } else {
+                        word & 0xff
+                    }
+                } else {
+                    crate::zorro_device::ZorroDevice::read(dev, off, size, &mut host)
+                };
                 (v, crate::zorro_device::ZorroDevice::take_activity(dev))
             };
+            self.bus.sample_buster_requests();
             if activity {
                 self.bus.note_hdd_activity();
             }
@@ -4749,6 +4849,10 @@ impl CpuBus {
             // Custom registers live on the chip bus; custom_read itself
             // grants the contended chip-bus slot.
             return self.bus.custom_read(u64::from(off), size) as u32;
+        }
+        if self.bus.buster.revision.super_buster() && self.bus.mem.zorro.native_config(addr) {
+            self.bill_zorro(crate::zorro::ZorroVersion::III, addr, size, false);
+            return self.bus.mem.zorro.config_read(u64::from(addr), size) as u32;
         }
         if range_contains(AUTOCONFIG_BASE as u32, AUTOCONFIG_SIZE as u32, addr) {
             self.bus.cpu_slow_external_access(Self::access_words(size));
@@ -4856,6 +4960,31 @@ impl CpuBus {
     }
 
     fn write_sized_unobserved(&mut self, address: u32, size: usize, value: u32) {
+        if self.bus.buster.revision != crate::buster::Revision::Absent
+            && size > 1
+            && (size > 2 || address & 1 != 0)
+        {
+            let first = self.bus.zorro_first_beat(self.mask(address), size);
+            if first < size {
+                self.write_sized_unobserved(address, first, value >> ((size - first) * 8));
+                self.write_sized_unobserved(
+                    address.wrapping_add(first as u32),
+                    size - first,
+                    value,
+                );
+                return;
+            }
+        }
+        if !self.bus.buster.wired || self.bus.buster.cpu_driving {
+            self.write_bus_cycle(address, size, value);
+            return;
+        }
+        self.bus.begin_buster_cpu_cycle();
+        self.write_bus_cycle(address, size, value);
+        self.bus.buster.cpu_driving = false;
+    }
+
+    fn write_bus_cycle(&mut self, address: u32, size: usize, value: u32) {
         let addr = self.mask(address);
         self.note_cpu_data_bus(addr, size, value);
         if self.bus.smc.is_some() {
@@ -4910,7 +5039,7 @@ impl CpuBus {
                 return;
             }
             Some(PlainMemRegion::ZorroRam(board, off)) => {
-                self.bill_external_access(size);
+                self.bill_zorro(self.bus.mem.zorro.ram_version(board), addr, size, true);
                 write_be(self.bus.mem.zorro.board_ram_mut(board), off, size, value);
                 return;
             }
@@ -5114,6 +5243,7 @@ impl CpuBus {
             self.bus.cpu_slow_external_access(1);
             if let Some(sdmac) = self.bus.sdmac.as_mut() {
                 sdmac.write_byte(addr, value as u8);
+                self.bus.sample_buster_requests();
             }
             return;
         }
@@ -5130,7 +5260,16 @@ impl CpuBus {
         if let Some((crate::zorro::BoardBacking::Device(slot), off)) =
             self.bus.mem.zorro.device_region_at(addr, size)
         {
-            self.bus.cpu_slow_external_access(Self::access_words(size));
+            self.bill_zorro(
+                self.bus
+                    .mem
+                    .zorro
+                    .device_version(slot)
+                    .expect("mapped board"),
+                addr,
+                size,
+                false,
+            );
             let (activity, touched_memory) = {
                 let mem = &mut self.bus.mem;
                 let dev = &mut self.bus.devices[slot];
@@ -5141,6 +5280,7 @@ impl CpuBus {
                     host.touched_memory(),
                 )
             };
+            self.bus.sample_buster_requests();
             if activity {
                 self.bus.note_hdd_activity();
             }
@@ -5197,6 +5337,14 @@ impl CpuBus {
             {
                 self.bus.slice_preempted = true;
             }
+            return;
+        }
+        if self.bus.buster.revision.super_buster() && self.bus.mem.zorro.native_config(addr) {
+            self.bill_zorro(crate::zorro::ZorroVersion::III, addr, size, false);
+            self.bus
+                .mem
+                .zorro
+                .config_write(u64::from(addr), size, u64::from(value));
             return;
         }
         if range_contains(AUTOCONFIG_BASE as u32, AUTOCONFIG_SIZE as u32, addr) {
@@ -5349,6 +5497,8 @@ impl CpuBus {
     /// memory before direct access resumes.
     fn jit_windows_allowed(&self) -> bool {
         self.jit_enabled
+            && !self.bus.buster.wired
+            && !self.bus.mem.zorro.has_collisions(self.bus.buster.revision)
             && self.bus.cpu_short_bus_cycle()
             && self.dbg_memw_addr.is_none()
             && !self.bus.heat_map_armed()
@@ -5434,39 +5584,41 @@ impl CpuBus {
                 JitLocalBacking::AccelRam,
             );
         }
-        // Copy descriptors, not allocations; no heap work in the batch path.
-        let mut banks = [None; MAX_FAST_MEM_REGIONS];
-        for (slot, bank) in banks.iter_mut().zip(mem.zorro.fast_ram_windows()) {
-            *slot = Some(bank);
-        }
-        for (base, len, idx) in banks.into_iter().flatten() {
-            if self.jit_window_bank != Some(base) {
-                push(
-                    mem.zorro.board_ram_mut(idx).as_mut_ptr(),
-                    base,
-                    len,
-                    true,
-                    JitLocalBacking::ZorroRam(idx),
-                );
+        if self.bus.buster.revision == crate::buster::Revision::Absent {
+            // Copy descriptors, not allocations; no heap work in the batch path.
+            let mut banks = [None; MAX_FAST_MEM_REGIONS];
+            for (slot, bank) in banks.iter_mut().zip(mem.zorro.fast_ram_windows()) {
+                *slot = Some(bank);
             }
-        }
-        // Boot ROMs a board declares plain (`ZorroDevice::plain_rom`): the
-        // driver code Copperline's own boards execute in place. Last, so a
-        // full table drops these before any RAM bank; their accesses then
-        // take the bus path, which bills them the same nothing.
-        for (base, len, slot) in mem.zorro.primary_device_windows() {
-            let Some((off, rom)) = crate::zorro_device::ZorroDevice::plain_rom(&devices[slot])
-            else {
-                continue;
-            };
-            if u64::from(off) + rom.len() as u64 <= u64::from(len) {
-                push(
-                    rom.as_ptr().cast_mut(),
-                    base + off,
-                    rom.len() as u32,
-                    false,
-                    JitLocalBacking::BoardRom(slot),
-                );
+            for (base, len, idx) in banks.into_iter().flatten() {
+                if self.jit_window_bank != Some(base) {
+                    push(
+                        mem.zorro.board_ram_mut(idx).as_mut_ptr(),
+                        base,
+                        len,
+                        true,
+                        JitLocalBacking::ZorroRam(idx),
+                    );
+                }
+            }
+            // Boot ROMs a board declares plain (`ZorroDevice::plain_rom`): the
+            // driver code Copperline's own boards execute in place. Last, so a
+            // full table drops these before any RAM bank; their accesses then
+            // take the bus path, which bills them the same nothing.
+            for (base, len, slot) in mem.zorro.primary_device_windows() {
+                let Some((off, rom)) = crate::zorro_device::ZorroDevice::plain_rom(&devices[slot])
+                else {
+                    continue;
+                };
+                if u64::from(off) + rom.len() as u64 <= u64::from(len) {
+                    push(
+                        rom.as_ptr().cast_mut(),
+                        base + off,
+                        rom.len() as u32,
+                        false,
+                        JitLocalBacking::BoardRom(slot),
+                    );
+                }
             }
         }
         let ranges = regions.map(|r| r.map(|r| (r.base, r.len)));
@@ -5633,6 +5785,9 @@ impl CpuBus {
         if addr.wrapping_sub(mem.mb_ram_base() as u32) < mem.mb_ram.len() as u32 {
             return Some(FastRamBank::Motherboard);
         }
+        if self.bus.buster.revision != crate::buster::Revision::Absent {
+            return None;
+        }
         mem.zorro
             .ram_region_containing(addr)
             .map(|(base, len, idx)| FastRamBank::Zorro { base, len, idx })
@@ -5642,7 +5797,9 @@ impl CpuBus {
     /// motherboard RAM.
     fn largest_fast_ram_bank(&self) -> Option<FastRamBank> {
         let mem = &self.bus.mem;
-        let zorro = mem.zorro.largest_ram_region();
+        let zorro = (self.bus.buster.revision == crate::buster::Revision::Absent)
+            .then(|| mem.zorro.largest_ram_region())
+            .flatten();
         let mb_len = mem.mb_ram.len() as u32;
         let accel_len = mem.accel_ram.len() as u32;
         let zorro_len = zorro.map_or(0, |(_, len, _)| len);
@@ -5736,6 +5893,7 @@ impl CpuBus {
             if let Some(icache) = self.icache.as_deref_mut() {
                 icache.enabled = cacr & CACR_040_IE != 0;
                 icache.frozen = false;
+                icache.burst = true;
                 if ops & CACR_CI != 0 {
                     icache.clear_all();
                 }
@@ -5743,6 +5901,7 @@ impl CpuBus {
             if let Some(dcache) = self.dcache.as_deref_mut() {
                 dcache.enabled = cacr & CACR_040_DE != 0;
                 dcache.frozen = false;
+                dcache.burst = true;
                 if ops & CACR_CD != 0 {
                     dcache.clear_all();
                 }
@@ -5752,6 +5911,7 @@ impl CpuBus {
         if let Some(icache) = self.icache.as_deref_mut() {
             icache.enabled = cacr & CACR_EI != 0;
             icache.frozen = cacr & CACR_FI != 0;
+            icache.burst = cacr & (1 << 4) != 0;
             if ops & CACR_CI != 0 {
                 icache.clear_all();
             }
@@ -5762,6 +5922,7 @@ impl CpuBus {
         if let Some(dcache) = self.dcache.as_deref_mut() {
             dcache.enabled = cacr & CACR_ED != 0;
             dcache.frozen = cacr & CACR_FD != 0;
+            dcache.burst = cacr & (1 << 12) != 0;
             if ops & CACR_CD != 0 {
                 dcache.clear_all();
             }
@@ -5848,34 +6009,34 @@ impl AddressBus for CpuBus {
     }
 
     fn try_read_byte(&mut self, address: u32) -> Result<u8, BusFault> {
-        self.check_injected_fault(address, 1, false)?;
+        self.check_bus_fault(address, 1, false)?;
         Ok(self.read_byte(address))
     }
 
     fn try_read_word(&mut self, address: u32) -> Result<u16, BusFault> {
-        self.check_injected_fault(address, 2, false)?;
+        self.check_bus_fault(address, 2, false)?;
         Ok(self.read_word(address))
     }
 
     fn try_read_long(&mut self, address: u32) -> Result<u32, BusFault> {
-        self.check_injected_fault(address, 4, false)?;
+        self.check_bus_fault(address, 4, false)?;
         Ok(self.read_long(address))
     }
 
     fn try_write_byte(&mut self, address: u32, value: u8) -> Result<(), BusFault> {
-        self.check_injected_fault(address, 1, true)?;
+        self.check_bus_fault(address, 1, true)?;
         self.write_byte(address, value);
         Ok(())
     }
 
     fn try_write_word(&mut self, address: u32, value: u16) -> Result<(), BusFault> {
-        self.check_injected_fault(address, 2, true)?;
+        self.check_bus_fault(address, 2, true)?;
         self.write_word(address, value);
         Ok(())
     }
 
     fn try_write_long(&mut self, address: u32, value: u32) -> Result<(), BusFault> {
-        self.check_injected_fault(address, 4, true)?;
+        self.check_bus_fault(address, 4, true)?;
         self.write_long(address, value);
         Ok(())
     }
@@ -5886,7 +6047,7 @@ impl AddressBus for CpuBus {
             let lo = self.try_read_byte(address.wrapping_add(2))? as u32;
             return Ok((hi << 8) | lo);
         }
-        self.check_injected_fault(address, 3, false)?;
+        self.check_bus_fault(address, 3, false)?;
         Ok(self.read_three_bytes_plain(address))
     }
 
@@ -5895,7 +6056,7 @@ impl AddressBus for CpuBus {
             self.try_write_word(address, (value >> 8) as u16)?;
             return self.try_write_byte(address.wrapping_add(2), value as u8);
         }
-        self.check_injected_fault(address, 3, true)?;
+        self.check_bus_fault(address, 3, true)?;
         self.write_three_bytes_plain(address, value);
         Ok(())
     }
@@ -5919,12 +6080,12 @@ impl AddressBus for CpuBus {
     }
 
     fn try_read_immediate_word(&mut self, address: u32) -> Result<u16, BusFault> {
-        self.check_injected_fault(address, 2, false)?;
+        self.check_bus_fault(address, 2, false)?;
         Ok(self.read_immediate_word(address))
     }
 
     fn try_read_immediate_long(&mut self, address: u32) -> Result<u32, BusFault> {
-        self.check_injected_fault(address, 4, false)?;
+        self.check_bus_fault(address, 4, false)?;
         Ok(self.read_immediate_long(address))
     }
 
@@ -6071,6 +6232,9 @@ impl AddressBus for CpuBus {
                     self.bus.emulated_frames(),
                 );
             }
+        }
+        if let Some(vector) = self.bus.quick_vector(level) {
+            return u32::from(vector);
         }
         if !self.bus.cpu_short_bus_cycle() {
             // On the 68000 motherboard bus the CPU-space IACK address
@@ -6222,6 +6386,101 @@ fn write_be(bytes: &mut [u8], off: usize, size: usize, value: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn buster_port_width_wait_and_burst_reach_the_cpu_bus() -> Result<()> {
+        use crate::buster::Revision;
+        for revision in [Revision::Rev7, Revision::Rev9, Revision::Rev11] {
+            let mut m = machine_with_program_model(0x400, &[0x4e71], CpuModel::M68030)?;
+            let b = &mut m.bus;
+            b.bus.buster.revision = revision;
+            b.bus.mem.zorro = ZorroChain::default();
+            b.bus
+                .mem
+                .zorro
+                .add_board_configured_at(BoardSpec::fast_ram(65536), 0x200000)?;
+            let mut ram = BoardSpec::z3_ram(16 << 20);
+            ram.timing.wait_cck = 2;
+            b.bus.mem.zorro.add_board_configured_at(ram, 0x40000000)?;
+            b.bus.wire_buster()?;
+            b.bus.set_cpu_bus_arbitration_enabled(true);
+            b.dcache = Some(Box::new(crate::cache::CpuCache::default()));
+            let before = b.bus.emulated_cck();
+            b.write_long(0x200000, 0x12345678);
+            assert_eq!(b.bus.emulated_cck() - before, 4);
+            let before = b.bus.emulated_cck();
+            assert_eq!(b.read_long(0x200000), 0x12345678);
+            assert_eq!(b.bus.emulated_cck() - before, 4);
+            b.apply_cache_control((1 << 12) | (1 << 8), 0, 0); // DBE and ED
+            let before = b.bus.emulated_cck();
+            b.read_long(0x4000000c);
+            let cost = b.bus.emulated_cck() - before;
+            assert_eq!(cost, if revision == Revision::Rev7 { 4 } else { 12 });
+            let before = b.bus.emulated_cck();
+            b.read_long(0x40000000);
+            assert_eq!(
+                b.bus.emulated_cck() - before,
+                if revision == Revision::Rev7 { 4 } else { 0 }
+            );
+            b.jit_enabled = true;
+            assert!(b.jit_fast_mem().is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_operand_crossing_two_ram_cards_strobes_each_select() -> Result<()> {
+        let mut m = machine_with_program_model(0x400, &[0x4e71], CpuModel::M68030)?;
+        let b = &mut m.bus;
+        b.bus.buster.revision = crate::buster::Revision::Rev11;
+        b.bus.mem.zorro = ZorroChain::default();
+        for base in [0x200000, 0x210000] {
+            b.bus
+                .mem
+                .zorro
+                .add_board_configured_at(BoardSpec::fast_ram(65536), base)?;
+        }
+        b.bus.wire_buster()?;
+        for addr in [0x20fffd, 0x20fffe, 0x20ffff] {
+            b.write_long(addr, 0x12345678);
+            assert_eq!(b.read_long(addr), 0x12345678);
+            let split = (0x210000 - addr) as usize;
+            assert_eq!(
+                &b.bus.mem.zorro.board_ram(0)[65536 - split..],
+                &0x12345678u32.to_be_bytes()[..split]
+            );
+            assert_eq!(
+                &b.bus.mem.zorro.board_ram(1)[..4 - split],
+                &0x12345678u32.to_be_bytes()[split..]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn dip_ovr_redirects_cpu_and_dma_and_a_second_pic_faults() -> Result<()> {
+        let mut m = machine_with_program(0x400, &[0x4e71])?;
+        let b = &mut m.bus;
+        b.bus.buster.revision = crate::buster::Revision::A2000;
+        let mut ram = BoardSpec::fast_ram(65536);
+        ram.timing.ovr = true;
+        b.bus.mem.zorro.add_board_configured_at(ram, 0x10000)?;
+        b.bus.wire_buster()?;
+        b.try_write_word(0x10000, 0xbeef).unwrap();
+        assert_eq!(b.try_read_word(0x10000).unwrap(), 0xbeef);
+        assert_eq!(
+            crate::zorro_device::dma_read_word(&b.bus.mem, 0x10000),
+            Some(0xbeef)
+        );
+        assert_eq!(&b.bus.mem.chip_ram[0x10000..0x10002], &[0, 0]);
+        b.bus
+            .mem
+            .zorro
+            .add_board_configured_at(BoardSpec::fast_ram(65536), 0x10000)?;
+        assert!(b.try_write_word(0x10000, 0).is_err());
+        assert_eq!(&b.bus.mem.zorro.board_ram(1)[..2], &[0xbe, 0xef]);
+        Ok(())
+    }
 
     #[test]
     fn charge_cpu_clocks_scales_with_clock_ratio_and_carries_remainders() -> Result<()> {

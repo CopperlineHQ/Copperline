@@ -59,6 +59,7 @@ pub fn board_spec(slot: usize) -> BoardSpec {
         chained: false,
         no_shutup: false,
         window: 0,
+        timing: Default::default(),
         diag_vec: None,
     }
 }

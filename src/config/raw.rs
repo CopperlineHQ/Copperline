@@ -1703,6 +1703,9 @@ pub(crate) struct RawMachine {
     /// exercise the diagnostic tools.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) mem_controller: Option<String>,
+    /// Super Buster package revision on an A3000 or A4000.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) buster_revision: Option<u8>,
     /// Skip the ROM's scsi.device. Defaults to true only when the machine's
     /// built-in disk controller (Gayle or A4000 IDE, A3000 SDMAC SCSI) has no
     /// drives configured, where the driver would only cost boot time probing

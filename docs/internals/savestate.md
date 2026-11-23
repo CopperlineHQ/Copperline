@@ -379,7 +379,7 @@ before it arrived complete.
 | `CART` | bus fields | `cartridge` |
 | `AKIK` | bus fields | `akiko` |
 | `CDTV` | bus fields | `cdtv` |
-| `ZORR` | bus fields | `devices` (every `BoardDevice`) |
+| `ZORR` | bus fields | `devices` (including in-flight A4091 SCRIPTS transfers) and `buster` (revision, owner, registrations, fairness and outstanding waits) |
 | `KEYB` | bus fields | `keyboard` (the 6500/1 MCU model) |
 | `INPT` | bus fields | `input` (controller ports) |
 | `BUS ` | bus rest | every other `Bus` field: DMA arbitration, interrupt latches, beam-event capture, presentation windows, diagnostics |

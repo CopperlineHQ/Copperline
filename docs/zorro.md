@@ -812,6 +812,7 @@ In-tree functional boards implement the `ZorroDevice` trait
            chained: false,
            no_shutup: false,
            window: 0,
+           timing: SlaveTiming::default(),
            diag_vec: None,
        }
    }
@@ -835,3 +836,26 @@ In-tree functional boards implement the `ZorroDevice` trait
 Keep the hardware-first rule in mind: boards model autoconfig hardware
 behaviour, and anything guest-visible (IDs, sizes, ROM bytes) should match
 what a real board of that class would expose.
+
+### Slave timing on Buster backplanes
+
+An optional `[timing]` table in board metadata describes the signals the
+card supplies when addressed. `wait_cck` adds colour clocks to each
+transfer (Zorro II XRDY or delayed Zorro III DTACK). For Zorro II RAM,
+`ovr = true` asserts OVR on a decoded access and suppresses the B2000
+motherboard response. Other cards responding at that address still collide.
+For Zorro III RAM, `mtack = true` accepts a Level II cache-line burst and
+`cache_inhibit = true` inhibits CPU caching. On Zorro II, Super Buster
+inhibits caching in its I/O windows and drives both read strobes in the
+`$200000–$9FFFFF` memory window.
+Zorro III cards configure at `$FF000000` on Super Buster. Set
+`config_in_z2 = true` for a card wired to configure at `$00E80000`.
+The card responds to one aperture while CFGIN is asserted.
+These signals default to zero in board metadata. The built-in Zorro III
+RAM board accepts bursts.
+
+```toml
+[timing]
+wait_cck = 1
+mtack = true
+```

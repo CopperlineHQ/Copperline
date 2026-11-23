@@ -131,6 +131,14 @@ impl Bus {
             vpos: self.agnus.vpos,
             hpos: self.agnus.hpos,
             frame: self.emulated_frames,
+            buster_requests: self.buster.z2
+                | self.buster.z3
+                | (u8::from(self.buster.local_request) << 5),
+            buster_grant: self
+                .buster
+                .owner
+                .and_then(|s| 1u8.checked_shl(s as u32))
+                .unwrap_or(0),
             owner_index: owner.accounting_index() as u8,
             owner_name: CHIP_BUS_OWNER_NAMES[owner.accounting_index()],
             dmacon: self.agnus.dmacon,

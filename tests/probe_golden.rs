@@ -76,6 +76,7 @@ enum Machine {
     Aga,
     /// A1200 profile exercising NTSC field geometry.
     AgaNtsc,
+    A4000Buster,
 }
 
 /// One golden-render probe: name, main-program binary, emulated seconds
@@ -166,9 +167,10 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         Machine::Jit => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
-        Machine::Aga | Machine::AgaNtsc => "revision = \"AGA\"\n",
+        Machine::Aga | Machine::AgaNtsc | Machine::A4000Buster => "revision = \"AGA\"\n",
     };
     let (cpu, memory) = match machine {
+        Machine::A4000Buster => ("68040", "chip = \"2M\"\n"),
         Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
         Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
         Machine::Aga | Machine::AgaNtsc => ("68EC020", "chip = \"2M\"\n"),
@@ -178,7 +180,9 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
     } else {
         ""
     };
-    let (profile, video) = if matches!(machine, Machine::AgaNtsc) {
+    let (profile, video) = if matches!(machine, Machine::A4000Buster) {
+        ("[machine]\nprofile = \"A4000\"\n[scsi]\ncontroller = \"a4091\"\n[rtg]\ncard = \"none\"\n", "PAL")
+    } else if matches!(machine, Machine::AgaNtsc) {
         (
             "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n",
             "NTSC",
@@ -315,6 +319,15 @@ fn run_probe(p: &Probe) {
     let shot_path = capture_probe(p, &work);
     let golden_path = golden_dir.join(format!("{name}.png"));
     let actual = load_png(&shot_path).expect("load capture");
+    if matches!(p.machine, Machine::A4000Buster) {
+        let center =
+            (actual.height as usize / 2 * actual.width as usize + actual.width as usize / 2) * 4;
+        assert_eq!(
+            &actual.data[center..center + 4],
+            &[34, 204, 68, 255],
+            "the guest must observe partial DMA and verify the final buffer"
+        );
+    }
     if matches!(p.machine, Machine::AgaNtsc) {
         // Require the source probe's visible 4:4:2:1 sprite staircase even
         // when blessing, so a failed boot cannot become a blank reference.
@@ -426,6 +439,7 @@ macro_rules! probe_tests {
 }
 
 probe_tests! {
+    golden_buster_z3_dma => Probe { name: "buster-z3-dma", program: "buster-z3-dma.bin", seconds: 24.0, machine: Machine::A4000Buster };
     golden_ntsc_aga_sprites => Probe { name: "ntsc-aga-sprites", program: "agashres-sprites.bin", seconds: 16.0, machine: Machine::AgaNtsc };
     golden_jit_bus_boundary => Probe { name: "jit-bus-boundary", program: "jit-bus-boundary.bin", seconds: 16.0, machine: Machine::Jit };
     golden_timing_test => probe("timing-test", "test.bin", 32.0);

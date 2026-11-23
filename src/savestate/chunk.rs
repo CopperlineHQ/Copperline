@@ -170,7 +170,8 @@ pub(crate) const UAEL: ChunkSpec = bus(b"UAEL", 1, "uaelib trap", &["uaelib"], f
 pub(crate) const CART: ChunkSpec = bus(b"CART", 1, "freezer cartridge", &["cartridge"], false);
 pub(crate) const AKIK: ChunkSpec = bus(b"AKIK", 1, "Akiko", &["akiko"], false);
 pub(crate) const CDTV: ChunkSpec = bus(b"CDTV", 1, "CDTV controller", &["cdtv"], false);
-pub(crate) const ZORR: ChunkSpec = bus(b"ZORR", 1, "expansion boards", &["devices"], true);
+pub(crate) const ZORR: ChunkSpec =
+    bus(b"ZORR", 2, "expansion boards", &["devices", "buster"], true);
 pub(crate) const KEYB: ChunkSpec = bus(b"KEYB", 1, "keyboard", &["keyboard"], true);
 pub(crate) const INPT: ChunkSpec = bus(b"INPT", 1, "controller ports", &["input"], true);
 /// Everything else on the `Bus`: DMA arbitration, interrupt latches, beam
@@ -696,6 +697,14 @@ pub(crate) struct Migration {
 /// fields, fill values a default cannot express) so states written at the
 /// previous version keep loading.
 pub(crate) const MIGRATIONS: &[Migration] = &[
+    Migration {
+        tag: ZORR.tag,
+        from: 1,
+        // A v1 board finished all ready transfers within its register
+        // access. Serde defaults its script to idle and its arbiter to
+        // absent, preserving that machine's DMA behavior on resume.
+        apply: |_| Ok(()),
+    },
     Migration {
         tag: CIAA.tag,
         from: 1,

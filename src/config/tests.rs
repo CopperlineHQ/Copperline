@@ -1016,6 +1016,7 @@ fn raw_config_serialize_round_trips() {
             rtc_frozen: Some(true),
             battmem: Some("battmem.nvram".to_string()),
             mem_controller: Some("ramsey-07".to_string()),
+            buster_revision: None,
             rom_scsi_device_disable: Some(true),
         },
         cpu: RawCpu {
@@ -7109,4 +7110,27 @@ fn bad_drive_profiles_are_rejected() {
     let twice = "[[drive_profile]]\nid = \"x\"\nbase = \"wd-ac2120\"\n\
                  [[drive_profile]]\nid = \"x\"\nbase = \"wd-ac2120\"\n";
     assert!(format!("{:#}", parse_config(twice).unwrap_err()).contains("defined twice"));
+}
+
+#[test]
+fn buster_follows_the_motherboard_and_accepts_super_buster_upgrades() {
+    use crate::buster::Revision::*;
+    for (profile, expected) in [
+        ("A500", Absent),
+        ("A2000", A2000),
+        ("A3000", Rev7),
+        ("A4000", Rev11),
+    ] {
+        let toml = format!("[machine]\nprofile = \"{profile}\"\n");
+        assert_eq!(parse_config(&toml).unwrap().buster, expected);
+        for (number, rev) in [(7, Rev7), (9, Rev9), (11, Rev11)] {
+            let cfg = parse_config(&format!("{toml}buster_revision = {number}"));
+            if matches!(profile, "A3000" | "A4000") {
+                assert_eq!(cfg.unwrap().descriptor().buster_revision, rev);
+            } else {
+                assert!(cfg.is_err());
+            }
+        }
+        assert!(parse_config(&format!("{toml}buster_revision = 8")).is_err());
+    }
 }

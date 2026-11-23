@@ -4659,6 +4659,7 @@ fn build_machine_inner(
         log::warn!("[audio] stereo_separation is ignored while channel_mode is mono");
     }
     let mut bus = Bus::new(mem, paula, floppy);
+    bus.buster.revision = cfg.buster;
     bus.set_ram_init(cfg.ram_init);
     // The printer attaches here (its byte sink is `Send`). A sampler owns a
     // cpal capture stream that is `!Send` on some hosts, so the frontend builds
@@ -4900,9 +4901,8 @@ fn build_machine_inner(
             );
         }
     }
-    if !devices.is_empty() {
-        bus.attach_devices(devices);
-    }
+    bus.attach_devices(devices);
+    bus.wire_buster()?;
     bus.input.set_port_device(0, cfg.port_devices[0]);
     bus.input.set_port_device(1, cfg.port_devices[1]);
     info!(

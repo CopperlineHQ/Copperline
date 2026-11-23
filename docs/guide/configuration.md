@@ -534,6 +534,27 @@ rejected because the 8372A cannot address it. Booting with no `[machine]`
 section uses the same Rev 6A defaults; select `A500OCS` or set
 `[chipset] revision = "OCS"` for the older 8371/8362 machine.
 
+Copperline fits the DIP Buster to the A2000, Super Buster revision 7 to
+the A3000, and revision 11 to the A4000. To model an upgraded A3000 or
+an early A4000, set the physical revision in the machine configuration.
+
+```toml
+[machine]
+profile = "A3000"
+buster_revision = 11
+```
+
+| Revision | Expansion hardware |
+|---|---|
+| A2000 DIP | Five Zorro II request inputs, fixed slot priority and 16-bit transfers |
+| 7 | Zorro II DMA and Zorro III slave cards, including Zorro III RAM |
+| 9 | Zorro III masters, burst reads and vectored interrupts, with a registration race at the start of a slave cycle |
+| 11 | Zorro III masters, burst reads and vectored interrupts, with one active Zorro III registration at a time |
+
+For an A4091 on an A3000, select revision 11. The motherboard SCSI
+controller uses the local DMA input and works with the stock revision 7.
+See [expansion bus timing](../internals/timing.md#buster-and-super-buster).
+
 The `A2000` profile models the B2000 Rev 6.x motherboard, the revision most
 A2000s are: the same chip pair as the A500 Rev 6A (the 8372A Agnus with the
 OCS 8362 Denise), a 68000 at 7.09 MHz, the board's 1 MiB of soldered RAM all
@@ -542,8 +563,9 @@ MSM6242 clock on the motherboard. Its Gary is the A500's part, so the
 motherboard address decode is the A500's. The board's five Zorro II slots are
 the autoconfig chain every profile has: `[memory] fast`, `[scsi]` (an A2091
 makes it an A2000HD), `[[zorro]]` and the other Zorro II boards configure on
-it with no further setup. There is no slot count to configure and none is
-enforced. The other board revisions are overrides on the same profile:
+it with no further setup. Buster grants a requesting A2091 the bus in physical
+slot order. Chained functions share one connector. The following settings
+select other motherboard revisions on the same profile.
 
 | Board | Settings on top of `profile = "A2000"` |
 |---|---|

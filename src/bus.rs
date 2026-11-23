@@ -864,6 +864,8 @@ pub struct Bus {
     /// accesses route here through the [`crate::zorro_device::ZorroDevice`]
     /// boundary. Serialized inline with the bus.
     pub devices: Vec<crate::zorro_device::BoardDevice>,
+    #[serde(default)]
+    pub(crate) buster: crate::buster::Buster,
     /// Emulated-time deadline keeping the front-panel HDD LED lit after the
     /// most recent Gayle IDE activity, so short synchronous transfers stay
     /// visible for a human-perceptible stretch.
@@ -1741,7 +1743,6 @@ impl BeamChipRamWrite {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn from_bytes(vpos: u32, hpos: u32, offset: u32, src: &[u8]) -> Self {
         let mut bytes = [0; 4];
         let len = src.len().min(bytes.len());
@@ -3803,6 +3804,7 @@ impl Bus {
             akiko: None,
             cdtv: None,
             devices: Vec::new(),
+            buster: Default::default(),
             hdd_led_until_cck: 0,
             bplcon3_drop_warned: false,
             cpu_fetch_latch: [None; 2],
@@ -5460,6 +5462,7 @@ impl Bus {
     /// RESET instruction's caller puts the coordinate back afterwards, and
     /// the battery clock must not hear of a restart that did not happen.
     fn reset_devices(&mut self, restart_time: bool) {
+        self.buster.reset();
         // The serial sink hears about the reset first: an in-process
         // synthesizer releases what the interrupted guest left
         // sounding, exactly as if its line had dropped.
@@ -7271,7 +7274,13 @@ impl Bus {
         if !self.cpu_bus_arbitration_enabled || words == 0 {
             return;
         }
-        let cck = words * 2;
+        self.cpu_peripheral_clocks(words * 2);
+    }
+
+    pub(crate) fn cpu_peripheral_clocks(&mut self, cck: u32) {
+        if !self.cpu_bus_arbitration_enabled {
+            return;
+        }
         let tick = self.advance_chipset(cck);
         self.record_slice_bus_advance(cck, tick);
         self.credit_cpu_off_chip_access(cck);
@@ -8110,10 +8119,17 @@ impl Bus {
             .iter()
             .filter_map(ZorroDevice::next_event_cck)
             .min();
-        [gayle, ide_a4000, sdmac, cdtv, boards]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            gayle,
+            ide_a4000,
+            sdmac,
+            cdtv,
+            boards,
+            self.buster_pending().then_some(1),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     pub fn next_pot_event_cck(&self) -> Option<u32> {
@@ -8726,6 +8742,8 @@ impl Bus {
                 }
             }
         }
+
+        self.sample_buster_requests();
 
         let cia_remainder = self.device_clock.cia_tick_remainder_cck;
         let ticks = self.device_clock.cia_ticks_for_cck(cck);
@@ -13944,6 +13962,7 @@ mod collisions;
 mod custom_regs;
 mod ddf_line;
 mod dma_slots;
+mod expansion;
 mod frame_capture;
 mod video_slot;
 mod wave;

@@ -26,6 +26,9 @@
 //! the same nibbles are also baked into the first `$60` bytes of the real
 //! EPROM, which is how the physical board presents them.
 
+mod scripts;
+use scripts::Script;
+
 use crate::scsi::{ScsiExec, ScsiTarget};
 use anyhow::{bail, Result};
 use std::collections::VecDeque;
@@ -227,6 +230,12 @@ pub struct A4091 {
     /// phase (its data, status or buffer space is not ready).
     #[serde(default)]
     stall_until: Option<u64>,
+    #[serde(skip)]
+    pub(crate) arbitrated: bool,
+    #[serde(default)]
+    script: Script,
+    #[serde(default)]
+    quick_vector: Option<u8>,
 }
 
 /// 53C710 register-file reset values at their big-endian byte addresses:
@@ -262,6 +271,9 @@ impl A4091 {
             targets: Default::default(),
             conn: None,
             stall_until: None,
+            arbitrated: false,
+            script: Script::Idle,
+            quick_vector: None,
         })
     }
 
@@ -397,6 +409,16 @@ impl A4091 {
             || (self.regs[REG_SSTAT0] & self.regs[REG_SIEN]) != 0
     }
 
+    pub(crate) fn interrupt_vector(&self) -> Option<u8> {
+        self.quick_vector.filter(|_| self.irq_line())
+    }
+
+    pub(crate) fn dma_bus_error(&mut self) {
+        self.regs[REG_DSTAT] |= 0x20; // BF, bus fault
+        self.script = Script::Idle;
+        self.stall_until = None;
+    }
+
     /// Software reset (power-on, /RST, or the ISTAT RST strobe): registers
     /// to documented reset values, FIFOs drained. ROM and switches keep.
     fn chip_reset(&mut self) {
@@ -407,6 +429,7 @@ impl A4091 {
         self.scsi_fifo.clear();
         self.conn = None;
         self.stall_until = None;
+        self.script = Script::Idle;
     }
 
     pub fn load_rom(path: &Path) -> Result<Vec<u8>> {
@@ -476,13 +499,6 @@ impl A4091 {
         }
     }
 
-    /// A big-endian longword read from Amiga RAM (a SCRIPTS table entry).
-    fn dma_read32(&self, host: &mut crate::zorro_device::DeviceHost, addr: u32) -> u32 {
-        let mut b = [0u8; 4];
-        host.dma_read(addr, &mut b);
-        u32::from_be_bytes(b)
-    }
-
     /// The SCSI phase the connected target is presenting, for the SCRIPTS
     /// phase compares. `0xFF` when the bus is free (matches no phase).
     fn phase_bits(&self) -> u8 {
@@ -493,9 +509,7 @@ impl A4091 {
     /// DSA+offset (a one-hot ID bitmask in bits 16-23). A present target opens
     /// a nexus in MSG_OUT (to accept the IDENTIFY); an empty ID raises a
     /// selection timeout, as the driver expects when probing for devices.
-    fn scsi_select(&mut self, host: &mut crate::zorro_device::DeviceHost, offset: u32) {
-        let dsa = self.reg32(REG_DSA);
-        let entry = self.dma_read32(host, dsa.wrapping_add(offset));
+    fn scsi_select(&mut self, entry: u32) {
         let id_bits = (entry >> 16) & 0xFF;
         let target = id_bits.trailing_zeros() as usize;
         if id_bits == 0 || !self.target_present(target) {
@@ -581,104 +595,39 @@ impl A4091 {
             .collect()
     }
 
-    /// Table-indirect block move for the current phase: transfer up to the
-    /// entry's byte count between the target and the initiator buffer at
-    /// DSA+offset, advancing the target's phase as each phase drains. A timed
-    /// target that is not ready for the move yet returns when it will be,
-    /// with nothing moved.
-    fn run_block_move(
-        &mut self,
-        host: &mut crate::zorro_device::DeviceHost,
-        offset: u32,
-    ) -> Option<u64> {
-        let dsa = self.reg32(REG_DSA);
-        let count = (self.dma_read32(host, dsa.wrapping_add(offset)) & DBC_MASK) as usize;
-        let addr = self.dma_read32(host, dsa.wrapping_add(offset).wrapping_add(4));
-        let phase = self.conn.as_ref().map(|c| c.phase)?;
-        if let (Some(due), Some(now)) = (self.block_move_due(phase, count), self.target_now()) {
-            if due > now {
-                return Some(due);
+    fn accept_data_out(&mut self, buf: &[u8]) {
+        // A timed drive takes each whole block into its buffer as it
+        // arrives (and the buffer has room), and writes it to the
+        // media as the platter comes round.
+        let offers = match self.conn.as_ref() {
+            Some(c) => match c.timing.as_ref().filter(|t| t.writing) {
+                Some(timing) => self.write_offers(c, timing, buf.len()),
+                None => Vec::new(),
+            },
+            None => Vec::new(),
+        };
+        if let Some(c) = self.conn.as_mut() {
+            c.data_out.extend_from_slice(buf);
+            if let Some(timing) = c.timing.as_mut() {
+                timing.moved += buf.len() as u64;
             }
         }
-        match phase {
-            // Initiator -> target directions.
-            Phase::MsgOut => {
-                let mut msg = vec![0u8; count];
-                host.dma_read(addr, &mut msg);
-                if let Some(&b) = msg.last() {
-                    self.regs[REG_SFBR] = b;
-                }
-                self.scsi_msg_out(&msg);
-            }
-            Phase::Command => {
-                let mut cdb = vec![0u8; count];
-                host.dma_read(addr, &mut cdb);
-                if let Some(&b) = cdb.last() {
-                    self.regs[REG_SFBR] = b;
-                }
-                self.scsi_command(&cdb);
-            }
-            Phase::DataOut => {
-                let mut buf = vec![0u8; count];
-                host.dma_read(addr, &mut buf);
-                if let Some(&b) = buf.last() {
-                    self.regs[REG_SFBR] = b;
-                }
-                // A timed drive takes each whole block into its buffer as it
-                // arrives (and the buffer has room), and writes it to the
-                // media as the platter comes round.
-                let offers = match self.conn.as_ref() {
-                    Some(c) => match c.timing.as_ref().filter(|t| t.writing) {
-                        Some(timing) => self.write_offers(c, timing, buf.len()),
-                        None => Vec::new(),
-                    },
-                    None => Vec::new(),
-                };
-                if let Some(c) = self.conn.as_mut() {
-                    c.data_out.extend_from_slice(&buf);
-                    if let Some(timing) = c.timing.as_mut() {
-                        timing.moved += buf.len() as u64;
-                    }
-                }
-                if !offers.is_empty() {
-                    let target = self.conn.as_ref().map(|c| c.target);
-                    if let Some(mechanics) = target
-                        .and_then(|t| self.targets.get_mut(t)?.as_mut())
-                        .and_then(ScsiTarget::mechanics_mut)
-                    {
-                        mechanics.accept_write_sectors(&offers);
-                    }
-                }
-                let done = self
-                    .conn
-                    .as_ref()
-                    .is_some_and(|c| c.data_out.len() >= c.data_out_needed);
-                if done {
-                    self.scsi_data_out_done();
-                }
-            }
-            // Target -> initiator directions.
-            Phase::DataIn | Phase::Status | Phase::MsgIn => {
-                let bytes: Vec<u8> = {
-                    let c = self.conn.as_mut().unwrap();
-                    let n = count.min(c.out.len());
-                    if phase == Phase::DataIn {
-                        if let Some(timing) = c.timing.as_mut() {
-                            timing.moved += n as u64;
-                        }
-                    }
-                    c.out.drain(..n).collect()
-                };
-                if let Some(&b) = bytes.last() {
-                    self.regs[REG_SFBR] = b;
-                }
-                host.dma_write(addr, &bytes);
-                if self.conn.as_ref().is_some_and(|c| c.out.is_empty()) {
-                    self.advance_in_phase();
-                }
+        if !offers.is_empty() {
+            let target = self.conn.as_ref().map(|c| c.target);
+            if let Some(mechanics) = target
+                .and_then(|t| self.targets.get_mut(t)?.as_mut())
+                .and_then(ScsiTarget::mechanics_mut)
+            {
+                mechanics.accept_write_sectors(&offers);
             }
         }
-        None
+        let done = self
+            .conn
+            .as_ref()
+            .is_some_and(|c| c.data_out.len() >= c.data_out_needed);
+        if done {
+            self.scsi_data_out_done();
+        }
     }
 
     /// Consume the MSG_OUT bytes (IDENTIFY plus any negotiation message). A
@@ -830,138 +779,98 @@ impl A4091 {
         cond == want_true
     }
 
-    /// Run the SCRIPTS processor from DSP until it interrupts, disconnects, or
-    /// hits an instruction it does not implement. Covers the driver's I/O
-    /// script: SELECT, table-indirect block moves through the SCSI phases,
-    /// conditional JUMP/CALL/RETURN/INT, the SET/CLEAR handshake ops, and
-    /// WAIT DISCONNECT, plus the self-test's register writes and Memory Move.
-    fn run_scripts(&mut self, host: &mut crate::zorro_device::DeviceHost) {
-        let diag = crate::envcfg::flag("COPPERLINE_DIAG_A4091");
-        for _ in 0..4096 {
-            let dsp = self.reg32(REG_DSP);
-            let mut insn = [0u8; 8];
-            host.dma_read(dsp, &mut insn);
-            self.set_reg32(REG_DSP, dsp.wrapping_add(8));
-            let dcmd = insn[0];
-            if diag {
-                log::info!(
-                    "a4091 scripts: fetch {dsp:#010X}: {insn:02X?} phase={:02X}",
-                    self.phase_bits()
-                );
-            }
-            match dcmd >> 6 {
-                // Block move: table-indirect transfer in the current phase.
-                0b00 => {
-                    let offset = u32::from_be_bytes(insn[4..8].try_into().unwrap());
-                    if let Some(due) = self.run_block_move(host, offset) {
-                        // The target has not asserted REQ for this phase
-                        // yet: the processor waits at the block move.
-                        self.set_reg32(REG_DSP, dsp);
-                        self.stall_until = Some(due);
-                        return;
+    fn decode_instruction(&mut self, insn: [u8; 8]) {
+        let dsp = self.reg32(REG_DSP);
+        self.set_reg32(REG_DSP, dsp.wrapping_add(8));
+        self.script = Script::Fetch;
+        let dcmd = insn[0];
+        let operand = u32::from_be_bytes(insn[4..8].try_into().unwrap());
+        if crate::envcfg::flag("COPPERLINE_DIAG_A4091") {
+            log::info!(
+                "a4091 scripts: fetch {dsp:#010X}: {insn:02X?} phase={:02X}",
+                self.phase_bits()
+            );
+        }
+        match dcmd >> 6 {
+            0 => self.script = Script::TableCount(self.reg32(REG_DSA).wrapping_add(operand)),
+            // I/O instructions.
+            0b01 => match (dcmd >> 3) & 7 {
+                // SELECT: target from the table entry at DSA+offset.
+                0 => {
+                    let offset = u32::from_be_bytes(insn[0..4].try_into().unwrap()) & DBC_MASK;
+                    self.script = Script::Select(self.reg32(REG_DSA).wrapping_add(offset));
+                }
+                // WAIT DISCONNECT: free the bus after the target completes.
+                1 => {
+                    if self.conn.as_ref().is_some_and(|c| c.disconnect_ready) {
+                        self.conn = None;
                     }
                 }
-                // I/O instructions.
-                0b01 => match (dcmd >> 3) & 7 {
-                    // SELECT: target from the table entry at DSA+offset.
-                    0 => {
-                        let offset = u32::from_be_bytes(insn[0..4].try_into().unwrap()) & DBC_MASK;
-                        self.scsi_select(host, offset);
-                        if self.conn.is_none() {
-                            return; // selection timeout: let the ISR handle it
-                        }
-                    }
-                    // WAIT DISCONNECT: free the bus after the target completes.
-                    1 => {
-                        if self.conn.as_ref().is_some_and(|c| c.disconnect_ready) {
-                            self.conn = None;
-                        }
-                    }
-                    // SET / CLEAR ATN/ACK: handshake, no byte-level model.
-                    3 | 4 => {}
-                    // MOVE immediate to register (self-test path).
-                    7 if dcmd == 0x78 => {
-                        let reg = Self::le_to_be((insn[1] & 0x3F) as usize);
-                        self.regs[reg] = insn[2];
-                    }
-                    // WAIT RESELECT and register-to-register moves live only on
-                    // the reconnect path, which the synchronous model never
-                    // reaches.
-                    _ => {
-                        self.regs[REG_DSTAT] |= DSTAT_IID;
-                        return;
-                    }
-                },
-                // Transfer control: JUMP / CALL / RETURN / INT, conditional.
-                0b10 => {
-                    let taken = self.branch_taken(&insn);
-                    let op = (dcmd >> 3) & 7;
-                    if op == 3 {
-                        // INT: interrupt the host with the operand in DSPS.
-                        if taken {
-                            let dsps = u32::from_be_bytes(insn[4..8].try_into().unwrap());
-                            self.set_reg32(REG_DSPS, dsps);
-                            self.regs[REG_DSTAT] |= DSTAT_SIR;
-                            return;
-                        }
-                    } else if taken {
-                        let operand = u32::from_be_bytes(insn[4..8].try_into().unwrap());
-                        let target = if insn[1] & 0x80 != 0 {
-                            dsp.wrapping_add(8).wrapping_add(operand) // relative
-                        } else {
-                            operand
-                        };
-                        match op {
-                            0 => self.set_reg32(REG_DSP, target), // JUMP
-                            1 => {
-                                // CALL: stack the return address in TEMP.
-                                self.set_reg32(REG_TEMP, dsp.wrapping_add(8));
-                                self.set_reg32(REG_DSP, target);
-                            }
-                            2 => {
-                                let temp = self.reg32(REG_TEMP); // RETURN
-                                self.set_reg32(REG_DSP, temp);
-                            }
-                            _ => {
-                                self.regs[REG_DSTAT] |= DSTAT_IID;
-                                return;
-                            }
-                        }
-                    }
+                // SET / CLEAR ATN/ACK: handshake, no byte-level model.
+                3 | 4 => {}
+                // MOVE immediate to register (self-test path).
+                7 if dcmd == 0x78 => {
+                    let reg = Self::le_to_be((insn[1] & 0x3F) as usize);
+                    self.regs[reg] = insn[2];
                 }
-                // Memory Move: 24-bit byte count, then source and
-                // destination addresses in a third fetched longword.
-                0b11 if dcmd & 0x38 == 0 => {
-                    let mut dst = [0u8; 4];
-                    host.dma_read(dsp.wrapping_add(8), &mut dst);
-                    self.set_reg32(REG_DSP, dsp.wrapping_add(12));
-                    let count = u32::from_be_bytes(insn[0..4].try_into().unwrap()) & 0x00FF_FFFF;
-                    let src = u32::from_be_bytes(insn[4..8].try_into().unwrap());
-                    let dst = u32::from_be_bytes(dst);
-                    for i in 0..count {
-                        let b = self.dma_byte(host, src.wrapping_add(i));
-                        self.dma_write_byte(host, dst.wrapping_add(i), b);
-                        if diag && i < 8 {
-                            log::info!(
-                                "a4091 scripts: move [{:#010X}] {b:02X} -> [{:#010X}]",
-                                src.wrapping_add(i),
-                                dst.wrapping_add(i)
-                            );
-                        }
-                    }
-                    // The byte counter runs down to zero.
-                    self.regs[REG_DBC] = 0;
-                    self.regs[REG_DBC + 1] = 0;
-                    self.regs[REG_DBC + 2] = 0;
-                }
+                // WAIT RESELECT and register-to-register moves live only on
+                // the reconnect path, which the synchronous model never
+                // reaches.
                 _ => {
                     self.regs[REG_DSTAT] |= DSTAT_IID;
-                    return;
+                    self.script = Script::Idle;
+                }
+            },
+            // Transfer control: JUMP / CALL / RETURN / INT, conditional.
+            0b10 => {
+                let taken = self.branch_taken(&insn);
+                let op = (dcmd >> 3) & 7;
+                if op == 3 {
+                    // INT: interrupt the host with the operand in DSPS.
+                    if taken {
+                        let dsps = u32::from_be_bytes(insn[4..8].try_into().unwrap());
+                        self.set_reg32(REG_DSPS, dsps);
+                        self.regs[REG_DSTAT] |= DSTAT_SIR;
+                        self.script = Script::Idle;
+                    }
+                } else if taken {
+                    let operand = u32::from_be_bytes(insn[4..8].try_into().unwrap());
+                    let target = if insn[1] & 0x80 != 0 {
+                        dsp.wrapping_add(8).wrapping_add(operand) // relative
+                    } else {
+                        operand
+                    };
+                    match op {
+                        0 => self.set_reg32(REG_DSP, target), // JUMP
+                        1 => {
+                            // CALL: stack the return address in TEMP.
+                            self.set_reg32(REG_TEMP, dsp.wrapping_add(8));
+                            self.set_reg32(REG_DSP, target);
+                        }
+                        2 => {
+                            let temp = self.reg32(REG_TEMP); // RETURN
+                            self.set_reg32(REG_DSP, temp);
+                        }
+                        _ => {
+                            self.regs[REG_DSTAT] |= DSTAT_IID;
+                            self.script = Script::Idle;
+                        }
+                    }
                 }
             }
+
+            3 if dcmd & 0x38 == 0 => {
+                let count = u32::from_be_bytes(insn[..4].try_into().unwrap()) & DBC_MASK;
+                self.script = Script::MoveDestination {
+                    src: operand,
+                    count,
+                };
+            }
+            _ => {
+                self.regs[REG_DSTAT] |= DSTAT_IID;
+                self.script = Script::Idle;
+            }
         }
-        // Runaway script: stop as illegal.
-        self.regs[REG_DSTAT] |= DSTAT_IID;
     }
 
     /// One byte of the nibble-wide ROM as seen in the window at `off`.
@@ -1093,11 +1002,16 @@ impl crate::zorro_device::ZorroDevice for A4091 {
     ) {
         for i in 0..size {
             let o = off.wrapping_add(i as u32);
+            let b = (value >> (8 * (size - 1 - i))) as u8;
+            if (0x880000..0x8c0000).contains(&o) && o & 3 == 3 {
+                // DS0 clocks the board vector latch. ReA4091 decodes A17
+                // to let its driver return to the shared level-2 vector.
+                self.quick_vector = (o & 0x20000 == 0).then_some(b);
+            }
             if !(IO_OFFSET..IO_END).contains(&o) {
                 continue;
             }
             let r = (o as usize) & 0x3F;
-            let b = (value >> (8 * (size - 1 - i))) as u8;
             // SODL with SFWR set pushes the SCSI FIFO as well as storing.
             if r == REG_SODL
                 && self.regs[REG_CTEST4] & CTEST4_SFWR != 0
@@ -1126,6 +1040,7 @@ impl crate::zorro_device::ZorroDevice for A4091 {
                 // Abort: latch the DSTAT cause; DIEN gates only the line.
                 if b & ISTAT_ABRT != 0 {
                     self.regs[REG_DSTAT] |= DSTAT_ABRT;
+                    self.script = Script::Idle;
                     self.stall_until = None;
                 }
                 continue;
@@ -1145,7 +1060,7 @@ impl crate::zorro_device::ZorroDevice for A4091 {
             // Writing DSP's low byte starts the SCRIPTS processor.
             if r == REG_DSP + 3 {
                 self.stall_until = None;
-                self.run_scripts(host);
+                self.start_scripts(host);
             }
         }
     }
@@ -1182,7 +1097,7 @@ impl crate::zorro_device::ZorroDevice for A4091 {
         if let Some(due) = self.stall_until {
             if self.target_now().is_none_or(|now| now >= due) {
                 self.stall_until = None;
-                self.run_scripts(host);
+                self.start_scripts(host);
             }
         }
         // Otherwise the chip completes everything within the SCRIPTS run;
@@ -1203,6 +1118,7 @@ impl crate::zorro_device::ZorroDevice for A4091 {
     }
 
     fn reset(&mut self) {
+        self.quick_vector = None;
         self.chip_reset();
     }
 

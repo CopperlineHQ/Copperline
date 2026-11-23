@@ -90,6 +90,8 @@ pub struct Sdmac {
     sspbctl: u32,
     /// Set by ST_DMA, cleared by SP_DMA and FLUSH.
     dma_active: bool,
+    #[serde(skip)]
+    pub(crate) arbitrated: bool,
     dma_warned: bool,
     activity: bool,
     /// Set when `pump_dma` wrote guest memory this tick. Drained by the bus
@@ -116,6 +118,7 @@ impl Sdmac {
             sspbdat: 0,
             sspbctl: 0,
             dma_active: false,
+            arbitrated: false,
             dma_warned: false,
             activity: false,
             wrote_memory: false,
@@ -325,37 +328,45 @@ impl Sdmac {
     /// Move every byte the WD33C93 currently offers or wants between its data
     /// path and Amiga memory, a word at a time, while DMA is started.
     fn pump_dma(&mut self, mem: &mut Memory) {
-        if !self.dma_active {
+        if !self.arbitrated {
+            while self.request_address().is_some() {
+                self.transfer_word(mem);
+            }
+        }
+    }
+
+    pub(crate) fn request_address(&self) -> Option<u32> {
+        (self.dma_active && self.wd.dma_request().is_some() && self.wd.dma_remaining() != 0)
+            .then_some(self.acr & DMA_ADDR_MASK)
+    }
+
+    pub(crate) fn transfer_word(&mut self, mem: &mut Memory) {
+        let Some(dir) = self.wd.dma_request() else {
             return;
-        }
-        while let Some(dir) = self.wd.dma_request() {
-            if self.wd.dma_remaining() == 0 {
-                break;
+        };
+        self.activity = true;
+        let addr = self.acr & DMA_ADDR_MASK;
+        match dir {
+            DmaDir::In => {
+                let b0 = self.wd.dma_in_byte();
+                let b1 = if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
+                    self.wd.dma_in_byte()
+                } else {
+                    // An odd byte count still writes a full word; the pad
+                    // byte is whatever the FIFO carries (zero here).
+                    0
+                };
+                self.dma_write_word(mem, addr, (u16::from(b0) << 8) | u16::from(b1));
             }
-            self.activity = true;
-            let addr = self.acr & DMA_ADDR_MASK;
-            match dir {
-                DmaDir::In => {
-                    let b0 = self.wd.dma_in_byte();
-                    let b1 = if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
-                        self.wd.dma_in_byte()
-                    } else {
-                        // An odd byte count still writes a full word; the pad
-                        // byte is whatever the FIFO carries (zero here).
-                        0
-                    };
-                    self.dma_write_word(mem, addr, (u16::from(b0) << 8) | u16::from(b1));
-                }
-                DmaDir::Out => {
-                    let w = self.dma_read_word(mem, addr);
-                    self.wd.dma_out_byte((w >> 8) as u8);
-                    if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
-                        self.wd.dma_out_byte(w as u8);
-                    }
+            DmaDir::Out => {
+                let w = self.dma_read_word(mem, addr);
+                self.wd.dma_out_byte((w >> 8) as u8);
+                if self.wd.dma_request().is_some() && self.wd.dma_remaining() > 0 {
+                    self.wd.dma_out_byte(w as u8);
                 }
             }
-            self.acr = self.acr.wrapping_add(2);
         }
+        self.acr = self.acr.wrapping_add(2);
     }
 
     fn dma_read_word(&mut self, mem: &Memory, addr: u32) -> u16 {

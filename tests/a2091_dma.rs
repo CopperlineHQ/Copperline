@@ -35,10 +35,17 @@ fn dma_addresses(log: &str) -> Vec<u32> {
 }
 
 fn run_case(name: &str, kick: Option<&Path>, fast: &str, chip: &str) {
-    run_case_with_lba(name, kick, fast, chip, false);
+    run_case_with_lba(name, kick, fast, chip, false, "A500");
 }
 
-fn run_case_with_lba(name: &str, kick: Option<&Path>, fast: &str, chip: &str, boundary: bool) {
+fn run_case_with_lba(
+    name: &str,
+    kick: Option<&Path>,
+    fast: &str,
+    chip: &str,
+    boundary: bool,
+    model: &str,
+) {
     let temp = std::env::temp_dir().join(format!(
         "copperline-a2091-dma-{name}-{}",
         std::process::id()
@@ -89,7 +96,7 @@ fn run_case_with_lba(name: &str, kick: Option<&Path>, fast: &str, chip: &str, bo
         format!(
             r#"
 [machine]
-profile = "A500"
+profile = "{model}"
 [cpu]
 model = "{cpu}"
 [memory]
@@ -257,5 +264,12 @@ fn a2091_dma_kickstarts() {
 #[test]
 #[ignore = "runs the emulator with a sparse disk larger than 2 TiB"]
 fn a2091_dma_read_crosses_32_bit_lba_boundary() {
-    run_case_with_lba("aros-lba", None, "2M", "2M", true);
+    run_case_with_lba("aros-lba", None, "2M", "2M", true, "A500");
+}
+
+#[test]
+#[ignore = "runs the emulator"]
+fn a2000_buster_dma_to_chip_and_expansion_ram() {
+    run_case_with_lba("buster-fast", None, "2M", "2M", false, "A2000");
+    run_case_with_lba("buster-chip", None, "0", "2M", false, "A2000");
 }

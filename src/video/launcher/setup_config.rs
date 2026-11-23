@@ -22,6 +22,7 @@ pub(super) fn carry_unowned_keys(src: &RawConfig, dst: &mut RawConfig) {
     dst.machine.rtc_frozen = src.machine.rtc_frozen;
     dst.machine.battmem = src.machine.battmem.clone();
     dst.machine.mem_controller = src.machine.mem_controller.clone();
+    dst.machine.buster_revision = src.machine.buster_revision;
     dst.machine.rom_scsi_device_disable = src.machine.rom_scsi_device_disable;
     dst.pcmcia = src.pcmcia.clone();
     dst.clipboard = src.clipboard.clone();
@@ -608,6 +609,9 @@ impl MachineSetup {
         if self.parallel_device != ParallelDevice::JoystickAdapter {
             raw.input.port3 = None;
             raw.input.port4 = None;
+        }
+        if !matches!(self.model, Some(MachineModel::A3000 | MachineModel::A4000)) {
+            raw.machine.buster_revision = None;
         }
         if !self.cpu.is_68060() {
             raw.cpu.unimplemented = None;
