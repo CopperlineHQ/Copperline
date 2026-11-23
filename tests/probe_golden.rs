@@ -448,7 +448,7 @@ fn a4000_replays_ongoing_z3_dma() {
     let mid = path("mid.clstate");
     for (label, resume) in [("continuous", false), ("resumed", true)] {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_copperline"));
-        cmd.current_dir(dir.path())
+        cmd.current_dir(repo_root())
             .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
             .args([
                 "--factory",
