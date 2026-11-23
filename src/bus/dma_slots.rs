@@ -1797,6 +1797,15 @@ impl Bus {
         add_agnus_tick(&mut self.pending_device_tick, tick);
     }
 
+    pub(super) fn recycle_device_trace_spans(&mut self, mut spans: Vec<BusTraceSpan>) {
+        // A synchronous board DMA read can advance the chipset while the
+        // timed callbacks run. Keep the spans generated for that next batch.
+        if self.pending_device_trace_spans.is_empty() {
+            spans.clear();
+            self.pending_device_trace_spans = spans;
+        }
+    }
+
     /// Apply any deferred timed-device color clocks (see `record_slice_bus_
     /// advance`). Called before every device-register observation (CIA, custom,
     /// and other peripheral reads/writes) and at each instruction boundary, so
@@ -1812,7 +1821,6 @@ impl Bus {
         let tick = std::mem::take(&mut self.pending_device_tick);
         let spans = std::mem::take(&mut self.pending_device_trace_spans);
         self.tick_timed_devices(cck, tick, &spans);
-        self.pending_device_trace_spans = spans;
-        self.pending_device_trace_spans.clear();
+        self.recycle_device_trace_spans(spans);
     }
 }

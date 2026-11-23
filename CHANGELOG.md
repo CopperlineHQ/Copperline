@@ -10,6 +10,12 @@ for the earlier release notes.
 
 ### Added
 
+- The A2000, A3000 and A4000 model Buster expansion-bus arbitration for
+  SCSI controllers and DMA-capable WebAssembly cards. Memory TAS, CAS and
+  CAS2 hold the bus through their operand cycles. A3000 and A4000
+  configurations can select Super Buster revision 7, 9 or 11 with
+  `[machine] buster_revision`.
+
 - The DAP adapter serves the debugger features the Amiga Assembly VS Code
   extension (`prb28.amiga-assembly`) offers for FS-UAE and WinUAE, so its
   `emulatorType: "copperline"` sessions get them too. The Debug Console
@@ -58,6 +64,10 @@ for the earlier release notes.
   when the machine model is changed.
 
 ### Fixed
+
+- A save state preserves the 68040/68060 MMU translation cache. Resuming
+  keeps the resident page mappings and the bus clocks a table walk would
+  consume on a miss.
 
 - A save state now records the identity (length and SHA-256) of the board
   firmware built into Copperline that its machine maps -- the

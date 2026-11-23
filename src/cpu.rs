@@ -4412,7 +4412,22 @@ impl CpuBus {
             self.bus
                 .note_heat(addr, size as u32, crate::heatmap::Toucher::CpuRead);
         }
-        if self.icache.is_some() || self.dcache.is_some() {
+        let locked_read = self.bus.buster.cpu_locked && kind == CpuBusAccessKind::Read;
+        if let (true, Some(cache)) = (locked_read, self.dcache.as_deref_mut()) {
+            if self.cacr_040_layout {
+                // MC68040UM 7.4.5 / MC68060UM 7.7.5: evict each matching
+                // 16-byte line before the uncached operand transfer.
+                let first = addr & !15;
+                let last = addr.wrapping_add(size as u32 - 1) & !15;
+                for offset in (0..last.wrapping_sub(first) + 16).step_by(4) {
+                    cache.invalidate_write(first.wrapping_add(offset), 4);
+                }
+            } else {
+                // MC68030UM 6.1.2.2: force a miss, then refresh the operand.
+                cache.invalidate_write(addr, size);
+            }
+        }
+        if !locked_read && (self.icache.is_some() || self.dcache.is_some()) {
             // Consume the tick-path DMA latch before any data-cache lookup:
             // under the JIT batch path a slow MMIO access mid-batch flushes
             // timed devices (whose tick can DMA into guest memory) without
@@ -4450,6 +4465,9 @@ impl CpuBus {
             self.instruction_fetches_cached = false;
         }
         let value = self.read_sized_uncached(addr, size, kind);
+        if locked_read && !self.cacr_040_layout && self.dcache.is_some() {
+            self.cache_fill_after_miss(addr, size, kind);
+        }
         self.note_cpu_data_bus(addr, size, value);
         value
     }
@@ -4489,6 +4507,7 @@ impl CpuBus {
             cache.fill_after_miss(addr, size, |long| self.peek_long(long));
             let line = addr & !15;
             if cache.burst
+                && !self.bus.buster.cpu_locked
                 && cache.enabled
                 && !cache.frozen
                 && self.bus.buster.revision.z3_master()
@@ -4789,6 +4808,13 @@ impl CpuBus {
                 size,
                 false,
             );
+            #[cfg(feature = "wasm-boards")]
+            if let Some(v) = self
+                .bus
+                .wasm_board_call(slot, crate::wasmboard::BoardCall::Read(off, size))
+            {
+                return v;
+            }
             let (value, activity) = {
                 let mem = &mut self.bus.mem;
                 let dev = &mut self.bus.devices[slot];
@@ -5270,6 +5296,14 @@ impl CpuBus {
                 size,
                 false,
             );
+            #[cfg(feature = "wasm-boards")]
+            if self
+                .bus
+                .wasm_board_call(slot, crate::wasmboard::BoardCall::Write(off, size, value))
+                .is_some()
+            {
+                return;
+            }
             let (activity, touched_memory) = {
                 let mem = &mut self.bus.mem;
                 let dev = &mut self.bus.devices[slot];
@@ -5704,7 +5738,7 @@ impl CpuBus {
     /// the live interrupt level, not the per-access sample.
     #[inline]
     fn jit_local_read(&mut self, address: u32, size: usize, fetch: bool) -> Option<u32> {
-        if self.jit_local.count == 0 {
+        if self.jit_local.count == 0 || self.bus.buster.cpu_locked {
             return None;
         }
         let (region, off) = self
@@ -5728,7 +5762,7 @@ impl CpuBus {
     /// store aimed at ROM takes the ordinary path, which drops it.
     #[inline]
     fn jit_local_write(&mut self, address: u32, size: usize, value: u32) -> bool {
-        if self.jit_local.count == 0 {
+        if self.jit_local.count == 0 || self.bus.buster.cpu_locked {
             return false;
         }
         let Some((region, off)) = self
@@ -5943,6 +5977,10 @@ fn cacr_040_layout(cpu_type: CpuType) -> bool {
 }
 
 impl AddressBus for CpuBus {
+    fn set_rmw_lock(&mut self, asserted: bool) {
+        self.bus.set_cpu_rmw_lock(asserted);
+    }
+
     #[inline(always)]
     fn batch_boundary(&mut self, retired: u32, pc: u32, sr: u16) -> bool {
         self.note_jit_batch_boundary(retired, pc, sr)
@@ -6552,6 +6590,214 @@ mod tests {
 
     fn test_bus_with_pc(pc: u32) -> Bus {
         test_bus(reset_rom(0x0007_FFFE, pc))
+    }
+
+    #[cfg(feature = "wasm-boards")]
+    mod wasm_buster {
+        use super::*;
+        use crate::buster::Revision;
+        use crate::wasmboard::{WasmBoard, WasmCaps, WasmManifest};
+        use crate::zorro::ZorroVersion;
+        use crate::zorro_device::{BoardDevice, ZorroDevice};
+
+        // Reading register zero rings a DMA doorbell; register four samples
+        // chip RAM using a synchronous DMA read. The write strobe saves the
+        // CPU operand. All three go through the normal CpuBus MMIO decode.
+        const MODULE: &str = r#"(module
+            (import "env" "dma_write" (func $out (param i32 i32 i32)))
+            (import "env" "dma_read" (func $in (param i32 i32 i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "abcdefghijklmnop")
+            (func (export "read") (param $off i32) (param i32) (result i32)
+                (if (i32.eqz (local.get $off)) (then
+                    (call $out (i32.const 8192) (i32.const 0) (i32.const 16))
+                    (return (i32.const 18))))
+                (if (i32.eq (local.get $off) (i32.const 4)) (then
+                    (call $in (i32.const 8192) (i32.const 64) (i32.const 16))
+                    (return (i32.load8_u (i32.const 79)))))
+                (if (i32.eq (local.get $off) (i32.const 16)) (then (return (i32.load (i32.const 92)))))
+                (i32.load (i32.const 80)))
+            (func (export "write") (param $off i32) (param i32) (param $v i32)
+                (if (i32.eq (local.get $off) (i32.const 12)) (then
+                    (i32.store (i32.const 84) (i32.const 1))))
+                (i32.store (i32.const 80) (local.get $v)))
+            (func (export "tick") (param $cck i32)
+                (i32.store (i32.const 92) (i32.add (i32.load (i32.const 92)) (local.get $cck)))
+                (if (i32.load (i32.const 84)) (then
+                    (i32.store (i32.const 84) (i32.const 0))
+                    (call $in (i32.const 8192) (i32.const 64) (i32.const 16)))))
+            (func (export "int2") (result i32) (i32.const 1)))"#;
+
+        fn plugin_bus(
+            version: ZorroVersion,
+            revision: Revision,
+        ) -> Result<(tempfile::TempDir, CpuBus, u32)> {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("board.wasm");
+            std::fs::write(&path, wat::parse_str(MODULE)?)?;
+            let board = WasmBoard::from_file(
+                &path,
+                WasmManifest {
+                    name: "DMA".into(),
+                    caps: WasmCaps {
+                        dma: true,
+                        int2: true,
+                        ..Default::default()
+                    },
+                    net: crate::net::NetConfig::None,
+                    config: Default::default(),
+                    file_keys: vec![],
+                },
+            )?;
+            let mut b = cpu_bus(test_bus_with_pc(0x100));
+            b.bus.mem.zorro = ZorroChain::default();
+            let base = if version == ZorroVersion::III {
+                0x4000_0000
+            } else {
+                0xe90000
+            };
+            let spec = if version == ZorroVersion::III {
+                BoardSpec::a4091(0)
+            } else {
+                BoardSpec::a2091(0)
+            };
+            b.bus.mem.zorro.add_board_configured_at(spec, base)?;
+            b.bus.devices.push(BoardDevice::Wasm(board));
+            b.address_mask = u32::MAX;
+            b.bus.buster.revision = revision;
+            b.bus.wire_buster()?;
+            b.bus.set_cpu_bus_arbitration_enabled(true);
+            Ok((dir, b, base))
+        }
+
+        #[test]
+        fn tas_keeps_dma_requested_by_the_slave_out_of_its_writeback() -> Result<()> {
+            for (version, rev, model) in [
+                (ZorroVersion::II, Revision::A2000, CpuType::M68000),
+                (ZorroVersion::III, Revision::Rev11, CpuType::M68040),
+            ] {
+                let (_dir, mut bus, base) = plugin_bus(version, rev)?;
+                let mut cpu = CpuCore::new();
+                cpu.set_cpu_type(model);
+                cpu.set_a(0, base);
+                cpu.exec_tas(&mut bus, m68k::core::ea::AddressingMode::AddressIndirect(0));
+                assert_eq!(bus.bus.mem.chip_ram[0x2000], 0, "DMA ran inside TAS");
+                assert!(!bus.bus.buster.cpu_locked);
+                assert!(!bus.bus.devices[0].int2_line());
+                bus.bus.advance_chipset(128);
+                assert_eq!(&bus.bus.mem.chip_ram[0x2000..0x2010], b"abcdefghijklmnop");
+                assert_eq!(bus.read_byte(base + 8), 0x92);
+                assert!(bus.bus.devices[0].int2_line());
+            }
+            Ok(())
+        }
+
+        #[test]
+        fn dma_inside_tick_settles_the_chipset_and_replays_the_elapsed_plugin_time() -> Result<()> {
+            use crate::wasmboard::BoardCall;
+            let (_dir, mut b, _) = plugin_bus(ZorroVersion::III, Revision::Rev11)?;
+            b.bus.set_cpu_bus_arbitration_enabled(false);
+            b.bus.wasm_board_call(0, BoardCall::Write(12, 1, 1));
+            let before = b.bus.emulated_cck();
+            b.bus.advance_cpu_idle_devices(10);
+            let elapsed = (b.bus.emulated_cck() - before) as u32;
+            assert!(elapsed > 10);
+            assert_eq!(b.bus.wasm_board_call(0, BoardCall::Read(16, 4)), Some(10));
+            let snap = rmp_serde::to_vec_named(&b.bus)?;
+            let mut restored: Bus = rmp_serde::from_slice(&snap)?;
+            restored.wire_buster()?;
+            for bus in [&mut b.bus, &mut restored] {
+                bus.advance_cpu_idle_devices(10);
+                assert_eq!(
+                    bus.wasm_board_call(0, BoardCall::Read(16, 4)),
+                    Some(elapsed + 10)
+                );
+            }
+            assert_eq!(
+                rmp_serde::to_vec_named(&b.bus)?,
+                rmp_serde::to_vec_named(&restored)?
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn synchronous_plugin_read_samples_ram_after_the_competing_scsi_master() -> Result<()> {
+            let (_dir, mut b, _) = plugin_bus(ZorroVersion::III, Revision::Rev11)?;
+            b.bus
+                .mem
+                .zorro
+                .add_board_configured_at(BoardSpec::a4091(1), 0x4200_0000)?;
+            b.bus
+                .devices
+                .push(BoardDevice::A4091(crate::a4091::A4091::new(vec![
+                    0;
+                    65536
+                ])?));
+            b.bus.wire_buster()?;
+            // Register the 53C710 first. Rev 11 retains that registration
+            // while its SCRIPTS move copies the buffer the plugin will read.
+            for (i, word) in [0xc000_0010u32, 0x2100, 0x2000, 0x9808_0000, 17]
+                .into_iter()
+                .enumerate()
+            {
+                b.bus.mem.chip_ram[0x1000 + i * 4..0x1004 + i * 4]
+                    .copy_from_slice(&word.to_be_bytes());
+            }
+            b.bus.mem.chip_ram[0x2100..0x2110].fill(0xa9);
+            b.bus.devices[1].write(
+                0x80002c,
+                4,
+                0x1000,
+                &mut crate::zorro_device::DeviceHost::for_slot(&mut b.bus.mem, 1),
+            );
+            b.bus.sample_buster_requests();
+            assert_eq!(b.bus.mem.chip_ram[0x200f], 0);
+            assert_eq!(
+                b.bus
+                    .wasm_board_call(0, crate::wasmboard::BoardCall::Read(4, 1)),
+                Some(0xa9)
+            );
+            Ok(())
+        }
+
+        #[test]
+        fn plugin_reads_wait_for_grants_and_writes_resume_mid_buffer() -> Result<()> {
+            for (version, revision) in [
+                (ZorroVersion::II, Revision::Rev7),
+                (ZorroVersion::III, Revision::Rev11),
+            ] {
+                let (_dir, mut b, base) = plugin_bus(version, revision)?;
+                b.read_byte(base);
+                for _ in 0..32 {
+                    if b.bus.mem.chip_ram[0x2000] == b'a' {
+                        break;
+                    }
+                    b.bus.advance_chipset(1);
+                }
+                assert_eq!(b.bus.mem.chip_ram[0x2000], b'a');
+                assert_eq!(b.bus.mem.chip_ram[0x200f], 0);
+                let snap = rmp_serde::to_vec_named(&b.bus)?;
+                let mut restored = cpu_bus(rmp_serde::from_slice(&snap)?);
+                restored.address_mask = u32::MAX;
+                restored.bus.wire_buster()?;
+                for bus in [&mut b, &mut restored] {
+                    let then = bus.bus.emulated_cck();
+                    assert_eq!(bus.read_byte(base + 4), b'p');
+                    assert!(
+                        bus.bus.emulated_cck() - then
+                            >= if version == ZorroVersion::II { 16 } else { 4 }
+                    );
+                }
+                assert_eq!(b.bus.emulated_cck(), restored.bus.emulated_cck());
+                assert_eq!(b.bus.mem.chip_ram, restored.bus.mem.chip_ram);
+            }
+            let (_dir, mut b, base) = plugin_bus(ZorroVersion::III, Revision::Rev7)?;
+            b.read_byte(base);
+            b.bus.advance_chipset(128);
+            assert_eq!(b.read_byte(base + 4), 0xff);
+            assert_eq!(b.bus.mem.chip_ram[0x2000], 0);
+            Ok(())
+        }
     }
 
     fn reset_rom(sp: u32, pc: u32) -> Vec<u8> {
@@ -7784,6 +8030,41 @@ mod tests {
         let slice = machine.step_slice(7)?;
         assert_eq!(slice.instructions, 7);
         assert_eq!(machine.d(2), 1, "CINVA must flush the stale icache entry");
+        Ok(())
+    }
+
+    #[test]
+    fn failed_cas_rereads_ram_and_updates_the_matching_cache_line() -> Result<()> {
+        for (model, enable) in [
+            (CpuModel::M68030, m68k::CACR_ED),
+            (CpuModel::M68040, m68k::CACR_040_DE),
+        ] {
+            // CAS.L D0,D1,(A0). D0 and the cached copy both start at zero.
+            let mut machine = machine_with_program_model(0x100, &[0x0ed0, 0x0040], model)?;
+            machine.bus_mut().mem.fit_mb_ram(1024 * 1024);
+            let addr = machine.bus_mut().mem.mb_ram_base() as u32;
+            machine.set_cache_emulation(false, true);
+            machine.cpu.cacr = enable;
+            machine.apply_cacr_updates();
+            machine.cpu.set_a(0, addr);
+            assert_eq!(machine.bus.read_long(addr), 0);
+            assert_eq!(machine.bus.read_long(addr + 4), 0);
+            machine.bus_mut().mem.mb_ram[..4].copy_from_slice(&42u32.to_be_bytes());
+            machine.step_slice(1)?;
+            assert_eq!(machine.d(0), 42);
+            let cached = |off| {
+                machine
+                    .bus
+                    .cache_read(addr + off, 4, CpuBusAccessKind::Read)
+            };
+            if model == CpuModel::M68030 {
+                assert_eq!(cached(0), Some(42));
+                assert_eq!(cached(4), Some(0));
+            } else {
+                assert_eq!(cached(0), None);
+                assert_eq!(cached(4), None);
+            }
+        }
         Ok(())
     }
 

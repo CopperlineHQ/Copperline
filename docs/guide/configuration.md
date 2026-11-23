@@ -553,6 +553,8 @@ buster_revision = 11
 
 For an A4091 on an A3000, select revision 11. The motherboard SCSI
 controller uses the local DMA input and works with the stock revision 7.
+A WebAssembly card with the `dma` capability uses the same revision rules
+as a physical card of its configured Zorro generation.
 See [expansion bus timing](../internals/timing.md#buster-and-super-buster).
 
 The `A2000` profile models the B2000 Rev 6.x motherboard, the revision most

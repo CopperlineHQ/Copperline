@@ -24,6 +24,10 @@ impl Bus {
         self.mem.zorro.rebuild_regions();
         self.buster.devices = [None; 5];
         self.buster.wired = false;
+        #[cfg(feature = "wasm-boards")]
+        {
+            self.buster.wasm_slots = 0;
+        }
         let fitted = self.buster.revision != Revision::Absent;
         if let Some(local) = self.sdmac.as_mut() {
             local.arbitrated = fitted;
@@ -33,6 +37,14 @@ impl Bus {
             match board {
                 BoardDevice::A2091(d) => d.arbitrated = fitted,
                 BoardDevice::A4091(d) => d.arbitrated = fitted,
+                #[cfg(feature = "wasm-boards")]
+                BoardDevice::Wasm(d) if d.can_dma() => {
+                    d.dma.version = if fitted {
+                        self.mem.zorro.device_version(index)
+                    } else {
+                        None
+                    };
+                }
                 _ => continue,
             }
             if fitted {
@@ -45,6 +57,10 @@ impl Bus {
                     anyhow::anyhow!("DMA controller exceeds the five Buster request lines")
                 })?;
                 *pin = Some(index);
+                #[cfg(feature = "wasm-boards")]
+                if matches!(board, BoardDevice::Wasm(_)) {
+                    self.buster.wasm_slots |= 1 << slot;
+                }
                 self.buster.wired = true;
             }
         }
@@ -66,6 +82,16 @@ impl Bus {
                     if d.request_address().is_some() && self.buster.revision.z3_master() =>
                 {
                     z3 |= 1 << slot
+                }
+                #[cfg(feature = "wasm-boards")]
+                BoardDevice::Wasm(d) if d.dma.request_address().is_some() => {
+                    if d.dma.z3() {
+                        if self.buster.revision.z3_master() {
+                            z3 |= 1 << slot;
+                        }
+                    } else {
+                        z2 |= 1 << slot;
+                    }
                 }
                 _ => {}
             }
@@ -128,20 +154,40 @@ impl Bus {
         self.buster.pending()
     }
 
+    pub(crate) fn set_cpu_rmw_lock(&mut self, asserted: bool) {
+        if asserted && self.cpu_bus_arbitration_enabled {
+            self.settle_cpu_posted_writes();
+            if self.buster.wired {
+                self.begin_buster_cpu_cycle();
+            }
+        }
+        self.buster.cpu_locked = asserted;
+        self.buster.cpu_driving = asserted;
+    }
+
     /// Finish the outstanding grant before driving /AS. The final turnaround
     /// clock is part of the master's cycle. Between Z3 scheduling atoms the
     /// local CPU can complete its pending cycle.
     pub(crate) fn begin_buster_cpu_cycle(&mut self) {
         if self.buster_pending() && self.cpu_bus_arbitration_enabled {
             loop {
-                let tick = self.advance_chipset(1);
-                self.record_slice_bus_advance(1, tick);
+                self.clock_buster_wait();
                 if self.buster.owner.is_none() {
                     break;
                 }
             }
         }
         self.buster.cpu_driving = true;
+    }
+
+    pub(crate) fn clock_buster_wait(&mut self) {
+        let tick = self.advance_chipset(1);
+        if self.cpu_bus_arbitration_enabled {
+            self.record_slice_bus_advance(1, tick);
+        } else {
+            self.pending_device_cck = self.pending_device_cck.saturating_add(1);
+            add_agnus_tick(&mut self.pending_device_tick, tick);
+        }
     }
 
     /// Return true when this cycle uses the Agnus CPU port. Zorro-to-Zorro
@@ -183,6 +229,8 @@ impl Bus {
         let (addr, z3) = match &self.devices[index] {
             BoardDevice::A2091(d) => (d.request_address(), false),
             BoardDevice::A4091(d) => (d.request_address(), true),
+            #[cfg(feature = "wasm-boards")]
+            BoardDevice::Wasm(d) => (d.dma.request_address(), d.dma.z3()),
             _ => return false,
         };
         let Some(addr) = addr else { return false };
@@ -235,6 +283,27 @@ impl Bus {
                 chain.device_version(slot) == Some(crate::zorro::ZorroVersion::III)
             });
         let fault = (z3 && !z3_port) || chain.collision(self.buster.revision, addr, 1);
+        #[cfg(feature = "wasm-boards")]
+        if let BoardDevice::Wasm(board) = &mut self.devices[index] {
+            let mut host = DeviceHost::for_slot(&mut self.mem, index);
+            let queued = board.dma.writing();
+            let written = board.dma.transfer(addr, !fault, &mut host);
+            if queued && !board.dma.writing() {
+                if board.int2_line() {
+                    self.paula.intreq |= INT_PORTS;
+                }
+                if board.int6_line() {
+                    self.paula.intreq |= INT_EXTER;
+                }
+            }
+            self.devices_wrote_memory |= written != 0;
+            if chip && written != 0 {
+                self.record_expansion_chip_write(addr, written);
+            }
+            self.buster.complete(slot, z3, false, now);
+            self.sample_buster_requests();
+            return chip || slow;
+        }
         let mut written = 0;
         if fault {
             match &mut self.devices[index] {

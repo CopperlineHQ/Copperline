@@ -215,14 +215,26 @@ manifest capabilities; importing one that was not granted fails to load):
 DMA transfers (`dma_read`/`dma_write`) are permitted only inside an active
 host transaction (`read`, `write`, `tick`). A DMA call from `init` traps and
 makes instantiation fail; one from an interrupt query (`int2`, `int6`) traps
-and takes the board offline. Within a transaction, `dma_write` buffers
-transfers in a host-side journal, bounded to 4,096 transfers and 16 MiB per
-callback so a plugin cannot exhaust host memory, and the journal is committed
-to Amiga memory only when the callback returns successfully. If the plugin
-traps (out of fuel, a panic, or any other trap), the uncommitted writes are
-discarded and Amiga memory is untouched. `dma_read` overlays the pending
-writes, so a plugin reads its own writes, including across the 32-bit address
-wrap (`0xFFFF_FFFF` -> `0x0000_0000`).
+and takes the board offline. Within a transaction, `dma_write` journals up to
+4,096 transfers and 16 MiB. A successful return submits the journal in order.
+A trap discards that callback's journal. A read sees the callback's earlier
+writes, including accesses that wrap at the end of the address space.
+
+On a Buster backplane, the slot claims the bus for each DMA buffer. Zorro II
+drives a 24-bit address and transfers up to two bytes per cycle. Zorro III
+drives 32 bits and transfers up to four bytes per cycle on revision 9 or 11.
+Chip and slow RAM also wait for the Agnus CPU port. The synchronous
+`dma_read` import samples memory on granted cycles, including any wait for
+earlier writes. Board ticks wait across an indivisible CPU instruction. An
+immediate read requested by a register callback during a CPU lock or while
+serving another expansion master sees open bus. A Zorro III card on revision
+7 can respond to register accesses but cannot master DMA.
+
+Submitted writes become visible to the guest as their cycles complete.
+The outstanding write queue has the same limits as the journal. Interrupt
+queries wait for outstanding writes to drain so a completion interrupt can
+safely publish a DMA buffer. Save states retain the queue and byte offset.
+The import signatures are the same on machines with and without Buster.
 
 ### Fault isolation and lifecycle
 

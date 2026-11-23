@@ -226,17 +226,22 @@ The timing unit is the colour clock. Nominal ready-slave timings and
 registration overlap are quantized to that unit. The model does not
 resolve the propagation delays of a specific daughterboard or the
 sub-clock synchronizer failures reported for particular revision 9 cards.
-Copperline runs one CPU, including when a CPU-slot accelerator is fitted.
-Its CPU core exposes TAS and CAS operands as individual memory callbacks,
-so CPU-originated RMC timing is unresolved. Host-service mailboxes and
-WebAssembly DMA imports retain their synchronous interfaces. A state
-saved during a grant preserves ownership, arbitration history and the
-current SCRIPTS instruction or buffered transfer. A pre-Buster save
-resumes its original DMA timing. The 68040 core reloads its address
-translation cache cold. Under AROS with the MMU enabled, a mid-DMA replay
-reproduced the expansion, CPU and memory chunks and the framebuffer, with a
-four-CPU-clock difference in the bus's fractional clock phase. A Kickstart
-3.1 replay with the MMU disabled also reproduced the bus chunk.
+Memory TAS, CAS and CAS2 hold the CPU grant across the operand transfers,
+including both addresses of CAS2. A bus fault releases the grant before
+the exception frame is written. A locked operand read reaches the bus even on a data-cache hit. The
+68030 refreshes a cacheable operand and the 68040/060 evicts the matching
+line. A locked chip write waits for its Agnus slot before the CPU releases
+Buster.
+Register TAS leaves arbitration free.
+
+DMA-capable WebAssembly cards use their physical slot's request line and
+bus width. Reads sample guest RAM at each grant. Successful callbacks
+queue their writes for transfer, and their interrupt outputs become
+visible after the queue drains. A save during a grant preserves the
+slot owner, arbitration history and the byte cursor of the active card.
+The 68040 MMU also retains resident translations across a save, preserving
+the bus clocks of later accesses. A pre-Buster state resumes its original
+DMA timing. [WebAssembly DMA interface](../zorro.md#module-abi)
 
 Hardware references include [LIV2's B2000 replacement RTL](https://github.com/LIV2/Bluster/blob/dev/RTL/Bluster.v),
 [the Zorro III bus specification](https://www.devili.iki.fi/mirrors/haynie/zorroiii/docs/zorro3.pdf),
@@ -782,10 +787,9 @@ the tested normal/fill readback; line-texture controls expose additional flag
 behaviour that remains under investigation. The historical game-specific
 examples are removed as evidence for the rule.
 
-A 68000 `TAS` read-modify-write is unsafe on chip RAM (the HRM warns
-against it); the `m68k` backend exposes it as a byte read then a byte
-write, so Copperline models `TAS` against chip RAM as two separately
-Agnus-arbitrated accesses, each subject to the same back-pressure rule.
+The HRM cautions against 68000 `TAS` on chip RAM. Its read and write
+each need an Agnus slot. Buster holds off other expansion masters
+through the internal clocks and both operand strobes.
 Tests: `blithog_clear_busy_blitter_yields_to_cpu_only_after_starvation`,
 `bltpri_cpu_uses_first_d_bubble_but_waits_for_bus_accesses`,
 `bltpri_line_blit_bresenham_cycles_stay_cpu_available`,

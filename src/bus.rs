@@ -7448,7 +7448,10 @@ impl Bus {
         // pending write and a second write stalls on the one in-flight cycle.
         self.settle_cpu_posted_writes();
         self.cpu_trace_slots.clear();
-        if self.cpu_short_bus_cycle && matches!(kind, CpuBusAccessKind::Write) {
+        if self.cpu_short_bus_cycle
+            && !self.buster.cpu_locked
+            && matches!(kind, CpuBusAccessKind::Write)
+        {
             // Post the write instead of stalling for its slot: the 020+ bus
             // unit accepts it at the end of its 3-clock cycle and the
             // transfer overlaps the following execution, so those clocks are
@@ -7982,11 +7985,11 @@ impl Bus {
     /// deadline optimization to pay for itself.
     pub fn advance_cpu_idle_devices(&mut self, cck: u32) -> AgnusTick {
         self.flush_timed_devices();
-        let tick = self.advance_chipset_cpu_idle(cck);
+        let mut tick = self.advance_chipset_cpu_idle(cck);
         let spans = std::mem::take(&mut self.pending_device_trace_spans);
-        self.tick_timed_devices(cck, tick, &spans);
-        self.pending_device_trace_spans = spans;
-        self.pending_device_trace_spans.clear();
+        let extra = self.tick_timed_devices(cck, tick, &spans);
+        add_agnus_tick(&mut tick, extra);
+        self.recycle_device_trace_spans(spans);
         tick
     }
 
@@ -7995,11 +7998,11 @@ impl Bus {
         // this (idle/stopped-CPU or test-driven) span, so device time stays
         // ordered, then tick this span directly.
         self.flush_timed_devices();
-        let tick = self.advance_chipset(cck);
+        let mut tick = self.advance_chipset(cck);
         let spans = std::mem::take(&mut self.pending_device_trace_spans);
-        self.tick_timed_devices(cck, tick, &spans);
-        self.pending_device_trace_spans = spans;
-        self.pending_device_trace_spans.clear();
+        let extra = self.tick_timed_devices(cck, tick, &spans);
+        add_agnus_tick(&mut tick, extra);
+        self.recycle_device_trace_spans(spans);
         tick
     }
 
@@ -8554,12 +8557,66 @@ impl Bus {
         Some(position_cck)
     }
 
+    /// Run peripheral timers up to the observation point before a plugin
+    /// can issue a synchronous DMA read and advance the beam again.
     fn tick_timed_devices(
         &mut self,
         cck: u32,
-        agnus_tick: AgnusTick,
+        tick: AgnusTick,
         trace_spans: &[BusTraceSpan],
-    ) {
+    ) -> AgnusTick {
+        self.tick_peripherals(cck, tick, trace_spans);
+        #[cfg(feature = "wasm-boards")]
+        if self.buster.wasm_slots != 0 {
+            return self.tick_wasm_masters(cck);
+        }
+        AgnusTick::default()
+    }
+
+    #[cfg(feature = "wasm-boards")]
+    fn tick_wasm_masters(&mut self, cck: u32) -> AgnusTick {
+        use crate::zorro_device::{BoardDevice, ZorroDevice};
+        let pins = self.buster.devices;
+        for (pin, index) in pins.into_iter().enumerate() {
+            if self.buster.wasm_slots & (1 << pin) == 0 {
+                continue;
+            }
+            let index = index.expect("wired plugin slot");
+            self.wasm_board_call(index, crate::wasmboard::BoardCall::Tick(cck));
+            let dev = &self.devices[index];
+            if dev.int2_line() {
+                self.paula.intreq |= INT_PORTS;
+            }
+            if dev.int6_line() {
+                self.paula.intreq |= INT_EXTER;
+            }
+        }
+        self.arm_irq_recognition_latency();
+        // A synchronous read inside tick() can have spent additional CCKs.
+        // Settle native timers now so snapshots are at the same clock as
+        // the CPU. Deliver that elapsed time to plugins at the next tick:
+        // calling tick recursively could start another DMA on every return.
+        let elapsed = std::mem::take(&mut self.pending_device_cck);
+        let tick = std::mem::take(&mut self.pending_device_tick);
+        if elapsed != 0 {
+            let spans = std::mem::take(&mut self.pending_device_trace_spans);
+            self.tick_peripherals(elapsed, tick, &spans);
+            self.recycle_device_trace_spans(spans);
+            for (pin, index) in pins.into_iter().enumerate() {
+                if self.buster.wasm_slots & (1 << pin) != 0 {
+                    let BoardDevice::Wasm(board) =
+                        &mut self.devices[index.expect("wired plugin slot")]
+                    else {
+                        unreachable!()
+                    };
+                    board.defer_tick(elapsed);
+                }
+            }
+        }
+        tick
+    }
+
+    fn tick_peripherals(&mut self, cck: u32, agnus_tick: AgnusTick, trace_spans: &[BusTraceSpan]) {
         if agnus_tick.new_frames > 0 {
             self.pending_vbi = 1;
         }
@@ -8697,25 +8754,21 @@ impl Bus {
         // -- delivering delayed interrupts and any DMA that became ready -- and
         // level-feed its INT2/INT6 lines like Gayle's.
         {
-            let Self {
-                devices,
-                mem,
-                paula,
-                devices_wrote_memory,
-                agnus,
-                emulated_frames,
-                ..
-            } = self;
-            // The beam, for boards that keep time by the field (the Flyer).
             let beam = crate::zorro_device::HostBeam {
-                vpos: agnus.vpos,
-                long_frame: agnus.lof,
-                frame: *emulated_frames,
+                vpos: self.agnus.vpos,
+                long_frame: self.agnus.lof,
+                frame: self.emulated_frames,
             };
-            for (slot, dev) in devices.iter_mut().enumerate() {
+            for (slot, dev) in self.devices.iter_mut().enumerate() {
+                #[cfg(feature = "wasm-boards")]
+                if matches!(dev, crate::zorro_device::BoardDevice::Wasm(board) if board.dma.version.is_some())
+                {
+                    continue;
+                }
+                let paula = &mut self.paula;
                 let (cd_audio, toccata_audio, mhi_audio) = paula.audio_rings_mut();
                 let mut host = crate::zorro_device::DeviceHost::for_slot_with_audio(
-                    &mut *mem,
+                    &mut self.mem,
                     slot,
                     cd_audio,
                     toccata_audio,
@@ -8732,7 +8785,7 @@ impl Bus {
                 // mere access would clear the data cache every tick --
                 // disabling it in practice.
                 if host.wrote_memory() {
-                    *devices_wrote_memory = true;
+                    self.devices_wrote_memory = true;
                 }
                 if crate::zorro_device::ZorroDevice::int2_line(dev) {
                     paula.intreq |= INT_PORTS;

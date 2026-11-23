@@ -3090,7 +3090,14 @@ impl Emulator {
             accounting.slice_cck = accounting
                 .slice_cck
                 .min(idle_cck.saturating_add(run.bus_advanced_cck));
+            let before = self.bus().emulated_cck();
             self.bus_mut().advance_cpu_idle_devices(idle_cck);
+            let elapsed = self.bus().emulated_cck() - before;
+            let dma_wait = elapsed
+                .saturating_sub(u64::from(idle_cck))
+                .min(u64::from(u32::MAX)) as u32;
+            accounting.slice_cck = accounting.slice_cck.saturating_add(dma_wait);
+            accounting.device_cck = accounting.device_cck.saturating_add(dma_wait);
         }
         // `refresh_irq_line` applies any deferred timed-device color clocks
         // before sampling the interrupt line (see its body), so a device

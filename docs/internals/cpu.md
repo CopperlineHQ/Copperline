@@ -2,8 +2,11 @@
 
 ## The wrapper and the bus adapter
 
-`M68kMachine` (`src/cpu.rs`) wraps the published pure-Rust
-[`m68k` 0.17.1 core](https://docs.rs/crate/m68k/0.17.1). The core sees
+`M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core with
+locked operand bus cycles and serializable MMU translations.
+[Pinned core revision](https://github.com/LinuxJedi/m68k-rs/commit/d5bfb1b4ae902267e0ff508b652fd7a268866719)
+
+The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
 every CPU-visible access -- RAM, ROM, custom registers, CIA, RTC,
 autoconfig, Gayle, Akiko -- routes into the shared `Bus` and is billed in
@@ -364,8 +367,8 @@ the same `m68k` source (see the lockfile check above).
 (cpu-core-conformance-fixes-awaiting-upstream)=
 ### CPU core release and conformance fixes
 
-Copperline requires `m68k` 0.17.1, which carries the CPU, FPU and MMU
-conformance fixes described below. That release also adds faster indexed
+The pinned core includes the CPU, FPU and MMU conformance fixes from
+`m68k` 0.17.1 described below. That release also adds faster indexed
 operations and memory accesses under translation
 ([PR #264](https://github.com/benletchford/m68k-rs/pull/264)).
 A decoded batch can reuse a translated instruction page when a single fastmem
@@ -420,9 +423,18 @@ software package enabled, the 68040 and 68060 trap arithmetic overflow and
 underflow even when their enable bits are clear. On both models, FMOVE to
 memory or a data register still completes without taking an arithmetic
 exception, and rounding to single or double precision retains the extended
-exponent range. PMOVE still omits the MMU configuration exception. A locked
-read-modify-write cycle (TAS against a 68030 TT register with RWM clear)
-is matched one bus cycle at a time.
+exponent range. PMOVE still omits the MMU configuration exception. The PMMU checks write permission on the first read of
+a locked TAS, CAS or CAS2 operand. On the 68030, transparent translation
+of that operand requires a TT register with RWM set. A fault releases the
+bus before stacking the frame and records the read-modify-write status
+in the 68010/020/030 SSW, the 68040 SSW or the 68060 FSLW.
+
+On a failed 68040 CAS2, Copperline writes the original value back to
+destination 1 to end the locked transfer. The programmer's reference
+names destination 1, while the 68040 user's manual describes the last
+operand read. The external operand order has yet to be verified on
+silicon. [M68000 Family Programmer's Reference Manual, p. 4-68](https://www.nxp.com/docs/en/reference-manual/M68000PRM.pdf)
+and [M68040 User's Manual, §7.4.5](https://www.nxp.com/docs/en/reference-manual/MC68040UM.pdf)
 
 The boundary callback is a no-op for ordinary embedders; Copperline uses
 it to keep hardware accesses ordered without calling the host from every

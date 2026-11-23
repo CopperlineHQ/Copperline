@@ -86,12 +86,17 @@ pub struct Buster {
     pub(crate) devices: [Option<usize>; 5],
     #[serde(skip)]
     pub(crate) wired: bool,
+    #[cfg(feature = "wasm-boards")]
+    #[serde(skip)]
+    pub(crate) wasm_slots: u8,
     #[serde(skip)]
     pub(crate) z2: u8,
     #[serde(skip)]
     pub(crate) z3: u8,
     #[serde(skip)]
     pub(crate) cpu_driving: bool,
+    #[serde(skip)]
+    pub(crate) cpu_locked: bool,
     #[serde(skip)]
     pub(crate) local_request: bool,
     #[serde(default)]
@@ -136,6 +141,11 @@ impl Buster {
             self.registered |= eligible;
         }
         self.z3 = requests;
+    }
+
+    #[cfg(feature = "wasm-boards")]
+    pub(crate) fn accepts_z3_request(&self) -> bool {
+        self.revision.z3_master() && !self.rev9_lock
     }
 
     pub(crate) fn pending(&self) -> bool {
@@ -242,6 +252,8 @@ impl Buster {
             revision: self.revision,
             devices: self.devices,
             wired: self.wired,
+            #[cfg(feature = "wasm-boards")]
+            wasm_slots: self.wasm_slots,
             ..Self::default()
         };
     }
