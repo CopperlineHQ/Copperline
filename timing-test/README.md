@@ -1011,4 +1011,7 @@ Batching idle chipset spans must leave the render byte-identical.
 It starts a 4 KiB SCRIPTS memory move between chip RAM buffers. The CPU
 checks the head while the tail is still clear, waits for the SCRIPTS interrupt
 and checks every longword. The settled green frame requires all three checks.
-The run uses the bundled AROS ROM and an empty SCSI bus.
+The card then repeats the transfer while the CPU spins. The
+`a4000_replays_ongoing_z3_dma` regression saves this workload at 20
+emulated seconds and compares the full machine and display one second
+later after restoring the save. The run uses the bundled AROS ROM and an empty SCSI bus.

@@ -44,6 +44,11 @@ WORDS   equ 1024
         bne.s   .fail
         dbra    d0,.check
         move.w  #$2c4,$180(a6)
+        ; Keep the arbiter active while the CPU spins in the green state.
+        ; Replace the SCRIPTS INT with a JUMP back to the memory move.
+        move.l  #$80080000,SCRIPT+12
+        move.l  #SCRIPT,SCRIPT+16
+        move.l  #SCRIPT,$2c(a2)
 .hold:  bra.s   .hold
 .fail:  move.w  #$f00,$180(a6)
         bra.s   .hold

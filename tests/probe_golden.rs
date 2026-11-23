@@ -181,14 +181,20 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         ""
     };
     let (profile, video) = if matches!(machine, Machine::A4000Buster) {
-        ("[machine]\nprofile = \"A4000\"\n[scsi]\ncontroller = \"a4091\"\n[rtg]\ncard = \"none\"\n", "PAL")
+        (
+            format!(
+                "[machine]\nprofile = \"A4000\"\nbattmem = '{}'\n[scsi]\ncontroller = \"a4091\"\n[rtg]\ncard = \"none\"\n",
+                adf.with_extension("nvram").display()
+            ),
+            "PAL",
+        )
     } else if matches!(machine, Machine::AgaNtsc) {
         (
-            "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n",
+            "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n".to_owned(),
             "NTSC",
         )
     } else {
-        ("", "PAL")
+        (String::new(), "PAL")
     };
     format!(
         "rom = \"<bundled-aros>\"\n\
@@ -420,6 +426,69 @@ fn run_probe(p: &Probe) {
          fix, re-bless with COPPERLINE_BLESS_GOLDEN={name} cargo test --release --test \
          probe_golden and review the render diff in the commit.",
         failure.unwrap()
+    );
+}
+
+/// Re-run the green probe's continuous DMA from a saved 68040 machine.
+/// A lost ATC entry adds table walks after restore and shifts the A4091's
+/// grant even if the screenshot still matches.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "requires --profile ci or --release")]
+fn a4000_replays_ongoing_z3_dma() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = |name: &str| dir.path().join(name);
+    let adf = path("buster.adf");
+    let disk = build_adf(
+        include_bytes!("../timing-test/boot.bin"),
+        include_bytes!("../timing-test/buster-z3-dma.bin"),
+    );
+    fs::write(&adf, disk).unwrap();
+    let cfg = path("a4000.toml");
+    fs::write(&cfg, probe_config(&adf, Machine::A4000Buster)).unwrap();
+    let mid = path("mid.clstate");
+    for (label, resume) in [("continuous", false), ("resumed", true)] {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_copperline"));
+        cmd.current_dir(dir.path())
+            .env("COPPERLINE_AROS_DIR", repo_root().join("assets/aros"))
+            .args([
+                "--factory",
+                "--noaudio",
+                "--rtc-time",
+                "2001-01-01 00:00:00",
+                "--config",
+            ])
+            .arg(&cfg);
+        if resume {
+            cmd.arg("--load-state").arg(&mid);
+        } else {
+            cmd.args(["--save-state-after", "20"]).arg(&mid);
+        }
+        cmd.args(["--save-state-after", "21"])
+            .arg(path(&format!("{label}.clstate")))
+            .args(["--screenshot-after", "21"])
+            .arg(path(&format!("{label}.png")));
+        let output = common::output_with_timeout(&mut cmd, Duration::from_secs(120)).unwrap();
+        assert!(
+            output.status.success(),
+            "{label}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // A boot failure could replay just as deterministically. The green
+    // screen is reached only after the guest verifies every copied word.
+    let shot = load_png(&path("continuous.png")).unwrap();
+    let center = 4 * ((shot.height / 2) * shot.width + shot.width / 2) as usize;
+    assert_eq!(&shot.data[center..center + 4], &[0x22, 0xcc, 0x44, 0xff]);
+    let expected = fs::read(path("continuous.clstate")).unwrap();
+    let resumed = fs::read(path("resumed.clstate")).unwrap();
+    let body = copperline::savestate::machine_body_offset;
+    assert!(
+        expected[body(&expected).unwrap()..] == resumed[body(&resumed).unwrap()..],
+        "the machine state diverged after restore"
+    );
+    assert!(
+        fs::read(path("continuous.png")).unwrap() == fs::read(path("resumed.png")).unwrap(),
+        "the display diverged after restore"
     );
 }
 
