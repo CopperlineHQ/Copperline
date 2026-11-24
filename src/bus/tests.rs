@@ -3327,6 +3327,39 @@ fn cold_power_on_reset_clears_chip_ram_and_restores_overlay() {
     );
 }
 
+/// Agnus samples the board's PAL/NTSC strap while reset is asserted, so a
+/// standard that software selected through BEAMCON0's PAL bit lasts only
+/// until the next reset: keyboard reset and the CPU RESET instruction both
+/// bring the chip back in the board's standard.
+#[test]
+fn reset_returns_agnus_to_the_board_video_standard() {
+    use crate::chipset::agnus::NTSC_LINES;
+
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ecs8373);
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+
+    bus.agnus.write_beamcon0(0);
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Ntsc);
+    assert_eq!(bus.agnus.current_frame_lines(), NTSC_LINES);
+    bus.reset_for_keyboard_reset();
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+    assert_eq!(bus.agnus.current_frame_lines(), PAL_LINES);
+    assert_eq!(bus.agnus.read_vposr() & 0x7F00, 0x2000, "PAL ECS Agnus ID");
+
+    bus.agnus.write_beamcon0(0);
+    bus.reset_custom_chips_from_cpu_reset();
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+
+    // An NTSC board comes back as NTSC from a PAL selection.
+    bus.set_video_standard(VideoStandard::Ntsc);
+    bus.agnus.write_beamcon0(BEAMCON0_PAL);
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+    bus.reset_for_keyboard_reset();
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Ntsc);
+    assert_eq!(bus.agnus.current_frame_lines(), NTSC_LINES);
+}
+
 #[test]
 fn fat_gary_coldboot_is_set_by_power_on_not_by_the_reset_line() {
     // Kickstart clears COLDBOOT on every boot and reads it at the next reset

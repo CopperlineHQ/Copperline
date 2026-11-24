@@ -5467,7 +5467,10 @@ impl Bus {
         // synthesizer releases what the interrupted guest left
         // sounding, exactly as if its line had dropped.
         self.paula.serial.machine_reset();
-        let video_standard = self.agnus.video_standard();
+        // Reset reloads BEAMCON0, so the chip comes back in the standard
+        // the board straps it to, not the one software last selected
+        // through the PAL bit.
+        let video_standard = self.agnus.board_video_standard();
         let agnus_revision = self.agnus.revision();
         self.cia_a = Cia::new(Which::A);
         self.cia_b = Cia::new(Which::B);

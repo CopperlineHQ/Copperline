@@ -222,6 +222,13 @@ pub struct Agnus {
     /// advance_by_cck(); returned and reset by advance_by_cck().
     pending_tick: AgnusTick,
     video_standard: VideoStandard,
+    /// The board's PAL/NTSC strap, the level the chip samples while reset
+    /// is asserted: the N*_P pin on the 8372A, 8375 and Alice, the part
+    /// fitted on OCS. BEAMCON0 bit 5 reselects the standard afterwards,
+    /// but only until the next reset. `None` comes from a save state
+    /// written before the field existed and means the standard in force.
+    #[serde(default)]
+    board_standard: Option<VideoStandard>,
     revision: AgnusRevision,
     lace: bool,
     beamcon0: u16,
@@ -764,6 +771,7 @@ impl Agnus {
             nudge_cck: 0,
             pending_tick: AgnusTick::default(),
             video_standard,
+            board_standard: Some(video_standard),
             revision,
             lace: false,
             beamcon0: beamcon0_reset_value(video_standard),
@@ -796,6 +804,16 @@ impl Agnus {
         self.video_standard
     }
 
+    /// The standard the board straps the chip to, which a reset returns
+    /// it to whatever BEAMCON0 selected in the meantime: "During reset, if
+    /// N*_P is low, the device powers-up in NTSC mode; if N*_P is high, it
+    /// powers-up in PAL mode ... PAL or NTSC modes may be reselected after
+    /// power-up by writing the desired value in the BEAMCON0 register, bit
+    /// 5" (Alice specification, pin description).
+    pub fn board_video_standard(&self) -> VideoStandard {
+        self.board_standard.unwrap_or(self.video_standard)
+    }
+
     pub fn revision(&self) -> AgnusRevision {
         self.revision
     }
@@ -812,8 +830,10 @@ impl Agnus {
     }
 
     /// Host/config entry point: authoritatively select the standard, which
-    /// also rewrites the BEAMCON0 PAL bit to match.
+    /// also rewrites the BEAMCON0 PAL bit to match. This is the board
+    /// strap, so it is also what the next reset comes back to.
     pub fn set_video_standard(&mut self, video_standard: VideoStandard) {
+        self.board_standard = Some(video_standard);
         self.beamcon0 =
             (self.beamcon0 & !(1 << 5)) | (beamcon0_reset_value(video_standard) & (1 << 5));
         self.apply_video_standard(video_standard);
@@ -1768,6 +1788,24 @@ mod tests {
         assert_eq!(ocs.vpos, 0x0034, "V9 and V10 do not exist on OCS");
         ocs.write_vposw(0x0007);
         assert_eq!(ocs.vpos, 0x0134);
+    }
+
+    /// A BEAMCON0 write reselects the standard but leaves the board strap
+    /// alone; the host selecting a standard moves the strap.
+    #[test]
+    fn beamcon0_pal_bit_does_not_move_the_board_standard() {
+        let mut agnus =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        assert_eq!(agnus.board_video_standard(), VideoStandard::Pal);
+        agnus.write_beamcon0(0);
+        assert_eq!(agnus.video_standard(), VideoStandard::Ntsc);
+        assert_eq!(agnus.board_video_standard(), VideoStandard::Pal);
+
+        agnus.set_video_standard(VideoStandard::Ntsc);
+        assert_eq!(agnus.board_video_standard(), VideoStandard::Ntsc);
+        agnus.write_beamcon0(BEAMCON0_PAL);
+        assert_eq!(agnus.video_standard(), VideoStandard::Pal);
+        assert_eq!(agnus.board_video_standard(), VideoStandard::Ntsc);
     }
 
     /// A VPOSW write clears the long-line flip-flop whatever bit 7 of the
