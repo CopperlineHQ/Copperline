@@ -132,6 +132,9 @@ for the earlier release notes.
   - Fat Gary's interrupt-enable latch gates the chipset interrupts at the
     CPU. It answers every word of `$DF8000`-`$DFBFFF`, not only the
     documented `$DF809A`.
+- A3000, A4000: a ROM read takes the bus cycle Fat Gary's ROM timing
+  jumpers set, eight CPU clocks on the A3000 and six on the A4000, and one
+  cycle delivers a longword. It was four clocks a word on every board.
 - Ramsey (A3000, A4000): a control write takes effect at the next
   refresh, and in precise mode a motherboard RAM cycle costs what the
   mode in force makes it cost (standard, page hit, page miss, skip,

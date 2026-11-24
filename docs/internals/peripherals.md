@@ -86,6 +86,21 @@ gate. Paula keeps
 its INTENA and INTREQ latches throughout, so re-enabling the gate exposes
 any request still pending. [Commodore Fat Gary specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/FatGary/390540-02_FatGary_specification.pdf)
 
+Fat Gary times the ROM cycle itself and ends it with `*STERM`. Two board
+jumpers on its ROMJP1 and ROMJP0 inputs select 5, 6, 7 or 8 CPU clocks; the
+access time the ROMs are allowed is one clock less, 160 to 280 ns at 25 MHz.
+The 25 MHz A3000 boards ship with J151 and J152 both at 1-2, eight clocks:
+the system ROMs need 250 ns, and 280 ns is the only 25 MHz setting that
+covers it. The A4000 ships with J151 at 1-2, six clocks (200 ns). The ROM
+is a 32-bit port, so one cycle delivers an aligned longword whatever the
+operand size, an operand across two longwords takes two cycles, and the
+second opcode word of a longword the CPU has just fetched costs none. In
+precise mode a ROM read is billed that way on both profiles; other boards
+keep the generic external cycle of four CPU clocks a word, and JIT bills
+ROM nothing. The CIA cycle on these boards (Fat Gary shortens ECLK's high
+time during a CIA access) is not modelled: it still follows the 68000 E
+clock rule. Golden probe `fatgary-romcycle`. [Commodore Fat Gary specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/FatGary/390540-02_FatGary_specification.pdf)
+
 Beyond Ramsey's four banks the big-box memory map reserves
 `$04000000`-`$06FFFFFF` for motherboard RAM expansion; on the A4000
 profile the bank keeps growing downward through it, up to 64 MiB at

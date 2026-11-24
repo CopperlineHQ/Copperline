@@ -4350,6 +4350,52 @@ impl CpuBus {
         self.bus.cpu_external_access(Self::access_words(size));
     }
 
+    /// Bill a ROM read: the generic external-bus cost, or Fat Gary's own
+    /// cycle on the boards that have one. Every ROM fetch on every machine
+    /// comes through here, so a board without a Fat Gary pays one test.
+    #[inline]
+    fn bill_rom(&mut self, addr: u32, size: usize, kind: CpuBusAccessKind) {
+        if self.bus.gary.is_some() {
+            self.bill_fat_gary_rom(addr, size, kind);
+        } else {
+            self.bill_external_access(size);
+        }
+    }
+
+    /// Fat Gary runs the ROM cycle itself and ends it with *STERM after the
+    /// number of board clocks its two jumpers select, 5 to 8 (Fat Gary
+    /// specification, "ROM Timing"). The ROM is a 32-bit port, so one cycle
+    /// delivers an aligned longword whatever the operand size, and an
+    /// operand that straddles two longwords takes two. The CPU fetches
+    /// opcodes a longword at a time: the second word of a longword it has
+    /// just fetched costs no cycle. A Fat Gary whose jumpers were never
+    /// recorded keeps the generic external-bus cost.
+    #[inline(never)]
+    fn bill_fat_gary_rom(&mut self, addr: u32, size: usize, kind: CpuBusAccessKind) {
+        if self.jit_enabled {
+            return;
+        }
+        let Some(gary) = self
+            .bus
+            .gary
+            .as_mut()
+            .filter(|gary| gary.rom_cycle_clocks().is_some())
+        else {
+            self.bus.cpu_external_access(Self::access_words(size));
+            return;
+        };
+        let first = addr & !3;
+        let last = addr.wrapping_add(size.max(1) as u32 - 1) & !3;
+        if matches!(kind, CpuBusAccessKind::Fetch) {
+            if size <= 2 && first == last && gary.rom_fetch_latch == Some(first) {
+                return;
+            }
+            gary.rom_fetch_latch = Some(last);
+        }
+        self.bus
+            .fat_gary_rom_cycles((last.wrapping_sub(first) >> 2) + 1);
+    }
+
     fn bill_motherboard_ram(&mut self, addr: u32, size: usize) {
         if addr < 0x0700_0000 || self.bus.ramsey.is_none() {
             self.bill_external_access(size);
@@ -4723,7 +4769,7 @@ impl CpuBus {
         let addr = self.mask(address);
         match self.classify_plain_memory(addr, size) {
             Some(PlainMemRegion::OverlayRom(off)) => {
-                self.bill_external_access(size);
+                self.bill_rom(addr, size, kind);
                 return read_be(&self.bus.mem.rom, off, size);
             }
             Some(PlainMemRegion::ChipRam(off)) => {
@@ -4768,7 +4814,7 @@ impl CpuBus {
                 return read_be(&self.bus.mem.slow_ram, off, size);
             }
             Some(PlainMemRegion::Rom(off)) => {
-                self.bill_external_access(size);
+                self.bill_rom(addr, size, kind);
                 return read_be(&self.bus.mem.rom, off, size);
             }
             // A1000 WCS at $FC0000 (empty -> no match on other machines): the
@@ -4778,7 +4824,7 @@ impl CpuBus {
                 return read_be(&self.bus.mem.wcs, off, size);
             }
             Some(PlainMemRegion::ExtendedRom(off)) => {
-                self.bill_external_access(size);
+                self.bill_rom(addr, size, kind);
                 return read_be(&self.bus.mem.extended_rom, off, size);
             }
             Some(PlainMemRegion::Cartridge(off)) => {
@@ -6697,6 +6743,78 @@ mod tests {
         b.write_byte(RAMSEY_CONTROL, CONTROL_SKIP);
         b.bus.advance_devices(24);
         assert_eq!(cost(b, base), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn fat_gary_rom_cycles_follow_the_board_jumpers() -> Result<()> {
+        use crate::gary::{Gary, ROM_JUMPERS_A3000, ROM_JUMPERS_A4000};
+        use CpuBusAccessKind::{Fetch, Read};
+        let machine = |gary: Option<Gary>| -> Result<M68kMachine> {
+            let mut m = machine_with_program_model(0x400, &[0x4e71], CpuModel::M68030)?;
+            m.bus.bus.set_cpu_clocks_per_cck(7);
+            m.bus.bus.set_cpu_bus_arbitration_enabled(true);
+            m.bus.bus.mem.rom = vec![0; 512 * 1024];
+            if let Some(gary) = gary {
+                m.bus.bus.attach_gary(gary);
+            }
+            Ok(m)
+        };
+        let cost = |b: &mut CpuBus, addr: u32, size: usize, kind| {
+            let before = b.bus.ramsey_clock();
+            b.read_sized_uncached(addr, size, kind);
+            b.bus.ramsey_clock() - before
+        };
+        let rom = ROM_BASE as u32 + 0x1000;
+        // ROMJP1:ROMJP0 select 5 to 8 board clocks: 8 on the 25 MHz A3000
+        // boards (both jumpers 1-2, 280 ns), 6 on the A4000 (200 ns).
+        for (jumpers, clocks) in [
+            (0, 5),
+            (ROM_JUMPERS_A4000, 6),
+            (2, 7),
+            (ROM_JUMPERS_A3000, 8),
+        ] {
+            let mut m = machine(Some(Gary::new().with_rom_jumpers(jumpers)))?;
+            let b = &mut m.bus;
+            // A 32-bit port: one cycle delivers an aligned longword
+            // whatever the operand size.
+            assert_eq!(cost(b, rom, 4, Read), clocks);
+            assert_eq!(cost(b, rom, 2, Read), clocks);
+            assert_eq!(cost(b, rom + 3, 1, Read), clocks);
+            // An operand across two longwords takes two cycles.
+            assert_eq!(cost(b, rom + 2, 4, Read), 2 * clocks);
+            // Opcodes are fetched a longword at a time: the second word of
+            // the longword just fetched needs no cycle, and a data read in
+            // between does not change that.
+            assert_eq!(cost(b, rom + 8, 2, Fetch), clocks);
+            assert_eq!(cost(b, rom + 0x100, 2, Read), clocks);
+            assert_eq!(cost(b, rom + 10, 2, Fetch), 0);
+            assert_eq!(cost(b, rom + 12, 2, Fetch), clocks);
+            assert_eq!(cost(b, rom + 8, 2, Fetch), clocks);
+            // The jumpers are part of the board: both resets keep them.
+            b.bus.gary.as_mut().unwrap().reset();
+            assert_eq!(cost(b, rom, 4, Read), clocks);
+            b.bus.gary.as_mut().unwrap().power_on_reset();
+            assert_eq!(cost(b, rom, 4, Read), clocks);
+        }
+        // A Fat Gary whose jumpers were never recorded (an older save
+        // state) and a board without one keep the generic bus cost of four
+        // CPU clocks a word.
+        for gary in [Some(Gary::new()), None] {
+            let mut m = machine(gary)?;
+            let b = &mut m.bus;
+            // Seven clocks to the colour clock here: seven word reads are
+            // 28 clocks, seven long reads 56.
+            let before = b.bus.emulated_cck();
+            for _ in 0..7 {
+                b.read_sized_uncached(rom, 2, Read);
+            }
+            assert_eq!(b.bus.emulated_cck() - before, 4);
+            for _ in 0..7 {
+                b.read_sized_uncached(rom, 4, Read);
+            }
+            assert_eq!(b.bus.emulated_cck() - before, 12);
+        }
         Ok(())
     }
 

@@ -4863,7 +4863,18 @@ fn build_machine_inner(
     // Ramsey: xSysInfo gives up on the memory controller if it cannot first
     // identify a Fat Gary. Fitting one without the other identifies as neither.
     if cfg.gate_array.is_fat_gary() {
-        bus.attach_gary(crate::gary::Gary::new());
+        // The ROM timing jumpers go with the board, which the Ramsey part
+        // tells apart: -04 on the A3000, -07 on the A4000.
+        let gary = match cfg.mem_controller.ramsey_revision() {
+            Some(crate::ramsey::RamseyRevision::Rev4) => {
+                crate::gary::Gary::new().with_rom_jumpers(crate::gary::ROM_JUMPERS_A3000)
+            }
+            Some(crate::ramsey::RamseyRevision::Rev7) => {
+                crate::gary::Gary::new().with_rom_jumpers(crate::gary::ROM_JUMPERS_A4000)
+            }
+            None => crate::gary::Gary::new(),
+        };
+        bus.attach_gary(gary);
     }
     // The WinUAE-compatible uaelib trap at $F0FF60 (crate::uaelib). Fitted
     // even when a $F00000 extended ROM hides it: the decode order handles

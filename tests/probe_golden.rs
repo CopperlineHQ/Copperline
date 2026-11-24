@@ -84,6 +84,8 @@ enum Machine {
     A1200,
     A4000,
     A4000Buster,
+    /// A3000 profile: ECS, 68030, Fat Gary with the A3000's ROM jumpers.
+    A3000,
 }
 
 /// One golden-render probe: name, main-program binary, emulated seconds
@@ -171,7 +173,7 @@ fn build_adf(boot: &[u8], program: &[u8]) -> Vec<u8> {
 // Windows temp path's backslashes are not parsed as escape sequences.
 fn probe_config(adf: &Path, machine: Machine) -> String {
     let chipset = match machine {
-        Machine::Jit => "revision = \"ECS\"\n",
+        Machine::Jit | Machine::A3000 => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
         Machine::EcsDenise => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"ECS\"\n",
@@ -183,6 +185,7 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
     };
     let (cpu, memory) = match machine {
         Machine::A4000 | Machine::A4000Buster => ("68040", "chip = \"2M\"\n"),
+        Machine::A3000 => ("68030", "chip = \"2M\"\n"),
         Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
         Machine::Ocs | Machine::Ecs | Machine::EcsDenise => {
             ("68000", "chip = \"512K\"\nslow = \"512K\"\n")
@@ -194,7 +197,10 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
     } else {
         ""
     };
-    let (profile, video) = if matches!(machine, Machine::A4000 | Machine::A4000Buster) {
+    let (profile, video) = if matches!(
+        machine,
+        Machine::A4000 | Machine::A4000Buster | Machine::A3000
+    ) {
         let scsi = if matches!(machine, Machine::A4000Buster) {
             "[scsi]\ncontroller = \"a4091\"\n"
         } else {
@@ -202,7 +208,12 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         };
         (
             format!(
-                "[machine]\nprofile = \"A4000\"\nbattmem = '{}'\n{scsi}[rtg]\ncard = \"none\"\n",
+                "[machine]\nprofile = \"{}\"\nbattmem = '{}'\n{scsi}[rtg]\ncard = \"none\"\n",
+                if matches!(machine, Machine::A3000) {
+                    "A3000"
+                } else {
+                    "A4000"
+                },
                 adf.with_extension("nvram").display()
             ),
             "PAL",
@@ -348,11 +359,11 @@ fn run_probe(p: &Probe) {
     let shot_path = capture_probe(p, &work);
     let golden_path = golden_dir.join(format!("{name}.png"));
     let actual = load_png(&shot_path).expect("load capture");
-    // The pass/fail probes paint one success colour; ramsey-cycles draws
-    // its measurements instead.
-    if (matches!(p.machine, Machine::A4000 | Machine::A4000Buster) && name != "ramsey-cycles")
-        || name == "gary-overlay"
-    {
+    // The pass/fail probes paint one success colour; the cycle probes draw
+    // their measurements instead.
+    let pass_fail = matches!(p.machine, Machine::A4000 | Machine::A4000Buster)
+        && !matches!(name, "ramsey-cycles" | "fatgary-romcycle");
+    if pass_fail || name == "gary-overlay" {
         let center =
             (actual.height as usize / 2 * actual.width as usize + actual.width as usize / 2) * 4;
         assert_eq!(
@@ -680,6 +691,10 @@ probe_tests! {
     // Ramsey's DRAM cycle length in standard, page-hit, page-miss and skip
     // modes, as band heights.
     golden_ramsey_cycles => Probe { name: "ramsey-cycles", program: "ramsey-cycles.bin", seconds: 10.0, machine: Machine::A4000 };
+    // Fat Gary's jumper-set ROM cycle against a five-clock Ramsey cycle: six
+    // clocks on the A4000, eight on the 25 MHz A3000, one cycle a longword.
+    golden_fatgary_romcycle => Probe { name: "fatgary-romcycle", program: "fatgary-romcycle.bin", seconds: 10.0, machine: Machine::A4000 };
+    golden_fatgary_romcycle_a3000 => Probe { name: "fatgary-romcycle-a3000", program: "fatgary-romcycle.bin", seconds: 16.0, machine: Machine::A3000 };
     // The registers are a 16-bit CPU port beside Alice's 32-bit chip RAM
     // port: a long register access takes two cycles, a long RAM access one.
     golden_busprobe_reglong => probe_aga("busprobe-reglong", "busprobe-reglong.bin", 16.0);

@@ -7265,6 +7265,30 @@ impl Bus {
             )
     }
 
+    /// Bill `cycles` ROM cycles of the length Fat Gary's jumpers set, in
+    /// board clocks converted to this CPU's clocks like a Ramsey cycle.
+    /// False when the board has no jumper-timed ROM cycle (no Fat Gary, or a
+    /// state saved before the jumpers were recorded) and nothing was billed.
+    pub(crate) fn fat_gary_rom_cycles(&mut self, cycles: u32) -> bool {
+        let Some(gary) = self.gary.as_mut() else {
+            return false;
+        };
+        let Some(clocks) = gary.rom_cycle_clocks() else {
+            return false;
+        };
+        if self.cpu_bus_arbitration_enabled {
+            let total = cycles * clocks * self.cpu_clocks_per_cck + gary.rom_clock_remainder;
+            gary.rom_clock_remainder = total % crate::ramsey::CLOCKS_PER_CCK;
+            let cpu_clocks = total / crate::ramsey::CLOCKS_PER_CCK;
+            self.charge_cpu_clocks_to_cck(cpu_clocks);
+            if self.cpu_short_bus_cycle && self.cpu_access_phase_sync {
+                self.cpu_bus_overlap_clocks =
+                    self.cpu_bus_overlap_clocks.saturating_add(cpu_clocks);
+            }
+        }
+        true
+    }
+
     pub(crate) fn ramsey_access(&mut self, addr: u32, burst_beat: bool) {
         let now = self.ramsey_clock();
         let ramsey = self.ramsey.as_mut().expect("Ramsey owns this RAM cycle");

@@ -1021,8 +1021,8 @@ later after restoring the save. The run uses the bundled AROS ROM and an empty S
 
 From this directory run `./build.sh gary-overlay`, `./build.sh gary-decode`,
 `./build.sh fatgary-ramsey`, `./build.sh ramsey-cycles`,
-`./build.sh busprobe-reglong` or `./build.sh lisa-scanblank` to produce a
-bootable ADF. Cold boot the matching machine from the disk. Each probe takes
+`./build.sh fatgary-romcycle`, `./build.sh busprobe-reglong` or
+`./build.sh lisa-scanblank` to produce a bootable ADF. Cold boot the matching machine from the disk. Each probe takes
 over and stays on its result until reset.
 
 | Probe | Board | Expected observation |
@@ -1031,6 +1031,7 @@ over and stays on its result until reset.
 | `gary-decode` | A500 or A2000 (Gary), A600 or A1200 (Gayle) | Eight bands, green where a device answered and blue where none did: CIA-A at `$A0E301`, CIA-B at `$A0D200`, both CIAs from one word at `$BFC300`, CIA-A at `$BFF301`, the register bank at `$DFF200`, and the ROM at `$E00000`, `$A80000` and `$B00000`. Gary with a 512 KiB Kickstart: bands 1, 2, 3, 5 and 6 green. Gayle: bands 5, 6, 7 and 8 green. A 1 MiB ROM set answers at `$E00000` with its own second part, so band 6 is blue there, as in the CI goldens (`gary-decode`, `gayle-decode`). vAmiga 4.4 with Kickstart 1.3 draws the Gary pattern. |
 | `fatgary-ramsey` | A3000 or A4000 | Green after checking custom mirrors, blocking then delivering a pending level-one interrupt through Fat Gary (at the documented `$DF809A`, then at other offsets of its four pages), and changing then restoring Ramsey's refresh rate. Red indicates an incomplete or failed check; yellow means the interrupt latch answered at `$09A` only. |
 | `ramsey-cycles` | A3000 or A4000 with motherboard fast RAM | Four bands whose heights are the lines 3000 double reads of motherboard RAM take in standard mode (white), page mode within one row (green), page mode alternating rows (yellow) and Ramsey-07 skip mode (pink). Green is the shortest and yellow the tallest; on a Ramsey-04 pink equals white. |
+| `fatgary-romcycle` | A3000 or A4000 with motherboard fast RAM | Four bands whose heights are the lines 1800 double reads take: motherboard RAM longwords (white), ROM longwords (green), ROM words (yellow) and ROM longwords at an odd word address (pink). Green and yellow are equal: one ROM cycle delivers a longword. Pink less green is two ROM cycles a pass: 16 clocks with the A3000's jumpers at 8 clocks, 12 with the A4000's at 6. Moving J151 or J152 changes the green, yellow and pink bands. CI goldens `fatgary-romcycle` (A4000) and `fatgary-romcycle-a3000`. |
 | `busprobe-reglong` | A1200, A4000 or CD32 | Four bands whose heights are the lines 1000 passes of a loop take: a long read of chip RAM (white), a word read of INTENAR (green), a long read of INTENAR (yellow) and a long write to FMODE (pink). The two long register bands are taller: the registers are a 16-bit port. |
 | `lisa-scanblank` | A1200 or A4000 with Lisa and Alice | Blue field with a two-sample black slit at colour clock `$60`. Red sprite stripes are two beam lines tall, green stripes one. Both start on an odd line. |
 
