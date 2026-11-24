@@ -5,9 +5,10 @@
 //! typed read/write methods for memory-mapped devices.
 
 use crate::chipset::agnus::{
-    bitplane_dma_planes_for_fmode, sprite_dma_disabled_by_bitplane_ddf, wide_fetch_word_address,
-    Agnus, AgnusRevision, AgnusTick, VideoStandard, BEAMCON0_DUAL, COLORCLOCKS_PER_LINE,
-    NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
+    bitplane_dma_planes_for_fmode, sprite_ctl_vstart_high, sprite_dma_disabled_by_bitplane_ddf,
+    sprite_vstart_from_words, sprite_vstop_from_ctl, wide_fetch_word_address, Agnus, AgnusRevision,
+    AgnusTick, VideoStandard, BEAMCON0_DUAL, COLORCLOCKS_PER_LINE, NTSC_LINES,
+    NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
 };
 use crate::chipset::blitter::{BlitBusAccess, Blitter};
 use crate::chipset::cia::{
@@ -457,18 +458,20 @@ impl Default for DisplaySpriteDmaState {
 
 impl DisplaySpriteDmaState {
     /// A POS word (fetch or poke) replaces the vertical start's low bits,
-    /// keeping the CTL-supplied high bit.
+    /// keeping the CTL-supplied high bits.
     fn poke_pos(&mut self, value: u16) {
         self.pos = value;
-        self.vstrt = (self.vstrt & 0x100) | i32::from(value >> 8);
+        self.vstrt = (self.vstrt & 0x300) | i32::from(value >> 8);
     }
 
-    /// A CTL word (fetch or poke) supplies vstart's high bit and the whole
-    /// vstop, and disarms the channel's display latches.
-    fn poke_ctl(&mut self, value: u16) {
+    /// A CTL word (fetch or poke) supplies vstart's high bits and the whole
+    /// vstop, and disarms the channel's display latches. `v9` says the
+    /// comparators are ten bits wide (ECS Agnus, Alice), so SV9 and EV9
+    /// count; on OCS those CTL bits do nothing.
+    fn poke_ctl(&mut self, value: u16, v9: bool) {
         self.ctl = value;
-        self.vstrt = (self.vstrt & 0x0FF) | (i32::from(value & 0x0004) << 6);
-        self.vstop = (i32::from(value & 0x0002) << 7) | i32::from(value >> 8);
+        self.vstrt = (self.vstrt & 0x0FF) | sprite_ctl_vstart_high(value, v9);
+        self.vstop = sprite_vstop_from_ctl(value, v9);
         self.last_line = None;
     }
 
@@ -11698,14 +11701,6 @@ fn read_chip_word_wrapping(ram: &[u8], addr: u32) -> u16 {
     u16::from_be_bytes([ram[a], ram[(a + 1) % len]])
 }
 
-fn sprite_vstart_from_words(pos: u16, ctl: u16) -> i32 {
-    (((pos >> 8) & 0x00FF) | ((ctl & 0x0004) << 6)) as i32
-}
-
-fn sprite_vstop_from_ctl(ctl: u16) -> i32 {
-    (((ctl >> 8) & 0x00FF) | ((ctl & 0x0002) << 7)) as i32
-}
-
 fn sprite_hstart_from_words(pos: u16, ctl: u16) -> i32 {
     (((pos & 0x00FF) << 1) | (ctl & 0x0001)) as i32
 }
@@ -12369,7 +12364,7 @@ fn live_manual_sprite_collision_sources(
             sprdatb[sprite],
             spr_armed[sprite],
             hsub_70ns_applies,
-            aga,
+            frame_base.agnus_revision,
             frame_base.fmode,
             beam_y,
             sprite_dma_idle,
@@ -12397,7 +12392,7 @@ fn live_manual_sprite_collision_sources(
             sprdatb[sprite],
             spr_armed[sprite],
             hsub_70ns_applies,
-            aga,
+            frame_base.agnus_revision,
             frame_base.fmode,
             beam_y,
             sprite_dma_idle,
@@ -12646,7 +12641,7 @@ fn push_live_manual_sprite_source(
     sprdatb: u16,
     spr_armed: bool,
     hsub_70ns_applies: bool,
-    aga: bool,
+    agnus_revision: AgnusRevision,
     fmode: u16,
     beam_y: i32,
     sprite_dma_idle: bool,
@@ -12656,9 +12651,11 @@ fn push_live_manual_sprite_source(
     if x_start >= x_stop || !spr_armed {
         return;
     }
+    let aga = matches!(agnus_revision, AgnusRevision::AgaAlice);
     if !sprite_dma_idle {
-        let vstart = sprite_vstart_from_words(sprpos, sprctl);
-        let vstop = sprite_vstop_from_ctl(sprctl);
+        let v9 = agnus_revision.sprite_v9();
+        let vstart = sprite_vstart_from_words(sprpos, sprctl, v9);
+        let vstop = sprite_vstop_from_ctl(sprctl, v9);
         if beam_y < vstart || beam_y >= vstop {
             return;
         }

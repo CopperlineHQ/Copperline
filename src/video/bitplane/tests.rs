@@ -854,6 +854,23 @@ fn sprite_horizontal_subposition_applies_in_shres_on_ecs_and_always_on_aga() {
     );
 }
 
+/// A captured sprite DMA line below line 511 of a programmable scan is
+/// carried to the replay as control words. They must round-trip through
+/// SPRxCTL's SV9/EV9 bits, or the line would be placed 512 lines up.
+#[test]
+fn sprite_control_words_round_trip_lines_past_511() {
+    for beam_y in [0x1FF, 0x200, 0x234, 0x2FF, 0x3FE] {
+        let (pos, ctl) =
+            sprite_control_words_from_parts(beam_y, beam_y + 1, 160, false, false, false);
+        assert_eq!(sprite_vstart(pos, ctl, true), beam_y);
+        assert_eq!(sprite_vstop(ctl, true), beam_y + 1);
+    }
+    // Nine-bit comparators (OCS) never see the two extra bits.
+    let (pos, ctl) = sprite_control_words_from_parts(0x234, 0x235, 160, false, false, false);
+    assert_eq!(sprite_vstart(pos, ctl, false), 0x034);
+    assert_eq!(sprite_vstop(ctl, false), 0x035);
+}
+
 #[test]
 fn manual_sprite_compare_tracks_midline_shres_enable() {
     let mut state = blank_state();

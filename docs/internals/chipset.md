@@ -144,8 +144,11 @@ Sprite DMA is modelled at the register level, the way the chips work:
 there is no separate "descriptor" concept. Each channel keeps Agnus-side
 copies of its SPRxPOS/SPRxCTL words and the vertical comparator values
 derived from them, updated identically by DMA fetches and by CPU/Copper
-pokes (POS supplies the vertical start's low bits, CTL the high bit, the
-whole vertical stop, and disarms the display latches). At each line start
+pokes (POS supplies the vertical start's low bits, CTL the high bits, the
+whole vertical stop, and disarms the display latches). The comparators
+are nine bits wide on OCS; the ECS Agnus and Alice add a tenth start and
+stop bit from SPRxCTL bits 6 and 5 (SV9, EV9), which is what lets a
+sprite sit below line 511 of a programmable scan. At each line start
 the comparators run: passing vstart sets the channel's DMA flip-flop,
 passing vstop clears it -- even when SPREN is off, which is what leaves a
 sprite dead until the next field when software disables DMA across its

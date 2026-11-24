@@ -2413,8 +2413,9 @@ impl App {
                     .map(|sprite| {
                         let pos = base.sprpos[sprite];
                         let ctl = base.sprctl[sprite];
-                        let vstart = (pos >> 8) | ((ctl & 0x04) << 6);
-                        let vstop = (ctl >> 8) | ((ctl & 0x02) << 7);
+                        let v9 = bus.agnus.revision().sprite_v9();
+                        let vstart = crate::chipset::agnus::sprite_vstart_from_words(pos, ctl, v9);
+                        let vstop = crate::chipset::agnus::sprite_vstop_from_ctl(ctl, v9);
                         let hstart = ((pos & 0xFF) << 1) | (ctl & 0x01);
                         let attached = ctl & 0x80 != 0;
                         let mut dma_lines: Vec<&crate::bus::CapturedSpriteLine> = captured

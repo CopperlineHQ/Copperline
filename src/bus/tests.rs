@@ -17,17 +17,17 @@ use super::{
     CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuTraceSlot,
     CpuWaitClass, CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData,
     FrameBusTrace, LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
-    PortDevice, RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A,
-    BLTCON0_USE_B, BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA,
-    BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES,
-    BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_CIAA_IRQ, BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT,
-    BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL, BUS_EVENT_SPECIAL, BUS_EVENT_VB,
-    BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER, BUS_RECORD_COPPER, BUS_RECORD_CPU,
-    BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN,
-    DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, IRQ_SOURCE_BITS, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
-    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
-    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
-    SPRITE_OUTPUT_DELAY_LORES,
+    PortDevice, RenderRegisterSnapshot, SpriteControlRegisterWrite,
+    BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_B, BLTCON0_USE_C, BLTCON0_USE_D,
+    BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
+    BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_CIAA_IRQ,
+    BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL,
+    BUS_EVENT_SPECIAL, BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER,
+    BUS_RECORD_COPPER, BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP,
+    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, IRQ_SOURCE_BITS,
+    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
+    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
+    SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -8234,6 +8234,87 @@ fn lowres_fallback_fetches_ignore_pointer_writes_after_plane_slot() {
     bitplane::render(&mut bus, &mut fb);
 
     assert_eq!(fb[0], rgb12_to_rgba8(0x0000));
+}
+
+/// SPRxCTL bit 6 (SV9) and bit 5 (EV9) are the tenth bits of a sprite's
+/// vertical start and stop on an ECS Agnus or Alice, so a channel can be
+/// placed below line 511 of a tall programmable scan. Sprite DMA then
+/// fetches its data on those lines and nowhere 512 lines above them. OCS
+/// compares nine bits and ignores the two CTL bits.
+#[test]
+fn sprite_dma_compares_ten_vertical_bits_on_ecs_agnus() {
+    // VSTART $210, VSTOP $212, HSTART $83, with SV9 and EV9 set.
+    let (pos, ctl) = (0x1041u16, 0x1261u16);
+    for revision in [AgnusRevision::Ecs8372Rev4, AgnusRevision::AgaAlice] {
+        let mut bus = empty_bus();
+        bus.set_agnus_revision(revision);
+        bus.agnus.write_vtotal(0x270);
+        bus.agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
+        let sprite_ptr = 0x0100usize;
+        write_chip_word(&mut bus, sprite_ptr, pos);
+        write_chip_word(&mut bus, sprite_ptr + 2, ctl);
+        write_chip_word(&mut bus, sprite_ptr + 4, 0x1111);
+        write_chip_word(&mut bus, sprite_ptr + 6, 0x2222);
+        write_chip_word(&mut bus, sprite_ptr + 8, 0x3333);
+        write_chip_word(&mut bus, sprite_ptr + 10, 0x4444);
+        write_chip_word(&mut bus, sprite_ptr + 12, 0);
+        write_chip_word(&mut bus, sprite_ptr + 14, 0);
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
+        bus.denise.sprpt[0] = sprite_ptr as u32;
+        bus.display_dma_sprpt[0] = sprite_ptr as u32;
+
+        sprite_fetch_control_words_at_reset_line(&mut bus);
+        let state = bus.display_dma_sprite_state[0];
+        assert_eq!((state.vstrt, state.vstop), (0x210, 0x212), "{revision:?}");
+
+        // Nothing on the lines the low nine bits alone would select...
+        assert!(
+            bus.captured_sprite_line_at(0, 0x110).is_none(),
+            "{revision:?}"
+        );
+        assert!(
+            bus.captured_sprite_line_at(0, 0x20F).is_none(),
+            "{revision:?}"
+        );
+        // ...and the two data lines where the ten-bit compare puts them.
+        let first = bus
+            .captured_sprite_line_at(0, 0x210)
+            .expect("line $210 fetches data");
+        assert_eq!(
+            (first.beam_y, first.data, first.datb),
+            (0x210, 0x1111, 0x2222)
+        );
+        let second = bus
+            .captured_sprite_line_at(0, 0x211)
+            .expect("line $211 fetches data");
+        assert_eq!(
+            (second.beam_y, second.data, second.datb),
+            (0x211, 0x3333, 0x4444)
+        );
+        // The stop line fetches the next control words instead of data.
+        assert!(
+            bus.captured_sprite_line_at(0, 0x212).is_none(),
+            "{revision:?}"
+        );
+        assert_eq!(bus.display_dma_sprpt[0], sprite_ptr as u32 + 16);
+    }
+
+    let mut ocs = empty_bus();
+    ocs.poke_display_sprite_control_at(0, pos, SpriteControlRegisterWrite::Pos, 0);
+    ocs.poke_display_sprite_control_at(0, ctl, SpriteControlRegisterWrite::Ctl, 0);
+    let state = ocs.display_dma_sprite_state[0];
+    assert_eq!((state.vstrt, state.vstop), (0x010, 0x012));
+}
+
+/// A SPRxPOS write after SPRxCTL keeps both CTL-supplied start bits
+/// (SV8 and SV9) and replaces only the low eight.
+#[test]
+fn sprite_pos_write_keeps_the_ctl_supplied_start_high_bits() {
+    let mut bus = empty_bus();
+    bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+    bus.poke_display_sprite_control_at(0, 0x0044, SpriteControlRegisterWrite::Ctl, 0);
+    bus.poke_display_sprite_control_at(0, 0x5A00, SpriteControlRegisterWrite::Pos, 0);
+    assert_eq!(bus.display_dma_sprite_state[0].vstrt, 0x35A);
 }
 
 #[test]

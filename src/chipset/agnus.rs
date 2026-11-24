@@ -83,6 +83,43 @@ pub fn ddf_hard_stop_lifted(revision: AgnusRevision, beamcon0_lifts: bool, bplco
 }
 const DEFAULT_HTOTAL: u16 = (COLORCLOCKS_PER_LINE - 1) as u16;
 
+/// SPRxCTL bit 6, SV9: the tenth bit of a sprite's vertical start (ECS
+/// Agnus and Alice).
+pub const SPRCTL_SV9: u16 = 0x0040;
+/// SPRxCTL bit 5, EV9: the tenth bit of a sprite's vertical stop (ECS
+/// Agnus and Alice).
+pub const SPRCTL_EV9: u16 = 0x0020;
+
+/// The vertical-start bits a SPRxCTL word supplies: SV8 (bit 2), and SV9
+/// (bit 6) when the comparators are ten bits wide (`v9`, see
+/// [`AgnusRevision::sprite_v9`]).
+pub fn sprite_ctl_vstart_high(ctl: u16, v9: bool) -> i32 {
+    let v8 = i32::from(ctl & 0x0004) << 6;
+    let sv9 = if v9 {
+        i32::from(ctl & SPRCTL_SV9) << 3
+    } else {
+        0
+    };
+    v8 | sv9
+}
+
+/// A sprite's vertical start line from its control words: SV7-SV0 in the
+/// SPRxPOS high byte plus the SPRxCTL high bits.
+pub fn sprite_vstart_from_words(pos: u16, ctl: u16, v9: bool) -> i32 {
+    i32::from(pos >> 8) | sprite_ctl_vstart_high(ctl, v9)
+}
+
+/// A sprite's vertical stop line from SPRxCTL: EV7-EV0 in the high byte,
+/// EV8 (bit 1), and EV9 (bit 5) when the comparators are ten bits wide.
+pub fn sprite_vstop_from_ctl(ctl: u16, v9: bool) -> i32 {
+    let ev9 = if v9 {
+        i32::from(ctl & SPRCTL_EV9) << 4
+    } else {
+        0
+    };
+    i32::from(ctl >> 8) | (i32::from(ctl & 0x0002) << 7) | ev9
+}
+
 const OCS_LORES_BPL_SEQUENCE: [usize; 8] = [8, 4, 6, 2, 7, 3, 5, 1];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -128,6 +165,14 @@ impl AgnusRevision {
     /// Alice's, so AGA reports true here.
     pub fn is_ecs(self) -> bool {
         !matches!(self, Self::Ocs)
+    }
+
+    /// Whether the sprite vertical comparators are ten bits wide. The ECS
+    /// Agnus and Alice take a tenth start and stop bit from SPRxCTL (SV9,
+    /// EV9) so a sprite can sit below line 511 of a programmable scan;
+    /// OCS compares nine bits and leaves those CTL bits unused.
+    pub fn sprite_v9(self) -> bool {
+        self.is_ecs()
     }
 
     /// Highest chip address this Agnus can drive: the writable DMA pointer
@@ -1788,6 +1833,28 @@ mod tests {
         assert_eq!(ocs.vpos, 0x0034, "V9 and V10 do not exist on OCS");
         ocs.write_vposw(0x0007);
         assert_eq!(ocs.vpos, 0x0134);
+    }
+
+    /// SPRxCTL bit 6 (SV9) and bit 5 (EV9) are the tenth vertical start
+    /// and stop bits on the ECS Agnus and Alice; OCS has nine-bit
+    /// comparators and ignores them.
+    #[test]
+    fn sprite_control_words_carry_a_tenth_vertical_bit_on_ecs_only() {
+        use super::{sprite_vstart_from_words, sprite_vstop_from_ctl};
+        // Start line $234, stop line $2A0: SV9 | EV9 | EV7-EV0 = $A0,
+        // SV8 clear, EV8 clear.
+        let (pos, ctl) = (0x3440, 0xA060);
+        assert_eq!(sprite_vstart_from_words(pos, ctl, true), 0x234);
+        assert_eq!(sprite_vstop_from_ctl(ctl, true), 0x2A0);
+        assert_eq!(sprite_vstart_from_words(pos, ctl, false), 0x034);
+        assert_eq!(sprite_vstop_from_ctl(ctl, false), 0x0A0);
+        // All three start bits and all three stop bits together.
+        assert_eq!(sprite_vstart_from_words(0xFF00, 0x0044, true), 0x3FF);
+        assert_eq!(sprite_vstop_from_ctl(0xFF22, true), 0x3FF);
+        assert!(AgnusRevision::Ecs8372Rev4.sprite_v9());
+        assert!(AgnusRevision::Ecs8375.sprite_v9());
+        assert!(AgnusRevision::AgaAlice.sprite_v9());
+        assert!(!AgnusRevision::Ocs.sprite_v9());
     }
 
     /// A BEAMCON0 write reselects the standard but leaves the board strap

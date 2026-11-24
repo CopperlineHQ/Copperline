@@ -201,6 +201,9 @@ pub(super) struct BeamSpriteState {
     /// of the wide holding register, so a manual wide sprite repeats its
     /// 16-pixel pattern across the 32/64-pixel window (WinUAE model).
     pub(super) aga: bool,
+    /// The sprite vertical comparators are ten bits wide (ECS Agnus,
+    /// Alice): SPRxCTL SV9/EV9 count in the control words' vertical window.
+    pub(super) sprite_v9: bool,
     pub(super) bplcon0: u16,
     pub(super) fmode: u16,
     /// Sprites reused with DMA off (SPREN cleared mid-frame): the bus
@@ -270,6 +273,7 @@ impl BeamSpriteState {
             spr_armed,
             direct_data_armed: [false; 8],
             aga: matches!(state.agnus_revision, AgnusRevision::AgaAlice),
+            sprite_v9: state.agnus_revision.sprite_v9(),
             bplcon0: state.bplcon0,
             fmode: state.fmode,
             held: *held,
@@ -366,8 +370,8 @@ impl BeamSpriteState {
         // latch, so a latch seeded there is kept to the control words'
         // vertical window. The hardware-true view needs no such limit.
         if !self.direct_data_armed[sprite] && !self.hardware_latch {
-            let vstart = sprite_vstart(pos, ctl);
-            let vstop = sprite_vstop(ctl);
+            let vstart = sprite_vstart(pos, ctl, self.sprite_v9);
+            let vstop = sprite_vstop(ctl, self.sprite_v9);
             // Normal pair: [vstart, vstop). Equal start/stop is an empty window;
             // only a strictly inverted pair wraps through the frame boundary.
             let in_window = if vstop == vstart {
@@ -1721,8 +1725,9 @@ pub(super) fn collect_sprite_lines_into(
         let regs = BeamSpriteState::from_render_state(state, &[None; 8], true);
         let pos = regs.sprpos[sprite];
         let ctl = regs.sprctl[sprite];
+        let v9 = state.agnus_revision.sprite_v9();
         lines.extend(
-            (sprite_vstart(pos, ctl)..sprite_vstop(ctl))
+            (sprite_vstart(pos, ctl, v9)..sprite_vstop(ctl, v9))
                 .filter_map(|beam_y| regs.line_for_sprite(sprite, beam_y, 0, FB_WIDTH)),
         );
     }
@@ -1943,12 +1948,15 @@ pub(super) fn sprite_sprite_clx_bit(a: usize, b: usize) -> u16 {
     }
 }
 
-pub(super) fn sprite_vstart(pos: u16, ctl: u16) -> i32 {
-    (((pos >> 8) & 0x00FF) | ((ctl & 0x0004) << 6)) as i32
+/// Vertical start of the control words' window; `v9` adds SPRxCTL's SV9
+/// on a chipset whose sprite comparators are ten bits wide.
+pub(super) fn sprite_vstart(pos: u16, ctl: u16, v9: bool) -> i32 {
+    crate::chipset::agnus::sprite_vstart_from_words(pos, ctl, v9)
 }
 
-pub(super) fn sprite_vstop(ctl: u16) -> i32 {
-    (((ctl >> 8) & 0x00FF) | ((ctl & 0x0002) << 7)) as i32
+/// Vertical stop of the control words' window; `v9` adds SPRxCTL's EV9.
+pub(super) fn sprite_vstop(ctl: u16, v9: bool) -> i32 {
+    crate::chipset::agnus::sprite_vstop_from_ctl(ctl, v9)
 }
 
 pub(super) fn sprite_hstart(pos: u16, ctl: u16) -> i32 {
@@ -1976,9 +1984,13 @@ pub(super) fn sprite_control_words_from_parts(
     let vstop = vstop as u16;
     let hstart = hstart as u16;
     let pos = ((vstart & 0x00FF) << 8) | ((hstart >> 1) & 0x00FF);
+    // Lines past 511 exist only on a programmable ECS/AGA scan, where the
+    // tenth bits are SV9 (bit 6) and EV9 (bit 5).
     let mut ctl = ((vstop & 0x00FF) << 8)
         | ((vstart & 0x0100) >> 6)
         | ((vstop & 0x0100) >> 7)
+        | ((vstart & 0x0200) >> 3)
+        | ((vstop & 0x0200) >> 4)
         | (hstart & 0x0001);
     if hsub_70ns {
         ctl |= 0x0010;
