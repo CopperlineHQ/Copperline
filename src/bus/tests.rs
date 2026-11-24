@@ -3206,6 +3206,58 @@ fn killehb_is_latched_by_ecs_denise_and_lisa_but_not_ocs_denise() {
 }
 
 #[test]
+fn ecs_denise_blanks_from_agnus_csy_pin_only_with_ecsena_and_extblken() {
+    const BLANKEN: u64 = 1 << 3;
+    const VARCSYEN: u64 = 1 << 4;
+    const PAL: u64 = 1 << 5;
+    let machine = |denise: DeniseRevision, beamcon0: u64| {
+        let mut bus = empty_bus();
+        bus.set_chipset_revisions(AgnusRevision::Ecs8372Rev4, denise);
+        bus.custom_write(0x1dc, 2, PAL | beamcon0);
+        bus.custom_write(0x1c4, 2, 0x40); // HBSTRT
+        bus.custom_write(0x1c6, 2, 0x48); // HBSTOP
+        bus.custom_write(0x1de, 2, 0x44); // HSSTRT
+        bus.custom_write(0x1c2, 2, 0x50); // HSSTOP
+        bus
+    };
+
+    // Agnus's BLANKEN alone changes nothing in the picture: it only puts
+    // composite blank on the CSY* pin. Denise listens to that pin when
+    // BPLCON3.EXTBLKEN is set and BPLCON0.ECSENA enables it.
+    let mut ecs = machine(DeniseRevision::Ecs8373, BLANKEN);
+    for (bplcon0, bplcon3, window) in [
+        (0, 0, None),
+        (1, 0, None),
+        (0, 1, None),
+        (1, 1, Some((0x200, 0x240))),
+    ] {
+        ecs.custom_write(0x100, 2, bplcon0);
+        ecs.custom_write(0x106, 2, bplcon3);
+        assert_eq!(ecs.display_horizontal_blank(), window);
+    }
+
+    // OCS Denise has neither bit and keeps its fixed blank decode.
+    let mut ocs_denise = machine(DeniseRevision::Ocs, BLANKEN);
+    ocs_denise.custom_write(0x100, 2, 1);
+    ocs_denise.custom_write(0x106, 2, 1);
+    assert_eq!(ocs_denise.display_horizontal_blank(), None);
+
+    // Without BLANKEN the pin carries composite sync. The hardwired pulse
+    // lies inside the fixed blank; a programmed one (VARCSYEN) blanks its
+    // own width; with both bits the pin is active where they overlap.
+    for (beamcon0, window) in [
+        (0, None),
+        (VARCSYEN, Some((0x220, 0x280))),
+        (BLANKEN | VARCSYEN, Some((0x220, 0x240))),
+    ] {
+        let mut bus = machine(DeniseRevision::Ecs8373, beamcon0);
+        bus.custom_write(0x100, 2, 1);
+        bus.custom_write(0x106, 2, 1);
+        assert_eq!(bus.display_horizontal_blank(), window, "{beamcon0:#06X}");
+    }
+}
+
+#[test]
 fn ddf_low_bits_are_masked_by_fetch_mode() {
     assert_eq!(
         bitplane_words_per_row(AgnusRevision::Ocs, 0x0000, 0, 0x0038, 0x0043, false),

@@ -111,6 +111,20 @@ Wrapped windows can blank both edges of the image. The native SHRES canvas
 preserves a transition within a single hi-res pixel. ECS Agnus retains its
 whole-clock comparator. [Commodore AA chipset specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/Specifications_AA_Chipset-Manual-ENG.pdf)
 
+ECS Denise has no blank comparators of its own. BPLCON3.EXTBLKEN, enabled
+by BPLCON0.ECSENA, switches it from its fixed internal blank decode to its
+CBL* pin, which Agnus's CSY* pin drives: with BEAMCON0.BLANKEN that pin
+carries composite blank, so the picture blanks from HBSTRT to HBSTOP;
+without it the pin carries composite sync and the picture blanks for the
+sync pulse alone (the programmed HSSTRT..HSSTOP pulse under VARCSYEN; the
+hardwired pulse lies inside the fixed blank and hides nothing). With
+BLANKEN and VARCSYEN both set the pin is active only where the two
+windows overlap. BLANKEN by itself therefore changes nothing in the
+picture, and an OCS Denise beside an ECS Agnus always blanks on its fixed
+decode. Only the horizontal window of the pin is modelled: its vertical
+component (programmed vertical blank without VARVBEN, sync serration and
+equalisation) is not. [Commodore 8373 Denise specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/denise/refs/Denise_specification.pdf)
+
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as
 many address bits as it is wired to see, so the fitted chip RAM image

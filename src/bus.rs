@@ -307,6 +307,7 @@ const AGNUS_WRITE_EFFECT_DELAY_CCK: u32 = 2;
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
 const BPLCON2_KILLEHB: u16 = 1 << 9;
+const BPLCON3_EXTBLKEN: u16 = 1 << 0;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
 const BPLCON3_BRDRBLNK: u16 = 1 << 5;
 /// The four BPLCON3 flip-flops ECS Denise (8373) has: BRDRBLNK, BRDNTRAN,
@@ -9625,17 +9626,28 @@ impl Bus {
         (events, self.bus_event_next_sequence, dropped)
     }
 
-    /// Display blank endpoints in 35 ns ticks. ECS uses Agnus's external
-    /// blank. Lisa compares its own fine horizontal position when enabled.
+    /// Programmable horizontal blank that reaches the RGB output, as
+    /// endpoints in 35 ns ticks; None while Denise blanks on its fixed
+    /// internal decode.
+    ///
+    /// The switch is Denise's: BPLCON3.EXTBLKEN, enabled by BPLCON0.ECSENA.
+    /// OCS Denise has neither bit and always uses the fixed decode. ECS
+    /// Denise has no blank comparators of its own: EXTBLKEN makes it take
+    /// blanking from its CBL* pin, which Agnus's CSY* pin drives (8373
+    /// spec), so the window is whatever Agnus puts on that pin. Lisa
+    /// compares its own fine horizontal position.
     pub(crate) fn display_horizontal_blank(&self) -> Option<(u32, u32)> {
+        if !self.denise_ecs_registers()
+            || self.denise.bplcon0 & BPLCON0_ECSENA == 0
+            || self.denise.bplcon3 & BPLCON3_EXTBLKEN == 0
+        {
+            return None;
+        }
         if !self.denise_is_lisa() {
             return self
                 .agnus
-                .programmable_horizontal_blank()
+                .csy_pin_blank_window()
                 .map(|(a, b)| (8 * a, 8 * b));
-        }
-        if self.denise.bplcon0 & 1 == 0 || self.denise.bplcon3 & 1 == 0 {
-            return None;
         }
         let [start, stop] = self.denise.horizontal_blank;
         let fine_ticks = |word: u16| ((word & 0xff) << 3) | ((word >> 8) & 7);
@@ -9644,9 +9656,22 @@ impl Bus {
         (start != stop).then_some((u32::from(start), u32::from(stop)))
     }
 
+    /// Where the chip that owns the blank comparators asserts programmable
+    /// horizontal blank, in 35 ns ticks, for the beam trace. On ECS that
+    /// is Agnus, which compares under BEAMCON0.BLANKEN whether or not
+    /// Denise listens; on AGA it is Lisa, as in the picture.
+    fn horizontal_blank_comparator_window(&self) -> Option<(u32, u32)> {
+        if self.denise_is_lisa() {
+            return self.display_horizontal_blank();
+        }
+        self.agnus
+            .programmable_horizontal_blank()
+            .map(|(a, b)| (8 * a, 8 * b))
+    }
+
     fn beam_trace_events_at(&self, vpos: u32, hpos: u32) -> u32 {
         let mut events = self.ddf_trace_events_at(hpos);
-        if let Some((start, stop)) = self.display_horizontal_blank() {
+        if let Some((start, stop)) = self.horizontal_blank_comparator_window() {
             if hpos == start / 8 {
                 events |= BUS_EVENT_HBS;
             }

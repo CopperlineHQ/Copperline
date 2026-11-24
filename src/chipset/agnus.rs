@@ -222,6 +222,38 @@ impl VideoStandard {
     }
 }
 
+/// Overlap of two horizontal windows on a line of `line_cck` colour
+/// clocks. Each window asserts at its first position and clears at its
+/// second, wrapping through the line origin when the first is not below
+/// the second; the result uses the same convention. Two wrapping windows
+/// can overlap in two pieces; the longer piece is returned.
+fn circular_window_overlap(a: (u32, u32), b: (u32, u32), line_cck: u32) -> Option<(u32, u32)> {
+    let contains = |(strt, stop): (u32, u32), pos: u32| {
+        if strt < stop {
+            pos >= strt && pos < stop
+        } else {
+            pos >= strt || pos < stop
+        }
+    };
+    let both = |pos: u32| contains(a, pos) && contains(b, pos);
+    // Start the walk on a position outside the overlap so that no run
+    // straddles the walk's own origin.
+    let origin = (0..line_cck).find(|&pos| !both(pos))?;
+    let mut best: Option<(u32, u32)> = None;
+    let mut run: Option<(u32, u32)> = None;
+    for step in 1..=line_cck {
+        let pos = (origin + step) % line_cck;
+        if both(pos) {
+            run = Some(run.map_or((pos, 1), |(start, len)| (start, len + 1)));
+        } else if let Some(found) = run.take() {
+            if best.is_none_or(|(_, len)| found.1 > len) {
+                best = Some(found);
+            }
+        }
+    }
+    best.map(|(start, len)| (start, (start + len) % line_cck))
+}
+
 fn beamcon0_reset_value(video_standard: VideoStandard) -> u16 {
     match video_standard {
         VideoStandard::Pal => 1 << 5,
@@ -1102,6 +1134,44 @@ impl Agnus {
         Some((u32::from(self.hbstrt), u32::from(self.hbstop)))
     }
 
+    /// The horizontal window Agnus's CSY* pin holds active, in colour
+    /// clocks, for an ECS Denise that takes its blanking from that pin
+    /// (BPLCON3.EXTBLKEN): None when the pin's pulse cannot reach the
+    /// picture.
+    ///
+    /// With BEAMCON0.BLANKEN the pin carries composite blank, so the
+    /// window is HBSTRT..HBSTOP. Without it the pin carries composite
+    /// sync and Denise blanks for the sync pulse alone: the programmed
+    /// pulse HSSTRT..HSSTOP under VARCSYEN, otherwise the hardwired one,
+    /// which lies wholly inside the fixed horizontal blank and so hides
+    /// nothing a display shows. With BLANKEN and VARCSYEN both set the
+    /// pin is active only where the blank window and the programmed sync
+    /// pulse overlap (WinUAE check_vidsyncs).
+    ///
+    /// The pin's vertical component (programmed vertical blank, sync
+    /// serration and equalisation) is not part of this window.
+    pub fn csy_pin_blank_window(&self) -> Option<(u32, u32)> {
+        if !self.revision.is_ecs() {
+            return None;
+        }
+        let blank = (self.hbstrt != self.hbstop)
+            .then_some((u32::from(self.hbstrt), u32::from(self.hbstop)));
+        let sync = (self.hsstrt != self.hsstop)
+            .then_some((u32::from(self.hsstrt), u32::from(self.hsstop)));
+        match (
+            self.beamcon0 & BEAMCON0_BLANKEN != 0,
+            self.beamcon0 & BEAMCON0_VARCSYEN != 0,
+        ) {
+            (true, false) => blank,
+            (false, true) => sync,
+            (true, true) => {
+                let (blank, sync) = (blank?, sync?);
+                circular_window_overlap(blank, sync, self.current_line_cck())
+            }
+            (false, false) => None,
+        }
+    }
+
     pub fn cck_until_next_frame(&self) -> u32 {
         let mut cck = self.nudge_cck;
         let mut hpos = self.hpos;
@@ -1688,6 +1758,61 @@ mod tests {
         COLORCLOCKS_PER_LINE, DMACON_BPLEN, DMACON_DMAEN, NTSC_LINES,
         NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES, VHPOSR_LOOKAHEAD_CCK,
     };
+
+    #[test]
+    fn csy_pin_carries_blank_under_blanken_and_sync_otherwise() {
+        use super::{BEAMCON0_BLANKEN, BEAMCON0_VARCSYEN};
+
+        let mut agnus =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        agnus.write_hbstrt(0x10);
+        agnus.write_hbstop(0x30);
+        agnus.write_hsstrt(0x18);
+        agnus.write_hsstop(0x24);
+
+        // Hardwired sync on the pin: its pulse lies in the fixed blank.
+        agnus.write_beamcon0(BEAMCON0_PAL);
+        assert_eq!(agnus.csy_pin_blank_window(), None);
+        // BLANKEN: composite blank.
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_BLANKEN);
+        assert_eq!(agnus.csy_pin_blank_window(), Some((0x10, 0x30)));
+        // VARCSYEN: the programmed sync pulse.
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARCSYEN);
+        assert_eq!(agnus.csy_pin_blank_window(), Some((0x18, 0x24)));
+        // Both: active only where blank and sync overlap.
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_BLANKEN | BEAMCON0_VARCSYEN);
+        assert_eq!(agnus.csy_pin_blank_window(), Some((0x18, 0x24)));
+        agnus.write_hsstrt(0x40);
+        agnus.write_hsstop(0x50);
+        assert_eq!(agnus.csy_pin_blank_window(), None);
+        // A degenerate blank window never asserts.
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_BLANKEN);
+        agnus.write_hbstop(0x10);
+        assert_eq!(agnus.csy_pin_blank_window(), None);
+
+        // OCS Agnus has no programmable pin function at all.
+        let mut ocs = Agnus::with_video_standard(VideoStandard::Pal);
+        ocs.write_beamcon0(BEAMCON0_PAL | BEAMCON0_BLANKEN);
+        ocs.write_hbstrt(0x10);
+        ocs.write_hbstop(0x30);
+        assert_eq!(ocs.csy_pin_blank_window(), None);
+    }
+
+    #[test]
+    fn circular_window_overlap_follows_wraps_through_the_line_origin() {
+        use super::circular_window_overlap as overlap;
+
+        // Plain intervals.
+        assert_eq!(overlap((10, 30), (20, 40), 227), Some((20, 30)));
+        assert_eq!(overlap((10, 20), (20, 40), 227), None);
+        // One window wraps through the line origin.
+        assert_eq!(overlap((200, 20), (10, 40), 227), Some((10, 20)));
+        assert_eq!(overlap((200, 20), (190, 210), 227), Some((200, 210)));
+        // Both wrap: the overlap wraps too.
+        assert_eq!(overlap((200, 20), (210, 10), 227), Some((210, 10)));
+        // Two pieces: the longer one is reported.
+        assert_eq!(overlap((200, 100), (90, 205), 227), Some((90, 100)));
+    }
 
     #[test]
     fn nudge_debt_carries_across_small_advances() {
