@@ -1037,8 +1037,10 @@ impl ControlState {
             }
             BPLCON3_SPRES_LORES => 4,
             BPLCON3_SPRES_HIRES => 2,
-            // ECS Super Denise accepts the SPRES encoding but retains its
-            // 70 ns sprite serializer; Lisa adds the final 35 ns rate.
+            // SPRES is Lisa's field and only Lisa has the 35 ns rate. ECS
+            // Denise has no such BPLCON3 bits, so the bus never hands it a
+            // non-zero encoding; the 70 ns arm keeps a hand-built state on
+            // the widest pitch that chip can serialize.
             BPLCON3_SPRES_SHRES => {
                 if self.aga() {
                     1
@@ -4490,8 +4492,8 @@ impl RenderInput {
 
     /// Finest programmed playfield/sprite pitch for an unfiltered capture.
     pub(crate) fn native_canvas_scale(&self) -> usize {
-        // ECS accepts SPRES=11 but keeps its 70 ns serializer; only Lisa
-        // emits 35 ns sprite samples (sprite_pixel_repeat_subpixels).
+        // Only Lisa has the SPRES field and emits 35 ns sprite samples
+        // (sprite_pixel_repeat_subpixels).
         let sprite_shres = self.render_base.agnus_revision == AgnusRevision::AgaAlice
             && (self.render_base.bplcon3 & BPLCON3_SPRES_MASK == BPLCON3_SPRES_SHRES
                 || self.frame_render_events.iter().any(|event| {

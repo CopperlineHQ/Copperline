@@ -308,6 +308,9 @@ const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
 const BPLCON3_BRDRBLNK: u16 = 1 << 5;
+/// The four BPLCON3 flip-flops ECS Denise (8373) has: BRDRBLNK, BRDNTRAN,
+/// ZDCLKEN and EXTBLKEN. Every other bit of the register is Lisa's.
+const BPLCON3_ECS_DENISE_BITS: u16 = 0x0035;
 const BPLCON3_SPRES_MASK: u16 = 0x00C0;
 const BPLCON3_SPRES_LORES: u16 = 0x0040;
 const BPLCON3_SPRES_HIRES: u16 = 0x0080;
@@ -874,7 +877,7 @@ pub struct Bus {
     /// visible for a human-perceptible stretch.
     hdd_led_until_cck: u64,
     /// One-time diagnostic when software writes BPLCON3 and the write is
-    /// dropped (OCS Denise, or ECS with ENBPLCN3 clear).
+    /// dropped (OCS Denise has no such register).
     bplcon3_drop_warned: bool,
     /// AGA 32-bit fetch latch: the aligned chip longwords the CPU most
     /// recently fetched opcode words from (two entries, so a tight loop
@@ -4399,10 +4402,9 @@ impl Bus {
             | 0x1CC | 0x1CE | 0x1D8 | 0x1DC | 0x1DE | 0x1E0 | 0x1E2 => {
                 self.blitter_ecs_registers_enabled()
             }
-            // ECS Denise: BPLCON3 latches only while BPLCON0.ECSENA is
-            // set, which is the gate the write dispatch applies -- so a
-            // BPLCON3 write without ECSENA is reported, which is one of
-            // the classic silent drops this validator exists to surface.
+            // BPLCON3 exists on ECS Denise and Lisa and latches every
+            // write; ECSENA only enables what its bits select, so a write
+            // made without it is not a drop.
             0x106 => self.bplcon3_write_enabled(),
             0x1E4 => self.denise_ecs_registers(),
             // AGA Lisa: BPLCON4, CLXCON2, and bitplanes 7-8.
@@ -5260,12 +5262,29 @@ impl Bus {
         self.denise_revision.is_ecs()
     }
 
-    /// ECS Denise ENBPLCN3: BPLCON0 bit 0 must be set for BPLCON3 writes to
-    /// latch (8373 spec). OCS Denise has no BPLCON3 at all; AGA Lisa always
-    /// accepts the write (the palette BANK/LOCT mechanics depend on it).
+    /// BPLCON3 exists on ECS Denise and Lisa, and a write always latches:
+    /// BPLCON0 bit 0 (ENBPLCN3/ECSENA) enables the features the bits
+    /// select, not the write. The Lisa spec (391227) says the bits can
+    /// always be set and their effects are inhibited until ECSENA goes
+    /// high; the 8373 spec says that with ENBPLCN3 reset "Denise returns
+    /// to normal operation". OCS Denise has no BPLCON3 at all.
     fn bplcon3_write_enabled(&self) -> bool {
-        self.denise_is_lisa()
-            || (self.denise_ecs_registers() && self.denise.bplcon0 & BPLCON0_ECSENA != 0)
+        self.denise_ecs_registers()
+    }
+
+    /// The value a BPLCON3 write leaves in the fitted Denise, which is
+    /// also what the render replay is given. ECS Denise (8373) implements
+    /// only four BPLCON3 bits: the sprite-resolution, playfield 2 offset
+    /// and palette-bank fields are Lisa's, so on the 8373 the
+    /// dual-playfield colour offset stays at the fixed OCS value whatever
+    /// is written.
+    fn denise_control_latch_value(&self, off: u16, val: u16) -> u16 {
+        match (off, self.denise_revision) {
+            (0x106, DeniseRevision::Ecs8373) => {
+                (val & BPLCON3_ECS_DENISE_BITS) | crate::chipset::denise::BPLCON3_PF2OF_DEFAULT
+            }
+            _ => val,
+        }
     }
 
     fn denise_is_lisa(&self) -> bool {

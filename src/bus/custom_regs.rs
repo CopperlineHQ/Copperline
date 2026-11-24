@@ -371,6 +371,9 @@ impl Bus {
                 return false;
             }
         }
+        // From here on the write is what the fitted Denise latches: bits
+        // the chip has no flip-flop for never reach it or the render replay.
+        let val = self.denise_control_latch_value(off, val);
         if is_render_relevant_custom_write(off)
             && !matches!(off, 0x180..=0x1BE)
             && (off != 0x1E4 || self.denise_ecs_registers())
@@ -1200,19 +1203,15 @@ impl Bus {
                         self.bplcon3_write_enabled(),
                     );
                 }
-                // ECS Denise only latches BPLCON3 while BPLCON0 bit 0
-                // (ENBPLCN3/ECSENA) is set; OCS Denise has no BPLCON3.
+                // ECS Denise and Lisa latch every BPLCON3 write; ECSENA
+                // gates the border, genlock and blank features where they
+                // are used. OCS Denise has no BPLCON3.
                 if self.bplcon3_write_enabled() {
                     self.denise.bplcon3 = val;
                 } else if !self.bplcon3_drop_warned && val != 0 {
                     self.bplcon3_drop_warned = true;
                     log::info!(
-                        "BPLCON3 write {val:#06X} dropped ({}); further drops not logged",
-                        if self.denise_ecs_registers() {
-                            "ENBPLCN3 clear"
-                        } else {
-                            "OCS Denise"
-                        }
+                        "BPLCON3 write {val:#06X} dropped (OCS Denise); further drops not logged"
                     );
                 }
                 false

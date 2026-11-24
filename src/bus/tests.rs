@@ -3107,7 +3107,7 @@ fn sync_strobes_are_documented_noops() {
 }
 
 #[test]
-fn bplcon3_writes_require_ecs_denise_and_enbplcn3() {
+fn bplcon3_latches_without_ecsena_on_ecs_denise_and_lisa() {
     use crate::chipset::denise::BPLCON3_PF2OF_DEFAULT;
 
     // OCS Denise has no BPLCON3: writes never latch.
@@ -3115,22 +3115,61 @@ fn bplcon3_writes_require_ecs_denise_and_enbplcn3() {
     assert!(!ocs.custom_write(0x100, 2, 0x0001));
     assert!(!ocs.custom_write(0x106, 2, 0x1234));
     assert_eq!(ocs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT);
+    assert!(!ocs.custom_reg_present(0x106));
 
-    // ECS Denise drops BPLCON3 writes while ENBPLCN3 (BPLCON0 bit 0)
-    // is clear and latches them while it is set.
+    // ECS Denise latches the write whatever ENBPLCN3 (BPLCON0 bit 0)
+    // says; the bit enables the features, not the register.
     let mut ecs = empty_bus();
     ecs.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
-    assert!(!ecs.custom_write(0x106, 2, 0x1234));
-    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT);
+    assert!(ecs.custom_reg_present(0x106));
+    assert!(!ecs.custom_write(0x106, 2, 0x0021));
+    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT | 0x0021);
+    // The border blank it selects stays off until ENBPLCN3 is set, and
+    // then needs no second BPLCON3 write.
+    let border_blank = |bus: &Bus| {
+        bus.denise.bplcon0 & BPLCON0_ECSENA != 0 && bus.denise.bplcon3 & BPLCON3_BRDRBLNK != 0
+    };
+    assert!(!border_blank(&ecs));
     assert!(!ecs.custom_write(0x100, 2, 0x0001));
-    assert!(!ecs.custom_write(0x106, 2, 0x5678));
-    assert_eq!(ecs.denise.bplcon3, 0x5678);
-
-    // Clearing ENBPLCN3 again keeps the last latched value but blocks
-    // further writes.
+    assert!(border_blank(&ecs));
     assert!(!ecs.custom_write(0x100, 2, 0x0000));
-    assert!(!ecs.custom_write(0x106, 2, 0x9ABC));
-    assert_eq!(ecs.denise.bplcon3, 0x5678);
+    assert!(!ecs.custom_write(0x106, 2, 0x0000));
+    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT);
+
+    // Lisa latches every bit, also without ECSENA.
+    let mut aga = empty_bus();
+    aga.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    assert!(!aga.custom_write(0x106, 2, 0x9ABC));
+    assert_eq!(aga.denise.bplcon3, 0x9ABC);
+}
+
+#[test]
+fn ecs_denise_bplcon3_has_only_its_four_control_bits() {
+    use crate::chipset::denise::BPLCON3_PF2OF_DEFAULT;
+
+    // BRDRBLNK, BRDNTRAN, ZDCLKEN and EXTBLKEN are the 8373's whole
+    // BPLCON3. Lisa's sprite-resolution, playfield 2 offset, border-sprite
+    // and palette-bank fields have no flip-flops there: the playfield 2
+    // colour offset stays at the fixed OCS value whatever is written.
+    let mut ecs = empty_bus();
+    ecs.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+    assert!(!ecs.custom_write(0x100, 2, 0x0001));
+    ecs.current_frame_render_events.clear();
+    assert!(!ecs.custom_write(0x106, 2, 0xFFFF));
+    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT | 0x0035);
+    assert!(!ecs.custom_write(0x106, 2, 0x0000));
+    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT);
+    // The render replay is given what the chip latched.
+    let replayed: Vec<u16> = ecs
+        .current_frame_render_events
+        .iter()
+        .filter(|event| event.offset == 0x106)
+        .map(|event| event.value)
+        .collect();
+    assert_eq!(
+        replayed,
+        [BPLCON3_PF2OF_DEFAULT | 0x0035, BPLCON3_PF2OF_DEFAULT]
+    );
 }
 
 #[test]
@@ -12202,7 +12241,8 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         write_chip_word(&mut bus, sprite_ptr + 8, 0);
         write_chip_word(&mut bus, sprite_ptr + 10, 0);
 
-        bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        // SPRES is a Lisa field: ECS Denise has no such BPLCON3 bits.
+        bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN | DMACON_BPLEN;
         bus.agnus.vpos = 0x2C;
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
@@ -12210,7 +12250,6 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         bus.denise.diwstop = 0x2DC1;
         bus.denise.ddfstrt = 0x0038;
         bus.denise.ddfstop = 0x0038;
-        // ECSENA/ENBPLCN3 set so the live SPRES write below latches.
         bus.denise.bplcon0 = 0x9000 | BPLCON0_ECSENA;
         bus.denise.bplcon3 = bplcon3;
         // One-bitplane playfield: match only bitplane 1 so the absent planes
@@ -12255,7 +12294,8 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         write_chip_word(&mut bus, sprite_ptr + 8, 0);
         write_chip_word(&mut bus, sprite_ptr + 10, 0);
 
-        bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        // SPRES is a Lisa field: ECS Denise has no such BPLCON3 bits.
+        bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN | DMACON_BPLEN;
         bus.agnus.vpos = 0x2C;
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
@@ -12263,7 +12303,6 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         bus.denise.diwstop = 0x2DC1;
         bus.denise.ddfstrt = 0x0038;
         bus.denise.ddfstop = 0x0038;
-        // ECSENA/ENBPLCN3 set so the live SPRES write below latches.
         bus.denise.bplcon0 = 0x9000 | BPLCON0_ECSENA;
         bus.denise.bplcon3 = 0;
         // One-bitplane playfield: match only bitplane 1 so the absent planes
