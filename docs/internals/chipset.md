@@ -104,8 +104,8 @@ bits collides over every word its serializer shifts out, 32 or 64 sprite
 pixels, the same pixels the renderer draws; a manually written SPRxDATA
 word repeats across that width in both paths.
 
-Lisa has its own HBSTRT and HBSTOP comparators. Bits 7–0 select the colour
-clock and bits 10–8 select one of its eight 35 ns samples. BPLCON0.ECSENA
+Lisa has its own HBSTRT and HBSTOP comparators. Bits 7-0 select the colour
+clock and bits 10-8 select one of its eight 35 ns samples. BPLCON0.ECSENA
 and BPLCON3.EXTBLKEN enable the programmable horizontal output blank.
 Wrapped windows can blank both edges of the image. The native SHRES canvas
 preserves a transition within a single hi-res pixel. ECS Agnus retains its
@@ -326,9 +326,25 @@ display window (DIWSTRT/DIWSTOP, ECS DIWHIGH), sprite
 position/control/data registers, and CLXCON/CLXDAT collision detection.
 On Lisa, CLXCON2 extends the plane match to planes 7-8 in both the rendered
 and live beam-timed collision paths. Denise revisions: OCS 8362,
-ECS 8373, AGA Lisa (DENISEID $00F8). The AGA decode adds 8 bitplanes,
+ECS 8373, AGA Lisa. DENISEID reads $FFFC from the 8373; Lisa drives only
+the low byte ($F8) and the motherboard supplies the high one: $00 on the
+A1200 and CD32, $FC on the A4000. The AGA decode adds 8 bitplanes,
 HAM8, the BPLCON4 BPLAM pixel-index XOR mask, and the OSPRM/ESPRM sprite
-palette banks. The two BPLCON4 fields are on different Lisa timing paths:
+palette banks. Lisa also decodes both HAM modes in every resolution; OCS
+and ECS Denise decode at most two planes in super-hires, which keeps HAM
+out of it there.
+
+Each revision latches only the control bits it has flip-flops for, and
+the render replay is given the latched value. OCS Denise has no BPLCON3
+and no BPLCON2.KILLEHB, so six planes without HAM or dual playfield are
+always extra-half-brite on it; ECS Denise and Lisa honour KILLEHB without
+ECSENA. ECS Denise implements four BPLCON3 bits (BRDRBLNK, BRDNTRAN,
+ZDCLKEN, EXTBLKEN): the sprite-resolution, playfield 2 offset,
+border-sprite and palette-bank fields are Lisa's, and writing them on the
+8373 leaves its fixed behaviour in place. BPLCON3 latches every write on
+both chips; ECSENA gates the border, genlock and blank features where
+they are used, so software can write the register first and enable it
+later. The two BPLCON4 fields are on different Lisa timing paths:
 the low byte that selects sprite palette bases (ESPRM/OSPRM) reaches sprite
 colour lookup on an earlier sprite palette-control path than ordinary COLORxx
 palette writes, while the high-byte BPLAM XOR continues on the normal
