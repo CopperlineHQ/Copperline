@@ -183,6 +183,13 @@ aligned longword use the AGA fetch latch and do not request or wait for the
 same value twice. This read/write asymmetry is covered by
 `aga_68020_chip_reads_wait_for_data_but_writes_are_posted`.
 
+The custom registers stay a 16-bit port on those boards. Gayle and Fat Gary
+end a register cycle with DSACK1 alone (Fat Gary specification, "Chip
+Registers"), so the CPU runs a long register access as two word cycles and
+takes two granted slots, as on a 68000 board, where a long chip-RAM access
+takes one. Test: `aga_custom_register_long_access_runs_two_word_cycles`;
+golden probe `busprobe-reglong`.
+
 ### Buster and Super Buster
 
 The expansion arbiter runs on the machine clock. A2091 DMA consumes one

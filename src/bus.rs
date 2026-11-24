@@ -7444,7 +7444,11 @@ impl Bus {
             return;
         }
 
-        let wide_bus = self.aga_enabled();
+        // Chip RAM is a 32-bit port on the AGA boards, but the registers are
+        // not: Gayle and Fat Gary end a register cycle with DSACK1 alone
+        // (Fat Gary specification, "Chip Registers"), so the CPU runs a
+        // long access to them as two word cycles, as on a 68000 board.
+        let wide_bus = self.aga_enabled() && !matches!(kind, CpuBusAccessKind::Custom);
         if wide_bus && matches!(kind, CpuBusAccessKind::Write) {
             if let Some(addr) = addr {
                 let first = addr & !3;

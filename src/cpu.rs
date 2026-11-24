@@ -9373,6 +9373,34 @@ mod tests {
     }
 
     #[test]
+    fn aga_custom_register_long_access_runs_two_word_cycles() {
+        use crate::chipset::agnus::AgnusRevision;
+        use crate::chipset::denise::DeniseRevision;
+
+        // Chip RAM is a 32-bit port beside Alice; the registers end their
+        // cycle with DSACK1 alone, so a long access is two word cycles.
+        let mut b = cpu_bus(test_bus(reset_rom(0, 0)));
+        b.bus
+            .set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+        b.bus.set_cpu_bus_arbitration_enabled(true);
+        // Clear of the refresh, disk, audio and sprite slots.
+        b.bus.advance_chipset(0x40);
+        let cost = |b: &mut CpuBus, addr: u32, size: usize| {
+            let before = b.bus.emulated_cck();
+            b.read_sized_uncached(addr, size, CpuBusAccessKind::Read);
+            b.bus.emulated_cck() - before
+        };
+        let ram_long = cost(&mut b, 0x0400, 4);
+        let reg_word = cost(&mut b, 0xdff002, 2);
+        let reg_long = cost(&mut b, 0xdff002, 4);
+        assert_eq!(reg_word, ram_long);
+        assert_eq!(reg_long, 2 * reg_word);
+        let before = b.bus.emulated_cck();
+        b.write_long(0xdff180, 0x0123_0456);
+        assert_eq!(b.bus.emulated_cck() - before, reg_long);
+    }
+
+    #[test]
     fn classic_gary_boot_rom_repeats_over_two_megabytes() {
         for fat in [false, true] {
             let mut machine = test_bus(reset_rom(0, 0));

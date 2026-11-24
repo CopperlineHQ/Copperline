@@ -652,6 +652,9 @@ probe_tests! {
     // Ramsey's DRAM cycle length in standard, page-hit, page-miss and skip
     // modes, as band heights.
     golden_ramsey_cycles => Probe { name: "ramsey-cycles", program: "ramsey-cycles.bin", seconds: 10.0, machine: Machine::A4000 };
+    // The registers are a 16-bit CPU port beside Alice's 32-bit chip RAM
+    // port: a long register access takes two cycles, a long RAM access one.
+    golden_busprobe_reglong => probe_aga("busprobe-reglong", "busprobe-reglong.bin", 16.0);
     golden_lisa_scanblank => probe_aga("lisa-scanblank", "lisa-scanblank.bin", 16.0);
     golden_dblpal_hires_lace => probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
     // Alice wide-fetch addressing: FMODE 10 duplicates the first word and
