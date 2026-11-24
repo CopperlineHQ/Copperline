@@ -908,8 +908,9 @@ impl Agnus {
     }
 
     pub fn current_frame_lines(&self) -> u32 {
-        // VARBEAMEN programmable totals (VTOTAL+1) drive the beam entirely and
-        // override the fixed PAL/NTSC short/long-frame selection.
+        // VARBEAMEN programmable totals drive the beam entirely and replace
+        // the fixed PAL/NTSC counts; interlace still lengthens the long
+        // field by a line (see `programmable_frame_lines`).
         if let Some(lines) = self.programmable_frame_lines() {
             return lines;
         }
@@ -920,23 +921,21 @@ impl Agnus {
         }
     }
 
+    /// The long field's line count: what a non-interlaced display runs
+    /// every field on a fixed standard, and the longer of the two
+    /// alternating fields under interlace.
     pub fn nominal_frame_lines(&self) -> u32 {
-        if let Some(lines) = self.programmable_frame_lines() {
-            return lines;
+        if let Some(short) = self.programmable_short_field_lines() {
+            return short + u32::from(self.lace);
         }
         self.video_standard.long_frame_lines()
     }
 
     /// Mean colour clocks per video field for a frontend's refresh rate.
-    /// Interlace alternates long/short fields; NTSC can also alternate line
-    /// lengths. Programmable totals replace both standard timing rules.
+    /// Interlace alternates long/short fields, on a programmable scan as
+    /// on a fixed one; NTSC can also alternate line lengths.
     pub fn nominal_frame_cck(&self) -> f64 {
-        let lines = f64::from(self.nominal_frame_lines())
-            - if self.lace && self.programmable_frame_lines().is_none() {
-                0.5
-            } else {
-                0.0
-            };
+        let lines = f64::from(self.nominal_frame_lines()) - if self.lace { 0.5 } else { 0.0 };
         let line = if self.long_line_toggles() {
             f64::from(self.line_cck_for(false) + self.line_cck_for(true)) / 2.0
         } else {
@@ -1018,9 +1017,27 @@ impl Agnus {
         Some(u32::from(self.htotal).saturating_add(1).max(1))
     }
 
-    /// Programmable frame height (VTOTAL+1) when ECS and VARBEAMEN are set;
-    /// otherwise None and the fixed PAL/NTSC frame counts apply.
+    /// Height of the current field of a programmable scan, when ECS and
+    /// VARBEAMEN are set; otherwise None and the fixed PAL/NTSC frame
+    /// counts apply. VTOTAL is "the line number to reset the counter, so
+    /// there's this many + 1 in a field. The exception is if the LACE bit
+    /// is set (BPLCON0), in which case every other field is this many +2
+    /// & the short field is this many + 1" (AA register list, VTOTAL):
+    /// the long field of an interlaced programmable scan runs one line
+    /// past VTOTAL, which is what offsets the two fields by half a line.
+    ///
+    /// TODO: WinUAE ends the field at VTOTAL + 1 + LOF whatever LACE says,
+    /// so a non-interlaced scan with the long-field latch set would also
+    /// run VTOTAL + 2 lines. The register list words it as an interlace
+    /// exception ("all fields are short if LACE=0"), and that is what is
+    /// modelled until a hardware measurement settles the held-latch case.
     pub fn programmable_frame_lines(&self) -> Option<u32> {
+        let short = self.programmable_short_field_lines()?;
+        Some(short + u32::from(self.lace && self.lof))
+    }
+
+    /// VTOTAL + 1, the short field of a programmable scan.
+    fn programmable_short_field_lines(&self) -> Option<u32> {
         if !self.revision.is_ecs() || self.beamcon0 & BEAMCON0_VARBEAMEN == 0 {
             return None;
         }
@@ -2549,10 +2566,60 @@ mod tests {
             Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
         a.write_vtotal(149); // 150-line frame
         a.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
-        a.set_lace(true);
-        a.update_interlace_long_frame(true);
-        // Programmable totals win over the lace short/long selection.
+        // Programmable totals replace the fixed PAL counts, interlaced or
+        // not: nothing here is 312 or 313 lines.
         assert_eq!(a.current_frame_lines(), 150);
+        a.set_lace(true);
+        assert_ne!(a.current_frame_lines(), PAL_LINES);
+        assert_ne!(a.current_frame_lines(), PAL_LINES - 1);
+    }
+
+    /// An interlaced programmable scan alternates a short field of
+    /// VTOTAL + 1 lines with a long field of VTOTAL + 2, following the
+    /// long-field latch as the fixed standards do. Without LACE every
+    /// field is VTOTAL + 1 lines whatever the latch holds.
+    #[test]
+    fn interlaced_programmable_scan_adds_a_line_to_the_long_field() {
+        let mut a =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        a.write_htotal(0x81);
+        a.write_vtotal(0x23D);
+        a.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
+        assert!(a.lof, "the latch powers up set");
+        assert_eq!(a.current_frame_lines(), 0x23E, "no LACE: VTOTAL + 1");
+        assert_eq!(a.nominal_frame_lines(), 0x23E);
+
+        // The first laced field after a progressive display is short.
+        a.update_interlace_long_frame(true);
+        assert!(!a.lof);
+        assert_eq!(a.current_frame_lines(), 0x23E);
+        a.update_interlace_long_frame(true);
+        assert!(a.lof);
+        assert_eq!(a.current_frame_lines(), 0x23F, "long field: VTOTAL + 2");
+        assert_eq!(a.nominal_frame_lines(), 0x23F);
+        assert_eq!(a.nominal_frame_cck(), 574.5 * 130.0);
+
+        // The beam really runs that many lines before wrapping.
+        a.vpos = 0;
+        a.hpos = 0;
+        let tick = a.advance_by_cck(0x23E * 130);
+        assert_eq!(tick.new_frames, 0);
+        assert_eq!(a.vpos, 0x23E);
+        assert_eq!(a.read_vposr() & 0x0007, 2);
+        let tick = a.advance_by_cck(130);
+        assert_eq!(tick.new_frames, 1);
+        assert_eq!(a.vpos, 0);
+
+        // VPOSW can force the latch; the field length follows it.
+        a.write_vposw(0x0000);
+        assert_eq!(a.current_frame_lines(), 0x23E);
+        a.write_vposw(0x8000);
+        assert_eq!(a.current_frame_lines(), 0x23F);
+
+        // Leaving interlace with the latch set goes back to VTOTAL + 1.
+        a.update_interlace_long_frame(false);
+        assert!(a.lof);
+        assert_eq!(a.current_frame_lines(), 0x23E);
     }
 
     #[test]

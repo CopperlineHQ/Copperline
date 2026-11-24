@@ -601,8 +601,11 @@ fn nominal_refresh_tracks_interlace_and_programmable_totals() {
     agnus.write_beamcon0(0xa0);
     agnus.write_htotal(199);
     agnus.write_vtotal(199);
-    agnus.set_lace(true);
     assert_eq!(agnus.nominal_frame_cck(), 40_000.0);
+    // Interlace lengthens every other field of a programmable scan by a
+    // line as well: VTOTAL + 2 against VTOTAL + 1.
+    agnus.set_lace(true);
+    assert_eq!(agnus.nominal_frame_cck(), 200.5 * 200.0);
 }
 
 #[test]

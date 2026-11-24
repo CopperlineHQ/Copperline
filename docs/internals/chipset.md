@@ -419,6 +419,12 @@ BPLCON0 LACE is set; outside interlace it holds its value -- the power-on
 state is set, so progressive fields normally read LOF=1, and a value
 written through VPOSW persists until the next laced toggle. Non-laced
 frame timing always uses the long frame length regardless of the latch.
+A programmable scan (BEAMCON0.VARBEAMEN) replaces the fixed counts with
+VTOTAL + 1 lines, and under interlace its long field runs VTOTAL + 2
+lines, as the AA register list describes VTOTAL. WinUAE extends the
+field by the latch alone (VTOTAL + 1 + LOF), which differs for a
+non-laced scan with the latch set; that case stays at VTOTAL + 1 here
+until a hardware measurement settles it.
 The held power-on state matters for the phase: the first field after
 software enables LACE toggles to a short field, as on real hardware,
 which is the absolute field order that software pairing its per-field

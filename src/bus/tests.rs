@@ -9130,6 +9130,49 @@ fn frame_geometry_latches_programmable_scan_at_frame_wrap() {
     assert_eq!(geometry.frame_lines, 626);
 }
 
+/// The long field of an interlaced programmable scan is one line longer
+/// than the short one. Both fields must still present the same number of
+/// glass rows, or the deinterlacer would see two different scans and stop
+/// weaving them into one picture.
+#[test]
+fn laced_programmable_fields_present_the_same_glass_rows() {
+    use crate::chipset::agnus::{BEAMCON0_PAL, BEAMCON0_VARBEAMEN, BEAMCON0_VARVBEN};
+    const BEAMCON0_VARVSYEN: u16 = 1 << 9;
+
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    // The AmigaOS DblPAL constellation, interlaced.
+    bus.agnus.write_htotal(0x81);
+    bus.agnus.write_vtotal(0x23D);
+    bus.agnus.write_vsstrt(0x07);
+    bus.agnus.write_vsstop(0x0E);
+    bus.agnus.write_vbstrt(0x23E);
+    bus.agnus.write_vbstop(0x16);
+    bus.agnus
+        .write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN | BEAMCON0_VARVBEN | BEAMCON0_VARVSYEN);
+    bus.denise.bplcon0 = 0x0004; // LACE
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        bus.begin_new_beam_frame();
+        let geometry = bus.current_frame_geometry;
+        assert!(geometry.programmable && geometry.lace);
+        seen.push((
+            bus.agnus.lof,
+            geometry.frame_lines,
+            bus.current_frame_presentation_v_window,
+        ));
+    }
+    let long: Vec<_> = seen.iter().filter(|field| field.0).collect();
+    let short: Vec<_> = seen.iter().filter(|field| !field.0).collect();
+    assert_eq!((long.len(), short.len()), (2, 2), "{seen:?}");
+    assert!(long.iter().all(|field| field.1 == 0x23F), "{seen:?}");
+    assert!(short.iter().all(|field| field.1 == 0x23E), "{seen:?}");
+    // 574 lines less the seven of vertical sync, for both fields.
+    let glass = Some((0x16 - 0x0E, 0x23E - 7));
+    assert!(seen.iter().all(|field| field.2 == glass), "{seen:?}");
+}
+
 /// The renderer draws the frame that just completed. If the next frame
 /// programs a shorter VARBEAMEN scan before the host presents that
 /// completed standard frame, the standard frame's bottom border still

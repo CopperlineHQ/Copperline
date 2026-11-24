@@ -9254,7 +9254,14 @@ impl Bus {
         }
         let (vsstrt, vsstop) = self.agnus.programmable_vsync_window()?;
         let sync_len = vsstop - vsstrt;
-        let glass_lines = geometry.frame_lines.saturating_sub(sync_len).max(1);
+        // The long field of an interlaced programmable scan runs one line
+        // past the short one. Both fields are given the short field's
+        // glass, so they present the same rows and weave; the line the
+        // long field adds is its last, where the vertical blank already is.
+        let field_lines = geometry
+            .frame_lines
+            .saturating_sub(u32::from(geometry.lace && self.agnus.lof));
+        let glass_lines = field_lines.saturating_sub(sync_len).max(1);
         let offset = geometry.visible_start_vpos as i32 - vsstop as i32;
         Some((offset, glass_lines))
     }

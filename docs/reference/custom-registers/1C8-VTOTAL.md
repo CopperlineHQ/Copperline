@@ -10,4 +10,4 @@ Sets the last vertical line number of a programmable field.
 - Bits 10-0: Vertical line number.
 - Bits 15-11: Ignored.
 
-With BEAMCON0.VARBEAMEN set, each field is VTOTAL + 1 lines long.
+With BEAMCON0.VARBEAMEN set, each field is VTOTAL + 1 lines long. Under interlace (BPLCON0.LACE) the long field is VTOTAL + 2 lines and the short field VTOTAL + 1.
