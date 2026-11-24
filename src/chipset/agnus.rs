@@ -1172,26 +1172,31 @@ impl Agnus {
         }
     }
 
+    /// Colour clocks until the vertical counter wraps: the rest of this
+    /// line, then every whole line left in the field. The bus arbiter asks
+    /// on every quantum, so this is the sum in closed form, not a walk down
+    /// the remaining lines.
     pub fn cck_until_next_frame(&self) -> u32 {
-        let mut cck = self.nudge_cck;
-        let mut hpos = self.hpos;
-        let mut vpos = self.vpos;
-        let mut lol = self.lol;
-        let frame_lines = self.current_frame_lines();
-
-        loop {
-            let line_cck = self.line_cck_for(lol);
-            let remaining_line = line_cck.saturating_sub(hpos).max(1);
-            cck = cck.saturating_add(remaining_line);
-            vpos += 1;
-            if self.long_line_toggles() {
-                lol = !lol;
-            }
-            if vpos >= frame_lines {
-                return cck;
-            }
-            hpos = 0;
-        }
+        let first = self.line_cck_for(self.lol).saturating_sub(self.hpos).max(1);
+        let following = self
+            .current_frame_lines()
+            .saturating_sub(self.vpos.saturating_add(1));
+        let rest = if following == 0 {
+            0
+        } else if self.long_line_toggles() {
+            // The line after this one has the other length, and they
+            // alternate from there.
+            let long_lines = if self.lol {
+                following / 2
+            } else {
+                following.div_ceil(2)
+            };
+            (following - long_lines) * self.line_cck_for(false)
+                + long_lines * self.line_cck_for(true)
+        } else {
+            following * self.line_cck_for(self.lol)
+        };
+        self.nudge_cck.saturating_add(first).saturating_add(rest)
     }
 
     pub fn cck_until_line_start(&self, target_vpos: u32) -> Option<u32> {
@@ -1930,6 +1935,71 @@ mod tests {
         agnus.lof = true;
         agnus.vpos = 0x100;
         assert_eq!(agnus.read_vposr(), 0x8001);
+    }
+
+    /// The frame deadline is a closed-form sum. It must equal a walk down
+    /// the remaining lines for every standard, field, line phase and
+    /// programmable total, since the bus arbiter schedules against it.
+    #[test]
+    fn cck_until_next_frame_equals_a_walk_down_the_remaining_lines() {
+        fn walk(agnus: &Agnus) -> u32 {
+            let mut cck = agnus.nudge_cck;
+            let mut hpos = agnus.hpos;
+            let mut vpos = agnus.vpos;
+            let mut lol = agnus.lol;
+            let frame_lines = agnus.current_frame_lines();
+            loop {
+                let line_cck = agnus.line_cck_for(lol);
+                cck = cck.saturating_add(line_cck.saturating_sub(hpos).max(1));
+                vpos += 1;
+                if agnus.long_line_toggles() {
+                    lol = !lol;
+                }
+                if vpos >= frame_lines {
+                    return cck;
+                }
+                hpos = 0;
+            }
+        }
+        let mut cases = 0;
+        for standard in [VideoStandard::Pal, VideoStandard::Ntsc] {
+            for revision in [AgnusRevision::Ocs, AgnusRevision::Ecs8372Rev4] {
+                for beamcon0 in [0, BEAMCON0_PAL, BEAMCON0_LOLDIS, BEAMCON0_VARBEAMEN] {
+                    for (lace, lof, lol) in [
+                        (false, false, false),
+                        (false, true, true),
+                        (true, false, true),
+                        (true, true, false),
+                    ] {
+                        let mut agnus = Agnus::with_video_standard_and_revision(standard, revision);
+                        agnus.write_htotal(0x71);
+                        agnus.write_vtotal(0x245);
+                        agnus.write_beamcon0(beamcon0);
+                        agnus.set_lace(lace);
+                        agnus.lof = lof;
+                        agnus.lol = lol;
+                        let lines = agnus.current_frame_lines();
+                        for vpos in [0, 1, 2, lines / 2, lines - 2, lines - 1, lines, lines + 3] {
+                            for hpos in [0, 1, 0x70, 0x71, 0xE2, 0xE3, 0xE4, 0x1FF] {
+                                for nudge in [0, 1] {
+                                    agnus.vpos = vpos;
+                                    agnus.hpos = hpos;
+                                    agnus.nudge_cck = nudge;
+                                    assert_eq!(
+                                        agnus.cck_until_next_frame(),
+                                        walk(&agnus),
+                                        "{standard:?} {revision:?} beamcon0={beamcon0:#x} \
+                                         lace={lace} lof={lof} lol={lol} v={vpos} h={hpos}"
+                                    );
+                                    cases += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 2 * 2 * 4 * 4 * 8 * 8 * 2);
     }
 
     /// A programmable scan can run past line 511. The ECS Agnus and Alice
