@@ -5077,8 +5077,16 @@ fn draw_analyzer_beam_tab(
         } else {
             String::new()
         };
+        let strobe = if record.kind == crate::bus::BUS_RECORD_REFRESH {
+            match record.reg {
+                0x1fe => " NULL".to_owned(),
+                reg => format!(" {}", crate::debugger::custom_reg_name(reg)),
+            }
+        } else {
+            String::new()
+        };
         let detail = format!(
-            "reg=${:04X} addr=${:08X} data=${:016X}/{} kind={}:{} ipl={} events={}{}",
+            "reg=${:04X}{strobe} addr=${:08X} data=${:016X}/{} kind={}:{} ipl={} events={}{}",
             record.reg,
             record.addr,
             record.data,

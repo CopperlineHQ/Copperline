@@ -5,12 +5,16 @@
 //! refreshes the DRAM and decides whether to use page mode, burst mode and,
 //! on Ramsey-07, cycle-skip mode. The CPU sees only two registers.
 //!
-//! Only the register file lives here; the RAM bank itself is
-//! [`crate::memory::Memory::mb_ram`]. Refresh has no observable effect on an
-//! emulator that never loses a DRAM cell, and page/burst/skip mode only change
-//! how fast a real memory cycle completes, which we do not simulate either.
-//! The bits are still stored and read back, because Kickstart and the
-//! diagnostic tools write a mode and then spin until they read it back.
+//! The stock big-box profiles use the 25 MHz motherboard clock (seven clocks
+//! per emulated colour clock). The RAM contents live in `Memory::mb_ram`.
+//! Refresh closes an open static-column row and clocks a pending control
+//! write into the DRAM timing. The register reads back the written byte at
+//! once.
+
+pub(crate) const CLOCKS_PER_CCK: u32 = 7;
+const fn first_refresh() -> u64 {
+    154
+}
 
 /// Ramsey control register: refresh rate, page/burst mode, and a description
 /// of the DRAM fitted to the motherboard. Byte-wide, on an odd address.
@@ -114,7 +118,19 @@ impl RamseyRevision {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Ramsey {
     revision: RamseyRevision,
+    /// The mode the DRAM controller is running. A refresh clocks it in.
     control: u8,
+    /// The last control write, waiting for the next refresh. CPU reads of
+    /// the control register already return it.
+    #[serde(default)]
+    pending: Option<u8>,
+    #[serde(default = "first_refresh")]
+    next_refresh: u64,
+    #[serde(default)]
+    open_row: Option<u32>,
+    /// Remainder when converting board clocks to accelerator CPU clocks.
+    #[serde(default)]
+    pub(crate) clock_remainder: u32,
 }
 
 impl Ramsey {
@@ -135,17 +151,76 @@ impl Ramsey {
         if revision == RamseyRevision::Rev4 {
             control |= CONTROL_RAMWIDTH;
         }
-        Self { revision, control }
+        Self {
+            revision,
+            control,
+            pending: None,
+            next_refresh: first_refresh(),
+            open_row: None,
+            clock_remainder: 0,
+        }
     }
 
     pub fn reset(&mut self) {
         *self = Self::new(self.revision, self.bank_bytes());
     }
 
+    fn refresh_period(control: u8) -> Option<u64> {
+        [Some(154), Some(238), Some(380), None][usize::from((control >> 5) & 3)]
+    }
+
+    /// Catch up at the next externally visible operation. Skipping a frame
+    /// or restoring a machine between a write and a refresh preserves phase.
+    pub(crate) fn advance_to(&mut self, now: u64) {
+        if now < self.next_refresh || self.next_refresh == u64::MAX {
+            return;
+        }
+        self.open_row = None;
+        if let Some(value) = self.pending.take() {
+            self.control = value;
+        }
+        self.next_refresh = match Self::refresh_period(self.control) {
+            Some(period) => now.saturating_add(period - (now - self.next_refresh) % period),
+            None => u64::MAX,
+        };
+    }
+
+    pub(crate) fn access_clocks(&mut self, addr: u32) -> u32 {
+        let normal = if self.revision == RamseyRevision::Rev7 && self.control & CONTROL_SKIP != 0 {
+            4
+        } else {
+            5
+        };
+        if self.control & CONTROL_PAGE == 0 {
+            return normal;
+        }
+        // 256K x 4 parts use nine column bits, 1M-deep parts ten.
+        let large = self.control & CONTROL_RAMSIZE != 0
+            || (self.revision == RamseyRevision::Rev4 && self.control & CONTROL_RAMWIDTH == 0);
+        let row = addr >> if large { 12 } else { 11 };
+        match self.open_row.replace(row) {
+            Some(last) if last == row => 3,
+            Some(_) => 7,
+            None => normal,
+        }
+    }
+
+    pub(crate) fn burst_followups(&self, addr: u32) -> u32 {
+        if self.control & CONTROL_BURST == 0 {
+            0
+        } else if self.control & CONTROL_WRAP != 0 {
+            3
+        } else {
+            3 - ((addr >> 2) & 3)
+        }
+    }
+
     pub fn revision(&self) -> RamseyRevision {
         self.revision
     }
 
+    /// The mode Ramsey is running. It changes only on a refresh edge, while
+    /// [`Self::read_byte`] returns the most recent write at once.
     pub fn control(&self) -> u8 {
         self.control
     }
@@ -167,9 +242,17 @@ impl Ramsey {
     }
 
     /// Read one of the two registers. Callers must have checked `decodes`.
+    ///
+    /// The control register returns the last byte written, even before the
+    /// refresh that applies it to the DRAM timing. Commodore's specification
+    /// says the value cannot be read back before that refresh. Detection
+    /// code that reads the register on the very next instruction, with no
+    /// retry, recognises Ramsey only if the register answers at once.
+    /// TODO: measure the read-back delay on an A3000/A4000 board. If it is
+    /// real, return `self.control` here and keep the pending word internal.
     pub fn read_byte(&self, addr: u32) -> u8 {
         match block(addr) {
-            0 => self.control,
+            0 => self.pending.unwrap_or(self.control),
             1 => self.revision.version_id(),
             // Ramsey answers on the lane but drives nothing in these blocks.
             _ => 0xFF,
@@ -179,7 +262,19 @@ impl Ramsey {
     pub fn write_byte(&mut self, addr: u32, value: u8) {
         // The version register is read-only, and so are the unused blocks.
         if block(addr) == 0 {
-            self.control = value;
+            self.pending = Some(value);
+        }
+    }
+
+    pub(crate) fn write_at(&mut self, addr: u32, value: u8, now: u64) {
+        self.advance_to(now);
+        self.write_byte(addr, value);
+        // With refresh stopped, a new rate restarts the counter. The old
+        // mode stays in force until the first edge at the requested rate.
+        if self.next_refresh == u64::MAX && block(addr) == 0 {
+            if let Some(period) = Self::refresh_period(value) {
+                self.next_refresh = now.saturating_add(period);
+            }
         }
     }
 }
@@ -187,6 +282,28 @@ impl Ramsey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refresh_phase_and_open_page_survive_a_save_and_restore() {
+        let mut r = Ramsey::new(RamseyRevision::Rev4, 1 << 20);
+        r.write_at(RAMSEY_CONTROL, CONTROL_PAGE | CONTROL_RAMWIDTH, 12);
+        r.advance_to(154);
+        assert_eq!(r.access_clocks(0x07c0_0000), 5);
+        r.write_at(RAMSEY_CONTROL, CONTROL_RAMWIDTH, 200);
+        let bytes = rmp_serde::to_vec_named(&r).unwrap();
+        let mut restored: Ramsey = rmp_serde::from_slice(&bytes).unwrap();
+        for ramsey in [&mut r, &mut restored] {
+            assert_eq!(ramsey.read_byte(RAMSEY_CONTROL), CONTROL_RAMWIDTH);
+            ramsey.advance_to(307);
+            assert_eq!(ramsey.access_clocks(0x07c0_0120), 3);
+            ramsey.advance_to(308);
+            assert_eq!(ramsey.control(), CONTROL_RAMWIDTH);
+            assert_eq!(ramsey.access_clocks(0x07c0_0120), 5);
+        }
+        let old: Ramsey = serde_json::from_str(r#"{"revision":"Rev4","control":16}"#).unwrap();
+        assert_eq!(old.next_refresh, 154);
+        assert_eq!(old.pending, None);
+    }
 
     #[test]
     fn the_version_register_identifies_the_part() {
@@ -205,12 +322,24 @@ mod tests {
 
     /// ziptest and Kickstart both write a mode to the control register and
     /// then spin until they read it back. A write that does not stick hangs
-    /// the guest with interrupts disabled.
+    /// the guest with interrupts disabled. SysInfo writes a mode and reads it
+    /// back on the next instruction, and reports no Ramsey (and skips the
+    /// Gary ID probe) if the old word answers. The DRAM timing still changes
+    /// only at the refresh edge.
     #[test]
-    fn the_control_register_reads_back_what_was_written() {
+    fn a_control_write_reads_back_at_once_and_takes_effect_at_refresh() {
         let mut r = Ramsey::new(RamseyRevision::Rev7, 4 * 1024 * 1024);
+        let mut now = 0;
         for value in [0x00, 0xFF, CONTROL_BURST, CONTROL_PAGE | CONTROL_WRAP] {
-            r.write_byte(RAMSEY_CONTROL, value);
+            let old = r.control();
+            r.write_at(RAMSEY_CONTROL, value, now);
+            assert_eq!(r.read_byte(RAMSEY_CONTROL), value);
+            now = r.next_refresh;
+            r.advance_to(now - 1);
+            assert_eq!(r.control(), old);
+            assert_eq!(r.read_byte(RAMSEY_CONTROL), value);
+            r.advance_to(now);
+            assert_eq!(r.control(), value);
             assert_eq!(r.read_byte(RAMSEY_CONTROL), value);
         }
     }

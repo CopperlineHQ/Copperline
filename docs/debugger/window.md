@@ -394,7 +394,13 @@ or idle). Outlines mark the captured display (white) and the display window
 Click or drag in the raster or the scanline strip below it to select a colour
 clock, or move the selection with the arrow keys; the selected slot's full record
 appears below. It includes the custom register, address, transfer data and width,
-owner subtype, CPU-visible IPL, and decoded hardware events. An interlaced
+owner subtype, CPU-visible IPL, and decoded hardware events. The first refresh
+slot of a scanline shows the RGA strobe for equalization (STREQU), vertical
+blank (STRVBL) or normal horizontal timing (STRHOR). A long NTSC line also
+carries STRLONG in its second refresh slot. Other refresh slots show NULL.
+[PAL and NTSC reference counts](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/denise/refs/timing.md)
+
+An interlaced
 display alternates a long field and a short field one line shorter, so the raster
 is laid out against the long field: the diagram keeps its size and the cell under
 the pointer stays put as the fields alternate. A short field has no last line,

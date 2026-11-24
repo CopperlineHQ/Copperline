@@ -1123,6 +1123,8 @@ impl Cia {
             let now_no_overlay = self.cia_a_no_overlay_line();
             if !prev_no_overlay && now_no_overlay {
                 effect.disable_overlay = true;
+            } else if prev_no_overlay && !now_no_overlay {
+                effect.enable_overlay = true;
             }
         }
         effect.timer_started = started_timer;
@@ -1731,6 +1733,8 @@ pub struct CiaSideEffect {
     /// CIA-A /OVL was driven low: stop overlaying the ROM at $0 and
     /// switch to chip RAM there.
     pub disable_overlay: bool,
+    /// CIA-A PA0 rose, selecting ROM on boards wired to Gary's OVL pin.
+    pub enable_overlay: bool,
     /// CRA/CRB bit 0 transitioned 0 -> 1: a timer just started. The
     /// emulator preempts the current instruction slice so the next
     /// slice's dynamic cap (computed from `next_underflow_ticks`)

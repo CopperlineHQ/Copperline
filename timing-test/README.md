@@ -1015,3 +1015,24 @@ The card then repeats the transfer while the CPU spins. The
 `a4000_replays_ongoing_z3_dma` regression saves this workload at seven
 emulated seconds and compares the full machine and display one second
 later after restoring the save. The run uses the bundled AROS ROM and an empty SCSI bus.
+
+
+## Gary, Ramsey and Lisa board probes
+
+From this directory run `./build.sh gary-overlay`, `./build.sh fatgary-ramsey`
+or `./build.sh lisa-scanblank` to produce a bootable ADF. Cold boot the
+matching machine from the disk. Each probe takes over and stays on its
+result until reset.
+
+| Probe | Board | Expected observation |
+|---|---|---|
+| `gary-overlay` | A500 with at least 128 KiB of RAM at `$C00000` | Green if all four ROM aliases compare equal and a write during OVL preserves underlying RAM. The test runs from trapdoor RAM. |
+| `fatgary-ramsey` | A3000 or A4000 | Green after checking custom mirrors, blocking then delivering a pending level-one interrupt through Fat Gary, and changing then restoring Ramsey's refresh rate. Red indicates an incomplete or failed check. |
+| `lisa-scanblank` | A1200 or A4000 with Lisa and Alice | Blue field with a two-sample black slit at colour clock `$60`. Red sprite stripes are two beam lines tall, green stripes one. Both start on an odd line. |
+
+The register timing tests in `src/ramsey.rs` and `src/cpu.rs` count
+individual motherboard clocks. The boot disk checks guest-visible
+readback and interrupt delivery. The reference PNGs are Copperline captures. The A500 overlay probe is red
+on vAmiga 5 with Kickstart 1.3. Its `Memory::updateCpuMemSrcTable` overlays
+eight 64 KiB banks. Copperline follows the 2 MiB select decoded by the
+[Gary replacement](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/gary/Gary.v#L98-L105).

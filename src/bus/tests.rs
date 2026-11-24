@@ -261,6 +261,71 @@ fn cia_vpa_transfer_feeds_start_pipeline_on_the_transfer_edge() {
 }
 
 #[test]
+fn lisa_blank_requires_both_enables_and_decodes_each_fine_bit() {
+    let mut b = empty_bus();
+    b.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    for fine in 0..8 {
+        b.custom_write(0x1c4, 2, 0x40 | (fine << 8));
+        b.custom_write(0x1c6, 2, 0x41);
+        for (bplcon0, bplcon3) in [(0, 1), (1, 0), (1, 1)] {
+            b.custom_write(0x100, 2, bplcon0);
+            b.custom_write(0x106, 2, bplcon3);
+            let window = if bplcon0 & bplcon3 != 0 {
+                Some((0x200 + fine as u32, 0x208))
+            } else {
+                None
+            };
+            assert_eq!(b.display_horizontal_blank(), window);
+        }
+    }
+}
+
+#[test]
+fn full_bus_record_reports_refresh_strobes_in_both_field_phases() {
+    for (standard, long, expected) in [
+        (VideoStandard::Pal, false, [8, 18, 286]),
+        (VideoStandard::Pal, true, [9, 17, 287]),
+        (VideoStandard::Ntsc, false, [10, 11, 241]),
+        (VideoStandard::Ntsc, true, [10, 11, 242]),
+    ] {
+        let mut b = empty_bus();
+        b.agnus = crate::chipset::agnus::Agnus::with_video_standard_and_revision(
+            standard,
+            AgnusRevision::Ecs8375,
+        );
+        b.agnus.set_lace(true);
+        b.agnus.lof = long;
+        b.set_frame_analyzer_full(true);
+        let lines = b.agnus.current_frame_lines();
+        for _ in 0..lines - 1 {
+            b.advance_chipset(b.agnus.current_line_cck());
+        }
+        b.advance_chipset(7);
+        let mut counts = [0; 3];
+        let mut long_strobes = 0;
+        for y in 0..lines as usize {
+            let trace = &b.current_frame_bus_trace;
+            let reg = trace.record_at(y, 1).unwrap().reg;
+            counts[usize::from((reg - 0x38) / 2)] += 1;
+            let second = trace.record_at(y, 3).unwrap().reg;
+            if second == 0x3e {
+                long_strobes += 1;
+            } else {
+                assert_eq!(second, 0x1fe);
+            }
+            assert_eq!(trace.record_at(y, 5).unwrap().reg, 0x1fe);
+        }
+        assert_eq!(counts, expected);
+        let expected_long = if standard == VideoStandard::Ntsc {
+            lines / 2
+        } else {
+            0
+        };
+        assert_eq!(long_strobes, expected_long);
+    }
+}
+
+#[test]
 fn full_bus_record_carries_cia_register_and_e_clock_phase() {
     let mut bus = empty_bus();
     bus.set_frame_analyzer_full(true);
@@ -8728,8 +8793,8 @@ fn fmode_sscan2_sprite_dma_doubles_each_data_line() {
     bus.agnus.write_fmode(0x8000); // SSCAN2
 
     let sprite_ptr = 0x0100usize;
-    // First descriptor: 4 display lines backed by 2 data lines.
-    let (pos, ctl) = sprite_control_words(0x2C, 0x30, 0x0083);
+    // POS.SH10 opts this channel into doubling (four lines from two rows).
+    let (pos, ctl) = sprite_control_words(0x2C, 0x30, 0x0183);
     write_chip_word(&mut bus, sprite_ptr, pos);
     write_chip_word(&mut bus, sprite_ptr + 2, ctl);
     write_chip_word(&mut bus, sprite_ptr + 4, 0x1111);
@@ -8737,13 +8802,13 @@ fn fmode_sscan2_sprite_dma_doubles_each_data_line() {
     write_chip_word(&mut bus, sprite_ptr + 8, 0x3333);
     write_chip_word(&mut bus, sprite_ptr + 10, 0x4444);
     // Chained descriptor immediately after the two data lines.
-    let (pos2, ctl2) = sprite_control_words(0x32, 0x34, 0x0091);
+    let (pos2, ctl2) = sprite_control_words(0x33, 0x35, 0x0091);
     write_chip_word(&mut bus, sprite_ptr + 12, pos2);
     write_chip_word(&mut bus, sprite_ptr + 14, ctl2);
     write_chip_word(&mut bus, sprite_ptr + 16, 0x5555);
     write_chip_word(&mut bus, sprite_ptr + 18, 0x6666);
-    write_chip_word(&mut bus, sprite_ptr + 20, 0);
-    write_chip_word(&mut bus, sprite_ptr + 22, 0);
+    write_chip_word(&mut bus, sprite_ptr + 20, 0x7777);
+    write_chip_word(&mut bus, sprite_ptr + 22, 0x8888);
 
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
     bus.denise.sprpt[0] = sprite_ptr as u32;
@@ -8751,10 +8816,16 @@ fn fmode_sscan2_sprite_dma_doubles_each_data_line() {
 
     // Control words load at the vertical-blank reset line.
     sprite_fetch_control_words_at_reset_line(&mut bus);
-    for vpos in 0x2C..=0x32u32 {
+    for vpos in 0x2C..=0x34u32 {
         bus.agnus.vpos = vpos;
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
         bus.advance_chipset(4);
+        if [0x2d, 0x2f, 0x34].contains(&vpos) {
+            assert_eq!(
+                bus.sprite_slot_active_at(SPRITE_DMA_SLOT1_HPOS[0]),
+                vpos == 0x34
+            );
+        }
     }
 
     let lines = bus.frame_captured_sprite_lines();
@@ -8769,7 +8840,8 @@ fn fmode_sscan2_sprite_dma_doubles_each_data_line() {
             (0x2D, 0x1111, 0x2222),
             (0x2E, 0x3333, 0x4444),
             (0x2F, 0x3333, 0x4444),
-            (0x32, 0x5555, 0x6666),
+            (0x33, 0x5555, 0x6666),
+            (0x34, 0x7777, 0x8888),
         ]
     );
 }

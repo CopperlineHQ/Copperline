@@ -4252,7 +4252,7 @@ impl RenderInput {
             sprite_dma_observed: bus.frame_sprite_dma_observed(),
             frame_lines: bus.frame_lines(),
             programmable_vertical_blank: bus.agnus.programmable_vertical_blank(),
-            programmable_horizontal_blank: bus.agnus.programmable_horizontal_blank(),
+            programmable_horizontal_blank: bus.display_horizontal_blank(),
             emulated_seconds: bus.emulated_seconds(),
             emulated_frames: bus.emulated_frames(),
             debug_plane_mask: bus.ui_layer_masks().planes,
@@ -4332,7 +4332,7 @@ impl RenderInput {
             sprite_dma_observed: parts.sprite_dma_observed,
             frame_lines: parts.frame_lines,
             programmable_vertical_blank: bus.agnus.programmable_vertical_blank(),
-            programmable_horizontal_blank: bus.agnus.programmable_horizontal_blank(),
+            programmable_horizontal_blank: bus.display_horizontal_blank(),
             emulated_seconds: bus.emulated_seconds(),
             emulated_frames: bus.emulated_frames(),
             // A peripheral sees the real picture, never debugger masking.
@@ -4398,7 +4398,7 @@ impl RenderInput {
         self.sprite_dma_observed = bus.frame_sprite_dma_observed();
         self.frame_lines = bus.frame_lines();
         self.programmable_vertical_blank = bus.agnus.programmable_vertical_blank();
-        self.programmable_horizontal_blank = bus.agnus.programmable_horizontal_blank();
+        self.programmable_horizontal_blank = bus.display_horizontal_blank();
         self.emulated_seconds = bus.emulated_seconds();
         self.emulated_frames = bus.emulated_frames();
         self.debug_plane_mask = bus.ui_layer_masks().planes;
@@ -6255,13 +6255,9 @@ fn blank_window_contains(pos: u32, strt: u32, stop: u32) -> bool {
     }
 }
 
-/// The colour clock a framebuffer column sits in, as
-/// [`apply_programmable_blanking`] tests it against HBSTRT/HBSTOP: one
-/// colour clock spans two lo-res DIW positions, i.e. four hi-res
-/// framebuffer pixels.
-fn framebuffer_column_cck(x: usize) -> u32 {
-    let diw_pos = diw_hstart_fb0() + (x as i32) / 2;
-    (diw_pos / 2).max(0) as u32
+/// Beam position of a physical output sample in 35 ns (super-hires) ticks.
+fn blank_sample_position(x: usize, scale: usize) -> u32 {
+    (diw_hstart_fb0() * 4 + (x * (2 / scale)) as i32).max(0) as u32
 }
 
 /// Trim the content envelope to what the blanking left showing: rows the
@@ -6286,7 +6282,10 @@ fn trim_content_rect_to_blanking(
     };
     let column_blanked = |x: usize| {
         programmable_horizontal_blank.is_some_and(|(strt, stop)| {
-            blank_window_contains(framebuffer_column_cck(x), strt, stop)
+            let scale = active_canvas_scale();
+            (x * scale..(x + 1) * scale).all(|sample| {
+                blank_window_contains(blank_sample_position(sample, scale), strt, stop)
+            })
         })
     };
     let ContentRect {
@@ -6313,7 +6312,8 @@ fn trim_content_rect_to_blanking(
 /// ECS programmable blanking (plan 1.2): force the composite blank windows
 /// to black on the finished frame. Vertical blanking follows VBSTRT/VBSTOP
 /// under BEAMCON0.VARVBEN; horizontal blanking follows HBSTRT/HBSTOP under
-/// BEAMCON0.BLANKEN. The windows are read from the live Agnus latches rather
+/// BEAMCON0.BLANKEN on ECS and the Lisa fine comparators on AGA.
+/// The windows are read from the chipset latches rather
 /// than the beam-ordered replay log: software that runs a programmable scan
 /// sets them once at mode switch, so per-frame sampling is sufficient.
 ///
@@ -6343,23 +6343,20 @@ fn apply_programmable_blanking(
     }
 
     if let Some((strt, stop)) = programmable_horizontal_blank {
-        // HBSTRT/HBSTOP are in colour clocks; one colour clock spans two
-        // lo-res DIW positions, i.e. four hi-res framebuffer pixels.
-        let mut blank_cols = [false; FB_WIDTH];
-        let mut any = false;
-        for (x, blank) in blank_cols.iter_mut().enumerate() {
-            if in_window(framebuffer_column_cck(x), strt, stop) {
-                *blank = true;
-                any = true;
+        // A wrapping interval can cut both ends of a row. Find each span
+        // once, then paint it on all rows at the actual output pitch.
+        let mut x = 0;
+        while x < out_w {
+            let start = x;
+            while x < out_w && in_window(blank_sample_position(x, canvas_scale), strt, stop) {
+                x += 1;
             }
-        }
-        if any {
-            for row in fb.chunks_exact_mut(out_w) {
-                for (x, blank) in blank_cols.iter().enumerate() {
-                    if *blank {
-                        row[x * canvas_scale..(x + 1) * canvas_scale].fill(BLANK_RGBA);
-                    }
+            if x > start {
+                for row in fb.chunks_exact_mut(out_w) {
+                    row[start..x].fill(BLANK_RGBA);
                 }
+            } else {
+                x += 1;
             }
         }
     }

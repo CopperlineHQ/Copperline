@@ -25,6 +25,7 @@ pub const DMACON_DMAEN: u16 = 1 << 9;
 // pin polarities are latched without physical host output.
 #[allow(dead_code)]
 pub const BEAMCON0_BLANKEN: u16 = 1 << 3;
+pub const BEAMCON0_VARCSYEN: u16 = 1 << 4;
 pub const BEAMCON0_PAL: u16 = 1 << 5;
 pub const BEAMCON0_DUAL: u16 = 1 << 6;
 pub const BEAMCON0_VARBEAMEN: u16 = 1 << 7;

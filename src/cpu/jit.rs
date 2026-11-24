@@ -60,11 +60,7 @@ pub(super) enum JitAccess {
 
 /// The pending interrupt level and host stop condition for a batch boundary.
 fn jit_stop_state(bus: &Bus, deadline: u64) -> (u8, bool) {
-    let irq_level = if bus.paula.intena & INT_MASTER != 0 {
-        pending_ipl(bus.paula.intena & bus.cpu_visible_intreq())
-    } else {
-        0
-    };
+    let irq_level = bus.chipset_ipl();
     let host_stop =
         bus.cartridge_nmi_pending() || bus.slice_preempted || bus.emulated_cck() >= deadline;
     (irq_level, host_stop)

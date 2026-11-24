@@ -505,7 +505,10 @@ turns the driver back on automatically (it is the boot path for those
 drives), and setting the flag explicitly wins in either direction. The ROM
 file itself is never modified.
 
-Both profiles fit their stock 4M of Ramsey-controlled motherboard fast RAM;
+Both profiles fit their stock 4M of Ramsey-controlled motherboard fast RAM.
+In precise mode, guest changes to Ramsey page and burst mode affect the speed
+of accesses to this memory. For the register details see [Fat Gary and Ramsey](../internals/peripherals.md).
+
 `[memory] motherboard` resizes it up to 16M, and on the A4000 up to 64M
 via the motherboard RAM expansion space (see the `[memory]` section).
 `[memory] accelerator` adds CPU-slot RAM at `$08000000` on any 32-bit

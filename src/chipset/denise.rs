@@ -287,6 +287,10 @@ pub struct Denise {
     /// beam-timed live); a zero CLXCON2 leaves the classic six-plane
     /// behaviour untouched.
     pub clxcon2: u16,
+    /// Lisa has its own blank comparators, programmable in 35 ns ticks.
+    /// None restores older states from the shared whole-clock latches.
+    #[serde(default)]
+    pub horizontal_blank: [Option<u16>; 2],
     pub clxcon: u16,
     pub clxdat: u16,
     pub bplpt: [u32; 8],
@@ -404,6 +408,7 @@ impl Denise {
             bplcon3: BPLCON3_PF2OF_DEFAULT,
             bplcon4: 0x0011,
             clxcon2: 0,
+            horizontal_blank: [None; 2],
             clxcon: CLXCON_RESET,
             clxdat: 0,
             bplpt: [0; 8],
