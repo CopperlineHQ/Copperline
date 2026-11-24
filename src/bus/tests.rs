@@ -297,22 +297,30 @@ fn full_bus_record_reports_refresh_strobes_in_both_field_phases() {
         b.agnus.lof = long;
         b.set_frame_analyzer_full(true);
         let lines = b.agnus.current_frame_lines();
-        for _ in 0..lines - 1 {
-            b.advance_chipset(b.agnus.current_line_cck());
+        // Lines alternate long and short from line 0 of an NTSC frame.
+        let mut line_end_slots = Vec::new();
+        for _ in 0..lines {
+            let line_cck = b.agnus.current_line_cck();
+            line_end_slots.push(line_cck as usize - 1);
+            b.advance_chipset(line_cck);
         }
-        b.advance_chipset(7);
+        let trace = b.frame_bus_trace().unwrap();
         let mut counts = [0; 3];
         let mut long_strobes = 0;
         for y in 0..lines as usize {
-            let trace = &b.current_frame_bus_trace;
-            let reg = trace.record_at(y, 1).unwrap().reg;
+            // The line-end refresh cycle is the first of Agnus's four and
+            // carries the strobe for the line it leads into.
+            let reg = trace.record_at(y, line_end_slots[y]).unwrap().reg;
             counts[usize::from((reg - 0x38) / 2)] += 1;
-            let second = trace.record_at(y, 3).unwrap().reg;
+            // STRLONG rides the second cycle, the first slot of a long line.
+            let second = trace.record_at(y, 1).unwrap().reg;
             if second == 0x3e {
+                assert_eq!(line_end_slots[y], 0xe3);
                 long_strobes += 1;
             } else {
                 assert_eq!(second, 0x1fe);
             }
+            assert_eq!(trace.record_at(y, 3).unwrap().reg, 0x1fe);
             assert_eq!(trace.record_at(y, 5).unwrap().reg, 0x1fe);
         }
         assert_eq!(counts, expected);

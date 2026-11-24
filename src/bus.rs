@@ -11014,12 +11014,21 @@ impl Bus {
                 .cloned()
         });
         let registers = self.frame_register_snapshot();
+        // Lines alternate 227/228 colour clocks on NTSC: size the trace for
+        // the long one, or the line-end slot of every long line (E3, the
+        // first refresh cycle with its RGA strobe) falls outside a frame
+        // that happens to start on a short line.
+        let line_cck = if self.agnus.long_line_toggles() {
+            self.agnus.line_cck_for(true)
+        } else {
+            self.agnus.current_line_cck()
+        };
         self.current_frame_bus_trace.reset_for_frame_with_level(
             self.emulated_frames,
             self.emulated_seconds(),
             self.agnus.current_frame_lines(),
             self.agnus.nominal_frame_lines(),
-            self.agnus.current_line_cck(),
+            line_cck,
             self.current_frame_visible_start_vpos,
             self.current_frame_geometry.visible_lines,
             partial,
