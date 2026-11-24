@@ -630,6 +630,14 @@ pub(crate) fn load_with_migrations<R: Read>(
         log::warn!("save state: ignoring unreadable META chunk: {e:#}");
     }
     machine.apply_chunks(ZlibDecoder::new(body), migrations)?;
+    // A state from before Agnus recorded its board strap restores without
+    // one. The descriptor carries the standard the machine was configured
+    // with, which is the strap: a reset after the load must come back to
+    // it, not to whatever the guest had last selected through BEAMCON0.
+    machine
+        .bus_mut()
+        .agnus
+        .seed_board_standard(descriptor.video_standard);
     Ok(descriptor)
 }
 

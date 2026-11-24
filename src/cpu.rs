@@ -11916,6 +11916,38 @@ mod tests {
     }
 
     #[test]
+    fn a_state_without_the_agnus_board_strap_takes_it_from_the_descriptor() -> Result<()> {
+        use crate::chipset::agnus::{AgnusRevision, VideoStandard, BEAMCON0_PAL};
+        use crate::chipset::denise::DeniseRevision;
+
+        // An NTSC board whose guest has selected PAL through BEAMCON0,
+        // saved by a build that did not record the strap.
+        let mut machine = machine_with_program(0x1000, &[0x4E71, 0x4E71])?;
+        let bus = machine.bus_mut();
+        bus.set_chipset_revisions(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ecs8373);
+        bus.agnus.set_video_standard(VideoStandard::Ntsc);
+        bus.agnus.write_beamcon0(BEAMCON0_PAL);
+        assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+        bus.agnus.forget_board_standard();
+        let descriptor = crate::config::MachineDescriptor {
+            video_standard: VideoStandard::Ntsc,
+            ..Default::default()
+        };
+        let mut blob = Vec::new();
+        crate::savestate::save_to_writer(&machine, &descriptor, None, &mut blob)?;
+
+        let mut other = machine_with_program(0x1000, &[0x4E71, 0x4E71])?;
+        crate::savestate::load_from_reader(&mut other, blob.as_slice())?;
+        // The beam carries on as saved; the next reset returns to NTSC.
+        assert_eq!(other.bus().agnus.video_standard(), VideoStandard::Pal);
+        assert_eq!(
+            other.bus().agnus.board_video_standard(),
+            VideoStandard::Ntsc
+        );
+        Ok(())
+    }
+
+    #[test]
     fn machine_runtime_state_without_window_bank_reads_none() -> Result<()> {
         #[derive(serde::Serialize)]
         struct OlderMachineRuntimeState {

@@ -891,6 +891,19 @@ impl Agnus {
         self.board_standard.unwrap_or(self.video_standard)
     }
 
+    /// Give a state saved before the strap was recorded the standard of the
+    /// machine it describes. The beam keeps the standard it was saved
+    /// running; only the next reset consults the strap.
+    pub fn seed_board_standard(&mut self, standard: VideoStandard) {
+        self.board_standard.get_or_insert(standard);
+    }
+
+    /// Leave the strap unrecorded, as a state from before the field reads.
+    #[cfg(test)]
+    pub(crate) fn forget_board_standard(&mut self) {
+        self.board_standard = None;
+    }
+
     pub fn revision(&self) -> AgnusRevision {
         self.revision
     }
