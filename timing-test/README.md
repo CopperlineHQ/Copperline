@@ -1040,3 +1040,39 @@ readback and interrupt delivery. The reference PNGs are Copperline captures. The
 on vAmiga 5 with Kickstart 1.3. Its `Memory::updateCpuMemSrcTable` overlays
 eight 64 KiB banks. Copperline follows the 2 MiB select decoded by the
 [Gary replacement](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/gary/Gary.v#L98-L105).
+
+## Denise and Lisa register probes
+
+`./build.sh ecsblank-pin`, `ehbprobe-kill`, `diwhigh-fine` and
+`hamprobe-shres6` build four display probes for behaviour that differs by
+Denise generation. All four are golden renders in `tests/probe_golden.rs`;
+the first two boot twice, on two Denise revisions beside the same Agnus.
+
+| Probe | Machine | Expected observation |
+|---|---|---|
+| `ecsblank-pin` | ECS Agnus with an ECS Denise (A500+, A600, A3000) | Yellow ruler on dark blue with a black slit 16 lo-res pixels wide at colour clocks `$60`-`$67`, through the borders too. BPLCON3.EXTBLKEN is written before BPLCON0.ECSENA is set and must still take effect. |
+| `ecsblank-pin` | ECS Agnus with an OCS Denise (late A500, A2000) | The same ruler with no slit: BEAMCON0.BLANKEN alone does not reach the picture. |
+| `ehbprobe-kill` | Any OCS Denise | Grey and orange bars, the right half of the line at half intensity: the 8362 has no KILLEHB and stays extra-half-brite. |
+| `ehbprobe-kill` | ECS Agnus with an ECS Denise | Both halves alike: KILLEHB turns extra-half-brite off, without ECSENA. |
+| `diwhigh-fine` | A1200 or A4000 | Yellow field on dark blue in twelve 16-line bands from line `$40`. In the first four the left edge steps right one 35 ns column per band, in the next four the right edge does, in the last four both do. The harness checks every step. |
+| `hamprobe-shres6` | A1200 or A4000 | Four 64-line bands: red, green and blue ramps in twenty steps (0 to 15, then 0 to 3), and a band where the three components change in turn and hold between changes. A black picture means HAM was left off in super-hires. |
+
+The expected results come from the Commodore 8373 Denise and 391227 Lisa
+specifications in the
+[Amiga Replacement Project](https://github.com/nonarkitten/amiga_replacement_project/tree/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f)
+and from WinUAE's Denise model (`check_vidsyncs`, `setbplmode`,
+`calchdiw`). The reference PNGs are Copperline captures, compared with
+vAmiga where it models the behaviour (`tools/vamiga-ref.sh`,
+`tools/vamiga-aga-compare.py`):
+
+| golden | vAmiga |
+|---|---|
+| `hamprobe-shres6` | exact against 5.0b1 `A1200_2MB` (0 / 202628) |
+| `ehbprobe-kill` | exact against 4.4 `A500_OCS_1MB` |
+| `ecsblank-pin-ocs-denise` | exact against 4.4 `A500_ECS_1MB` |
+| `ehbprobe-kill-ecs-denise` | not a reference: 4.4 keeps extra-half-brite on `A500_PLUS_1MB`, it has no KILLEHB |
+| `ecsblank-pin` | not a reference: 4.4 draws no slit on `A500_PLUS_1MB`, it has no EXTBLKEN |
+| `diwhigh-fine` | not comparable: vAmiga has no native 35 ns AGA frame |
+
+`diwhigh-fine` uses programmable PAL totals, as `lisa-scanblank` does, so
+the frame keeps its 35 ns columns.

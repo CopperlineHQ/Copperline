@@ -70,7 +70,11 @@ enum Machine {
     /// Fixed-clock JIT accelerator with local fast RAM.
     Jit,
     Ocs,
+    /// ECS Agnus (8372A) beside an OCS Denise, the late-A500 pairing.
     Ecs,
+    /// ECS Agnus beside an ECS Denise (8373), for probes of the Denise
+    /// side of ECS: BPLCON3, KILLEHB, programmable blanking.
+    EcsDenise,
     /// A1200 shape (68EC020, AGA, 2M chip) for probes of AGA-only
     /// behaviour (FMODE wide fetches, extended BPLCON1 scroll).
     Aga,
@@ -170,6 +174,7 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         Machine::Jit => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
+        Machine::EcsDenise => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"ECS\"\n",
         Machine::Aga
         | Machine::AgaNtsc
         | Machine::A1200
@@ -179,7 +184,9 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
     let (cpu, memory) = match machine {
         Machine::A4000 | Machine::A4000Buster => ("68040", "chip = \"2M\"\n"),
         Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
-        Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
+        Machine::Ocs | Machine::Ecs | Machine::EcsDenise => {
+            ("68000", "chip = \"512K\"\nslow = \"512K\"\n")
+        }
         Machine::Aga | Machine::AgaNtsc | Machine::A1200 => ("68EC020", "chip = \"2M\"\n"),
     };
     let acceleration = if matches!(machine, Machine::Jit) {
@@ -388,6 +395,27 @@ fn run_probe(p: &Probe) {
                     [0, 0, 255]
                 }
             );
+        }
+    }
+    if name == "diwhigh-fine" {
+        assert_eq!((actual.width, actual.height), (1432, 313));
+        // First and last yellow column of a row, at the native 35 ns pitch.
+        let edges = |y: usize| {
+            let row = &actual.data[y * 1432 * 4..(y + 1) * 1432 * 4];
+            let lit = |x: usize| row[x * 4..x * 4 + 3] == [255, 255, 0];
+            let left = (0..1432).find(|&x| lit(x)).expect("window opens");
+            let right = (0..1432).rfind(|&x| lit(x)).expect("window closes");
+            (left, right)
+        };
+        // Row of beam line $40 + 16 * band + 8; the frame starts at line 0.
+        let band = |index: usize| edges(0x48 + 16 * index);
+        let (left, right) = band(0);
+        for fine in 0..4 {
+            // Start bits move the left edge only, stop bits the right
+            // edge only, one 35 ns column per count.
+            assert_eq!(band(fine), (left + fine, right), "start fine {fine}");
+            assert_eq!(band(4 + fine), (left, right + fine), "stop fine {fine}");
+            assert_eq!(band(8 + fine), (left + fine, right + fine), "both {fine}");
         }
     }
     if matches!(p.machine, Machine::AgaNtsc) {
@@ -656,6 +684,22 @@ probe_tests! {
     // port: a long register access takes two cycles, a long RAM access one.
     golden_busprobe_reglong => probe_aga("busprobe-reglong", "busprobe-reglong.bin", 16.0);
     golden_lisa_scanblank => probe_aga("lisa-scanblank", "lisa-scanblank.bin", 16.0);
+    // Lisa's fine DIWHIGH bits move a window edge in 70 ns (H1) and 35 ns
+    // (H0) steps without moving the picture; run_probe checks each step.
+    golden_diwhigh_fine => probe_aga("diwhigh-fine", "diwhigh-fine.bin", 16.0);
+    // Lisa decodes six-plane hold-and-modify in super-hires, where OCS and
+    // ECS Denise have only two planes to decode.
+    golden_hamprobe_shres6 => probe_aga("hamprobe-shres6", "hamprobe-shres6.bin", 16.0);
+    // ECS Denise blanks from Agnus's CSY* pin (HBSTRT..HBSTOP under
+    // BLANKEN) only with BPLCON3.EXTBLKEN and BPLCON0.ECSENA, and latches
+    // EXTBLKEN before ECSENA is set; an OCS Denise beside the same Agnus
+    // keeps its fixed blank.
+    golden_ecsblank_pin => Probe { name: "ecsblank-pin", program: "ecsblank-pin.bin", seconds: 16.0, machine: Machine::EcsDenise };
+    golden_ecsblank_pin_ocs_denise => probe_ecs("ecsblank-pin-ocs-denise", "ecsblank-pin.bin", 16.0);
+    // BPLCON2.KILLEHB is a bit of ECS Denise and Lisa: an OCS Denise
+    // ignores it and keeps six planes extra-half-brite.
+    golden_ehbprobe_kill => probe("ehbprobe-kill", "ehbprobe-kill.bin", 16.0);
+    golden_ehbprobe_kill_ecs_denise => Probe { name: "ehbprobe-kill-ecs-denise", program: "ehbprobe-kill.bin", seconds: 16.0, machine: Machine::EcsDenise };
     golden_dblpal_hires_lace => probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
     // Alice wide-fetch addressing: FMODE 10 duplicates the first word and
     // supplied low address bits alias phases inside 32-bit fetches.
