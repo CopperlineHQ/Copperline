@@ -451,10 +451,16 @@ Gary asserts /VPA for all of `$A00000`-`$BFFFFF` and takes the two CIA chip
 selects straight from address lines: CIA-A wherever A12 is low, CIA-B
 wherever A13 is low, both where both are, neither where both are high
 (A2000 PALEN equation `/VPA = /AS*A23*/A22*A21`). `$BFE001` and `$BFD000`
-are the addresses that select exactly one chip. A cycle that selects both
-writes each chip from its own data byte and reads each on its own byte.
-Gayle and Fat Gary decode the two 4 KiB pages `$BFE000` and `$BFD000` and
-nothing else.
+are the addresses that select exactly one chip. CIA-A is wired to D7-D0 and
+CIA-B to D15-D8, and on these boards every cycle in the range keeps those
+lanes: a word cycle reads CIA-B in its high byte and CIA-A in its low one
+and writes each chip from its own byte; a lane no selected chip drives
+floats, and a byte read of that lane reaches no chip, so it has none of a
+register read's side effects; a byte write is on both halves of the 68000
+data bus and reaches every selected chip. With neither chip selected the
+E-clock cycle still runs. A long access is two such word cycles. Gayle and
+Fat Gary decode the two 4 KiB pages `$BFE000` and `$BFD000` and nothing
+else; their cycles are not yet split by lane.
 
 While OVL is asserted, Gary and Gayle select ROM throughout the low 2 MiB
 (Gary specification 2.1.3, Gayle specification 2.0). The 512 KiB ROM

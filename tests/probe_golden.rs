@@ -688,6 +688,10 @@ probe_tests! {
     // The same program on the A1200 profile shows Gayle's decode.
     golden_gary_decode => probe("gary-decode", "gary-decode.bin", 16.0);
     golden_gayle_decode => Probe { name: "gayle-decode", program: "gary-decode.bin", seconds: 16.0, machine: Machine::A1200 };
+    // Gary's CIA cycles keep CIA-A on D7-D0 and CIA-B on D15-D8, run a
+    // long access as two word cycles, and run the E-clock cycle where
+    // neither chip is selected, as five green bands.
+    golden_gary_lanes => probe("gary-lanes", "gary-lanes.bin", 16.0);
     // Ramsey's DRAM cycle length in standard, page-hit, page-miss and skip
     // modes, as band heights.
     golden_ramsey_cycles => Probe { name: "ramsey-cycles", program: "ramsey-cycles.bin", seconds: 10.0, machine: Machine::A4000 };

@@ -121,8 +121,10 @@ for the earlier release notes.
     `$DFC000`-`$DFFFFF`.
   - On the A500, A1000, A2000 and CDTV the CIAs answer throughout
     `$A00000`-`$BFFFFF`: CIA-A wherever A12 is low, CIA-B wherever A13 is
-    low, both where both are. Gayle and Fat Gary keep the two standard
-    pages.
+    low, both where both are. CIA-A is on the low data byte and CIA-B on
+    the high one: the byte a selected chip does not drive floats, and
+    reading it does not read the chip. Gayle and Fat Gary keep the two
+    standard pages.
   - The Kickstart ROM is mirrored at `$E00000` on the A500, A2000, A600
     and A1200, and at `$A80000`-`$B7FFFF` on the A600 and A1200.
   - While OVL is asserted the ROM fills `$000000`-`$1FFFFF` on Gary and

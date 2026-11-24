@@ -1036,7 +1036,9 @@ provides a compatible ABI at `$F0FF60` (see
 The same `UaeLib` instance serves WinUAE's write-only printf ports at `$BFFF00`
 (arguments) and `$BFFF04` (format pointer), implemented in
 `uaelib/debug_port.rs`. The CPU bus decodes these writes after real RAM/ROM
-and before the CIA windows, preserving the ordinary unmapped-write timing.
+and before the CIA windows, and bills them as the hardware decode of those
+addresses would: an E-clock cycle with neither CIA selected on a Gary board,
+an unmapped write elsewhere.
 Reads and neighbouring addresses keep their normal hardware decode. Word
 transfers within one instruction are assembled in either order; a provisional
 high-word argument is replaced by the completed longword. The instruction-fetch

@@ -4840,6 +4840,45 @@ impl CpuBus {
             None => {}
         }
 
+        if let Some((cia_a, cia_b)) = self.gary_vpa_select(addr) {
+            if size == 4 {
+                // A long operand is two word cycles, each with its own
+                // decode, chip selects and byte lanes.
+                let hi = self.read_bus_cycle(addr, 2, kind);
+                let lo = self.read_bus_cycle(addr.wrapping_add(2), 2, kind);
+                return (hi << 16) | (lo & 0xffff);
+            }
+            // The E-clock cycle runs for the whole /VPA range, whether or
+            // not either chip select follows.
+            self.bus.cpu_cia_access(Self::access_words(size));
+            let off = u64::from(addr & 0xfff);
+            // CIA-B drives D15-D8 and CIA-A D7-D0. A lane no selected chip
+            // drives floats, and a chip whose lane the CPU is not reading
+            // is not read: its register side effects do not happen.
+            let floating = u32::from(self.bus.data_bus);
+            let upper = size == 2 || addr & 1 == 0;
+            let lower = size == 2 || addr & 1 != 0;
+            let mut value = 0;
+            if upper {
+                let byte = if cia_b {
+                    // A word read returns CIA-B's byte already in D15-D8.
+                    self.bus.cia_b_read(off, size) as u32 >> ((size - 1) * 8)
+                } else {
+                    floating >> 8
+                };
+                value = byte & 0xff;
+            }
+            if lower {
+                let byte = if cia_a {
+                    self.bus.cia_a_read(off, size) as u32
+                } else {
+                    floating
+                };
+                value = (value << 8) | (byte & 0xff);
+            }
+            self.bus.cpu_cia_access_finish();
+            return value;
+        }
         if range_contains(CIA_A_BASE, CIA_A_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
             let value = self.bus.cia_a_read(u64::from(addr - CIA_A_BASE), size) as u32;
@@ -4849,21 +4888,6 @@ impl CpuBus {
         if range_contains(CIA_B_BASE, CIA_B_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
             let value = self.bus.cia_b_read(u64::from(addr - CIA_B_BASE), size) as u32;
-            self.bus.cpu_cia_access_finish();
-            return value;
-        }
-        if let Some((cia_a, cia_b)) = self.gary_cia_mirror_select(addr) {
-            // CIA-A drives the low data byte and CIA-B the high one, so a
-            // cycle that selects both still reads each on its own lane.
-            self.bus.cpu_cia_access(Self::access_words(size));
-            let off = u64::from(addr & 0xfff);
-            let mut value = 0;
-            if cia_b && (size > 1 || !cia_a || addr & 1 == 0) {
-                value |= self.bus.cia_b_read(off, size) as u32;
-            }
-            if cia_a && (size > 1 || !cia_b || addr & 1 != 0) {
-                value |= self.bus.cia_a_read(off, size) as u32;
-            }
             self.bus.cpu_cia_access_finish();
             return value;
         }
@@ -5309,14 +5333,46 @@ impl CpuBus {
         if self.bus.uaelib.is_some() && crate::uaelib::debug_port::decodes(addr) {
             // Emulator service in the otherwise unused CIA page. It is
             // write-only; ordinary reads and neighbouring addresses keep
-            // their hardware decode. Preserve the posted-write credits of
-            // the ordinary unmapped path (which splits into byte writes).
-            for _ in 0..size {
-                self.bus.credit_cpu_posted_void_write();
+            // their hardware decode, and the write keeps the timing of
+            // that decode. On a Gary board the page is /VPA space with
+            // neither CIA selected: an E-clock cycle for each word.
+            // Elsewhere it is unmapped: preserve the posted-write credits
+            // of that path (which splits into byte writes).
+            if self.gary_vpa_select(addr).is_some() {
+                for _ in 0..Self::access_words(size) {
+                    self.bus.cpu_cia_access(1);
+                    self.bus.cpu_cia_access_finish();
+                }
+            } else {
+                for _ in 0..size {
+                    self.bus.credit_cpu_posted_void_write();
+                }
             }
             if let Some(uaelib) = self.bus.uaelib.as_mut() {
                 uaelib.write_debug_port(addr, size, value, &self.bus.mem, self.address_mask);
             }
+            return;
+        }
+        if let Some((cia_a, cia_b)) = self.gary_vpa_select(addr) {
+            if size == 4 {
+                // Two word cycles, as for a read.
+                self.write_bus_cycle(addr, 2, value >> 16);
+                self.write_bus_cycle(addr.wrapping_add(2), 2, value & 0xffff);
+                return;
+            }
+            // One E-clock cycle reaches every selected chip. A word gives
+            // CIA-B its high byte and CIA-A its low one; a byte is on both
+            // halves of the data bus, so whichever chips are selected latch
+            // it. With neither selected the cycle still runs.
+            self.bus.cpu_cia_access(Self::access_words(size));
+            let off = u64::from(addr & 0xfff);
+            if cia_b {
+                self.cia_b_cycle_write(off, size, value);
+            }
+            if cia_a {
+                self.cia_a_cycle_write(off, size, value);
+            }
+            self.bus.cpu_cia_access_finish();
             return;
         }
         if range_contains(CIA_A_BASE, CIA_A_SIZE, addr) {
@@ -5328,20 +5384,6 @@ impl CpuBus {
         if range_contains(CIA_B_BASE, CIA_B_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
             self.cia_b_cycle_write(u64::from(addr - CIA_B_BASE), size, value);
-            self.bus.cpu_cia_access_finish();
-            return;
-        }
-        if let Some((cia_a, cia_b)) = self.gary_cia_mirror_select(addr) {
-            // One E-clock cycle reaches every selected chip: CIA-A takes
-            // the low data byte, CIA-B the high one.
-            self.bus.cpu_cia_access(Self::access_words(size));
-            let off = u64::from(addr & 0xfff);
-            if cia_b && (size > 1 || !cia_a || addr & 1 == 0) {
-                self.cia_b_cycle_write(off, size, value);
-            }
-            if cia_a && (size > 1 || !cia_b || addr & 1 != 0) {
-                self.cia_a_cycle_write(off, size, value);
-            }
             self.bus.cpu_cia_access_finish();
             return;
         }
@@ -5626,14 +5668,16 @@ impl CpuBus {
         }
     }
 
-    /// Which CIAs a cycle outside their two standard pages selects.
+    /// Gary's /VPA cycle: which chips it selects, as (CIA-A, CIA-B).
     ///
-    /// Gary asserts /VPA for all of $A00000-$BFFFFF and the chip selects
-    /// come straight from two address lines: CIA-A wherever A12 is low,
-    /// CIA-B wherever A13 is low, both where both are. $BFE001 and $BFD000
-    /// are only the addresses that select exactly one. Gayle and Fat Gary
-    /// decode the two standard pages alone.
-    fn gary_cia_mirror_select(&self, addr: u32) -> Option<(bool, bool)> {
+    /// Gary asserts /VPA for all of $A00000-$BFFFFF (PALEN: `/VPA =
+    /// /AS*A23*/A22*A21`), so the CPU runs a 6800-style cycle there
+    /// whatever the low address bits are. The chip selects come straight
+    /// from two address lines: CIA-A wherever A12 is low, CIA-B wherever
+    /// A13 is low, both where both are and neither where both are high.
+    /// $BFE001 and $BFD000 are only the addresses that select exactly one.
+    /// Gayle and Fat Gary decode the two standard pages alone.
+    fn gary_vpa_select(&self, addr: u32) -> Option<(bool, bool)> {
         if !GARY_VPA.contains(&addr)
             || self.bus.gary.is_some()
             || self.bus.ramsey.is_some()
@@ -5642,9 +5686,7 @@ impl CpuBus {
         {
             return None;
         }
-        let cia_a = addr & 0x1000 == 0;
-        let cia_b = addr & 0x2000 == 0;
-        (cia_a || cia_b).then_some((cia_a, cia_b))
+        Some((addr & 0x1000 == 0, addr & 0x2000 == 0))
     }
 
     /// The CIA-A half of a CPU write cycle, with what the write does to the
@@ -9427,6 +9469,104 @@ mod tests {
         b.write_word(0xbff000 + DDRB, 0xffff);
         assert_eq!(b.read_byte(0xbfd000 + DDRB), 0x12);
         assert_eq!(b.read_byte(0xbfe001 + DDRB), 0x34);
+    }
+
+    #[test]
+    fn gary_cia_cycles_keep_each_chip_on_its_own_data_lane() {
+        const DDRB: u32 = 0x300;
+        const ICR: u32 = 0xd00;
+        let mut b = cpu_bus(test_bus(reset_rom(0, 0)));
+        b.write_byte(0xbfd000 + DDRB, 0x12);
+        b.write_byte(0xbfe001 + DDRB, 0x34);
+        // CIA-A drives D7-D0 only. Where it alone is selected the upper
+        // lane floats, at $BFE000 as at any other address with A12 low.
+        for page in [0xa0e000, 0xbfe000] {
+            b.bus.data_bus = 0xa55a;
+            assert_eq!(b.read_byte(page + DDRB), 0xa5, "{page:x}");
+            assert_eq!(b.read_byte(page + DDRB + 1), 0x34, "{page:x}");
+            b.bus.data_bus = 0xa55a;
+            assert_eq!(b.read_word(page + DDRB), 0xa534, "{page:x}");
+        }
+        // CIA-B drives D15-D8 only.
+        for page in [0xa0d000, 0xbfd000] {
+            b.bus.data_bus = 0xa55a;
+            assert_eq!(b.read_byte(page + DDRB + 1), 0x5a, "{page:x}");
+            assert_eq!(b.read_byte(page + DDRB), 0x12, "{page:x}");
+            b.bus.data_bus = 0xa55a;
+            assert_eq!(b.read_word(page + DDRB), 0x125a, "{page:x}");
+        }
+        // A byte read of the lane a chip does not drive is not a read of
+        // that chip: its interrupt flags survive.
+        b.bus.cia_a.assert_flag();
+        b.bus.cia_b.assert_flag();
+        let pending = (b.bus.cia_a.debug_icr_data(), b.bus.cia_b.debug_icr_data());
+        assert_ne!(pending, (0, 0));
+        b.read_byte(0xa0e000 + ICR);
+        b.read_byte(0xa0d001 + ICR);
+        b.read_byte(0xa0f000 + ICR);
+        b.read_byte(0xa0f001 + ICR);
+        assert_eq!(
+            (b.bus.cia_a.debug_icr_data(), b.bus.cia_b.debug_icr_data()),
+            pending
+        );
+        // With both selected a byte read still reaches one chip only.
+        b.read_byte(0xa0c001 + ICR);
+        assert_eq!(b.bus.cia_a.debug_icr_data(), 0);
+        assert_eq!(b.bus.cia_b.debug_icr_data(), pending.1);
+        b.read_byte(0xa0c000 + ICR);
+        assert_eq!(b.bus.cia_b.debug_icr_data(), 0);
+        // A byte write is on both halves of the data bus, so every
+        // selected chip latches it whichever strobe carried it.
+        b.write_byte(0xa0e000 + DDRB, 0x56);
+        assert_eq!(b.read_byte(0xbfe001 + DDRB), 0x56);
+        b.write_byte(0xa0c001 + DDRB, 0x78);
+        assert_eq!(b.read_word(0xa0c000 + DDRB), 0x7878);
+    }
+
+    #[test]
+    fn gary_long_cia_access_is_two_word_cycles() {
+        const DDRB: u32 = 0x300;
+        let mut b = cpu_bus(test_bus(reset_rom(0, 0)));
+        b.write_word(0xa0c000 + DDRB, 0x1234);
+        assert_eq!(b.read_long(0xa0c000 + DDRB), 0x1234_1234);
+        // The second word cycle is the one whose data stays in the
+        // registers.
+        b.write_long(0xa0c000 + DDRB, 0x1122_3344);
+        assert_eq!(b.read_word(0xa0c000 + DDRB), 0x3344);
+        // Each cycle selects a register from its own address: the first
+        // word of this long is DDRB's, the second timer A's.
+        b.write_long(0xa0c0fe + DDRB, 0x5566_7788);
+        assert_eq!(b.read_word(0xa0c000 + DDRB), 0x5566);
+    }
+
+    #[test]
+    fn gary_vpa_cycle_runs_whether_or_not_a_cia_is_selected() {
+        // /VPA depends on A23-A21 alone, so an address with A12 and A13
+        // both high costs the same E-clock cycle as one that selects a
+        // chip. Start every access at the same E phase.
+        let cost = |addr: u32, size: usize, write: bool| {
+            let mut b = cpu_bus(test_bus(reset_rom(0, 0)));
+            b.bus.set_cpu_bus_arbitration_enabled(true);
+            b.bus.advance_chipset(0x40);
+            let before = b.bus.emulated_cck();
+            match (write, size) {
+                (false, 1) => {
+                    b.read_byte(addr);
+                }
+                (false, _) => {
+                    b.read_word(addr);
+                }
+                (true, 1) => b.write_byte(addr, 0),
+                (true, _) => b.write_word(addr, 0),
+            }
+            b.bus.emulated_cck() - before
+        };
+        for write in [false, true] {
+            assert_eq!(cost(0xbff301, 1, write), cost(0xbfe301, 1, write));
+            assert_eq!(cost(0xa03300, 2, write), cost(0xbfd300, 2, write));
+        }
+        // Space outside the range is an ordinary cycle, and shorter.
+        assert!(cost(0x9ff301, 1, false) < cost(0xbff301, 1, false));
     }
 
     #[test]
