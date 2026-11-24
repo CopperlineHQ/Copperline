@@ -943,8 +943,8 @@ impl Agnus {
         // VARBEAMEN programmable totals drive the beam entirely and replace
         // the fixed PAL/NTSC counts; interlace still lengthens the long
         // field by a line (see `programmable_frame_lines`).
-        if let Some(lines) = self.programmable_frame_lines() {
-            return lines;
+        if self.beam_is_programmable() {
+            return self.programmable_field_lines();
         }
         if self.lace && !self.lof {
             self.video_standard.short_frame_lines()
@@ -988,15 +988,37 @@ impl Agnus {
     /// marks "lines with long counts (228 - NTSC, HTOTAL+2 - VARBEAMEN=1
     /// hires chips only)" (AA register list).
     pub(crate) fn line_cck_for(&self, lol: bool) -> u32 {
-        let long = matches!(self.video_standard, VideoStandard::Ntsc) && lol;
-        if let Some(line_cck) = self.programmable_line_cck() {
-            return line_cck + u32::from(long);
+        if self.beam_is_programmable() {
+            return self.programmable_line_cck_for(lol);
         }
-        if long {
+        if matches!(self.video_standard, VideoStandard::Ntsc) && lol {
             NTSC_LONG_COLORCLOCKS_PER_LINE
         } else {
             COLORCLOCKS_PER_LINE
         }
+    }
+
+    /// ECS Agnus or Alice with BEAMCON0.VARBEAMEN: HTOTAL and VTOTAL size
+    /// the scan. The beam loop asks on every colour clock, and on a fixed
+    /// PAL or NTSC scan this one test is all it should pay: the
+    /// programmable arithmetic stays out of line so the compiler cannot
+    /// fold it into the common path as unconditional work.
+    #[inline]
+    fn beam_is_programmable(&self) -> bool {
+        self.beamcon0 & BEAMCON0_VARBEAMEN != 0 && self.revision.is_ecs()
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn programmable_line_cck_for(&self, lol: bool) -> u32 {
+        let long = matches!(self.video_standard, VideoStandard::Ntsc) && lol;
+        u32::from(self.htotal).saturating_add(1).max(1) + u32::from(long)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn programmable_field_lines(&self) -> u32 {
+        u32::from(self.vtotal).saturating_add(1).max(1) + u32::from(self.lace && self.lof)
     }
 
     /// Whether lines alternate long/short: with the PAL decodes off (an
@@ -1514,6 +1536,9 @@ impl Agnus {
     /// it unless the pen is disabled or this field already latched a pulse.
     /// ECS LPENDIS does not stop the latch; it only hides it from the
     /// position registers (see [`Agnus::lpen_latch_active`]).
+    // A pen pulse is a rare event beside the beam loop that sweeps for it.
+    #[cold]
+    #[inline(never)]
     fn trigger_light_pen_at(&mut self, vpos: u32, hpos: u32) {
         if !self.lpen_enabled || self.lpen_triggered_this_field {
             return;
