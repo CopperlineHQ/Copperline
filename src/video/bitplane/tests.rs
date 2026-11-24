@@ -184,6 +184,40 @@ fn static_h_window_transition_solver_matches_counter_replay() {
 }
 
 #[test]
+fn lisa_decodes_ham6_in_super_hires_where_ocs_and_ecs_have_too_few_planes() {
+    // Six planes, HAMEN and SHRES.
+    let bplcon0 = 0x6000 | 0x0800 | BPLCON0_SHRES;
+    let lisa = ControlState {
+        bplcon0,
+        agnus_revision: AgnusRevision::AgaAlice,
+        ..ControlState::default()
+    };
+    assert_eq!(lisa.nplanes(), 6);
+    assert!(lisa.hold_and_modify());
+    assert!(lisa.ham());
+    for revision in [AgnusRevision::Ocs, AgnusRevision::Ecs8372Rev4] {
+        let denise = ControlState {
+            bplcon0,
+            agnus_revision: revision,
+            ..ControlState::default()
+        };
+        // A super-hires Denise decodes two planes, so HAM is out of reach.
+        assert_eq!(denise.nplanes(), 2);
+        assert!(!denise.hold_and_modify());
+    }
+
+    // Each 35 ns sample of the pair runs the hold-and-modify step: the
+    // left sample sets blue, the right one modifies red of that result.
+    let mut palette = Palette::new();
+    palette.write_ocs(0, 0x0000);
+    let mut ham_color = 0;
+    let (left, right) =
+        denise_shres_playfield_output_pair(lisa, &palette, 0x1F, 0x2A, &mut ham_color);
+    assert_eq!(rgb24_to_rgb12_hi(left.color), 0x000F);
+    assert_eq!(rgb24_to_rgb12_hi(right.color), 0x0A0F);
+}
+
+#[test]
 fn h_window_flop_carries_open_past_line_with_unreachable_hstart() {
     // Standard window rows, then a late-line DIWSTOP rewrite to $2C00
     // before the standard stop matched: the flip-flop stays open across

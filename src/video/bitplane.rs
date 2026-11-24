@@ -1209,10 +1209,14 @@ impl ControlState {
     }
 
     /// HAM6: HAMEN with five or six planes, on every Denise generation.
+    /// OCS and ECS Denise decode at most two planes in super-hires, so
+    /// the plane count alone keeps HAM out of that resolution there; Lisa
+    /// runs both HAM modes in every resolution ("not just LORES as
+    /// before", Lisa spec 391227).
     /// Callers that mean "any hold-and-modify variant" (history-dependent
     /// pixel output) must use [`Self::ham`], which also covers Lisa's HAM8.
     fn hold_and_modify(&self) -> bool {
-        !self.shres() && matches!(self.nplanes(), 5 | 6) && self.bplcon0 & 0x0800 != 0
+        matches!(self.nplanes(), 5 | 6) && self.bplcon0 & 0x0800 != 0
     }
 
     /// Lisa's HAM8: HAMEN with all eight planes, AGA only. Mirrors the
