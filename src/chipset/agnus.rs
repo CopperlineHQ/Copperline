@@ -951,25 +951,30 @@ impl Agnus {
     /// Color clocks for a line given the long-line (`lol`) state. Single owner
     /// of the programmable-vs-227/228 selection; every beam-walk path (live
     /// advance, the frame/line deadlines, and the bus Copper-prediction clone)
-    /// routes through this so they cannot drift.
+    /// routes through this so they cannot drift. A long line is one colour
+    /// clock longer than a short one on a programmable scan too: STRLONG
+    /// marks "lines with long counts (228 - NTSC, HTOTAL+2 - VARBEAMEN=1
+    /// hires chips only)" (AA register list).
     pub(crate) fn line_cck_for(&self, lol: bool) -> u32 {
+        let long = matches!(self.video_standard, VideoStandard::Ntsc) && lol;
         if let Some(line_cck) = self.programmable_line_cck() {
-            return line_cck;
+            return line_cck + u32::from(long);
         }
-        if matches!(self.video_standard, VideoStandard::Ntsc) && lol {
+        if long {
             NTSC_LONG_COLORCLOCKS_PER_LINE
         } else {
             COLORCLOCKS_PER_LINE
         }
     }
 
-    /// Whether lines alternate long/short. Only NTSC does, and only when the
-    /// beam is not programmable (VARBEAMEN fixes the line length) and LOLDIS is
-    /// clear.
+    /// Whether lines alternate long/short: with the PAL decodes off (an
+    /// NTSC part, or BEAMCON0.PAL clear on ECS/AGA) and LOLDIS clear. A
+    /// programmable beam does not stop the toggle by itself -- "in
+    /// variable beam counter mode this bit [LOLDIS] disables the long
+    /// line/short line toggle" (AA register list, BEAMCON0) -- which is
+    /// why the programmable display modes set LOLDIS.
     pub(crate) fn long_line_toggles(&self) -> bool {
-        matches!(self.video_standard, VideoStandard::Ntsc)
-            && self.programmable_line_cck().is_none()
-            && !self.loldis_active()
+        matches!(self.video_standard, VideoStandard::Ntsc) && !self.loldis_active()
     }
 
     fn loldis_active(&self) -> bool {
@@ -1141,11 +1146,11 @@ impl Agnus {
             } else {
                 remaining_lines / 2
             };
+            let short_cck = self.line_cck_for(false);
+            let long_extra = self.line_cck_for(true) - short_cck;
             u64::from(remaining_lines)
-                .saturating_mul(u64::from(COLORCLOCKS_PER_LINE))
-                .saturating_add(u64::from(long_lines).saturating_mul(u64::from(
-                    NTSC_LONG_COLORCLOCKS_PER_LINE - COLORCLOCKS_PER_LINE,
-                )))
+                .saturating_mul(u64::from(short_cck))
+                .saturating_add(u64::from(long_lines).saturating_mul(u64::from(long_extra)))
         } else {
             // Uniform line length: PAL, LOLDIS, or programmable VARBEAMEN.
             u64::from(remaining_lines).saturating_mul(u64::from(current_line))
@@ -2622,17 +2627,48 @@ mod tests {
         assert_eq!(a.current_frame_lines(), 0x23E);
     }
 
+    /// VARBEAMEN does not stop the long/short line toggle. With the PAL
+    /// bit and LOLDIS both clear the lines of a programmable scan
+    /// alternate HTOTAL + 1 and HTOTAL + 2 colour clocks; LOLDIS or the
+    /// PAL bit pins them at HTOTAL + 1.
     #[test]
-    fn programmable_frame_does_not_toggle_long_line() {
+    fn programmable_scan_toggles_long_lines_until_loldis_or_pal() {
         let mut a = Agnus::with_video_standard_and_revision(
             VideoStandard::Ntsc,
             AgnusRevision::Ecs8372Rev4,
         );
-        a.write_htotal(140); // programmable line length 141
-        a.write_beamcon0(BEAMCON0_VARBEAMEN); // NTSC + programmable beam
+        a.write_htotal(140); // short line: 141 colour clocks
+        a.write_vtotal(399);
+        a.write_beamcon0(BEAMCON0_VARBEAMEN); // PAL and LOLDIS clear
+        assert!(a.long_line_toggles());
+        assert!(!a.lol);
         assert_eq!(a.current_line_cck(), 141);
+        a.advance_by_cck(141);
+        assert_eq!((a.vpos, a.hpos), (1, 0));
+        assert!(a.lol);
+        assert_eq!(a.current_line_cck(), 142, "long line: HTOTAL + 2");
+        a.advance_by_cck(142);
+        assert_eq!((a.vpos, a.hpos), (2, 0));
+        assert!(!a.lol);
+        assert_eq!(a.read_vposr() & 0x0080, 0);
+
+        // The line-start deadline counts both lengths: two short lines
+        // and one long line from the start of line 2 to line 5.
+        assert_eq!(a.cck_until_line_start(5), Some(141 + 142 + 141));
+        // Mean field length for the refresh rate: 400 lines of 141.5.
+        assert_eq!(a.nominal_frame_cck(), 400.0 * 141.5);
+
+        a.write_beamcon0(BEAMCON0_VARBEAMEN | BEAMCON0_LOLDIS);
         assert!(!a.long_line_toggles());
         a.advance_by_cck(141 * 3);
+        assert_eq!(a.vpos, 5);
+        assert!(!a.lol);
+        assert_eq!(a.current_line_cck(), 141);
+
+        a.write_beamcon0(BEAMCON0_VARBEAMEN | BEAMCON0_PAL);
+        assert!(!a.long_line_toggles());
+        a.advance_by_cck(141 * 3);
+        assert_eq!(a.vpos, 8);
         assert_eq!(a.current_line_cck(), 141);
     }
 

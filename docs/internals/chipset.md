@@ -23,6 +23,10 @@ including spans crossing scanlines and frames.
 Agnus owns the beam: `vpos`/`hpos` counters advanced per colour clock, PAL
 (313 lines, 227 CCK/line) and NTSC (263 lines with long/short line
 alternation) geometry, the long-field flag for interlace, and VPOSR/VHPOSR.
+The long/short line toggle runs whenever the PAL decodes are off and
+BEAMCON0.LOLDIS is clear, on a programmable scan as well: VARBEAMEN lines
+then alternate HTOTAL + 1 and HTOTAL + 2 colour clocks, which is why the
+programmable display modes set LOLDIS.
 It also owns DMACON and the display-fetch machinery: for FMODE=0 fetches
 the per-line fetch table comes from the DDF sequencer flop model
 (`src/chipset/ddf_sequencer.rs`; see the [arbitration model](timing) for
