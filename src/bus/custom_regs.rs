@@ -99,7 +99,9 @@ impl Bus {
                 self.paula.read_audio_reg(off - 0x0A0)
             }
             // DENISEID: ECS Denise (8373) drives 0xFFFC; software detects ECS
-            // via the low byte (0xFC). OCS Denise (8362) has no such register,
+            // via the low byte (0xFC). Lisa answers 0xF8 in the low byte and
+            // the motherboard supplies the high one (`Bus::denise_id`).
+            // OCS Denise (8362) has no such register,
             // so $07C reads the undriven custom bus, held here at 0xFFFF (low
             // byte 0xFF != 0xFC, so software correctly detects OCS).
             // TODO: the accurate OCS model is the floating-bus residue
@@ -109,7 +111,7 @@ impl Bus {
             // HHPOSR (ECS Agnus): UHRES dual-mode H counter readback. The
             // counter is not emulated, so this reads the HHPOSW latch.
             0x1DA if self.agnus.revision().is_ecs() => self.agnus.hhpos(),
-            0x07C => match self.denise_revision.id() {
+            0x07C => match self.denise_id() {
                 Some(id) => id,
                 // Undriven on OCS: return early so the workaround constant
                 // never contaminates the bus residue below.
@@ -371,6 +373,9 @@ impl Bus {
                 return false;
             }
         }
+        // From here on the write is what the fitted Denise latches: bits
+        // the chip has no flip-flop for never reach it or the render replay.
+        let val = self.denise_control_latch_value(off, val);
         if is_render_relevant_custom_write(off)
             && !matches!(off, 0x180..=0x1BE)
             && (off != 0x1E4 || self.denise_ecs_registers())
@@ -1200,19 +1205,15 @@ impl Bus {
                         self.bplcon3_write_enabled(),
                     );
                 }
-                // ECS Denise only latches BPLCON3 while BPLCON0 bit 0
-                // (ENBPLCN3/ECSENA) is set; OCS Denise has no BPLCON3.
+                // ECS Denise and Lisa latch every BPLCON3 write; ECSENA
+                // gates the border, genlock and blank features where they
+                // are used. OCS Denise has no BPLCON3.
                 if self.bplcon3_write_enabled() {
                     self.denise.bplcon3 = val;
                 } else if !self.bplcon3_drop_warned && val != 0 {
                     self.bplcon3_drop_warned = true;
                     log::info!(
-                        "BPLCON3 write {val:#06X} dropped ({}); further drops not logged",
-                        if self.denise_ecs_registers() {
-                            "ENBPLCN3 clear"
-                        } else {
-                            "OCS Denise"
-                        }
+                        "BPLCON3 write {val:#06X} dropped (OCS Denise); further drops not logged"
                     );
                 }
                 false

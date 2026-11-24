@@ -27,6 +27,10 @@ pub const CIA_A_SIZE: u32 = 0x0000_1000;
 pub const CIA_B_BASE: u32 = 0x00BF_D000;
 pub const CIA_B_SIZE: u32 = 0x0000_1000;
 pub const CUSTOM_BASE: u32 = 0x00DF_F000;
+/// Fat Gary's interrupt-enable latch answers throughout these four pages.
+const FAT_GARY_IENA: std::ops::Range<u32> = 0x00DF_8000..0x00DF_C000;
+/// Gary's /VPA decode: the 6800-style peripheral cycle the two CIAs live in.
+const GARY_VPA: std::ops::Range<u32> = 0x00A0_0000..0x00C0_0000;
 pub const CUSTOM_SIZE: u32 = 0x0000_1000;
 pub const RTC_BASE: u32 = 0x00DC_0000;
 pub const RTC_SIZE: u32 = 0x0001_0000;
@@ -4038,6 +4042,9 @@ impl CpuBus {
         ) {
             return Some(PlainMemRegion::ExtendedRom(off));
         }
+        if let Some(region) = self.rom_mirror_region(addr, size) {
+            return Some(region);
+        }
         if let Some(off) = self
             .bus
             .cartridge
@@ -4047,6 +4054,51 @@ impl CpuBus {
             return Some(PlainMemRegion::Cartridge(off));
         }
         None
+    }
+
+    /// The Kickstart images a board's address decoder adds beside the
+    /// canonical selects.
+    ///
+    /// Gary's ROM select also answers at $E00000-$E7FFFF (the PALEN /ROMEN
+    /// equation it absorbed), and Gayle's at $E00000-$E7FFFF and
+    /// $A80000-$B7FFFF (Gayle specification 2.0), each presenting the same
+    /// 512 KiB part. The A1000 and CDTV boards and Fat Gary have no such
+    /// select, and a second ROM fitted at $E00000 takes the place of the
+    /// mirror there. Gayle's 1 MiB select at $A80000-$B7FFFF passes A19 to
+    /// the ROM, so with such a second ROM the half that answers at $E00000
+    /// (A19 low) answers at $B00000 and the $F80000 half at $A80000.
+    ///
+    /// Only three 512 KiB blocks can hold a mirror, and the canonical
+    /// selects are tried first, so no ordinary fetch pays for this.
+    fn rom_mirror_region(&self, addr: u32, size: usize) -> Option<PlainMemRegion> {
+        let block = addr >> 19;
+        if !matches!(block, 0x15 | 0x16 | 0x1c) {
+            return None;
+        }
+        let gayle = self.bus.gayle.is_some();
+        let gary = !gayle
+            && self.bus.gary.is_none()
+            && self.bus.ramsey.is_none()
+            && self.bus.akiko.is_none()
+            && self.bus.cdtv.is_none()
+            && self.bus.mem.wcs.is_empty();
+        let rom = self.bus.mem.rom.len();
+        let second = self.bus.mem.extended_rom.len();
+        let second_at_e0 = second != 0 && self.bus.mem.extended_rom_base == 0x00E0_0000;
+        match block {
+            // $E00000-$E7FFFF
+            0x1c if (gary || gayle) && second == 0 => {
+                region_offset(rom, 0x00E0_0000, addr, size).map(PlainMemRegion::Rom)
+            }
+            // $A80000-$AFFFFF
+            0x15 if gayle => region_offset(rom, 0x00A8_0000, addr, size).map(PlainMemRegion::Rom),
+            // $B00000-$B7FFFF
+            0x16 if gayle && second_at_e0 => {
+                region_offset(second, 0x00B0_0000, addr, size).map(PlainMemRegion::ExtendedRom)
+            }
+            0x16 if gayle => region_offset(rom, 0x00B0_0000, addr, size).map(PlainMemRegion::Rom),
+            _ => None,
+        }
     }
 
     /// CPU-side chip RAM decode. The motherboard address decode (Gary and
@@ -4087,6 +4139,10 @@ impl CpuBus {
     /// (yellow screen); KS 1.3 added a write/read-back check that also
     /// stops on a floating bus. Gayle does not select these aliases. Fat
     /// Gary selects custom registers in the $C0-$CF and $DFC-$DFF pages.
+    ///
+    /// Whichever part asserts the select, the chips themselves only receive
+    /// the register address lines RGA8-RGA1, so the bank repeats every $200
+    /// inside any selected page: $DFF200 is $DFF000 again.
     fn custom_reg_page_offset(&self, addr: u32) -> Option<u32> {
         if self.bus.gary.is_some() {
             return ((0x00df_c000..0x00e0_0000).contains(&addr)
@@ -4094,7 +4150,7 @@ impl CpuBus {
             .then_some(addr & 0x1ff);
         }
         if range_contains(CUSTOM_BASE, CUSTOM_SIZE, addr) {
-            return Some(addr & 0xfff);
+            return Some(addr & 0x1ff);
         }
         if self.bus.gayle.is_some() || self.bus.ramsey.is_some() {
             return None;
@@ -4105,7 +4161,7 @@ impl CpuBus {
         // $DC0000 stays carved out for the RTC select (floating when no
         // clock answers) and $DD0000 is undecoded, as on real boards.
         let below_canonical = (0x00DE_0000..CUSTOM_BASE).contains(&addr);
-        (ranger || reserved || below_canonical).then_some(addr & 0xFFF)
+        (ranger || reserved || below_canonical).then_some(addr & 0x1ff)
     }
 
     /// The `$DC0000` clock page, a byte lane at a time.
@@ -4292,6 +4348,52 @@ impl CpuBus {
             return;
         }
         self.bus.cpu_external_access(Self::access_words(size));
+    }
+
+    /// Bill a ROM read: the generic external-bus cost, or Fat Gary's own
+    /// cycle on the boards that have one. Every ROM fetch on every machine
+    /// comes through here, so a board without a Fat Gary pays one test.
+    #[inline]
+    fn bill_rom(&mut self, addr: u32, size: usize, kind: CpuBusAccessKind) {
+        if self.bus.gary.is_some() {
+            self.bill_fat_gary_rom(addr, size, kind);
+        } else {
+            self.bill_external_access(size);
+        }
+    }
+
+    /// Fat Gary runs the ROM cycle itself and ends it with *STERM after the
+    /// number of board clocks its two jumpers select, 5 to 8 (Fat Gary
+    /// specification, "ROM Timing"). The ROM is a 32-bit port, so one cycle
+    /// delivers an aligned longword whatever the operand size, and an
+    /// operand that straddles two longwords takes two. The CPU fetches
+    /// opcodes a longword at a time: the second word of a longword it has
+    /// just fetched costs no cycle. A Fat Gary whose jumpers were never
+    /// recorded keeps the generic external-bus cost.
+    #[inline(never)]
+    fn bill_fat_gary_rom(&mut self, addr: u32, size: usize, kind: CpuBusAccessKind) {
+        if self.jit_enabled {
+            return;
+        }
+        let Some(gary) = self
+            .bus
+            .gary
+            .as_mut()
+            .filter(|gary| gary.rom_cycle_clocks().is_some())
+        else {
+            self.bus.cpu_external_access(Self::access_words(size));
+            return;
+        };
+        let first = addr & !3;
+        let last = addr.wrapping_add(size.max(1) as u32 - 1) & !3;
+        if matches!(kind, CpuBusAccessKind::Fetch) {
+            if size <= 2 && first == last && gary.rom_fetch_latch == Some(first) {
+                return;
+            }
+            gary.rom_fetch_latch = Some(last);
+        }
+        self.bus
+            .fat_gary_rom_cycles((last.wrapping_sub(first) >> 2) + 1);
     }
 
     fn bill_motherboard_ram(&mut self, addr: u32, size: usize) {
@@ -4596,6 +4698,7 @@ impl CpuBus {
                 1,
             )
             .is_some()
+            || self.rom_mirror_region(addr, 1).is_some()
             || self.bus.cartridge.as_ref().is_some_and(|c| c.decodes(addr))
     }
 
@@ -4623,6 +4726,7 @@ impl CpuBus {
                 1,
             )
             .is_some()
+            || self.rom_mirror_region(addr, 1).is_some()
             || self.bus.cartridge.as_ref().is_some_and(|c| c.decodes(addr))
     }
 
@@ -4665,7 +4769,7 @@ impl CpuBus {
         let addr = self.mask(address);
         match self.classify_plain_memory(addr, size) {
             Some(PlainMemRegion::OverlayRom(off)) => {
-                self.bill_external_access(size);
+                self.bill_rom(addr, size, kind);
                 return read_be(&self.bus.mem.rom, off, size);
             }
             Some(PlainMemRegion::ChipRam(off)) => {
@@ -4710,7 +4814,7 @@ impl CpuBus {
                 return read_be(&self.bus.mem.slow_ram, off, size);
             }
             Some(PlainMemRegion::Rom(off)) => {
-                self.bill_external_access(size);
+                self.bill_rom(addr, size, kind);
                 return read_be(&self.bus.mem.rom, off, size);
             }
             // A1000 WCS at $FC0000 (empty -> no match on other machines): the
@@ -4720,7 +4824,7 @@ impl CpuBus {
                 return read_be(&self.bus.mem.wcs, off, size);
             }
             Some(PlainMemRegion::ExtendedRom(off)) => {
-                self.bill_external_access(size);
+                self.bill_rom(addr, size, kind);
                 return read_be(&self.bus.mem.extended_rom, off, size);
             }
             Some(PlainMemRegion::Cartridge(off)) => {
@@ -4736,6 +4840,45 @@ impl CpuBus {
             None => {}
         }
 
+        if let Some((cia_a, cia_b)) = self.gary_vpa_select(addr) {
+            if size == 4 {
+                // A long operand is two word cycles, each with its own
+                // decode, chip selects and byte lanes.
+                let hi = self.read_bus_cycle(addr, 2, kind);
+                let lo = self.read_bus_cycle(addr.wrapping_add(2), 2, kind);
+                return (hi << 16) | (lo & 0xffff);
+            }
+            // The E-clock cycle runs for the whole /VPA range, whether or
+            // not either chip select follows.
+            self.bus.cpu_cia_access(Self::access_words(size));
+            let off = u64::from(addr & 0xfff);
+            // CIA-B drives D15-D8 and CIA-A D7-D0. A lane no selected chip
+            // drives floats, and a chip whose lane the CPU is not reading
+            // is not read: its register side effects do not happen.
+            let floating = u32::from(self.bus.data_bus);
+            let upper = size == 2 || addr & 1 == 0;
+            let lower = size == 2 || addr & 1 != 0;
+            let mut value = 0;
+            if upper {
+                let byte = if cia_b {
+                    // A word read returns CIA-B's byte already in D15-D8.
+                    self.bus.cia_b_read(off, size) as u32 >> ((size - 1) * 8)
+                } else {
+                    floating >> 8
+                };
+                value = byte & 0xff;
+            }
+            if lower {
+                let byte = if cia_a {
+                    self.bus.cia_a_read(off, size) as u32
+                } else {
+                    floating
+                };
+                value = (value << 8) | (byte & 0xff);
+            }
+            self.bus.cpu_cia_access_finish();
+            return value;
+        }
         if range_contains(CIA_A_BASE, CIA_A_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
             let value = self.bus.cia_a_read(u64::from(addr - CIA_A_BASE), size) as u32;
@@ -4918,6 +5061,14 @@ impl CpuBus {
             }
         }
         if let Some(off) = self.custom_reg_page_offset(addr) {
+            if size == 4 && self.bus.register_port_narrower_than_chip_ram() {
+                // Two word cycles on the registers' 16-bit port. Each is
+                // decoded and sampled on its own, so the second word comes
+                // one cycle later and from whatever its address selects.
+                let hi = self.read_bus_cycle(addr, 2, kind);
+                let lo = self.read_bus_cycle(addr.wrapping_add(2), 2, kind);
+                return (hi << 16) | (lo & 0xffff);
+            }
             // Custom registers live on the chip bus; custom_read itself
             // grants the contended chip-bus slot.
             return self.bus.custom_read(u64::from(off), size) as u32;
@@ -5182,58 +5333,58 @@ impl CpuBus {
         if self.bus.uaelib.is_some() && crate::uaelib::debug_port::decodes(addr) {
             // Emulator service in the otherwise unused CIA page. It is
             // write-only; ordinary reads and neighbouring addresses keep
-            // their hardware decode. Preserve the posted-write credits of
-            // the ordinary unmapped path (which splits into byte writes).
-            for _ in 0..size {
-                self.bus.credit_cpu_posted_void_write();
+            // their hardware decode, and the write keeps the timing of
+            // that decode. On a Gary board the page is /VPA space with
+            // neither CIA selected: an E-clock cycle for each word.
+            // Elsewhere it is unmapped: preserve the posted-write credits
+            // of that path (which splits into byte writes).
+            if self.gary_vpa_select(addr).is_some() {
+                for _ in 0..Self::access_words(size) {
+                    self.bus.cpu_cia_access(1);
+                    self.bus.cpu_cia_access_finish();
+                }
+            } else {
+                for _ in 0..size {
+                    self.bus.credit_cpu_posted_void_write();
+                }
             }
             if let Some(uaelib) = self.bus.uaelib.as_mut() {
                 uaelib.write_debug_port(addr, size, value, &self.bus.mem, self.address_mask);
             }
             return;
         }
+        if let Some((cia_a, cia_b)) = self.gary_vpa_select(addr) {
+            if size == 4 {
+                // Two word cycles, as for a read.
+                self.write_bus_cycle(addr, 2, value >> 16);
+                self.write_bus_cycle(addr.wrapping_add(2), 2, value & 0xffff);
+                return;
+            }
+            // One E-clock cycle reaches every selected chip. A word gives
+            // CIA-B its high byte and CIA-A its low one; a byte is on both
+            // halves of the data bus, so whichever chips are selected latch
+            // it. With neither selected the cycle still runs.
+            self.bus.cpu_cia_access(Self::access_words(size));
+            let off = u64::from(addr & 0xfff);
+            if cia_b {
+                self.cia_b_cycle_write(off, size, value);
+            }
+            if cia_a {
+                self.cia_a_cycle_write(off, size, value);
+            }
+            self.bus.cpu_cia_access_finish();
+            return;
+        }
         if range_contains(CIA_A_BASE, CIA_A_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
-            let effect = self
-                .bus
-                .cia_a_write(u64::from(addr - CIA_A_BASE), size, u64::from(value));
+            self.cia_a_cycle_write(u64::from(addr - CIA_A_BASE), size, value);
             self.bus.cpu_cia_access_finish();
-            if effect.disable_overlay {
-                // Gary's overlay flip-flop clears the moment the CIA drives
-                // OVL low: the guest's very next access may already expect
-                // chip RAM at $0. Flip it here rather than only at the slice
-                // boundary -- the batch/JIT path retires many instructions
-                // per slice, so the historical end-of-slice deferral would
-                // leave the bootstrap writing its vectors into the ROM
-                // mirror. The pending flag still ends the slice so the run
-                // loop logs the transition.
-                self.bus.mem.overlay = false;
-                self.bus.overlay_disable_pending = true;
-                self.bus.slice_preempted = true;
-            }
-            if effect.enable_overlay
-                && self.bus.gayle.is_none()
-                && self.bus.akiko.is_none()
-                && self.bus.mem.wcs.is_empty()
-            {
-                self.bus.mem.overlay = true;
-                self.bus.overlay_disable_pending = false;
-                self.bus.slice_preempted = true;
-            }
-            if effect.timer_started {
-                self.bus.slice_preempted = true;
-            }
             return;
         }
         if range_contains(CIA_B_BASE, CIA_B_SIZE, addr) {
             self.bus.cpu_cia_access(Self::access_words(size));
-            let effect = self
-                .bus
-                .cia_b_write(u64::from(addr - CIA_B_BASE), size, u64::from(value));
+            self.cia_b_cycle_write(u64::from(addr - CIA_B_BASE), size, value);
             self.bus.cpu_cia_access_finish();
-            if effect.timer_started {
-                self.bus.slice_preempted = true;
-            }
             return;
         }
         if self.bus.cdtv.is_some() && range_contains(CDTV_BATTRAM_BASE, CDTV_BATTRAM_SIZE, addr) {
@@ -5304,11 +5455,28 @@ impl CpuBus {
             }
             return;
         }
-        if self.bus.gary.is_some() && addr & !0x3000 == 0x00df_809a && size <= 2 {
+        if self.bus.gary.is_some() && FAT_GARY_IENA.contains(&addr) {
+            // Fat Gary's interrupt-enable latch. The specification places it
+            // at offset $09A of the four 4 KiB pages $DF8000-$DFBFFF, but
+            // the part has no A2-A11 pins (only A0, A1 and A12-A31), so it
+            // cannot tell that offset from any other in the range: every
+            // write cycle there loads the latch from D31, the one data line
+            // Gary sees. The range is a 16-bit port, so D31 carries the top
+            // bit of the byte on the upper data strobe. A long write runs
+            // two cycles and the second one wins; a lone odd byte is on the
+            // lower strobe and never reaches the latch.
             self.bill_external_access(size);
-            let high_byte = value >> ((size - 1) * 8);
-            self.bus.gary.as_mut().unwrap().interrupts_disabled = high_byte & 0x80 == 0;
-            self.bus.slice_preempted = true;
+            let mut enable = None;
+            for idx in 0..size {
+                let byte_addr = addr.wrapping_add(idx as u32);
+                if byte_addr & 1 == 0 && FAT_GARY_IENA.contains(&byte_addr) {
+                    enable = Some((value >> ((size - 1 - idx) * 8)) & 0x80 != 0);
+                }
+            }
+            if let Some(enable) = enable {
+                self.bus.gary.as_mut().unwrap().interrupts_disabled = !enable;
+                self.bus.slice_preempted = true;
+            }
             return;
         }
         if size == 1 && self.bus.gary.is_some() && crate::gary::decodes(addr) {
@@ -5422,6 +5590,18 @@ impl CpuBus {
             }
             return;
         }
+        if size == 4
+            && self.bus.register_port_narrower_than_chip_ram()
+            && self.custom_reg_page_offset(addr).is_some()
+        {
+            // Two word cycles on the registers' 16-bit port: each word is
+            // decoded and lands on its own cycle. Each cycle settles the
+            // translation-cache exclusions for what it reaches.
+            self.jit_cache_exclusions_current = exclusions_were_current;
+            self.write_bus_cycle(addr, 2, value >> 16);
+            self.write_bus_cycle(addr.wrapping_add(2), 2, value & 0xffff);
+            return;
+        }
         if let Some(off) = self.custom_reg_page_offset(addr) {
             self.jit_cache_exclusions_current = exclusions_were_current;
             // Custom registers live on the chip bus; custom_write itself
@@ -5488,18 +5668,88 @@ impl CpuBus {
         }
     }
 
+    /// Gary's /VPA cycle: which chips it selects, as (CIA-A, CIA-B).
+    ///
+    /// Gary asserts /VPA for all of $A00000-$BFFFFF (PALEN: `/VPA =
+    /// /AS*A23*/A22*A21`), so the CPU runs a 6800-style cycle there
+    /// whatever the low address bits are. The chip selects come straight
+    /// from two address lines: CIA-A wherever A12 is low, CIA-B wherever
+    /// A13 is low, both where both are and neither where both are high.
+    /// $BFE001 and $BFD000 are only the addresses that select exactly one.
+    /// Gayle and Fat Gary decode the two standard pages alone.
+    fn gary_vpa_select(&self, addr: u32) -> Option<(bool, bool)> {
+        if !GARY_VPA.contains(&addr)
+            || self.bus.gary.is_some()
+            || self.bus.ramsey.is_some()
+            || self.bus.gayle.is_some()
+            || self.bus.akiko.is_some()
+        {
+            return None;
+        }
+        Some((addr & 0x1000 == 0, addr & 0x2000 == 0))
+    }
+
+    /// The CIA-A half of a CPU write cycle, with what the write does to the
+    /// overlay. The caller brackets it with the E-clock billing.
+    fn cia_a_cycle_write(&mut self, off: u64, size: usize, value: u32) {
+        let effect = self.bus.cia_a_write(off, size, u64::from(value));
+        // Gayle keeps OVL in an internal latch that reset sets and the
+        // first write to CIA-A clears, whichever register it names:
+        // Kickstart 2 and 3 open with CLR.B $BFE001 while the port is still
+        // all inputs, which could not pull a pin-driven OVL low. (The Gayle
+        // specification says CIA1 at $BFD000 here; no Kickstart writes that
+        // chip before it needs chip RAM at zero.)
+        let gayle_latch = self.bus.gayle.is_some() && self.bus.mem.overlay;
+        if effect.disable_overlay || gayle_latch {
+            // Gary's overlay flip-flop clears the moment the CIA drives
+            // OVL low: the guest's very next access may already expect
+            // chip RAM at $0. Flip it here rather than only at the slice
+            // boundary -- the batch/JIT path retires many instructions
+            // per slice, so the historical end-of-slice deferral would
+            // leave the bootstrap writing its vectors into the ROM
+            // mirror. The pending flag still ends the slice so the run
+            // loop logs the transition.
+            self.bus.mem.overlay = false;
+            self.bus.overlay_disable_pending = true;
+            self.bus.slice_preempted = true;
+        }
+        if effect.enable_overlay
+            && self.bus.gayle.is_none()
+            && self.bus.akiko.is_none()
+            && self.bus.mem.wcs.is_empty()
+        {
+            self.bus.mem.overlay = true;
+            self.bus.overlay_disable_pending = false;
+            self.bus.slice_preempted = true;
+        }
+        if effect.timer_started {
+            self.bus.slice_preempted = true;
+        }
+    }
+
+    /// The CIA-B half of a CPU write cycle.
+    fn cia_b_cycle_write(&mut self, off: u64, size: usize, value: u32) {
+        let effect = self.bus.cia_b_write(off, size, u64::from(value));
+        if effect.timer_started {
+            self.bus.slice_preempted = true;
+        }
+    }
+
     fn overlay_rom_offset(&self, addr: u32, size: usize) -> Option<usize> {
         if !self.bus.mem.overlay {
             return None;
         }
-        let classic_gary = self.bus.gary.is_none()
+        // Gary (specification 2.1.3) and Gayle (specification 2.0) select
+        // the ROM for all of $000000-$1FFFFF while OVL is asserted, and the
+        // ROM's own address pins repeat its 512 KiB image through the bank.
+        // Fat Gary selects it for $000000-$07FFFF only. The discrete PALEN
+        // of the first A2000 boards differs again (ROM in the first and
+        // last 512 KiB, nothing in between); no profile models that board.
+        let whole_bank = self.bus.gary.is_none()
             && self.bus.ramsey.is_none()
-            && self.bus.gayle.is_none()
             && self.bus.akiko.is_none()
             && self.bus.mem.wcs.is_empty();
-        // Gary selects ROM for all of bank zero; the ROM address pins
-        // repeat its 512 KiB image. Fat Gary decodes only the first image.
-        let rom_addr = if classic_gary && u64::from(addr) < CHIP_WINDOW_SIZE {
+        let rom_addr = if whole_bank && u64::from(addr) < CHIP_WINDOW_SIZE {
             addr & 0x7ffff
         } else {
             addr
@@ -6528,7 +6778,8 @@ mod tests {
             b.write_byte(RAMSEY_CONTROL, control | CONTROL_RAMSIZE);
             // The register answers at once, as detection code expects.
             assert_eq!(b.read_byte(RAMSEY_CONTROL), control | CONTROL_RAMSIZE);
-            b.bus.advance_devices(24);
+            // Long enough for the power-up refresh interval of 238 clocks.
+            b.bus.advance_devices(34);
             // Ramsey catches up lazily: the next access after a refresh
             // finds the new mode in force.
             assert_eq!(b.read_byte(RAMSEY_CONTROL), control | CONTROL_RAMSIZE);
@@ -6544,7 +6795,7 @@ mod tests {
         b.dcache = None;
         b.write_byte(RAMSEY_CONTROL, CONTROL_PAGE | CONTROL_RAMSIZE);
         // Start just after a refresh so all three transfers fit in one open-row interval.
-        let until_refresh = 154 - b.bus.ramsey_clock() % 154;
+        let until_refresh = b.bus.ramsey.as_ref().unwrap().next_refresh_at() - b.bus.ramsey_clock();
         b.bus.advance_devices(until_refresh.div_ceil(7) as u32);
         assert_eq!(cost(b, base), 5);
         assert_eq!(cost(b, base + 4), 3);
@@ -6554,6 +6805,78 @@ mod tests {
         b.write_byte(RAMSEY_CONTROL, CONTROL_SKIP);
         b.bus.advance_devices(24);
         assert_eq!(cost(b, base), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn fat_gary_rom_cycles_follow_the_board_jumpers() -> Result<()> {
+        use crate::gary::{Gary, ROM_JUMPERS_A3000, ROM_JUMPERS_A4000};
+        use CpuBusAccessKind::{Fetch, Read};
+        let machine = |gary: Option<Gary>| -> Result<M68kMachine> {
+            let mut m = machine_with_program_model(0x400, &[0x4e71], CpuModel::M68030)?;
+            m.bus.bus.set_cpu_clocks_per_cck(7);
+            m.bus.bus.set_cpu_bus_arbitration_enabled(true);
+            m.bus.bus.mem.rom = vec![0; 512 * 1024];
+            if let Some(gary) = gary {
+                m.bus.bus.attach_gary(gary);
+            }
+            Ok(m)
+        };
+        let cost = |b: &mut CpuBus, addr: u32, size: usize, kind| {
+            let before = b.bus.ramsey_clock();
+            b.read_sized_uncached(addr, size, kind);
+            b.bus.ramsey_clock() - before
+        };
+        let rom = ROM_BASE as u32 + 0x1000;
+        // ROMJP1:ROMJP0 select 5 to 8 board clocks: 8 on the 25 MHz A3000
+        // boards (both jumpers 1-2, 280 ns), 6 on the A4000 (200 ns).
+        for (jumpers, clocks) in [
+            (0, 5),
+            (ROM_JUMPERS_A4000, 6),
+            (2, 7),
+            (ROM_JUMPERS_A3000, 8),
+        ] {
+            let mut m = machine(Some(Gary::new().with_rom_jumpers(jumpers)))?;
+            let b = &mut m.bus;
+            // A 32-bit port: one cycle delivers an aligned longword
+            // whatever the operand size.
+            assert_eq!(cost(b, rom, 4, Read), clocks);
+            assert_eq!(cost(b, rom, 2, Read), clocks);
+            assert_eq!(cost(b, rom + 3, 1, Read), clocks);
+            // An operand across two longwords takes two cycles.
+            assert_eq!(cost(b, rom + 2, 4, Read), 2 * clocks);
+            // Opcodes are fetched a longword at a time: the second word of
+            // the longword just fetched needs no cycle, and a data read in
+            // between does not change that.
+            assert_eq!(cost(b, rom + 8, 2, Fetch), clocks);
+            assert_eq!(cost(b, rom + 0x100, 2, Read), clocks);
+            assert_eq!(cost(b, rom + 10, 2, Fetch), 0);
+            assert_eq!(cost(b, rom + 12, 2, Fetch), clocks);
+            assert_eq!(cost(b, rom + 8, 2, Fetch), clocks);
+            // The jumpers are part of the board: both resets keep them.
+            b.bus.gary.as_mut().unwrap().reset();
+            assert_eq!(cost(b, rom, 4, Read), clocks);
+            b.bus.gary.as_mut().unwrap().power_on_reset();
+            assert_eq!(cost(b, rom, 4, Read), clocks);
+        }
+        // A Fat Gary whose jumpers were never recorded (an older save
+        // state) and a board without one keep the generic bus cost of four
+        // CPU clocks a word.
+        for gary in [Some(Gary::new()), None] {
+            let mut m = machine(gary)?;
+            let b = &mut m.bus;
+            // Seven clocks to the colour clock here: seven word reads are
+            // 28 clocks, seven long reads 56.
+            let before = b.bus.emulated_cck();
+            for _ in 0..7 {
+                b.read_sized_uncached(rom, 2, Read);
+            }
+            assert_eq!(b.bus.emulated_cck() - before, 4);
+            for _ in 0..7 {
+                b.read_sized_uncached(rom, 4, Read);
+            }
+            assert_eq!(b.bus.emulated_cck() - before, 12);
+        }
         Ok(())
     }
 
@@ -9037,6 +9360,376 @@ mod tests {
     }
 
     #[test]
+    fn fat_gary_iena_latch_answers_every_offset_of_its_four_pages() {
+        // Gary has no A2-A11 pins, so the latch cannot be confined to the
+        // $09A offset the specification names: any write cycle in
+        // $DF8000-$DFBFFF loads it from D31.
+        let mut machine = test_bus(reset_rom(0, 0));
+        machine.attach_gary(crate::gary::Gary::new());
+        let mut b = cpu_bus(machine);
+        for addr in [0xdf8000, 0xdf8180, 0xdf9ffe, 0xdfa09a, 0xdfbffe] {
+            b.write_word(addr, 0x7fff);
+            assert!(b.bus.gary_interrupts_disabled(), "{addr:x}");
+            b.write_word(addr, 0x8000);
+            assert!(!b.bus.gary_interrupts_disabled(), "{addr:x}");
+        }
+        // A byte on the upper data strobe carries D31; one on the lower
+        // strobe does not reach the latch.
+        b.write_byte(0xdf8100, 0x7f);
+        assert!(b.bus.gary_interrupts_disabled());
+        b.write_byte(0xdf8101, 0x80);
+        assert!(b.bus.gary_interrupts_disabled());
+        b.write_byte(0xdf8100, 0x80);
+        assert!(!b.bus.gary_interrupts_disabled());
+        // The port is 16 bits wide: a long write is two cycles and the
+        // second word decides.
+        b.write_long(0xdf8100, 0x8000_0000);
+        assert!(b.bus.gary_interrupts_disabled());
+        b.write_long(0xdf8100, 0x0000_8000);
+        assert!(!b.bus.gary_interrupts_disabled());
+        // Neither the chip-register pages beside it nor the space below
+        // belong to the latch.
+        for addr in [0xdf7ffe, 0xdfc09a, 0xdff09a, 0xc0009a] {
+            b.write_word(addr, 0);
+            assert!(!b.bus.gary_interrupts_disabled(), "{addr:x}");
+        }
+    }
+
+    #[test]
+    fn custom_register_bank_repeats_every_512_bytes_of_a_selected_page() {
+        // The chips receive RGA8-RGA1 only, whichever part selects them.
+        for board in 0..3 {
+            let mut machine = test_bus(reset_rom(0, 0));
+            match board {
+                1 => machine.attach_gayle(crate::gayle::Gayle::new(0xd0)),
+                2 => machine.attach_gary(crate::gary::Gary::new()),
+                _ => {}
+            }
+            let mut b = cpu_bus(machine);
+            for alias in [0x200, 0x400, 0xa00, 0xe00] {
+                b.write_word(0xdff09a, 0x3fff);
+                b.write_word(0xdff09a + alias, 0x8004);
+                assert_eq!(b.read_word(0xdff01c), 4, "board {board} +{alias:x}");
+                assert_eq!(b.read_word(0xdff01c + alias), 4, "board {board} +{alias:x}");
+            }
+        }
+    }
+
+    #[test]
+    fn gayle_overlay_spans_bank_zero_and_drops_at_the_first_cia_a_write() {
+        let mut machine = test_bus(reset_rom(0, 0));
+        machine.attach_gayle(crate::gayle::Gayle::new(0xd0));
+        machine.mem.overlay = true;
+        machine.mem.chip_ram.resize(2 << 20, 0);
+        machine.mem.rom = vec![0; 512 * 1024];
+        machine.mem.rom[..2].copy_from_slice(&[0x11, 0x22]);
+        let mut b = cpu_bus(machine);
+        // Gayle selects the ROM for all of $000000-$1FFFFF under OVL.
+        for addr in [0x000000, 0x080000, 0x100000, 0x180000] {
+            b.write_word(addr, 0xaa55);
+            assert_eq!(b.read_word(addr), 0x1122, "{addr:x}");
+        }
+        // The latch is internal: CIA-B cannot touch it, and CIA-A clears
+        // it by being written at all, whatever the register and whatever
+        // PA0 then drives.
+        b.write_byte(0xbfd200, 0xff);
+        assert!(b.bus.mem.overlay);
+        b.write_byte(0xbfe301, 0x00);
+        assert!(!b.bus.mem.overlay);
+        assert_eq!(b.read_word(0x080000), 0);
+        // Nothing but reset sets it again.
+        b.write_byte(0xbfe201, 0x00);
+        b.write_byte(0xbfe001, 0x01);
+        assert!(!b.bus.mem.overlay);
+    }
+
+    #[test]
+    fn gary_selects_the_cias_by_a12_and_a13_throughout_the_vpa_range() {
+        const DDRB: u32 = 0x300;
+        let mut b = cpu_bus(test_bus(reset_rom(0, 0)));
+        // A12 low alone: CIA-A, at any address of $A00000-$BFFFFF.
+        b.write_byte(0xa0e001 + DDRB, 0x5a);
+        assert_eq!(b.read_byte(0xbfe001 + DDRB), 0x5a);
+        assert_eq!(b.read_byte(0xb36001 + DDRB), 0x5a);
+        // A13 low alone: CIA-B.
+        b.write_byte(0xa0d000 + DDRB, 0xc3);
+        assert_eq!(b.read_byte(0xbfd000 + DDRB), 0xc3);
+        assert_eq!(b.read_byte(0xb25000 + DDRB), 0xc3);
+        assert_eq!(b.read_byte(0xbfe001 + DDRB), 0x5a);
+        // Both low: one cycle reaches both chips, each on its own byte.
+        b.write_word(0xbfc000 + DDRB, 0x1234);
+        assert_eq!(b.read_byte(0xbfd000 + DDRB), 0x12);
+        assert_eq!(b.read_byte(0xbfe001 + DDRB), 0x34);
+        assert_eq!(b.read_word(0xa0c000 + DDRB), 0x1234);
+        assert_eq!(b.read_byte(0xbfc000 + DDRB), 0x12);
+        assert_eq!(b.read_byte(0xbfc001 + DDRB), 0x34);
+        // Both high: neither chip is selected and the bus floats.
+        b.bus.data_bus = 0xa53c;
+        assert_eq!(b.read_word(0xbff000 + DDRB), 0xa53c);
+        b.write_word(0xbff000 + DDRB, 0xffff);
+        assert_eq!(b.read_byte(0xbfd000 + DDRB), 0x12);
+        assert_eq!(b.read_byte(0xbfe001 + DDRB), 0x34);
+    }
+
+    #[test]
+    fn gary_cia_cycles_keep_each_chip_on_its_own_data_lane() {
+        const DDRB: u32 = 0x300;
+        const ICR: u32 = 0xd00;
+        let mut b = cpu_bus(test_bus(reset_rom(0, 0)));
+        b.write_byte(0xbfd000 + DDRB, 0x12);
+        b.write_byte(0xbfe001 + DDRB, 0x34);
+        // CIA-A drives D7-D0 only. Where it alone is selected the upper
+        // lane floats, at $BFE000 as at any other address with A12 low.
+        for page in [0xa0e000, 0xbfe000] {
+            b.bus.data_bus = 0xa55a;
+            assert_eq!(b.read_byte(page + DDRB), 0xa5, "{page:x}");
+            assert_eq!(b.read_byte(page + DDRB + 1), 0x34, "{page:x}");
+            b.bus.data_bus = 0xa55a;
+            assert_eq!(b.read_word(page + DDRB), 0xa534, "{page:x}");
+        }
+        // CIA-B drives D15-D8 only.
+        for page in [0xa0d000, 0xbfd000] {
+            b.bus.data_bus = 0xa55a;
+            assert_eq!(b.read_byte(page + DDRB + 1), 0x5a, "{page:x}");
+            assert_eq!(b.read_byte(page + DDRB), 0x12, "{page:x}");
+            b.bus.data_bus = 0xa55a;
+            assert_eq!(b.read_word(page + DDRB), 0x125a, "{page:x}");
+        }
+        // A byte read of the lane a chip does not drive is not a read of
+        // that chip: its interrupt flags survive.
+        b.bus.cia_a.assert_flag();
+        b.bus.cia_b.assert_flag();
+        let pending = (b.bus.cia_a.debug_icr_data(), b.bus.cia_b.debug_icr_data());
+        assert_ne!(pending, (0, 0));
+        b.read_byte(0xa0e000 + ICR);
+        b.read_byte(0xa0d001 + ICR);
+        b.read_byte(0xa0f000 + ICR);
+        b.read_byte(0xa0f001 + ICR);
+        assert_eq!(
+            (b.bus.cia_a.debug_icr_data(), b.bus.cia_b.debug_icr_data()),
+            pending
+        );
+        // With both selected a byte read still reaches one chip only.
+        b.read_byte(0xa0c001 + ICR);
+        assert_eq!(b.bus.cia_a.debug_icr_data(), 0);
+        assert_eq!(b.bus.cia_b.debug_icr_data(), pending.1);
+        b.read_byte(0xa0c000 + ICR);
+        assert_eq!(b.bus.cia_b.debug_icr_data(), 0);
+        // A byte write is on both halves of the data bus, so every
+        // selected chip latches it whichever strobe carried it.
+        b.write_byte(0xa0e000 + DDRB, 0x56);
+        assert_eq!(b.read_byte(0xbfe001 + DDRB), 0x56);
+        b.write_byte(0xa0c001 + DDRB, 0x78);
+        assert_eq!(b.read_word(0xa0c000 + DDRB), 0x7878);
+    }
+
+    #[test]
+    fn gary_long_cia_access_is_two_word_cycles() {
+        const DDRB: u32 = 0x300;
+        let mut b = cpu_bus(test_bus(reset_rom(0, 0)));
+        b.write_word(0xa0c000 + DDRB, 0x1234);
+        assert_eq!(b.read_long(0xa0c000 + DDRB), 0x1234_1234);
+        // The second word cycle is the one whose data stays in the
+        // registers.
+        b.write_long(0xa0c000 + DDRB, 0x1122_3344);
+        assert_eq!(b.read_word(0xa0c000 + DDRB), 0x3344);
+        // Each cycle selects a register from its own address: the first
+        // word of this long is DDRB's, the second timer A's.
+        b.write_long(0xa0c0fe + DDRB, 0x5566_7788);
+        assert_eq!(b.read_word(0xa0c000 + DDRB), 0x5566);
+    }
+
+    #[test]
+    fn gary_vpa_cycle_runs_whether_or_not_a_cia_is_selected() {
+        // /VPA depends on A23-A21 alone, so an address with A12 and A13
+        // both high costs the same E-clock cycle as one that selects a
+        // chip. Start every access at the same E phase.
+        let cost = |addr: u32, size: usize, write: bool| {
+            let mut b = cpu_bus(test_bus(reset_rom(0, 0)));
+            b.bus.set_cpu_bus_arbitration_enabled(true);
+            b.bus.advance_chipset(0x40);
+            let before = b.bus.emulated_cck();
+            match (write, size) {
+                (false, 1) => {
+                    b.read_byte(addr);
+                }
+                (false, _) => {
+                    b.read_word(addr);
+                }
+                (true, 1) => b.write_byte(addr, 0),
+                (true, _) => b.write_word(addr, 0),
+            }
+            b.bus.emulated_cck() - before
+        };
+        for write in [false, true] {
+            assert_eq!(cost(0xbff301, 1, write), cost(0xbfe301, 1, write));
+            assert_eq!(cost(0xa03300, 2, write), cost(0xbfd300, 2, write));
+        }
+        // Space outside the range is an ordinary cycle, and shorter.
+        assert!(cost(0x9ff301, 1, false) < cost(0xbff301, 1, false));
+    }
+
+    #[test]
+    fn gayle_and_fat_gary_select_the_cias_in_their_two_pages_only() {
+        const DDRB: u32 = 0x300;
+        for fat in [false, true] {
+            let mut machine = test_bus(reset_rom(0, 0));
+            if fat {
+                machine.attach_gary(crate::gary::Gary::new());
+            } else {
+                machine.attach_gayle(crate::gayle::Gayle::new(0xd0));
+            }
+            let mut b = cpu_bus(machine);
+            b.write_byte(0xbfe001 + DDRB, 0x5a);
+            for addr in [0xa0e001, 0xbf6001, 0xbfc001] {
+                b.write_byte(addr + DDRB, 0xff);
+                assert_eq!(b.read_byte(0xbfe001 + DDRB), 0x5a, "{addr:x}");
+                b.bus.data_bus = 0xa53c;
+                assert_eq!(b.read_byte(addr + DDRB), 0x3c, "{addr:x}");
+            }
+        }
+    }
+
+    #[test]
+    fn gary_and_gayle_mirror_the_kickstart_rom() {
+        let rom = || {
+            let mut rom = vec![0u8; 512 * 1024];
+            rom[..2].copy_from_slice(&[0x11, 0x14]);
+            rom[0x7fffe..].copy_from_slice(&[0x33, 0x44]);
+            rom
+        };
+        // Gary: /ROMEN also answers at $E00000-$E7FFFF.
+        let mut b = cpu_bus(test_bus(rom()));
+        assert_eq!(b.read_word(0xe00000), 0x1114);
+        assert_eq!(b.read_word(0xe7fffe), 0x3344);
+        b.write_word(0xe00000, 0xffff);
+        assert_eq!(b.read_word(0xf80000), 0x1114);
+        // No ROM answers in $A80000-$B7FFFF on a Gary board: that is /VPA
+        // space, floating wherever A12 and A13 select neither CIA.
+        b.bus.data_bus = 0xa53c;
+        assert_eq!(b.read_word(0xa83000), 0xa53c);
+        assert_eq!(b.read_word(0xb03000), 0xa53c);
+
+        // Gayle adds two more images at $A80000-$B7FFFF.
+        let mut machine = test_bus(rom());
+        machine.attach_gayle(crate::gayle::Gayle::new(0xd0));
+        let mut b = cpu_bus(machine);
+        for base in [0xa80000, 0xb00000, 0xe00000, 0xf80000] {
+            assert_eq!(b.read_word(base), 0x1114, "{base:x}");
+            assert_eq!(b.read_word(base + 0x7fffe), 0x3344, "{base:x}");
+        }
+        b.bus.data_bus = 0xa53c;
+        assert_eq!(b.read_word(0xb80000), 0xa53c);
+
+        // Fat Gary selects the ROM at $F80000 alone.
+        let mut machine = test_bus(rom());
+        machine.attach_gary(crate::gary::Gary::new());
+        let mut b = cpu_bus(machine);
+        b.bus.data_bus = 0xa53c;
+        assert_eq!(b.read_word(0xe00000), 0xa53c);
+        assert_eq!(b.read_word(0xf80000), 0x1114);
+
+        // A ROM fitted at $E00000 is the part selected there, not a mirror.
+        let mut machine = test_bus(rom());
+        machine.mem.extended_rom = vec![0x77; 512 * 1024];
+        machine.mem.extended_rom_base = 0x00e0_0000;
+        let mut b = cpu_bus(machine);
+        assert_eq!(b.read_word(0xe00000), 0x7777);
+
+        // On Gayle the two parts of such a 1 MiB set keep their A19 halves
+        // in the $A80000 select: the $F80000 part at $A80000, the $E00000
+        // part at $B00000.
+        let mut machine = test_bus(rom());
+        machine.attach_gayle(crate::gayle::Gayle::new(0xd0));
+        machine.mem.extended_rom = vec![0x77; 512 * 1024];
+        machine.mem.extended_rom_base = 0x00e0_0000;
+        let mut b = cpu_bus(machine);
+        assert_eq!(b.read_word(0xa80000), 0x1114);
+        assert_eq!(b.read_word(0xb00000), 0x7777);
+        assert_eq!(b.read_word(0xb7fffe), 0x7777);
+        assert_eq!(b.read_word(0xe00000), 0x7777);
+    }
+
+    #[test]
+    fn aga_custom_register_long_access_runs_two_word_cycles() {
+        use crate::chipset::agnus::AgnusRevision;
+        use crate::chipset::denise::DeniseRevision;
+
+        // Chip RAM is a 32-bit port beside Alice; the registers end their
+        // cycle with DSACK1 alone, so a long access is two word cycles.
+        let mut b = cpu_bus(test_bus(reset_rom(0, 0)));
+        b.bus
+            .set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+        b.bus.set_cpu_bus_arbitration_enabled(true);
+        // Clear of the refresh, disk, audio and sprite slots.
+        b.bus.advance_chipset(0x40);
+        let cost = |b: &mut CpuBus, addr: u32, size: usize| {
+            let before = b.bus.emulated_cck();
+            b.read_sized_uncached(addr, size, CpuBusAccessKind::Read);
+            b.bus.emulated_cck() - before
+        };
+        let ram_long = cost(&mut b, 0x0400, 4);
+        let reg_word = cost(&mut b, 0xdff002, 2);
+        let reg_long = cost(&mut b, 0xdff002, 4);
+        assert_eq!(reg_word, ram_long);
+        assert_eq!(reg_long, 2 * reg_word);
+        let before = b.bus.emulated_cck();
+        b.write_long(0xdff180, 0x0123_0456);
+        assert_eq!(b.bus.emulated_cck() - before, reg_long);
+    }
+
+    #[test]
+    fn aga_long_register_access_is_two_separately_decoded_word_cycles() {
+        use crate::chipset::agnus::AgnusRevision;
+        use crate::chipset::denise::DeniseRevision;
+
+        let machine = || {
+            let mut rom = vec![0u8; 512 * 1024];
+            rom[..2].copy_from_slice(&[0x00, 0x07]);
+            let mut machine = test_bus(rom);
+            machine.attach_gayle(crate::gayle::Gayle::new(0xd0));
+            machine.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+            machine.set_cpu_bus_arbitration_enabled(true);
+            machine.advance_chipset(0x40);
+            cpu_bus(machine)
+        };
+        // The second word of a long at the last register word comes from
+        // what its own address selects: Gayle's ROM mirror at $E00000.
+        let mut b = machine();
+        assert_eq!(b.read_long(0xdffffe) & 0xffff, 0x0007);
+
+        // A long read is two word reads in what it samples and in how
+        // long it takes: VHPOSR is read a cycle after VPOSR.
+        let mut long = machine();
+        let mut words = machine();
+        let value = long.read_long(0xdff004);
+        let hi = words.read_word(0xdff004);
+        let lo = words.read_word(0xdff006);
+        assert_eq!(value, (u32::from(hi) << 16) | u32::from(lo));
+        assert_eq!(long.bus.emulated_cck(), words.bus.emulated_cck());
+
+        // A long write lands each word on its own cycle, where a word
+        // write of that register would land it.
+        let mut long = machine();
+        let mut words = machine();
+        long.write_long(0xdff180, 0x0123_0456);
+        words.write_word(0xdff180, 0x0123);
+        words.write_word(0xdff182, 0x0456);
+        assert_eq!(long.bus.emulated_cck(), words.bus.emulated_cck());
+        let landed = |b: &CpuBus| {
+            b.bus
+                .current_render_events()
+                .iter()
+                .map(|event| (event.vpos, event.hpos))
+                .collect::<Vec<_>>()
+        };
+        let positions = landed(&long);
+        assert_eq!(positions.len(), 2);
+        assert_ne!(positions[0], positions[1]);
+        assert_eq!(positions, landed(&words));
+    }
+
+    #[test]
     fn classic_gary_boot_rom_repeats_over_two_megabytes() {
         for fat in [false, true] {
             let mut machine = test_bus(reset_rom(0, 0));
@@ -11219,6 +11912,38 @@ mod tests {
         assert_eq!(other.bus.sampled_irq_level, 3);
         assert!(other.bus.ipl_sample_held);
         assert_eq!(other.bus.bus.data_bus, 0xBEEF);
+        Ok(())
+    }
+
+    #[test]
+    fn a_state_without_the_agnus_board_strap_takes_it_from_the_descriptor() -> Result<()> {
+        use crate::chipset::agnus::{AgnusRevision, VideoStandard, BEAMCON0_PAL};
+        use crate::chipset::denise::DeniseRevision;
+
+        // An NTSC board whose guest has selected PAL through BEAMCON0,
+        // saved by a build that did not record the strap.
+        let mut machine = machine_with_program(0x1000, &[0x4E71, 0x4E71])?;
+        let bus = machine.bus_mut();
+        bus.set_chipset_revisions(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ecs8373);
+        bus.agnus.set_video_standard(VideoStandard::Ntsc);
+        bus.agnus.write_beamcon0(BEAMCON0_PAL);
+        assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+        bus.agnus.forget_board_standard();
+        let descriptor = crate::config::MachineDescriptor {
+            video_standard: VideoStandard::Ntsc,
+            ..Default::default()
+        };
+        let mut blob = Vec::new();
+        crate::savestate::save_to_writer(&machine, &descriptor, None, &mut blob)?;
+
+        let mut other = machine_with_program(0x1000, &[0x4E71, 0x4E71])?;
+        crate::savestate::load_from_reader(&mut other, blob.as_slice())?;
+        // The beam carries on as saved; the next reset returns to NTSC.
+        assert_eq!(other.bus().agnus.video_standard(), VideoStandard::Pal);
+        assert_eq!(
+            other.bus().agnus.board_video_standard(),
+            VideoStandard::Ntsc
+        );
         Ok(())
     }
 

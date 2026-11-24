@@ -895,7 +895,8 @@ source of the per-opcode constants.
 On AGA machines, the 020+ CPU uses Alice's 32-bit chip-RAM path. One granted
 slot transfers a longword, and the two-entry fetch latch serves sequential
 opcode words from an already fetched longword without another bus access.
-OCS/ECS retain a 16-bit chip bus. The 68000/010 use their four-clock bus
+The custom registers are a 16-bit port even there: a long register access
+is two word cycles. OCS/ECS retain a 16-bit chip bus. The 68000/010 use their four-clock bus
 cycle; the 020+ path is selected by `Bus::cpu_short_bus_cycle`.
 
 For precise 020+ execution, the CPU's position is

@@ -505,13 +505,31 @@ fn display_window_unprogrammed(diwstrt: u16, diwstop: u16) -> bool {
 /// change, so degenerate windows never close (or never open) and the
 /// state carries across lines. `open_runs` lists the [start, end) spans
 /// in framebuffer hires x where the window is open on this row.
+///
+/// Lisa extends both comparators by two fine bits (DIWHIGH H1 and H0), so
+/// an AGA edge can sit 70 ns or 35 ns inside a low-resolution position.
+/// The 70 ns step is a whole framebuffer column and simply lands in
+/// `open_runs`. The 35 ns step is half a column: where the canvas has
+/// 35 ns columns the open run covers the column and `closed_halves`
+/// names the half that stays border; on the 70 ns canvas the step is
+/// below the output pitch and is dropped.
 #[derive(Clone, Debug, Default)]
 pub(super) struct HWindowRow {
     open_runs: Vec<(usize, usize)>,
     /// Framebuffer x of the first HSTART comparator match on this row
     /// (None when the row's openness is only carried in from a previous
-    /// line). Feeds the playfield painter's shifter-origin anchor.
+    /// line). Feeds the playfield painter's shifter-origin anchor. This is
+    /// the low-resolution position of the match: Lisa's fine start bits
+    /// move where the window opens, not where the fetched picture sits.
     comparator_anchor: Option<usize>,
+    /// 35 ns canvas columns (two per framebuffer x) that lie inside an
+    /// open run's first or last column but on the closed side of a fine
+    /// edge. Empty unless the canvas is 35 ns wide.
+    closed_halves: Vec<usize>,
+    /// Some open run of this row starts or ends off the low-resolution
+    /// grid, so a native pixel can straddle the edge and the painter must
+    /// gate per column.
+    fine_edges: bool,
 }
 
 impl HWindowRow {
@@ -541,6 +559,137 @@ impl HWindowRow {
             .filter(|&b| b > x)
             .min()
             .unwrap_or(FB_WIDTH)
+    }
+
+    fn clear(&mut self) {
+        self.open_runs.clear();
+        self.comparator_anchor = None;
+        self.closed_halves.clear();
+        self.fine_edges = false;
+    }
+
+    /// Append the open run [start, end). `start_half` / `end_half` say the
+    /// edge sits on the second 35 ns half of its column: an opening edge
+    /// there leaves the column's first half closed, a closing edge there
+    /// leaves the first half of column `end` open.
+    fn push_run(&mut self, start: usize, start_half: bool, end: usize, end_half: bool) {
+        let end = if end_half { end + 1 } else { end };
+        if end <= start {
+            return;
+        }
+        self.open_runs.push((start, end));
+        if start_half {
+            self.closed_halves.push(start * 2);
+        }
+        if end_half {
+            self.closed_halves.push((end - 1) * 2 + 1);
+        }
+    }
+}
+
+/// Turns the window flip-flop's transitions on one beam line into that
+/// row's open runs. Positions are comparator ticks from framebuffer
+/// column 0 plus a fine offset in 35 ns samples (four per tick).
+struct HWindowRunRecorder<'a> {
+    row: Option<&'a mut HWindowRow>,
+    /// Framebuffer x the current open run started at, and whether it
+    /// started on the second 35 ns half of that column.
+    open_from: Option<(usize, bool)>,
+    /// The canvas has 35 ns columns, so half-column edges can be shown.
+    half_columns: bool,
+}
+
+impl<'a> HWindowRunRecorder<'a> {
+    fn new(row: Option<&'a mut HWindowRow>) -> Self {
+        Self {
+            row,
+            open_from: None,
+            half_columns: active_canvas_scale() == 2,
+        }
+    }
+
+    /// The beam reaches framebuffer column 0 with the flip-flop in `flop`.
+    fn framebuffer_starts(&mut self, flop: bool) {
+        if self.row.is_some() && flop {
+            self.open_from = Some((0, false));
+        }
+    }
+
+    /// The flip-flop changed to `open`, `fine` samples into `fb_tick`.
+    fn transition(&mut self, fb_tick: i32, fine: i32, open: bool) {
+        let Some(row) = self.row.as_deref_mut() else {
+            return;
+        };
+        if fb_tick < 0 {
+            return;
+        }
+        let x = (fb_tick * 2 + (fine >> 1)) as usize;
+        let half = self.half_columns && fine & 1 != 0;
+        row.fine_edges |= fine & 2 != 0 || half;
+        if x < FB_WIDTH {
+            if open {
+                self.open_from = Some((x, half));
+                if row.comparator_anchor.is_none() {
+                    row.comparator_anchor = Some((fb_tick * 2) as usize);
+                }
+            } else if let Some((start, start_half)) = self.open_from.take() {
+                row.push_run(start, start_half, x, half);
+            }
+        } else if !open {
+            // Closed right of the framebuffer (or in the wrapped tail):
+            // the visible part of the run reaches the edge. A reopening
+            // out here only matters as carry into the next line.
+            if let Some((start, start_half)) = self.open_from.take() {
+                row.push_run(start, start_half, FB_WIDTH, false);
+            }
+        }
+    }
+
+    fn finish(self) {
+        if let (Some(row), Some((start, start_half))) = (self.row, self.open_from) {
+            row.push_run(start, start_half, FB_WIDTH, false);
+        }
+    }
+}
+
+/// Apply one counter tick's comparator matches to the window flip-flop.
+/// `start` / `stop` carry the matching edge's fine offset in 35 ns
+/// samples. Two matches in one tick act in sample order; on the same
+/// sample the stop wins, as it does for an OCS/ECS window whose HSTART
+/// equals its HSTOP. `transition` is told each change of state.
+fn apply_h_window_matches(
+    flop: &mut bool,
+    start: Option<i32>,
+    stop: Option<i32>,
+    mut transition: impl FnMut(i32, bool),
+) {
+    match (start, stop) {
+        (Some(start), Some(stop)) if start != stop => {
+            let edges = if start < stop {
+                [(start, true), (stop, false)]
+            } else {
+                [(stop, false), (start, true)]
+            };
+            for (fine, open) in edges {
+                if *flop != open {
+                    *flop = open;
+                    transition(fine, open);
+                }
+            }
+        }
+        _ => {
+            let was_open = *flop;
+            if start.is_some() {
+                *flop = true;
+            }
+            if stop.is_some() {
+                *flop = false;
+            }
+            if *flop != was_open {
+                let fine = if *flop { start } else { stop };
+                transition(fine.unwrap_or(0), *flop);
+            }
+        }
     }
 }
 
@@ -602,10 +751,13 @@ fn scan_static_h_window_line(
     flop: &mut bool,
     beam_line: i32,
     is_ecs: bool,
-    hstrt: i32,
-    hstop: i32,
-    mut record: Option<&mut HWindowRow>,
+    control: ControlState,
+    record: Option<&mut HWindowRow>,
 ) {
+    let hstrt = control.diw_h_start() as i32;
+    let hstop = control.diw_h_stop() as i32;
+    let start_fine = control.diw_h_start_fine();
+    let stop_fine = control.diw_h_stop_fine();
     let free_run = beam_line < 9 && !is_ecs;
     let counter_start = if free_run {
         (H_COUNTER_LINE_ORIGIN + beam_line * 0x1C6) & 0x1FF
@@ -620,8 +772,9 @@ fn scan_static_h_window_line(
     ];
     event_ticks.sort_unstable();
 
+    let fb_start_tick = h_counter_fb_start_tick();
+    let mut recorder = HWindowRunRecorder::new(record);
     let mut framebuffer_started = false;
-    let mut open_from = None;
     let mut event_idx = 0;
     while event_idx < event_ticks.len() {
         let tick = event_ticks[event_idx];
@@ -631,55 +784,23 @@ fn scan_static_h_window_line(
         while event_idx + 1 < event_ticks.len() && event_ticks[event_idx + 1] == tick {
             event_idx += 1;
         }
-        if !framebuffer_started && tick >= h_counter_fb_start_tick() {
+        if !framebuffer_started && tick >= fb_start_tick {
             framebuffer_started = true;
-            if record.is_some() && *flop {
-                open_from = Some(0);
-            }
+            recorder.framebuffer_starts(*flop);
         }
-
-        let was_open = *flop;
-        if start_tick == Some(tick) {
-            *flop = true;
-        }
-        if stop_tick == Some(tick) {
-            *flop = false;
-        }
-        if *flop != was_open {
-            if let Some(row) = record.as_deref_mut() {
-                let fb_tick = tick - h_counter_fb_start_tick();
-                if (0..FB_WIDTH as i32 / 2).contains(&fb_tick) {
-                    let x = (fb_tick * 2) as usize;
-                    if *flop {
-                        open_from = Some(x);
-                        if row.comparator_anchor.is_none() {
-                            row.comparator_anchor = Some(x);
-                        }
-                    } else if let Some(start) = open_from.take() {
-                        if x > start {
-                            row.open_runs.push((start, x));
-                        }
-                    }
-                } else if fb_tick >= FB_WIDTH as i32 / 2 && !*flop {
-                    if let Some(start) = open_from.take() {
-                        row.open_runs.push((start, FB_WIDTH));
-                    }
-                }
-            }
-        }
+        apply_h_window_matches(
+            flop,
+            (start_tick == Some(tick)).then_some(start_fine),
+            (stop_tick == Some(tick)).then_some(stop_fine),
+            |fine, open| recorder.transition(tick - fb_start_tick, fine, open),
+        );
         event_idx += 1;
     }
 
-    if !framebuffer_started && record.is_some() && *flop {
-        open_from = Some(0);
+    if !framebuffer_started {
+        recorder.framebuffer_starts(*flop);
     }
-    if let Some(row) = record {
-        if let Some(start) = open_from {
-            if FB_WIDTH > start {
-                row.open_runs.push((start, FB_WIDTH));
-            }
-        }
-    }
+    recorder.finish();
 }
 
 /// Run the window flip-flop over one beam line, updating `flop` in place.
@@ -691,17 +812,10 @@ fn scan_h_window_line(
     is_ecs: bool,
     mut control: ControlState,
     segs: &[ControlSegment],
-    mut record: Option<&mut HWindowRow>,
+    record: Option<&mut HWindowRow>,
 ) {
     if segs.is_empty() {
-        return scan_static_h_window_line(
-            flop,
-            beam_line,
-            is_ecs,
-            control.diw_h_start() as i32,
-            control.diw_h_stop() as i32,
-            record,
-        );
+        return scan_static_h_window_line(flop, beam_line, is_ecs, control, record);
     }
     let free_run = beam_line < 9 && !is_ecs;
     let fb_start_tick = h_counter_fb_start_tick();
@@ -716,63 +830,34 @@ fn scan_h_window_line(
     };
     let mut hstrt = control.diw_h_start() as i32;
     let mut hstop = control.diw_h_stop() as i32;
+    let mut start_fine = control.diw_h_start_fine();
+    let mut stop_fine = control.diw_h_stop_fine();
     let mut seg_idx = 0usize;
-    let mut open_from: Option<usize> = None;
+    let mut recorder = HWindowRunRecorder::new(record);
     for tick in 0..H_COUNTER_TICKS_PER_LINE {
         while seg_idx < segs.len() && diw_segment_effect_tick(segs[seg_idx].x) <= tick {
             control = segs[seg_idx].control;
             hstrt = control.diw_h_start() as i32;
             hstop = control.diw_h_stop() as i32;
+            start_fine = control.diw_h_start_fine();
+            stop_fine = control.diw_h_stop_fine();
             seg_idx += 1;
         }
-        if record.is_some() && tick == fb_start_tick && *flop {
-            open_from = Some(0);
+        if tick == fb_start_tick {
+            recorder.framebuffer_starts(*flop);
         }
-        let was_open = *flop;
-        if counter == hstrt {
-            *flop = true;
-        }
-        if counter == hstop {
-            *flop = false;
-        }
-        if *flop != was_open {
-            if let Some(row) = record.as_deref_mut() {
-                let fb_tick = tick - fb_start_tick;
-                if (0..FB_WIDTH as i32 / 2).contains(&fb_tick) {
-                    let x = (fb_tick * 2) as usize;
-                    if *flop {
-                        open_from = Some(x);
-                        if row.comparator_anchor.is_none() {
-                            row.comparator_anchor = Some(x);
-                        }
-                    } else if let Some(start) = open_from.take() {
-                        if x > start {
-                            row.open_runs.push((start, x));
-                        }
-                    }
-                } else if fb_tick >= FB_WIDTH as i32 / 2 && !*flop {
-                    // Closed right of the framebuffer (or in the wrapped
-                    // tail): the visible part of the run reaches the edge.
-                    // A reopening out here only matters as carry into the
-                    // next line.
-                    if let Some(start) = open_from.take() {
-                        row.open_runs.push((start, FB_WIDTH));
-                    }
-                }
-            }
-        }
+        apply_h_window_matches(
+            flop,
+            (counter == hstrt).then_some(start_fine),
+            (counter == hstop).then_some(stop_fine),
+            |fine, open| recorder.transition(tick - fb_start_tick, fine, open),
+        );
         counter = (counter + 1) & 0x1FF;
         if counter == H_COUNTER_WRAP && !free_run {
             counter = H_COUNTER_WRAP_TARGET;
         }
     }
-    if let Some(row) = record {
-        if let Some(start) = open_from.take() {
-            if FB_WIDTH > start {
-                row.open_runs.push((start, FB_WIDTH));
-            }
-        }
-    }
+    recorder.finish();
 }
 
 fn compute_h_window_rows_into(
@@ -785,8 +870,7 @@ fn compute_h_window_rows_into(
     out.resize_with(rows, HWindowRow::default);
     out.truncate(rows);
     for row in out.iter_mut() {
-        row.open_runs.clear();
-        row.comparator_anchor = None;
+        row.clear();
     }
     if rows == 0 {
         return;
@@ -815,9 +899,8 @@ fn compute_h_window_rows_into(
         if display_window_unprogrammed(base_controls[y].diwstrt, base_controls[y].diwstop)
             && control_segments[y].is_empty()
         {
-            out[y].open_runs.clear();
+            out[y].clear();
             out[y].open_runs.push((0, FB_WIDTH));
-            out[y].comparator_anchor = None;
         }
     }
 }
@@ -851,6 +934,22 @@ fn enforce_h_window_closed_intervals(
     let out_w = FB_WIDTH * canvas_scale;
     for y in 0..rows {
         let open_runs = h_window_rows[y].open_runs();
+        // A fine (35 ns) window edge closes half of an open run's first or
+        // last column; only a 35 ns canvas has those halves as columns.
+        if canvas_scale == 2 {
+            for &column in &h_window_rows[y].closed_halves {
+                let sx = column / 2;
+                let control = control_at_x(base_controls[y], &control_segments[y], sx);
+                if !(captured_open_rows.get(y).copied().unwrap_or(false)
+                    || control.display_window_contains_line(y, visible_line0))
+                    || control.border_sprite_enabled()
+                {
+                    continue;
+                }
+                let palette = palette_at_x(base_palettes[y], &palette_segments[y], sx);
+                fb[y * out_w + column] = background_pixel(&control, palette[0], true);
+            }
+        }
         if open_runs.len() == 1 && open_runs[0] == (0, FB_WIDTH) {
             continue;
         }
@@ -1037,8 +1136,10 @@ impl ControlState {
             }
             BPLCON3_SPRES_LORES => 4,
             BPLCON3_SPRES_HIRES => 2,
-            // ECS Super Denise accepts the SPRES encoding but retains its
-            // 70 ns sprite serializer; Lisa adds the final 35 ns rate.
+            // SPRES is Lisa's field and only Lisa has the 35 ns rate. ECS
+            // Denise has no such BPLCON3 bits, so the bus never hands it a
+            // non-zero encoding; the 70 ns arm keeps a hand-built state on
+            // the widest pitch that chip can serialize.
             BPLCON3_SPRES_SHRES => {
                 if self.aga() {
                     1
@@ -1123,6 +1224,28 @@ impl ControlState {
         self.diwhigh.h_stop(self.diwstop)
     }
 
+    /// Lisa's fine window start, in 35 ns samples past the low-resolution
+    /// position [`Self::diw_h_start`] names (DIWHIGH bits 4-3: H1 is a
+    /// 70 ns step, H0 a 35 ns step). ECS Denise has no such comparator
+    /// bits and ignores them.
+    fn diw_h_start_fine(&self) -> i32 {
+        if self.aga() {
+            i32::from(self.diwhigh.h_start_fine())
+        } else {
+            0
+        }
+    }
+
+    /// Lisa's fine window stop (DIWHIGH bits 12-11); see
+    /// [`Self::diw_h_start_fine`].
+    fn diw_h_stop_fine(&self) -> i32 {
+        if self.aga() {
+            i32::from(self.diwhigh.h_stop_fine())
+        } else {
+            0
+        }
+    }
+
     fn hires(&self) -> bool {
         self.bplcon0 & 0x8000 != 0 && !self.shres()
     }
@@ -1199,14 +1322,22 @@ impl ControlState {
     fn extra_half_brite(&self) -> bool {
         // OCS EHB is selected by six bitplanes with HAM and dual-playfield
         // disabled. Bitplane 6 halves the intensity of colors 0..31.
+        // KILLEHB (BPLCON2 bit 9) is a flip-flop of ECS Denise and Lisa
+        // only, and needs no ECSENA; the bus never latches it into an OCS
+        // Denise (`Bus::denise_control_latch_value`), so it reads clear
+        // here on that chip.
         self.nplanes() == 6 && self.bplcon0 & 0x0C00 == 0 && self.bplcon2 & BPLCON2_KILLEHB == 0
     }
 
     /// HAM6: HAMEN with five or six planes, on every Denise generation.
+    /// OCS and ECS Denise decode at most two planes in super-hires, so
+    /// the plane count alone keeps HAM out of that resolution there; Lisa
+    /// runs both HAM modes in every resolution ("not just LORES as
+    /// before", Lisa spec 391227).
     /// Callers that mean "any hold-and-modify variant" (history-dependent
     /// pixel output) must use [`Self::ham`], which also covers Lisa's HAM8.
     fn hold_and_modify(&self) -> bool {
-        !self.shres() && matches!(self.nplanes(), 5 | 6) && self.bplcon0 & 0x0800 != 0
+        matches!(self.nplanes(), 5 | 6) && self.bplcon0 & 0x0800 != 0
     }
 
     /// Lisa's HAM8: HAMEN with all eight planes, AGA only. Mirrors the
@@ -4490,8 +4621,8 @@ impl RenderInput {
 
     /// Finest programmed playfield/sprite pitch for an unfiltered capture.
     pub(crate) fn native_canvas_scale(&self) -> usize {
-        // ECS accepts SPRES=11 but keeps its 70 ns serializer; only Lisa
-        // emits 35 ns sprite samples (sprite_pixel_repeat_subpixels).
+        // Only Lisa has the SPRES field and emits 35 ns sprite samples
+        // (sprite_pixel_repeat_subpixels).
         let sprite_shres = self.render_base.agnus_revision == AgnusRevision::AgaAlice
             && (self.render_base.bplcon3 & BPLCON3_SPRES_MASK == BPLCON3_SPRES_SHRES
                 || self.frame_render_events.iter().any(|event| {
@@ -6838,6 +6969,10 @@ fn render_planned_playfield_line_impl(
         // hoisted out of the pixel loop.
         let window_open = h_row.open_at(x);
         run_stop = run_stop.min(h_row.next_boundary_after(x));
+        // Lisa's fine DIWHIGH bits can put a window edge inside a native
+        // pixel. On such a row the pixel shows on exactly the columns the
+        // window has open, so openness is asked per column, not per run.
+        let fine_window = h_row.fine_edges;
 
         let pixel_repeat = pixel_control.framebuffer_pixel_repeat();
         let native_per_pixel = pixel_control.native_samples_per_framebuffer_pixel();
@@ -6893,7 +7028,7 @@ fn render_planned_playfield_line_impl(
         // content. All edges - scroll lead-in, the DDFSTOP hold pixel,
         // window, segment and fetch-span boundaries - keep the per-pixel
         // loop below, which runs before and after the interior unchanged.
-        let fast_interior = if fast_runs && fine_scroll.is_none() {
+        let fast_interior = if fast_runs && fine_scroll.is_none() && !fine_window {
             fast_playfield_run_interior(
                 plan,
                 x,
@@ -6951,8 +7086,13 @@ fn render_planned_playfield_line_impl(
                 }
             }
             if let Some(fine) = fine_scroll {
+                let column_open = if fine_window {
+                    h_row.open_at(x)
+                } else {
+                    window_open
+                };
                 let visible =
-                    line_visible && window_open && x < plan.x_stop && x >= bpl_output_start_x;
+                    line_visible && column_open && x < plan.x_stop && x >= bpl_output_start_x;
                 let plane_mask = active_debug_plane_mask();
                 let position = 2 * (x - plan.x_start) as i64;
                 let mut halves: [Option<(DeniseBitplaneSample, DenisePlayfieldOutput)>; 2] =
@@ -7118,11 +7258,17 @@ fn render_planned_playfield_line_impl(
                 continue;
             };
             let native_x = relative_native_x + native_x_offset;
+            let column_open = |pixel_x: usize| {
+                if fine_window {
+                    h_row.open_at(pixel_x)
+                } else {
+                    window_open
+                }
+            };
             let visible_sample = line_visible
-                && window_open
                 && (0..pixel_repeat).any(|dx| {
                     let pixel_x = x + dx;
-                    pixel_x < plan.x_stop && pixel_x >= bpl_output_start_x
+                    column_open(pixel_x) && pixel_x < plan.x_stop && pixel_x >= bpl_output_start_x
                 });
             // Debugger layer isolation masks the colour-resolution index
             // only; `sample.idx` stays true for collisions and priority.
@@ -7256,7 +7402,7 @@ fn render_planned_playfield_line_impl(
             *clxdat |= collision.clxdat_bits();
             for dx in 0..pixel_repeat {
                 let pixel_x = x + dx;
-                if pixel_x >= plan.x_stop || !window_open {
+                if pixel_x >= plan.x_stop || !column_open(pixel_x) {
                     continue;
                 }
                 let fb_idx = plan.y * FB_WIDTH + pixel_x;

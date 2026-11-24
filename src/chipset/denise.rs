@@ -28,8 +28,11 @@ impl DeniseRevision {
         !matches!(self, Self::Ocs)
     }
 
-    /// DENISEID ($DFF07C). OCS Denise (8362) does not drive the register
-    /// (the bus floats); ECS Denise (8373) drives $FFFC; Lisa drives $00F8.
+    /// DENISEID/LISAID ($DFF07C). OCS Denise (8362) does not drive the
+    /// register (the bus floats); ECS Denise (8373) reads $FFFC. Lisa
+    /// identifies itself in the low byte only ($F8): the high byte is the
+    /// motherboard's, so this is the $00F8 word of the A1200 and CD32
+    /// boards and `Bus::denise_id` supplies the A4000 board's $FC.
     pub fn id(self) -> Option<u16> {
         match self {
             Self::Ocs => None,
@@ -84,6 +87,27 @@ impl DiwHigh {
         match self {
             Self::OcsImplicit => low | 0x0100,
             Self::EcsExplicit(bits) => low | (((bits >> 13) & 0x0001) << 8),
+        }
+    }
+
+    /// Lisa's fine horizontal start bits, DIWHIGH bits 4-3 (H1, H0), in
+    /// 35 ns samples: 0..=3 quarters of the low-resolution pixel that
+    /// [`Self::h_start`] names. Only Lisa has these comparator bits; the
+    /// caller gates on AGA, because the same register bits are don't-care
+    /// on ECS Denise.
+    pub fn h_start_fine(self) -> u8 {
+        match self {
+            Self::OcsImplicit => 0,
+            Self::EcsExplicit(bits) => ((bits >> 3) & 0x0003) as u8,
+        }
+    }
+
+    /// Lisa's fine horizontal stop bits, DIWHIGH bits 12-11 (H1, H0); see
+    /// [`Self::h_start_fine`].
+    pub fn h_stop_fine(self) -> u8 {
+        match self {
+            Self::OcsImplicit => 0,
+            Self::EcsExplicit(bits) => ((bits >> 11) & 0x0003) as u8,
         }
     }
 }

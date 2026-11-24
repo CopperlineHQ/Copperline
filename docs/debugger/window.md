@@ -394,10 +394,14 @@ or idle). Outlines mark the captured display (white) and the display window
 Click or drag in the raster or the scanline strip below it to select a colour
 clock, or move the selection with the arrow keys; the selected slot's full record
 appears below. It includes the custom register, address, transfer data and width,
-owner subtype, CPU-visible IPL, and decoded hardware events. The first refresh
-slot of a scanline shows the RGA strobe for equalization (STREQU), vertical
-blank (STRVBL) or normal horizontal timing (STRHOR). A long NTSC line also
-carries STRLONG in its second refresh slot. Other refresh slots show NULL.
+owner subtype, CPU-visible IPL, and decoded hardware events. Agnus runs its
+four refresh cycles back to back across the line boundary: the line-end slot
+(`$E2`, or `$E3` on a long line) is the first of them and slots 1, 3 and 5
+follow. The line-end slot shows the RGA strobe that classifies the line it
+leads into: equalization (STREQU), vertical blank (STRVBL) or normal
+horizontal timing (STRHOR). A long NTSC line carries STRLONG in the second
+cycle, its slot 1. The other refresh slots show NULL. An NTSC frame is traced
+228 colour clocks wide so the `$E3` slot of every long line is on the raster.
 [PAL and NTSC reference counts](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/denise/refs/timing.md)
 
 An interlaced

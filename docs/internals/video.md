@@ -248,6 +248,20 @@ border sprites are enabled by BPLCON3.BRDSPRT; if BPLCON3.BRDRBLNK is
 asserted, the border-sprite bypass is suppressed along with the blanked
 border.
 
+Lisa's fine DIWHIGH bits place an edge between low-resolution counter
+positions. The flip-flop still switches on the low-resolution match; the
+recorded open run is moved by the fine offset, and the shifter-origin
+anchor the playfield painter hangs the fetched data from stays on the
+low-resolution position, so the picture does not follow the edge. The
+70 ns step (H1) is one framebuffer column: on a row that has one, a
+native pixel can straddle the edge, and the painter asks the window for
+each column of the pixel instead of once per run (the fast interior is
+off on such rows). The 35 ns step (H0) is half a column. Where the frame
+is rendered at 35 ns per column (a programmable-scan super-hires frame)
+the open run covers the whole column and the closed half is restored to
+border after compositing; on the 70 ns canvas the step is below the
+output pitch and is dropped.
+
 BPLCON0 is itself split across two of those timelines. The plane count and
 the resolution bits gate the fetch/serializer side and stay in the generic
 register domain, but the HAM select does not reach the shifter at all: it

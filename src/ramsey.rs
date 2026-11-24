@@ -12,6 +12,7 @@
 //! once.
 
 pub(crate) const CLOCKS_PER_CCK: u32 = 7;
+/// Where a save state written before the refresh phase was recorded resumes.
 const fn first_refresh() -> u64 {
     154
 }
@@ -131,38 +132,67 @@ pub struct Ramsey {
     /// Remainder when converting board clocks to accelerator CPU clocks.
     #[serde(default)]
     pub(crate) clock_remainder: u32,
+    /// The board's RSIZE jumper: the DRAM depth the control register comes
+    /// up describing. None in a save state written before it was recorded.
+    #[serde(default)]
+    rsize: Option<bool>,
 }
 
 impl Ramsey {
-    /// A Ramsey whose control register comes up describing `bank_bytes` of
-    /// motherboard DRAM per bank.
+    /// A Ramsey out of power-up on a board fitted with `bank_bytes` of DRAM
+    /// per bank.
     ///
-    /// Real Ramsey powers up with the control register cleared and Kickstart
-    /// programs it while sizing memory. We seed it with a value that already
-    /// matches the RAM we emulate, so that a diagnostic run on a machine that
-    /// never got as far as Kickstart's memory sizing still reports the truth.
+    /// Every control bit has a default it takes while *PWRUP is low
+    /// (Commodore Ramsey specification, "RAMSEY Control Register"): page,
+    /// burst and wrap off, RAMsize from the RSIZE jumper, RAMwidth set on
+    /// the -04 (skip clear on the -07), and the refresh rate from the RSPEED
+    /// input, which selects 238 clocks on a 25 MHz board. The jumper is
+    /// taken to match the DRAM actually fitted.
     pub fn new(revision: RamseyRevision, bank_bytes: u32) -> Self {
-        let mut control = 0;
         // 1Mx4 parts give 4 MiB banks; 256Kx4 parts give 1 MiB banks.
-        if bank_bytes >= 4 * 1024 * 1024 {
+        let rsize = bank_bytes >= 4 * 1024 * 1024;
+        let control = Self::power_up_control(revision, rsize);
+        Self {
+            revision,
+            control,
+            pending: None,
+            next_refresh: Self::refresh_period(control).unwrap_or(u64::MAX),
+            open_row: None,
+            clock_remainder: 0,
+            rsize: Some(rsize),
+        }
+    }
+
+    fn power_up_control(revision: RamseyRevision, rsize: bool) -> u8 {
+        // RSPEED is high on the 25 MHz boards modelled here: refresh 01.
+        let mut control = 1 << 5;
+        if rsize {
             control |= CONTROL_RAMSIZE;
         }
         // Ramsey-07 has no 1-bit DRAM to describe, and bit 4 means skip mode.
         if revision == RamseyRevision::Rev4 {
             control |= CONTROL_RAMWIDTH;
         }
-        Self {
-            revision,
-            control,
-            pending: None,
-            next_refresh: first_refresh(),
-            open_row: None,
-            clock_remainder: 0,
-        }
+        control
     }
 
-    pub fn reset(&mut self) {
-        *self = Self::new(self.revision, self.bank_bytes());
+    /// A power cycle: *PWRUP reloads every default. The system /RESET line
+    /// (Ctrl-Amiga-Amiga, the CPU RESET instruction) does not reach the
+    /// register, so a warm reboot starts with whatever mode the last
+    /// session left and Kickstart programs it afresh.
+    pub fn power_on_reset(&mut self, now: u64) {
+        let rsize = self.rsize.unwrap_or(self.control & CONTROL_RAMSIZE != 0);
+        let control = Self::power_up_control(self.revision, rsize);
+        *self = Self {
+            revision: self.revision,
+            control,
+            pending: None,
+            next_refresh: Self::refresh_period(control)
+                .map_or(u64::MAX, |period| now.saturating_add(period)),
+            open_row: None,
+            clock_remainder: self.clock_remainder,
+            rsize: Some(rsize),
+        };
     }
 
     fn refresh_period(control: u8) -> Option<u64> {
@@ -183,6 +213,12 @@ impl Ramsey {
             Some(period) => now.saturating_add(period - (now - self.next_refresh) % period),
             None => u64::MAX,
         };
+    }
+
+    /// The board clock of the next refresh edge, as of the last catch-up.
+    #[cfg(test)]
+    pub(crate) fn next_refresh_at(&self) -> u64 {
+        self.next_refresh
     }
 
     pub(crate) fn access_clocks(&mut self, addr: u32) -> u32 {
@@ -226,6 +262,7 @@ impl Ramsey {
     }
 
     /// Bytes per memory bank, as currently described by the control register.
+    #[cfg(test)]
     fn bank_bytes(&self) -> u32 {
         let addr_bits = if self.control & CONTROL_RAMSIZE != 0 {
             20
@@ -286,17 +323,19 @@ mod tests {
     #[test]
     fn refresh_phase_and_open_page_survive_a_save_and_restore() {
         let mut r = Ramsey::new(RamseyRevision::Rev4, 1 << 20);
+        // The power-up rate puts the first refresh at 238 clocks. The
+        // page-mode word selects rate 00, so the next edge is 154 later.
         r.write_at(RAMSEY_CONTROL, CONTROL_PAGE | CONTROL_RAMWIDTH, 12);
-        r.advance_to(154);
+        r.advance_to(238);
         assert_eq!(r.access_clocks(0x07c0_0000), 5);
-        r.write_at(RAMSEY_CONTROL, CONTROL_RAMWIDTH, 200);
+        r.write_at(RAMSEY_CONTROL, CONTROL_RAMWIDTH, 300);
         let bytes = rmp_serde::to_vec_named(&r).unwrap();
         let mut restored: Ramsey = rmp_serde::from_slice(&bytes).unwrap();
         for ramsey in [&mut r, &mut restored] {
             assert_eq!(ramsey.read_byte(RAMSEY_CONTROL), CONTROL_RAMWIDTH);
-            ramsey.advance_to(307);
+            ramsey.advance_to(391);
             assert_eq!(ramsey.access_clocks(0x07c0_0120), 3);
-            ramsey.advance_to(308);
+            ramsey.advance_to(392);
             assert_eq!(ramsey.control(), CONTROL_RAMWIDTH);
             assert_eq!(ramsey.access_clocks(0x07c0_0120), 5);
         }
@@ -391,13 +430,36 @@ mod tests {
         assert_eq!(RamseyRevision::Rev7.bank_bytes_for(64 * M), 4 * M as u32);
     }
 
-    /// Refresh comes up at index 0 (154 clocks), which is what both diagnostic
-    /// tools expect to see on a machine Kickstart has not reprogrammed.
+    /// RSPEED is high on a 25 MHz board, which selects refresh rate 01 (238
+    /// clocks) at power-up; the test bit and the three mode bits come up
+    /// clear.
     #[test]
-    fn refresh_comes_up_at_the_fastest_rate() {
-        let r = Ramsey::new(RamseyRevision::Rev4, 1024 * 1024);
-        assert_eq!(r.control() & CONTROL_REFRESH, 0);
-        assert_eq!(r.control() & CONTROL_TEST, 0);
+    fn power_up_loads_the_25mhz_refresh_default() {
+        for revision in [RamseyRevision::Rev4, RamseyRevision::Rev7] {
+            let r = Ramsey::new(revision, 1024 * 1024);
+            assert_eq!(r.control() & CONTROL_REFRESH, 1 << 5);
+            assert_eq!(r.next_refresh, 238);
+            assert_eq!(
+                r.control() & (CONTROL_TEST | CONTROL_PAGE | CONTROL_BURST | CONTROL_WRAP),
+                0
+            );
+        }
+    }
+
+    /// Only *PWRUP reloads the defaults. A power cycle restores them even
+    /// when software has rewritten the RAMsize bit the RSIZE jumper seeded.
+    #[test]
+    fn a_power_cycle_reloads_the_defaults_from_the_board_jumpers() {
+        let mut r = Ramsey::new(RamseyRevision::Rev7, 4 * 1024 * 1024);
+        let power_up = r.control();
+        r.write_at(RAMSEY_CONTROL, CONTROL_PAGE | CONTROL_BURST, 10);
+        r.advance_to(238);
+        assert_eq!(r.control(), CONTROL_PAGE | CONTROL_BURST);
+        r.power_on_reset(1000);
+        assert_eq!(r.next_refresh, 1238);
+        assert_eq!(r.control(), power_up);
+        assert_eq!(r.read_byte(RAMSEY_CONTROL), power_up);
+        assert_eq!(r.bank_bytes(), 4 * 1024 * 1024);
     }
 
     /// Ramsey has exactly two registers. Anything else on the page must stay

@@ -415,7 +415,7 @@ The CPU-visible memory map:
 |---|---|
 | `$000000` - chip top | Chip RAM (256K-2M; ROM overlaid at `$0` after reset until CIA-A releases /OVL) |
 | `$200000` - | Zorro II space (fast RAM autoconfig boards) |
-| `$A00000` / `$BFxxxx` | CIA-A (odd bytes, /LDS) and CIA-B (even bytes, /UDS) |
+| `$BFE001` / `$BFD000` | CIA-A (odd bytes, /LDS) and CIA-B (even bytes, /UDS); mirrored through `$A00000`-`$BFFFFF` on the Gary boards |
 | `$B80000` | Akiko (CD32 only) |
 | `$C00000` | Slow ("ranger") RAM, up to 512K |
 | `$DA0000` / `$DE1000` | Gayle IDE task file / Gayle ID and status (A600/A1200) |
@@ -425,7 +425,7 @@ The CPU-visible memory map:
 | `$DFF000` | Custom-chip register window |
 | `$E80000` | Zorro autoconfig window (on a CDTV the DMAC is first in the chain) |
 | `$E00000` / `$F00000` | Extended ROM (CD32 / CDTV) |
-| `$F80000` | Kickstart ROM (512 KiB) |
+| `$F80000` | Kickstart ROM (512 KiB); mirrored at `$E00000` by Gary and Gayle, and at `$A80000`-`$B7FFFF` by Gayle |
 | `$40000000`+ | Zorro III space (32-bit CPUs) |
 
 MMIO stubs cover every "gap" region DiagROM probes during fast-RAM
@@ -442,12 +442,46 @@ the mirror answers -- on a floating bus KS 1.2 sizes RAM into unmapped
 space and dies on a yellow screen. Gayle does not select these aliases.
 Fat Gary selects the custom chips at `$C00000–$CFFFFF` and
 `$DFC000–$DFFFFF`. Its separate interrupt-enable latch occupies the four
-4 KiB pages immediately below the latter window.
+4 KiB pages immediately below the latter window. Whichever part selects
+them, the chips receive only the register address lines RGA8-RGA1, so the
+register bank repeats every `$200` inside a selected page: `$DFF200` is
+`$DFF000` again.
 
-While CIA-A asserts OVL, classic Gary selects ROM throughout the low 2 MiB.
-The 512 KiB ROM window repeats four times, and writes leave the underlying
-chip RAM intact. On Fat Gary the overlay ends at `$07FFFF`. The A1000 has
-its own boot ROM and writable control store.
+Gary asserts /VPA for all of `$A00000`-`$BFFFFF` and takes the two CIA chip
+selects straight from address lines: CIA-A wherever A12 is low, CIA-B
+wherever A13 is low, both where both are, neither where both are high
+(A2000 PALEN equation `/VPA = /AS*A23*/A22*A21`). `$BFE001` and `$BFD000`
+are the addresses that select exactly one chip. CIA-A is wired to D7-D0 and
+CIA-B to D15-D8, and on these boards every cycle in the range keeps those
+lanes: a word cycle reads CIA-B in its high byte and CIA-A in its low one
+and writes each chip from its own byte; a lane no selected chip drives
+floats, and a byte read of that lane reaches no chip, so it has none of a
+register read's side effects; a byte write is on both halves of the 68000
+data bus and reaches every selected chip. With neither chip selected the
+E-clock cycle still runs. A long access is two such word cycles. Gayle and
+Fat Gary decode the two 4 KiB pages `$BFE000` and `$BFD000` and nothing
+else; their cycles are not yet split by lane.
+
+While OVL is asserted, Gary and Gayle select ROM throughout the low 2 MiB
+(Gary specification 2.1.3, Gayle specification 2.0). The 512 KiB ROM
+repeats four times, and writes leave the underlying chip RAM intact. On Fat
+Gary the overlay ends at `$07FFFF`. Gary takes OVL from CIA-A PA0, so a
+program can assert it again. Gayle keeps it in an internal latch that reset
+sets and the first write to any CIA-A register clears; nothing but reset
+sets it again. (The Gayle specification names CIA1 at `$BFD000` as the chip
+whose write clears the latch. Kickstart 2 and 3 open with `CLR.B $BFE001`
+while the port is still all inputs and write nothing to `$BFD000` before
+they need chip RAM at zero, so the latch has to follow CIA-A.) The first
+A2000 boards used discrete PALs whose /ROMEN equation selects the ROM in
+the first and last 512 KiB of the bank and nothing in between; no profile
+models that board. The A1000 has its own boot ROM and writable control
+store.
+
+The same decoders mirror the Kickstart ROM above the expansion space.
+Gary selects it at `$E00000`-`$E7FFFF` as well as `$F80000`, and Gayle at
+`$E00000`-`$E7FFFF` and `$A80000`-`$B7FFFF`. A second ROM fitted at
+`$E00000` takes the place of the mirror there. The A1000, the CDTV and the
+Fat Gary boards have no mirror.
 
 The `A2000` profile fits the B2000 Rev 6.x motherboard, with an 8372A
 Agnus, OCS Denise, 1 MiB of chip RAM, an MSM6242 clock and the DIP Buster.

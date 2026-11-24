@@ -70,14 +70,22 @@ enum Machine {
     /// Fixed-clock JIT accelerator with local fast RAM.
     Jit,
     Ocs,
+    /// ECS Agnus (8372A) beside an OCS Denise, the late-A500 pairing.
     Ecs,
+    /// ECS Agnus beside an ECS Denise (8373), for probes of the Denise
+    /// side of ECS: BPLCON3, KILLEHB, programmable blanking.
+    EcsDenise,
     /// A1200 shape (68EC020, AGA, 2M chip) for probes of AGA-only
     /// behaviour (FMODE wide fetches, extended BPLCON1 scroll).
     Aga,
     /// A1200 profile exercising NTSC field geometry.
     AgaNtsc,
+    /// A1200 profile, PAL: the Gayle address decode.
+    A1200,
     A4000,
     A4000Buster,
+    /// A3000 profile: ECS, 68030, Fat Gary with the A3000's ROM jumpers.
+    A3000,
 }
 
 /// One golden-render probe: name, main-program binary, emulated seconds
@@ -165,25 +173,34 @@ fn build_adf(boot: &[u8], program: &[u8]) -> Vec<u8> {
 // Windows temp path's backslashes are not parsed as escape sequences.
 fn probe_config(adf: &Path, machine: Machine) -> String {
     let chipset = match machine {
-        Machine::Jit => "revision = \"ECS\"\n",
+        Machine::Jit | Machine::A3000 => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
-        Machine::Aga | Machine::AgaNtsc | Machine::A4000 | Machine::A4000Buster => {
-            "revision = \"AGA\"\n"
-        }
+        Machine::EcsDenise => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"ECS\"\n",
+        Machine::Aga
+        | Machine::AgaNtsc
+        | Machine::A1200
+        | Machine::A4000
+        | Machine::A4000Buster => "revision = \"AGA\"\n",
     };
     let (cpu, memory) = match machine {
         Machine::A4000 | Machine::A4000Buster => ("68040", "chip = \"2M\"\n"),
+        Machine::A3000 => ("68030", "chip = \"2M\"\n"),
         Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
-        Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
-        Machine::Aga | Machine::AgaNtsc => ("68EC020", "chip = \"2M\"\n"),
+        Machine::Ocs | Machine::Ecs | Machine::EcsDenise => {
+            ("68000", "chip = \"512K\"\nslow = \"512K\"\n")
+        }
+        Machine::Aga | Machine::AgaNtsc | Machine::A1200 => ("68EC020", "chip = \"2M\"\n"),
     };
     let acceleration = if matches!(machine, Machine::Jit) {
         "jit = true\nclock_mhz = 25\n"
     } else {
         ""
     };
-    let (profile, video) = if matches!(machine, Machine::A4000 | Machine::A4000Buster) {
+    let (profile, video) = if matches!(
+        machine,
+        Machine::A4000 | Machine::A4000Buster | Machine::A3000
+    ) {
         let scsi = if matches!(machine, Machine::A4000Buster) {
             "[scsi]\ncontroller = \"a4091\"\n"
         } else {
@@ -191,15 +208,24 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         };
         (
             format!(
-                "[machine]\nprofile = \"A4000\"\nbattmem = '{}'\n{scsi}[rtg]\ncard = \"none\"\n",
+                "[machine]\nprofile = \"{}\"\nbattmem = '{}'\n{scsi}[rtg]\ncard = \"none\"\n",
+                if matches!(machine, Machine::A3000) {
+                    "A3000"
+                } else {
+                    "A4000"
+                },
                 adf.with_extension("nvram").display()
             ),
             "PAL",
         )
-    } else if matches!(machine, Machine::AgaNtsc) {
+    } else if matches!(machine, Machine::AgaNtsc | Machine::A1200) {
         (
             "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n".to_owned(),
-            "NTSC",
+            if matches!(machine, Machine::AgaNtsc) {
+                "NTSC"
+            } else {
+                "PAL"
+            },
         )
     } else {
         (String::new(), "PAL")
@@ -333,7 +359,11 @@ fn run_probe(p: &Probe) {
     let shot_path = capture_probe(p, &work);
     let golden_path = golden_dir.join(format!("{name}.png"));
     let actual = load_png(&shot_path).expect("load capture");
-    if matches!(p.machine, Machine::A4000 | Machine::A4000Buster) || name == "gary-overlay" {
+    // The pass/fail probes paint one success colour; the cycle probes draw
+    // their measurements instead.
+    let pass_fail = matches!(p.machine, Machine::A4000 | Machine::A4000Buster)
+        && !matches!(name, "ramsey-cycles" | "fatgary-romcycle");
+    if pass_fail || name == "gary-overlay" {
         let center =
             (actual.height as usize / 2 * actual.width as usize + actual.width as usize / 2) * 4;
         assert_eq!(
@@ -376,6 +406,27 @@ fn run_probe(p: &Probe) {
                     [0, 0, 255]
                 }
             );
+        }
+    }
+    if name == "diwhigh-fine" {
+        assert_eq!((actual.width, actual.height), (1432, 313));
+        // First and last yellow column of a row, at the native 35 ns pitch.
+        let edges = |y: usize| {
+            let row = &actual.data[y * 1432 * 4..(y + 1) * 1432 * 4];
+            let lit = |x: usize| row[x * 4..x * 4 + 3] == [255, 255, 0];
+            let left = (0..1432).find(|&x| lit(x)).expect("window opens");
+            let right = (0..1432).rfind(|&x| lit(x)).expect("window closes");
+            (left, right)
+        };
+        // Row of beam line $40 + 16 * band + 8; the frame starts at line 0.
+        let band = |index: usize| edges(0x48 + 16 * index);
+        let (left, right) = band(0);
+        for fine in 0..4 {
+            // Start bits move the left edge only, stop bits the right
+            // edge only, one 35 ns column per count.
+            assert_eq!(band(fine), (left + fine, right), "start fine {fine}");
+            assert_eq!(band(4 + fine), (left, right + fine), "stop fine {fine}");
+            assert_eq!(band(8 + fine), (left + fine, right + fine), "both {fine}");
         }
     }
     if matches!(p.machine, Machine::AgaNtsc) {
@@ -632,7 +683,42 @@ probe_tests! {
     // FS-UAE-verified exact placement.
     golden_gary_overlay => probe("gary-overlay", "gary-overlay.bin", 16.0);
     golden_fatgary_ramsey => Probe { name: "fatgary-ramsey", program: "fatgary-ramsey.bin", seconds: 8.0, machine: Machine::A4000 };
+    // Gary's /VPA range and CIA selects by A12/A13, the register bank
+    // repeating every $200, and the ROM mirrors, as eight green/blue bands.
+    // The same program on the A1200 profile shows Gayle's decode.
+    golden_gary_decode => probe("gary-decode", "gary-decode.bin", 16.0);
+    golden_gayle_decode => Probe { name: "gayle-decode", program: "gary-decode.bin", seconds: 16.0, machine: Machine::A1200 };
+    // Gary's CIA cycles keep CIA-A on D7-D0 and CIA-B on D15-D8, run a
+    // long access as two word cycles, and run the E-clock cycle where
+    // neither chip is selected, as five green bands.
+    golden_gary_lanes => probe("gary-lanes", "gary-lanes.bin", 16.0);
+    // Ramsey's DRAM cycle length in standard, page-hit, page-miss and skip
+    // modes, as band heights.
+    golden_ramsey_cycles => Probe { name: "ramsey-cycles", program: "ramsey-cycles.bin", seconds: 10.0, machine: Machine::A4000 };
+    // Fat Gary's jumper-set ROM cycle against a five-clock Ramsey cycle: six
+    // clocks on the A4000, eight on the 25 MHz A3000, one cycle a longword.
+    golden_fatgary_romcycle => Probe { name: "fatgary-romcycle", program: "fatgary-romcycle.bin", seconds: 10.0, machine: Machine::A4000 };
+    golden_fatgary_romcycle_a3000 => Probe { name: "fatgary-romcycle-a3000", program: "fatgary-romcycle.bin", seconds: 16.0, machine: Machine::A3000 };
+    // The registers are a 16-bit CPU port beside Alice's 32-bit chip RAM
+    // port: a long register access takes two cycles, a long RAM access one.
+    golden_busprobe_reglong => probe_aga("busprobe-reglong", "busprobe-reglong.bin", 16.0);
     golden_lisa_scanblank => probe_aga("lisa-scanblank", "lisa-scanblank.bin", 16.0);
+    // Lisa's fine DIWHIGH bits move a window edge in 70 ns (H1) and 35 ns
+    // (H0) steps without moving the picture; run_probe checks each step.
+    golden_diwhigh_fine => probe_aga("diwhigh-fine", "diwhigh-fine.bin", 16.0);
+    // Lisa decodes six-plane hold-and-modify in super-hires, where OCS and
+    // ECS Denise have only two planes to decode.
+    golden_hamprobe_shres6 => probe_aga("hamprobe-shres6", "hamprobe-shres6.bin", 16.0);
+    // ECS Denise blanks from Agnus's CSY* pin (HBSTRT..HBSTOP under
+    // BLANKEN) only with BPLCON3.EXTBLKEN and BPLCON0.ECSENA, and latches
+    // EXTBLKEN before ECSENA is set; an OCS Denise beside the same Agnus
+    // keeps its fixed blank.
+    golden_ecsblank_pin => Probe { name: "ecsblank-pin", program: "ecsblank-pin.bin", seconds: 16.0, machine: Machine::EcsDenise };
+    golden_ecsblank_pin_ocs_denise => probe_ecs("ecsblank-pin-ocs-denise", "ecsblank-pin.bin", 16.0);
+    // BPLCON2.KILLEHB is a bit of ECS Denise and Lisa: an OCS Denise
+    // ignores it and keeps six planes extra-half-brite.
+    golden_ehbprobe_kill => probe("ehbprobe-kill", "ehbprobe-kill.bin", 16.0);
+    golden_ehbprobe_kill_ecs_denise => Probe { name: "ehbprobe-kill-ecs-denise", program: "ehbprobe-kill.bin", seconds: 16.0, machine: Machine::EcsDenise };
     golden_dblpal_hires_lace => probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
     // Alice wide-fetch addressing: FMODE 10 duplicates the first word and
     // supplied low address bits alias phases inside 32-bit fetches.

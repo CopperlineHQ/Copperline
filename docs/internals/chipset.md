@@ -23,6 +23,10 @@ including spans crossing scanlines and frames.
 Agnus owns the beam: `vpos`/`hpos` counters advanced per colour clock, PAL
 (313 lines, 227 CCK/line) and NTSC (263 lines with long/short line
 alternation) geometry, the long-field flag for interlace, and VPOSR/VHPOSR.
+The long/short line toggle runs whenever the PAL decodes are off and
+BEAMCON0.LOLDIS is clear, on a programmable scan as well: VARBEAMEN lines
+then alternate HTOTAL + 1 and HTOTAL + 2 colour clocks, which is why the
+programmable display modes set LOLDIS.
 It also owns DMACON and the display-fetch machinery: for FMODE=0 fetches
 the per-line fetch table comes from the DDF sequencer flop model
 (`src/chipset/ddf_sequencer.rs`; see the [arbitration model](timing) for
@@ -68,8 +72,8 @@ pointer.
 Agnus revisions are modelled independently of Denise (machines shipped
 mixed): OCS (8370/8371), ECS 8372A (1M chip RAM reach), ECS 8375 (2M), and
 AGA Alice (2M, HRM IDs $23/$33). VPOSR bits 8-14 report the chipset ID:
-$00 on OCS, $20/$30 (PAL/NTSC) on every ECS Agnus regardless of revision,
-and the Alice IDs above. The ECS Agnus adds DIWHIGH and the
+$00/$10 (PAL/NTSC) on OCS, $20/$30 on every ECS Agnus regardless of
+revision, and the Alice IDs above. The ECS Agnus adds DIWHIGH and the
 implemented subset of BEAMCON0 (PAL/VARBEAMEN/LOLDIS/HARDDIS and friends);
 Alice adds the FMODE wide-fetch latch, which scales the bitplane and
 sprite fetch quanta (FMODE=0 stays byte-identical to the OCS/ECS slot
@@ -100,12 +104,26 @@ bits collides over every word its serializer shifts out, 32 or 64 sprite
 pixels, the same pixels the renderer draws; a manually written SPRxDATA
 word repeats across that width in both paths.
 
-Lisa has its own HBSTRT and HBSTOP comparators. Bits 7–0 select the colour
-clock and bits 10–8 select one of its eight 35 ns samples. BPLCON0.ECSENA
+Lisa has its own HBSTRT and HBSTOP comparators. Bits 7-0 select the colour
+clock and bits 10-8 select one of its eight 35 ns samples. BPLCON0.ECSENA
 and BPLCON3.EXTBLKEN enable the programmable horizontal output blank.
 Wrapped windows can blank both edges of the image. The native SHRES canvas
 preserves a transition within a single hi-res pixel. ECS Agnus retains its
 whole-clock comparator. [Commodore AA chipset specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/Specifications_AA_Chipset-Manual-ENG.pdf)
+
+ECS Denise has no blank comparators of its own. BPLCON3.EXTBLKEN, enabled
+by BPLCON0.ECSENA, switches it from its fixed internal blank decode to its
+CBL* pin, which Agnus's CSY* pin drives: with BEAMCON0.BLANKEN that pin
+carries composite blank, so the picture blanks from HBSTRT to HBSTOP;
+without it the pin carries composite sync and the picture blanks for the
+sync pulse alone (the programmed HSSTRT..HSSTOP pulse under VARCSYEN; the
+hardwired pulse lies inside the fixed blank and hides nothing). With
+BLANKEN and VARCSYEN both set the pin is active only where the two
+windows overlap. BLANKEN by itself therefore changes nothing in the
+picture, and an OCS Denise beside an ECS Agnus always blanks on its fixed
+decode. Only the horizontal window of the pin is modelled: its vertical
+component (programmed vertical blank without VARVBEN, sync serration and
+equalisation) is not. [Commodore 8373 Denise specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/denise/refs/Denise_specification.pdf)
 
 The CPU sees the reach too: the motherboard decode (Gary and equivalents)
 routes the whole $000000-$1FFFFF window to Agnus, which decodes only as
@@ -144,8 +162,11 @@ Sprite DMA is modelled at the register level, the way the chips work:
 there is no separate "descriptor" concept. Each channel keeps Agnus-side
 copies of its SPRxPOS/SPRxCTL words and the vertical comparator values
 derived from them, updated identically by DMA fetches and by CPU/Copper
-pokes (POS supplies the vertical start's low bits, CTL the high bit, the
-whole vertical stop, and disarms the display latches). At each line start
+pokes (POS supplies the vertical start's low bits, CTL the high bits, the
+whole vertical stop, and disarms the display latches). The comparators
+are nine bits wide on OCS; the ECS Agnus and Alice add a tenth start and
+stop bit from SPRxCTL bits 6 and 5 (SV9, EV9), which is what lets a
+sprite sit below line 511 of a programmable scan. At each line start
 the comparators run: passing vstart sets the channel's DMA flip-flop,
 passing vstop clears it -- even when SPREN is off, which is what leaves a
 sprite dead until the next field when software disables DMA across its
@@ -305,9 +326,25 @@ display window (DIWSTRT/DIWSTOP, ECS DIWHIGH), sprite
 position/control/data registers, and CLXCON/CLXDAT collision detection.
 On Lisa, CLXCON2 extends the plane match to planes 7-8 in both the rendered
 and live beam-timed collision paths. Denise revisions: OCS 8362,
-ECS 8373, AGA Lisa (DENISEID $00F8). The AGA decode adds 8 bitplanes,
+ECS 8373, AGA Lisa. DENISEID reads $FFFC from the 8373; Lisa drives only
+the low byte ($F8) and the motherboard supplies the high one: $00 on the
+A1200 and CD32, $FC on the A4000. The AGA decode adds 8 bitplanes,
 HAM8, the BPLCON4 BPLAM pixel-index XOR mask, and the OSPRM/ESPRM sprite
-palette banks. The two BPLCON4 fields are on different Lisa timing paths:
+palette banks. Lisa also decodes both HAM modes in every resolution; OCS
+and ECS Denise decode at most two planes in super-hires, which keeps HAM
+out of it there.
+
+Each revision latches only the control bits it has flip-flops for, and
+the render replay is given the latched value. OCS Denise has no BPLCON3
+and no BPLCON2.KILLEHB, so six planes without HAM or dual playfield are
+always extra-half-brite on it; ECS Denise and Lisa honour KILLEHB without
+ECSENA. ECS Denise implements four BPLCON3 bits (BRDRBLNK, BRDNTRAN,
+ZDCLKEN, EXTBLKEN): the sprite-resolution, playfield 2 offset,
+border-sprite and palette-bank fields are Lisa's, and writing them on the
+8373 leaves its fixed behaviour in place. BPLCON3 latches every write on
+both chips; ECSENA gates the border, genlock and blank features where
+they are used, so software can write the register first and enable it
+later. The two BPLCON4 fields are on different Lisa timing paths:
 the low byte that selects sprite palette bases (ESPRM/OSPRM) reaches sprite
 colour lookup on an earlier sprite palette-control path than ordinary COLORxx
 palette writes, while the high-byte BPLAM XOR continues on the normal
@@ -346,6 +383,14 @@ low DIWSTRT/DIWSTOP values. Software that programmed a wide window through
 DIWHIGH and then touches DIWSTRT/DIWSTOP falls back to the implicit
 window, so the replay must drop the stale DIWHIGH on those writes rather
 than hold it.
+
+Lisa's DIWHIGH also carries two fine bits per edge (bits 4-3 for the
+start, 12-11 for the stop): H1 is a 70 ns step and H0 a 35 ns step below
+the low-resolution position DIWSTRT/DIWSTOP name, in every resolution.
+They extend the window comparators, not the bitplane position, so an edge
+moves across a picture that stays put. ECS Denise has no such bits. The
+beam-timed collision path and the frame analyzer's window markers still
+use the low-resolution window.
 
 DIWSTRT value zero is still a real Denise comparator position. The emulator
 only treats the display window as unprogrammed when DIWSTRT and DIWSTOP are
@@ -416,6 +461,12 @@ BPLCON0 LACE is set; outside interlace it holds its value -- the power-on
 state is set, so progressive fields normally read LOF=1, and a value
 written through VPOSW persists until the next laced toggle. Non-laced
 frame timing always uses the long frame length regardless of the latch.
+A programmable scan (BEAMCON0.VARBEAMEN) replaces the fixed counts with
+VTOTAL + 1 lines, and under interlace its long field runs VTOTAL + 2
+lines, as the AA register list describes VTOTAL. WinUAE extends the
+field by the latch alone (VTOTAL + 1 + LOF), which differs for a
+non-laced scan with the latch set; that case stays at VTOTAL + 1 here
+until a hardware measurement settles it.
 The held power-on state matters for the phase: the first field after
 software enables LACE toggles to a short field, as on real hardware,
 which is the absolute field order that software pairing its per-field

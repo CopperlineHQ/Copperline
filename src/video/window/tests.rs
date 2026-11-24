@@ -1626,14 +1626,18 @@ fn library_wheel_scrolls_games_and_favourites_and_accumulates_trackpad_motion() 
 #[test]
 fn native_screenshot_sprite_pitch_distinguishes_ecs_from_aga() {
     use crate::chipset::agnus::AgnusRevision;
-    for (revision, width) in [
-        (AgnusRevision::Ecs8372Rev4, 640),
-        (AgnusRevision::Ecs8375, 640),
-        (AgnusRevision::AgaAlice, 1280),
+    use crate::chipset::denise::DeniseRevision;
+    // BPLCON3 = SPRES 11 over a lo-res playfield. Lisa serializes 35 ns
+    // sprite samples; ECS Denise has no SPRES bits and stays on the
+    // playfield's lo-res pitch.
+    for (revision, denise, width) in [
+        (AgnusRevision::Ecs8372Rev4, DeniseRevision::Ecs8373, 320),
+        (AgnusRevision::Ecs8375, DeniseRevision::Ecs8373, 320),
+        (AgnusRevision::AgaAlice, DeniseRevision::AgaLisa, 1280),
     ] {
         let mut app = test_app();
         let bus = app.emu.bus_mut();
-        bus.set_agnus_revision(revision);
+        bus.set_chipset_revisions(revision, denise);
         for (offset, value) in [
             (0x08E, 0x2C81),
             (0x090, 0x2CC1),
@@ -1647,7 +1651,12 @@ fn native_screenshot_sprite_pitch_distinguishes_ecs_from_aga() {
         }
         app.emu.step_video_frame().unwrap();
         app.emu.step_video_frame().unwrap();
-        assert_eq!(app.emu.bus().frame_render_base().bplcon3 & 0xC0, 0xC0);
+        let spres = if denise == DeniseRevision::AgaLisa {
+            0xC0
+        } else {
+            0
+        };
+        assert_eq!(app.emu.bus().frame_render_base().bplcon3 & 0xC0, spres);
         app.set_native_screenshots(true);
         let image = app.capture_present_image();
         assert_eq!(

@@ -343,10 +343,11 @@ impl Bus {
             return;
         }
         let beam_y = vpos as i32;
+        let v9 = self.agnus.revision().sprite_v9();
         let state = &mut self.display_dma_sprite_state[sprite];
         match write {
             SpriteControlRegisterWrite::Pos => state.poke_pos(value),
-            SpriteControlRegisterWrite::Ctl => state.poke_ctl(value),
+            SpriteControlRegisterWrite::Ctl => state.poke_ctl(value, v9),
         }
         // TODO: near the end of a line the hardware comparator already sees
         // the next line's counter (vAmiga applies pos.v+1 from cck $E1).
@@ -1072,7 +1073,7 @@ impl Bus {
                 if let Some(words) =
                     self.fetch_sprite_words(sprite, vpos, SPRITE_DMA_SLOT1_HPOS[sprite] + 2, 0x0142)
                 {
-                    state.poke_ctl(words[0]);
+                    state.poke_ctl(words[0], self.agnus.revision().sprite_v9());
                     state.reevaluate_comparators_at(beam_y);
                     // The CTL fetch is a SPRxCTL write: it disarms the live
                     // display latch. Software relies on the null terminator's

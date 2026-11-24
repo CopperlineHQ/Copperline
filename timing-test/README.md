@@ -1019,15 +1019,21 @@ later after restoring the save. The run uses the bundled AROS ROM and an empty S
 
 ## Gary, Ramsey and Lisa board probes
 
-From this directory run `./build.sh gary-overlay`, `./build.sh fatgary-ramsey`
-or `./build.sh lisa-scanblank` to produce a bootable ADF. Cold boot the
-matching machine from the disk. Each probe takes over and stays on its
-result until reset.
+From this directory run `./build.sh gary-overlay`, `./build.sh gary-decode`,
+`./build.sh gary-lanes`, `./build.sh fatgary-ramsey`, `./build.sh ramsey-cycles`,
+`./build.sh fatgary-romcycle`, `./build.sh busprobe-reglong` or
+`./build.sh lisa-scanblank` to produce a bootable ADF. Cold boot the matching machine from the disk. Each probe takes
+over and stays on its result until reset.
 
 | Probe | Board | Expected observation |
 |---|---|---|
 | `gary-overlay` | A500 with at least 128 KiB of RAM at `$C00000` | Green if all four ROM aliases compare equal and a write during OVL preserves underlying RAM. The test runs from trapdoor RAM. |
-| `fatgary-ramsey` | A3000 or A4000 | Green after checking custom mirrors, blocking then delivering a pending level-one interrupt through Fat Gary, and changing then restoring Ramsey's refresh rate. Red indicates an incomplete or failed check. |
+| `gary-decode` | A500 or A2000 (Gary), A600 or A1200 (Gayle) | Eight bands, green where a device answered and blue where none did: CIA-A at `$A0E301`, CIA-B at `$A0D200`, both CIAs from one word at `$BFC300`, CIA-A at `$BFF301`, the register bank at `$DFF200`, and the ROM at `$E00000`, `$A80000` and `$B00000`. Gary with a 512 KiB Kickstart: bands 1, 2, 3, 5 and 6 green. Gayle: bands 5, 6, 7 and 8 green. A 1 MiB ROM set answers at `$E00000` with its own second part, so band 6 is blue there, as in the CI goldens (`gary-decode`, `gayle-decode`). vAmiga 4.4 with Kickstart 1.3 draws the Gary pattern. |
+| `gary-lanes` | A500, A1000, A2000 or CDTV (Gary) | Five bands, green where the behaviour was seen: a long read at `$A0C300` returns both chips' DDRB twice (two word cycles), a long write there leaves its second word in them, the even byte of `$A0E300` does not follow CIA-A's DDRB while the odd byte reads it, the odd byte of `$A0D300` does not follow CIA-B's while the even byte reads it, and 1024 byte reads of `$BFF301` (neither chip selected) take as many E clocks as reads of `$BFE301` and more than reads of the unmapped `$9FF301`. Gary: all green. Gayle and Fat Gary: all blue. vAmiga 4.4 with Kickstart 1.3 draws all five green. |
+| `fatgary-ramsey` | A3000 or A4000 | Green after checking custom mirrors, blocking then delivering a pending level-one interrupt through Fat Gary (at the documented `$DF809A`, then at other offsets of its four pages), and changing then restoring Ramsey's refresh rate. Red indicates an incomplete or failed check; yellow means the interrupt latch answered at `$09A` only. |
+| `ramsey-cycles` | A3000 or A4000 with motherboard fast RAM | Four bands whose heights are the lines 3000 double reads of motherboard RAM take in standard mode (white), page mode within one row (green), page mode alternating rows (yellow) and Ramsey-07 skip mode (pink). Green is the shortest and yellow the tallest; on a Ramsey-04 pink equals white. |
+| `fatgary-romcycle` | A3000 or A4000 with motherboard fast RAM | Four bands whose heights are the lines 1800 double reads take: motherboard RAM longwords (white), ROM longwords (green), ROM words (yellow) and ROM longwords at an odd word address (pink). Green and yellow are equal: one ROM cycle delivers a longword. Pink less green is two ROM cycles a pass: 16 clocks with the A3000's jumpers at 8 clocks, 12 with the A4000's at 6. Moving J151 or J152 changes the green, yellow and pink bands. CI goldens `fatgary-romcycle` (A4000) and `fatgary-romcycle-a3000`. |
+| `busprobe-reglong` | A1200, A4000 or CD32 | Four bands whose heights are the lines 1000 passes of a loop take: a long read of chip RAM (white), a word read of INTENAR (green), a long read of INTENAR (yellow) and a long write to FMODE (pink). The registers are a 16-bit port: the yellow band is taller than the green one by a whole register read cycle a pass, and the long write takes two cycles where chip RAM would take one. |
 | `lisa-scanblank` | A1200 or A4000 with Lisa and Alice | Blue field with a two-sample black slit at colour clock `$60`. Red sprite stripes are two beam lines tall, green stripes one. Both start on an odd line. |
 
 The register timing tests in `src/ramsey.rs` and `src/cpu.rs` count
@@ -1036,3 +1042,39 @@ readback and interrupt delivery. The reference PNGs are Copperline captures. The
 on vAmiga 5 with Kickstart 1.3. Its `Memory::updateCpuMemSrcTable` overlays
 eight 64 KiB banks. Copperline follows the 2 MiB select decoded by the
 [Gary replacement](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/gary/Gary.v#L98-L105).
+
+## Denise and Lisa register probes
+
+`./build.sh ecsblank-pin`, `ehbprobe-kill`, `diwhigh-fine` and
+`hamprobe-shres6` build four display probes for behaviour that differs by
+Denise generation. All four are golden renders in `tests/probe_golden.rs`;
+the first two boot twice, on two Denise revisions beside the same Agnus.
+
+| Probe | Machine | Expected observation |
+|---|---|---|
+| `ecsblank-pin` | ECS Agnus with an ECS Denise (A500+, A600, A3000) | Yellow ruler on dark blue with a black slit 16 lo-res pixels wide at colour clocks `$60`-`$67`, through the borders too. BPLCON3.EXTBLKEN is written before BPLCON0.ECSENA is set and must still take effect. |
+| `ecsblank-pin` | ECS Agnus with an OCS Denise (late A500, A2000) | The same ruler with no slit: BEAMCON0.BLANKEN alone does not reach the picture. |
+| `ehbprobe-kill` | Any OCS Denise | Grey and orange bars, the right half of the line at half intensity: the 8362 has no KILLEHB and stays extra-half-brite. |
+| `ehbprobe-kill` | ECS Agnus with an ECS Denise | Both halves alike: KILLEHB turns extra-half-brite off, without ECSENA. |
+| `diwhigh-fine` | A1200 or A4000 | Yellow field on dark blue in twelve 16-line bands from line `$40`. In the first four the left edge steps right one 35 ns column per band, in the next four the right edge does, in the last four both do. The harness checks every step. |
+| `hamprobe-shres6` | A1200 or A4000 | Four 64-line bands: red, green and blue ramps in twenty steps (0 to 15, then 0 to 3), and a band where the three components change in turn and hold between changes. A black picture means HAM was left off in super-hires. |
+
+The expected results come from the Commodore 8373 Denise and 391227 Lisa
+specifications in the
+[Amiga Replacement Project](https://github.com/nonarkitten/amiga_replacement_project/tree/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f)
+and from WinUAE's Denise model (`check_vidsyncs`, `setbplmode`,
+`calchdiw`). The reference PNGs are Copperline captures, compared with
+vAmiga where it models the behaviour (`tools/vamiga-ref.sh`,
+`tools/vamiga-aga-compare.py`):
+
+| golden | vAmiga |
+|---|---|
+| `hamprobe-shres6` | exact against 5.0b1 `A1200_2MB` (0 / 202628) |
+| `ehbprobe-kill` | exact against 4.4 `A500_OCS_1MB` |
+| `ecsblank-pin-ocs-denise` | exact against 4.4 `A500_ECS_1MB` |
+| `ehbprobe-kill-ecs-denise` | not a reference: 4.4 keeps extra-half-brite on `A500_PLUS_1MB`, it has no KILLEHB |
+| `ecsblank-pin` | not a reference: 4.4 draws no slit on `A500_PLUS_1MB`, it has no EXTBLKEN |
+| `diwhigh-fine` | not comparable: vAmiga has no native 35 ns AGA frame |
+
+`diwhigh-fine` uses programmable PAL totals, as `lisa-scanblank` does, so
+the frame keeps its 35 ns columns.

@@ -5,9 +5,10 @@
 //! typed read/write methods for memory-mapped devices.
 
 use crate::chipset::agnus::{
-    bitplane_dma_planes_for_fmode, sprite_dma_disabled_by_bitplane_ddf, wide_fetch_word_address,
-    Agnus, AgnusRevision, AgnusTick, VideoStandard, BEAMCON0_DUAL, COLORCLOCKS_PER_LINE,
-    NTSC_LINES, NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
+    bitplane_dma_planes_for_fmode, sprite_ctl_vstart_high, sprite_dma_disabled_by_bitplane_ddf,
+    sprite_vstart_from_words, sprite_vstop_from_ctl, wide_fetch_word_address, Agnus, AgnusRevision,
+    AgnusTick, VideoStandard, BEAMCON0_DUAL, COLORCLOCKS_PER_LINE, NTSC_LINES,
+    NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES,
 };
 use crate::chipset::blitter::{BlitBusAccess, Blitter};
 use crate::chipset::cia::{
@@ -305,8 +306,13 @@ const DENISE_COLLISION_MATCH_DELAY_CCK: u32 = 2;
 const AGNUS_WRITE_EFFECT_DELAY_CCK: u32 = 2;
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
+const BPLCON2_KILLEHB: u16 = 1 << 9;
+const BPLCON3_EXTBLKEN: u16 = 1 << 0;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
 const BPLCON3_BRDRBLNK: u16 = 1 << 5;
+/// The four BPLCON3 flip-flops ECS Denise (8373) has: BRDRBLNK, BRDNTRAN,
+/// ZDCLKEN and EXTBLKEN. Every other bit of the register is Lisa's.
+const BPLCON3_ECS_DENISE_BITS: u16 = 0x0035;
 const BPLCON3_SPRES_MASK: u16 = 0x00C0;
 const BPLCON3_SPRES_LORES: u16 = 0x0040;
 const BPLCON3_SPRES_HIRES: u16 = 0x0080;
@@ -457,18 +463,20 @@ impl Default for DisplaySpriteDmaState {
 
 impl DisplaySpriteDmaState {
     /// A POS word (fetch or poke) replaces the vertical start's low bits,
-    /// keeping the CTL-supplied high bit.
+    /// keeping the CTL-supplied high bits.
     fn poke_pos(&mut self, value: u16) {
         self.pos = value;
-        self.vstrt = (self.vstrt & 0x100) | i32::from(value >> 8);
+        self.vstrt = (self.vstrt & 0x300) | i32::from(value >> 8);
     }
 
-    /// A CTL word (fetch or poke) supplies vstart's high bit and the whole
-    /// vstop, and disarms the channel's display latches.
-    fn poke_ctl(&mut self, value: u16) {
+    /// A CTL word (fetch or poke) supplies vstart's high bits and the whole
+    /// vstop, and disarms the channel's display latches. `v9` says the
+    /// comparators are ten bits wide (ECS Agnus, Alice), so SV9 and EV9
+    /// count; on OCS those CTL bits do nothing.
+    fn poke_ctl(&mut self, value: u16, v9: bool) {
         self.ctl = value;
-        self.vstrt = (self.vstrt & 0x0FF) | (i32::from(value & 0x0004) << 6);
-        self.vstop = (i32::from(value & 0x0002) << 7) | i32::from(value >> 8);
+        self.vstrt = (self.vstrt & 0x0FF) | sprite_ctl_vstart_high(value, v9);
+        self.vstop = sprite_vstop_from_ctl(value, v9);
         self.last_line = None;
     }
 
@@ -871,7 +879,7 @@ pub struct Bus {
     /// visible for a human-perceptible stretch.
     hdd_led_until_cck: u64,
     /// One-time diagnostic when software writes BPLCON3 and the write is
-    /// dropped (OCS Denise, or ECS with ENBPLCN3 clear).
+    /// dropped (OCS Denise has no such register).
     bplcon3_drop_warned: bool,
     /// AGA 32-bit fetch latch: the aligned chip longwords the CPU most
     /// recently fetched opcode words from (two entries, so a tight loop
@@ -4396,10 +4404,9 @@ impl Bus {
             | 0x1CC | 0x1CE | 0x1D8 | 0x1DC | 0x1DE | 0x1E0 | 0x1E2 => {
                 self.blitter_ecs_registers_enabled()
             }
-            // ECS Denise: BPLCON3 latches only while BPLCON0.ECSENA is
-            // set, which is the gate the write dispatch applies -- so a
-            // BPLCON3 write without ECSENA is reported, which is one of
-            // the classic silent drops this validator exists to surface.
+            // BPLCON3 exists on ECS Denise and Lisa and latches every
+            // write; ECSENA only enables what its bits select, so a write
+            // made without it is not a drop.
             0x106 => self.bplcon3_write_enabled(),
             0x1E4 => self.denise_ecs_registers(),
             // AGA Lisa: BPLCON4, CLXCON2, and bitplanes 7-8.
@@ -5257,12 +5264,43 @@ impl Bus {
         self.denise_revision.is_ecs()
     }
 
-    /// ECS Denise ENBPLCN3: BPLCON0 bit 0 must be set for BPLCON3 writes to
-    /// latch (8373 spec). OCS Denise has no BPLCON3 at all; AGA Lisa always
-    /// accepts the write (the palette BANK/LOCT mechanics depend on it).
+    /// BPLCON3 exists on ECS Denise and Lisa, and a write always latches:
+    /// BPLCON0 bit 0 (ENBPLCN3/ECSENA) enables the features the bits
+    /// select, not the write. The Lisa spec (391227) says the bits can
+    /// always be set and their effects are inhibited until ECSENA goes
+    /// high; the 8373 spec says that with ENBPLCN3 reset "Denise returns
+    /// to normal operation". OCS Denise has no BPLCON3 at all.
     fn bplcon3_write_enabled(&self) -> bool {
-        self.denise_is_lisa()
-            || (self.denise_ecs_registers() && self.denise.bplcon0 & BPLCON0_ECSENA != 0)
+        self.denise_ecs_registers()
+    }
+
+    /// The value a BPLCON2 or BPLCON3 write leaves in the fitted Denise,
+    /// which is also what the render replay is given. OCS Denise (8362)
+    /// has no KILLEHB flip-flop, and ECS Denise (8373) implements only
+    /// four BPLCON3 bits: the sprite-resolution, playfield 2 offset and
+    /// palette-bank fields are Lisa's, so on the 8373 the dual-playfield
+    /// colour offset stays at the fixed OCS value whatever is written.
+    fn denise_control_latch_value(&self, off: u16, val: u16) -> u16 {
+        match (off, self.denise_revision) {
+            (0x104, DeniseRevision::Ocs) => val & !BPLCON2_KILLEHB,
+            (0x106, DeniseRevision::Ecs8373) => {
+                (val & BPLCON3_ECS_DENISE_BITS) | crate::chipset::denise::BPLCON3_PF2OF_DEFAULT
+            }
+            _ => val,
+        }
+    }
+
+    /// DENISEID/LISAID as the CPU reads it. Lisa drives only the low byte
+    /// (the chip revision, $F8); the high byte is the level the motherboard
+    /// leaves on D15-D8. The A4000 board (the Lisa machine built around
+    /// Fat Gary) reads $FC there, the A1200 and CD32 boards $00.
+    fn denise_id(&self) -> Option<u16> {
+        let id = self.denise_revision.id()?;
+        Some(if self.denise_is_lisa() && self.gary.is_some() {
+            id | 0xFC00
+        } else {
+            id
+        })
     }
 
     fn denise_is_lisa(&self) -> bool {
@@ -5273,6 +5311,18 @@ impl Bus {
     /// AGA/non-AGA chip pairs never shipped).
     fn aga_enabled(&self) -> bool {
         matches!(self.agnus.revision(), AgnusRevision::AgaAlice)
+    }
+
+    /// Whether the custom registers are a narrower CPU port than chip RAM.
+    /// Beside Alice chip RAM is 32 bits wide and the registers 16, so the
+    /// CPU bus runs a long register access as two separate word cycles.
+    ///
+    /// TODO: the 16-bit boards still hand a long register access to
+    /// `custom_read`/`custom_write` whole. Reads sample each word on its
+    /// own cycle there, but a long write applies both words after its
+    /// second cycle.
+    pub(crate) fn register_port_narrower_than_chip_ram(&self) -> bool {
+        self.aga_enabled()
     }
 
     pub fn reset_custom_chips_from_cpu_reset(&mut self) {
@@ -5467,7 +5517,10 @@ impl Bus {
         // synthesizer releases what the interrupted guest left
         // sounding, exactly as if its line had dropped.
         self.paula.serial.machine_reset();
-        let video_standard = self.agnus.video_standard();
+        // Reset reloads BEAMCON0, so the chip comes back in the standard
+        // the board straps it to, not the one software last selected
+        // through the PAL bit.
+        let video_standard = self.agnus.board_video_standard();
         let agnus_revision = self.agnus.revision();
         self.cia_a = Cia::new(Which::A);
         self.cia_b = Cia::new(Which::B);
@@ -5496,9 +5549,8 @@ impl Bus {
         if let Some(gary) = self.gary.as_mut() {
             gary.reset();
         }
-        if let Some(ramsey) = self.ramsey.as_mut() {
-            ramsey.reset();
-        }
+        // Ramsey's control register is loaded by *PWRUP alone: the reset
+        // line leaves its mode, and its refresh counter, running.
         if let Some(sdmac) = self.sdmac.as_mut() {
             sdmac.reset();
         }
@@ -5655,6 +5707,10 @@ impl Bus {
         // cycle sets it, so Kickstart takes its cold path.
         if let Some(gary) = self.gary.as_mut() {
             gary.power_on_reset();
+        }
+        let ramsey_clock = self.ramsey_clock();
+        if let Some(ramsey) = self.ramsey.as_mut() {
+            ramsey.power_on_reset(ramsey_clock);
         }
         // The warm-reset path above keeps a spinning disc's cached
         // lead-in; a power cycle stops the mechanism, so a mounted disc
@@ -7221,6 +7277,30 @@ impl Bus {
             )
     }
 
+    /// Bill `cycles` ROM cycles of the length Fat Gary's jumpers set, in
+    /// board clocks converted to this CPU's clocks like a Ramsey cycle.
+    /// False when the board has no jumper-timed ROM cycle (no Fat Gary, or a
+    /// state saved before the jumpers were recorded) and nothing was billed.
+    pub(crate) fn fat_gary_rom_cycles(&mut self, cycles: u32) -> bool {
+        let Some(gary) = self.gary.as_mut() else {
+            return false;
+        };
+        let Some(clocks) = gary.rom_cycle_clocks() else {
+            return false;
+        };
+        if self.cpu_bus_arbitration_enabled {
+            let total = cycles * clocks * self.cpu_clocks_per_cck + gary.rom_clock_remainder;
+            gary.rom_clock_remainder = total % crate::ramsey::CLOCKS_PER_CCK;
+            let cpu_clocks = total / crate::ramsey::CLOCKS_PER_CCK;
+            self.charge_cpu_clocks_to_cck(cpu_clocks);
+            if self.cpu_short_bus_cycle && self.cpu_access_phase_sync {
+                self.cpu_bus_overlap_clocks =
+                    self.cpu_bus_overlap_clocks.saturating_add(cpu_clocks);
+            }
+        }
+        true
+    }
+
     pub(crate) fn ramsey_access(&mut self, addr: u32, burst_beat: bool) {
         let now = self.ramsey_clock();
         let ramsey = self.ramsey.as_mut().expect("Ramsey owns this RAM cycle");
@@ -7441,7 +7521,11 @@ impl Bus {
             return;
         }
 
-        let wide_bus = self.aga_enabled();
+        // Chip RAM is a 32-bit port on the AGA boards, but the registers are
+        // not: Gayle and Fat Gary end a register cycle with DSACK1 alone
+        // (Fat Gary specification, "Chip Registers"), so the CPU runs a
+        // long access to them as two word cycles, as on a 68000 board.
+        let wide_bus = self.aga_enabled() && !matches!(kind, CpuBusAccessKind::Custom);
         if wide_bus && matches!(kind, CpuBusAccessKind::Write) {
             if let Some(addr) = addr {
                 let first = addr & !3;
@@ -9241,7 +9325,14 @@ impl Bus {
         }
         let (vsstrt, vsstop) = self.agnus.programmable_vsync_window()?;
         let sync_len = vsstop - vsstrt;
-        let glass_lines = geometry.frame_lines.saturating_sub(sync_len).max(1);
+        // The long field of an interlaced programmable scan runs one line
+        // past the short one. Both fields are given the short field's
+        // glass, so they present the same rows and weave; the line the
+        // long field adds is its last, where the vertical blank already is.
+        let field_lines = geometry
+            .frame_lines
+            .saturating_sub(u32::from(geometry.lace && self.agnus.lof));
+        let glass_lines = field_lines.saturating_sub(sync_len).max(1);
         let offset = geometry.visible_start_vpos as i32 - vsstop as i32;
         Some((offset, glass_lines))
     }
@@ -9584,17 +9675,28 @@ impl Bus {
         (events, self.bus_event_next_sequence, dropped)
     }
 
-    /// Display blank endpoints in 35 ns ticks. ECS uses Agnus's external
-    /// blank. Lisa compares its own fine horizontal position when enabled.
+    /// Programmable horizontal blank that reaches the RGB output, as
+    /// endpoints in 35 ns ticks; None while Denise blanks on its fixed
+    /// internal decode.
+    ///
+    /// The switch is Denise's: BPLCON3.EXTBLKEN, enabled by BPLCON0.ECSENA.
+    /// OCS Denise has neither bit and always uses the fixed decode. ECS
+    /// Denise has no blank comparators of its own: EXTBLKEN makes it take
+    /// blanking from its CBL* pin, which Agnus's CSY* pin drives (8373
+    /// spec), so the window is whatever Agnus puts on that pin. Lisa
+    /// compares its own fine horizontal position.
     pub(crate) fn display_horizontal_blank(&self) -> Option<(u32, u32)> {
+        if !self.denise_ecs_registers()
+            || self.denise.bplcon0 & BPLCON0_ECSENA == 0
+            || self.denise.bplcon3 & BPLCON3_EXTBLKEN == 0
+        {
+            return None;
+        }
         if !self.denise_is_lisa() {
             return self
                 .agnus
-                .programmable_horizontal_blank()
+                .csy_pin_blank_window()
                 .map(|(a, b)| (8 * a, 8 * b));
-        }
-        if self.denise.bplcon0 & 1 == 0 || self.denise.bplcon3 & 1 == 0 {
-            return None;
         }
         let [start, stop] = self.denise.horizontal_blank;
         let fine_ticks = |word: u16| ((word & 0xff) << 3) | ((word >> 8) & 7);
@@ -9603,9 +9705,22 @@ impl Bus {
         (start != stop).then_some((u32::from(start), u32::from(stop)))
     }
 
+    /// Where the chip that owns the blank comparators asserts programmable
+    /// horizontal blank, in 35 ns ticks, for the beam trace. On ECS that
+    /// is Agnus, which compares under BEAMCON0.BLANKEN whether or not
+    /// Denise listens; on AGA it is Lisa, as in the picture.
+    fn horizontal_blank_comparator_window(&self) -> Option<(u32, u32)> {
+        if self.denise_is_lisa() {
+            return self.display_horizontal_blank();
+        }
+        self.agnus
+            .programmable_horizontal_blank()
+            .map(|(a, b)| (8 * a, 8 * b))
+    }
+
     fn beam_trace_events_at(&self, vpos: u32, hpos: u32) -> u32 {
         let mut events = self.ddf_trace_events_at(hpos);
-        if let Some((start, stop)) = self.display_horizontal_blank() {
+        if let Some((start, stop)) = self.horizontal_blank_comparator_window() {
             if hpos == start / 8 {
                 events |= BUS_EVENT_HBS;
             }
@@ -11014,12 +11129,21 @@ impl Bus {
                 .cloned()
         });
         let registers = self.frame_register_snapshot();
+        // Lines alternate 227/228 colour clocks on NTSC: size the trace for
+        // the long one, or the line-end slot of every long line (E3, the
+        // first refresh cycle with its RGA strobe) falls outside a frame
+        // that happens to start on a short line.
+        let line_cck = if self.agnus.long_line_toggles() {
+            self.agnus.line_cck_for(true)
+        } else {
+            self.agnus.current_line_cck()
+        };
         self.current_frame_bus_trace.reset_for_frame_with_level(
             self.emulated_frames,
             self.emulated_seconds(),
             self.agnus.current_frame_lines(),
             self.agnus.nominal_frame_lines(),
-            self.agnus.current_line_cck(),
+            line_cck,
             self.current_frame_visible_start_vpos,
             self.current_frame_geometry.visible_lines,
             partial,
@@ -11677,14 +11801,6 @@ fn read_chip_word_wrapping(ram: &[u8], addr: u32) -> u16 {
     let len = ram.len();
     let a = addr as usize % len;
     u16::from_be_bytes([ram[a], ram[(a + 1) % len]])
-}
-
-fn sprite_vstart_from_words(pos: u16, ctl: u16) -> i32 {
-    (((pos >> 8) & 0x00FF) | ((ctl & 0x0004) << 6)) as i32
-}
-
-fn sprite_vstop_from_ctl(ctl: u16) -> i32 {
-    (((ctl >> 8) & 0x00FF) | ((ctl & 0x0002) << 7)) as i32
 }
 
 fn sprite_hstart_from_words(pos: u16, ctl: u16) -> i32 {
@@ -12350,7 +12466,7 @@ fn live_manual_sprite_collision_sources(
             sprdatb[sprite],
             spr_armed[sprite],
             hsub_70ns_applies,
-            aga,
+            frame_base.agnus_revision,
             frame_base.fmode,
             beam_y,
             sprite_dma_idle,
@@ -12378,7 +12494,7 @@ fn live_manual_sprite_collision_sources(
             sprdatb[sprite],
             spr_armed[sprite],
             hsub_70ns_applies,
-            aga,
+            frame_base.agnus_revision,
             frame_base.fmode,
             beam_y,
             sprite_dma_idle,
@@ -12627,7 +12743,7 @@ fn push_live_manual_sprite_source(
     sprdatb: u16,
     spr_armed: bool,
     hsub_70ns_applies: bool,
-    aga: bool,
+    agnus_revision: AgnusRevision,
     fmode: u16,
     beam_y: i32,
     sprite_dma_idle: bool,
@@ -12637,9 +12753,11 @@ fn push_live_manual_sprite_source(
     if x_start >= x_stop || !spr_armed {
         return;
     }
+    let aga = matches!(agnus_revision, AgnusRevision::AgaAlice);
     if !sprite_dma_idle {
-        let vstart = sprite_vstart_from_words(sprpos, sprctl);
-        let vstop = sprite_vstop_from_ctl(sprctl);
+        let v9 = agnus_revision.sprite_v9();
+        let vstart = sprite_vstart_from_words(sprpos, sprctl, v9);
+        let vstop = sprite_vstop_from_ctl(sprctl, v9);
         if beam_y < vstart || beam_y >= vstop {
             return;
         }

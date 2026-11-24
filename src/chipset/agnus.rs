@@ -83,6 +83,43 @@ pub fn ddf_hard_stop_lifted(revision: AgnusRevision, beamcon0_lifts: bool, bplco
 }
 const DEFAULT_HTOTAL: u16 = (COLORCLOCKS_PER_LINE - 1) as u16;
 
+/// SPRxCTL bit 6, SV9: the tenth bit of a sprite's vertical start (ECS
+/// Agnus and Alice).
+pub const SPRCTL_SV9: u16 = 0x0040;
+/// SPRxCTL bit 5, EV9: the tenth bit of a sprite's vertical stop (ECS
+/// Agnus and Alice).
+pub const SPRCTL_EV9: u16 = 0x0020;
+
+/// The vertical-start bits a SPRxCTL word supplies: SV8 (bit 2), and SV9
+/// (bit 6) when the comparators are ten bits wide (`v9`, see
+/// [`AgnusRevision::sprite_v9`]).
+pub fn sprite_ctl_vstart_high(ctl: u16, v9: bool) -> i32 {
+    let v8 = i32::from(ctl & 0x0004) << 6;
+    let sv9 = if v9 {
+        i32::from(ctl & SPRCTL_SV9) << 3
+    } else {
+        0
+    };
+    v8 | sv9
+}
+
+/// A sprite's vertical start line from its control words: SV7-SV0 in the
+/// SPRxPOS high byte plus the SPRxCTL high bits.
+pub fn sprite_vstart_from_words(pos: u16, ctl: u16, v9: bool) -> i32 {
+    i32::from(pos >> 8) | sprite_ctl_vstart_high(ctl, v9)
+}
+
+/// A sprite's vertical stop line from SPRxCTL: EV7-EV0 in the high byte,
+/// EV8 (bit 1), and EV9 (bit 5) when the comparators are ten bits wide.
+pub fn sprite_vstop_from_ctl(ctl: u16, v9: bool) -> i32 {
+    let ev9 = if v9 {
+        i32::from(ctl & SPRCTL_EV9) << 4
+    } else {
+        0
+    };
+    i32::from(ctl >> 8) | (i32::from(ctl & 0x0002) << 7) | ev9
+}
+
 const OCS_LORES_BPL_SEQUENCE: [usize; 8] = [8, 4, 6, 2, 7, 3, 5, 1];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -106,7 +143,11 @@ pub enum AgnusRevision {
 impl AgnusRevision {
     fn chipset_id(self, video_standard: VideoStandard) -> u16 {
         match (self, video_standard) {
-            (Self::Ocs, _) => 0x00,
+            // OCS has one part per standard, and the NTSC one sets bit 4:
+            // the AA registers list gives "8361 (regular) or 8370 (fat)
+            // (agnus-ntsc) = 10" and "8367 (pal) or 8371 (fat-pal) = 00".
+            (Self::Ocs, VideoStandard::Pal) => 0x00,
+            (Self::Ocs, VideoStandard::Ntsc) => 0x10,
             // Every ECS Agnus reports the same ID: the HRM's "8372 (Fat-hr)
             // rev 5" = $22 row is a part that apparently never shipped, and the
             // 2 MB Agnus is not distinguishable from the 1 MB one here. $22 is
@@ -124,6 +165,14 @@ impl AgnusRevision {
     /// Alice's, so AGA reports true here.
     pub fn is_ecs(self) -> bool {
         !matches!(self, Self::Ocs)
+    }
+
+    /// Whether the sprite vertical comparators are ten bits wide. The ECS
+    /// Agnus and Alice take a tenth start and stop bit from SPRxCTL (SV9,
+    /// EV9) so a sprite can sit below line 511 of a programmable scan;
+    /// OCS compares nine bits and leaves those CTL bits unused.
+    pub fn sprite_v9(self) -> bool {
+        self.is_ecs()
     }
 
     /// Highest chip address this Agnus can drive: the writable DMA pointer
@@ -173,6 +222,38 @@ impl VideoStandard {
     }
 }
 
+/// Overlap of two horizontal windows on a line of `line_cck` colour
+/// clocks. Each window asserts at its first position and clears at its
+/// second, wrapping through the line origin when the first is not below
+/// the second; the result uses the same convention. Two wrapping windows
+/// can overlap in two pieces; the longer piece is returned.
+fn circular_window_overlap(a: (u32, u32), b: (u32, u32), line_cck: u32) -> Option<(u32, u32)> {
+    let contains = |(strt, stop): (u32, u32), pos: u32| {
+        if strt < stop {
+            pos >= strt && pos < stop
+        } else {
+            pos >= strt || pos < stop
+        }
+    };
+    let both = |pos: u32| contains(a, pos) && contains(b, pos);
+    // Start the walk on a position outside the overlap so that no run
+    // straddles the walk's own origin.
+    let origin = (0..line_cck).find(|&pos| !both(pos))?;
+    let mut best: Option<(u32, u32)> = None;
+    let mut run: Option<(u32, u32)> = None;
+    for step in 1..=line_cck {
+        let pos = (origin + step) % line_cck;
+        if both(pos) {
+            run = Some(run.map_or((pos, 1), |(start, len)| (start, len + 1)));
+        } else if let Some(found) = run.take() {
+            if best.is_none_or(|(_, len)| found.1 > len) {
+                best = Some(found);
+            }
+        }
+    }
+    best.map(|(start, len)| (start, (start + len) % line_cck))
+}
+
 fn beamcon0_reset_value(video_standard: VideoStandard) -> u16 {
     match video_standard {
         VideoStandard::Pal => 1 << 5,
@@ -218,6 +299,13 @@ pub struct Agnus {
     /// advance_by_cck(); returned and reset by advance_by_cck().
     pending_tick: AgnusTick,
     video_standard: VideoStandard,
+    /// The board's PAL/NTSC strap, the level the chip samples while reset
+    /// is asserted: the N*_P pin on the 8372A, 8375 and Alice, the part
+    /// fitted on OCS. BEAMCON0 bit 5 reselects the standard afterwards,
+    /// but only until the next reset. `None` comes from a save state
+    /// written before the field existed and means the standard in force.
+    #[serde(default)]
+    board_standard: Option<VideoStandard>,
     revision: AgnusRevision,
     lace: bool,
     beamcon0: u16,
@@ -760,6 +848,7 @@ impl Agnus {
             nudge_cck: 0,
             pending_tick: AgnusTick::default(),
             video_standard,
+            board_standard: Some(video_standard),
             revision,
             lace: false,
             beamcon0: beamcon0_reset_value(video_standard),
@@ -792,6 +881,29 @@ impl Agnus {
         self.video_standard
     }
 
+    /// The standard the board straps the chip to, which a reset returns
+    /// it to whatever BEAMCON0 selected in the meantime: "During reset, if
+    /// N*_P is low, the device powers-up in NTSC mode; if N*_P is high, it
+    /// powers-up in PAL mode ... PAL or NTSC modes may be reselected after
+    /// power-up by writing the desired value in the BEAMCON0 register, bit
+    /// 5" (Alice specification, pin description).
+    pub fn board_video_standard(&self) -> VideoStandard {
+        self.board_standard.unwrap_or(self.video_standard)
+    }
+
+    /// Give a state saved before the strap was recorded the standard of the
+    /// machine it describes. The beam keeps the standard it was saved
+    /// running; only the next reset consults the strap.
+    pub fn seed_board_standard(&mut self, standard: VideoStandard) {
+        self.board_standard.get_or_insert(standard);
+    }
+
+    /// Leave the strap unrecorded, as a state from before the field reads.
+    #[cfg(test)]
+    pub(crate) fn forget_board_standard(&mut self) {
+        self.board_standard = None;
+    }
+
     pub fn revision(&self) -> AgnusRevision {
         self.revision
     }
@@ -808,8 +920,10 @@ impl Agnus {
     }
 
     /// Host/config entry point: authoritatively select the standard, which
-    /// also rewrites the BEAMCON0 PAL bit to match.
+    /// also rewrites the BEAMCON0 PAL bit to match. This is the board
+    /// strap, so it is also what the next reset comes back to.
     pub fn set_video_standard(&mut self, video_standard: VideoStandard) {
+        self.board_standard = Some(video_standard);
         self.beamcon0 =
             (self.beamcon0 & !(1 << 5)) | (beamcon0_reset_value(video_standard) & (1 << 5));
         self.apply_video_standard(video_standard);
@@ -839,10 +953,11 @@ impl Agnus {
     }
 
     pub fn current_frame_lines(&self) -> u32 {
-        // VARBEAMEN programmable totals (VTOTAL+1) drive the beam entirely and
-        // override the fixed PAL/NTSC short/long-frame selection.
-        if let Some(lines) = self.programmable_frame_lines() {
-            return lines;
+        // VARBEAMEN programmable totals drive the beam entirely and replace
+        // the fixed PAL/NTSC counts; interlace still lengthens the long
+        // field by a line (see `programmable_frame_lines`).
+        if self.beam_is_programmable() {
+            return self.programmable_field_lines();
         }
         if self.lace && !self.lof {
             self.video_standard.short_frame_lines()
@@ -851,23 +966,21 @@ impl Agnus {
         }
     }
 
+    /// The long field's line count: what a non-interlaced display runs
+    /// every field on a fixed standard, and the longer of the two
+    /// alternating fields under interlace.
     pub fn nominal_frame_lines(&self) -> u32 {
-        if let Some(lines) = self.programmable_frame_lines() {
-            return lines;
+        if let Some(short) = self.programmable_short_field_lines() {
+            return short + u32::from(self.lace);
         }
         self.video_standard.long_frame_lines()
     }
 
     /// Mean colour clocks per video field for a frontend's refresh rate.
-    /// Interlace alternates long/short fields; NTSC can also alternate line
-    /// lengths. Programmable totals replace both standard timing rules.
+    /// Interlace alternates long/short fields, on a programmable scan as
+    /// on a fixed one; NTSC can also alternate line lengths.
     pub fn nominal_frame_cck(&self) -> f64 {
-        let lines = f64::from(self.nominal_frame_lines())
-            - if self.lace && self.programmable_frame_lines().is_none() {
-                0.5
-            } else {
-                0.0
-            };
+        let lines = f64::from(self.nominal_frame_lines()) - if self.lace { 0.5 } else { 0.0 };
         let line = if self.long_line_toggles() {
             f64::from(self.line_cck_for(false) + self.line_cck_for(true)) / 2.0
         } else {
@@ -883,10 +996,13 @@ impl Agnus {
     /// Color clocks for a line given the long-line (`lol`) state. Single owner
     /// of the programmable-vs-227/228 selection; every beam-walk path (live
     /// advance, the frame/line deadlines, and the bus Copper-prediction clone)
-    /// routes through this so they cannot drift.
+    /// routes through this so they cannot drift. A long line is one colour
+    /// clock longer than a short one on a programmable scan too: STRLONG
+    /// marks "lines with long counts (228 - NTSC, HTOTAL+2 - VARBEAMEN=1
+    /// hires chips only)" (AA register list).
     pub(crate) fn line_cck_for(&self, lol: bool) -> u32 {
-        if let Some(line_cck) = self.programmable_line_cck() {
-            return line_cck;
+        if self.beam_is_programmable() {
+            return self.programmable_line_cck_for(lol);
         }
         if matches!(self.video_standard, VideoStandard::Ntsc) && lol {
             NTSC_LONG_COLORCLOCKS_PER_LINE
@@ -895,13 +1011,37 @@ impl Agnus {
         }
     }
 
-    /// Whether lines alternate long/short. Only NTSC does, and only when the
-    /// beam is not programmable (VARBEAMEN fixes the line length) and LOLDIS is
-    /// clear.
+    /// ECS Agnus or Alice with BEAMCON0.VARBEAMEN: HTOTAL and VTOTAL size
+    /// the scan. The beam loop asks on every colour clock, and on a fixed
+    /// PAL or NTSC scan this one test is all it should pay: the
+    /// programmable arithmetic stays out of line so the compiler cannot
+    /// fold it into the common path as unconditional work.
+    #[inline]
+    fn beam_is_programmable(&self) -> bool {
+        self.beamcon0 & BEAMCON0_VARBEAMEN != 0 && self.revision.is_ecs()
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn programmable_line_cck_for(&self, lol: bool) -> u32 {
+        let long = matches!(self.video_standard, VideoStandard::Ntsc) && lol;
+        u32::from(self.htotal).saturating_add(1).max(1) + u32::from(long)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn programmable_field_lines(&self) -> u32 {
+        u32::from(self.vtotal).saturating_add(1).max(1) + u32::from(self.lace && self.lof)
+    }
+
+    /// Whether lines alternate long/short: with the PAL decodes off (an
+    /// NTSC part, or BEAMCON0.PAL clear on ECS/AGA) and LOLDIS clear. A
+    /// programmable beam does not stop the toggle by itself -- "in
+    /// variable beam counter mode this bit [LOLDIS] disables the long
+    /// line/short line toggle" (AA register list, BEAMCON0) -- which is
+    /// why the programmable display modes set LOLDIS.
     pub(crate) fn long_line_toggles(&self) -> bool {
-        matches!(self.video_standard, VideoStandard::Ntsc)
-            && self.programmable_line_cck().is_none()
-            && !self.loldis_active()
+        matches!(self.video_standard, VideoStandard::Ntsc) && !self.loldis_active()
     }
 
     fn loldis_active(&self) -> bool {
@@ -949,9 +1089,27 @@ impl Agnus {
         Some(u32::from(self.htotal).saturating_add(1).max(1))
     }
 
-    /// Programmable frame height (VTOTAL+1) when ECS and VARBEAMEN are set;
-    /// otherwise None and the fixed PAL/NTSC frame counts apply.
+    /// Height of the current field of a programmable scan, when ECS and
+    /// VARBEAMEN are set; otherwise None and the fixed PAL/NTSC frame
+    /// counts apply. VTOTAL is "the line number to reset the counter, so
+    /// there's this many + 1 in a field. The exception is if the LACE bit
+    /// is set (BPLCON0), in which case every other field is this many +2
+    /// & the short field is this many + 1" (AA register list, VTOTAL):
+    /// the long field of an interlaced programmable scan runs one line
+    /// past VTOTAL, which is what offsets the two fields by half a line.
+    ///
+    /// TODO: WinUAE ends the field at VTOTAL + 1 + LOF whatever LACE says,
+    /// so a non-interlaced scan with the long-field latch set would also
+    /// run VTOTAL + 2 lines. The register list words it as an interlace
+    /// exception ("all fields are short if LACE=0"), and that is what is
+    /// modelled until a hardware measurement settles the held-latch case.
     pub fn programmable_frame_lines(&self) -> Option<u32> {
+        let short = self.programmable_short_field_lines()?;
+        Some(short + u32::from(self.lace && self.lof))
+    }
+
+    /// VTOTAL + 1, the short field of a programmable scan.
+    fn programmable_short_field_lines(&self) -> Option<u32> {
         if !self.revision.is_ecs() || self.beamcon0 & BEAMCON0_VARBEAMEN == 0 {
             return None;
         }
@@ -1011,26 +1169,69 @@ impl Agnus {
         Some((u32::from(self.hbstrt), u32::from(self.hbstop)))
     }
 
-    pub fn cck_until_next_frame(&self) -> u32 {
-        let mut cck = self.nudge_cck;
-        let mut hpos = self.hpos;
-        let mut vpos = self.vpos;
-        let mut lol = self.lol;
-        let frame_lines = self.current_frame_lines();
-
-        loop {
-            let line_cck = self.line_cck_for(lol);
-            let remaining_line = line_cck.saturating_sub(hpos).max(1);
-            cck = cck.saturating_add(remaining_line);
-            vpos += 1;
-            if self.long_line_toggles() {
-                lol = !lol;
-            }
-            if vpos >= frame_lines {
-                return cck;
-            }
-            hpos = 0;
+    /// The horizontal window Agnus's CSY* pin holds active, in colour
+    /// clocks, for an ECS Denise that takes its blanking from that pin
+    /// (BPLCON3.EXTBLKEN): None when the pin's pulse cannot reach the
+    /// picture.
+    ///
+    /// With BEAMCON0.BLANKEN the pin carries composite blank, so the
+    /// window is HBSTRT..HBSTOP. Without it the pin carries composite
+    /// sync and Denise blanks for the sync pulse alone: the programmed
+    /// pulse HSSTRT..HSSTOP under VARCSYEN, otherwise the hardwired one,
+    /// which lies wholly inside the fixed horizontal blank and so hides
+    /// nothing a display shows. With BLANKEN and VARCSYEN both set the
+    /// pin is active only where the blank window and the programmed sync
+    /// pulse overlap (WinUAE check_vidsyncs).
+    ///
+    /// The pin's vertical component (programmed vertical blank, sync
+    /// serration and equalisation) is not part of this window.
+    pub fn csy_pin_blank_window(&self) -> Option<(u32, u32)> {
+        if !self.revision.is_ecs() {
+            return None;
         }
+        let blank = (self.hbstrt != self.hbstop)
+            .then_some((u32::from(self.hbstrt), u32::from(self.hbstop)));
+        let sync = (self.hsstrt != self.hsstop)
+            .then_some((u32::from(self.hsstrt), u32::from(self.hsstop)));
+        match (
+            self.beamcon0 & BEAMCON0_BLANKEN != 0,
+            self.beamcon0 & BEAMCON0_VARCSYEN != 0,
+        ) {
+            (true, false) => blank,
+            (false, true) => sync,
+            (true, true) => {
+                let (blank, sync) = (blank?, sync?);
+                circular_window_overlap(blank, sync, self.current_line_cck())
+            }
+            (false, false) => None,
+        }
+    }
+
+    /// Colour clocks until the vertical counter wraps: the rest of this
+    /// line, then every whole line left in the field. The bus arbiter asks
+    /// on every quantum, so this is the sum in closed form, not a walk down
+    /// the remaining lines.
+    pub fn cck_until_next_frame(&self) -> u32 {
+        let first = self.line_cck_for(self.lol).saturating_sub(self.hpos).max(1);
+        let following = self
+            .current_frame_lines()
+            .saturating_sub(self.vpos.saturating_add(1));
+        let rest = if following == 0 {
+            0
+        } else if self.long_line_toggles() {
+            // The line after this one has the other length, and they
+            // alternate from there.
+            let long_lines = if self.lol {
+                following / 2
+            } else {
+                following.div_ceil(2)
+            };
+            (following - long_lines) * self.line_cck_for(false)
+                + long_lines * self.line_cck_for(true)
+        } else {
+            following * self.line_cck_for(self.lol)
+        };
+        self.nudge_cck.saturating_add(first).saturating_add(rest)
     }
 
     pub fn cck_until_line_start(&self, target_vpos: u32) -> Option<u32> {
@@ -1055,11 +1256,11 @@ impl Agnus {
             } else {
                 remaining_lines / 2
             };
+            let short_cck = self.line_cck_for(false);
+            let long_extra = self.line_cck_for(true) - short_cck;
             u64::from(remaining_lines)
-                .saturating_mul(u64::from(COLORCLOCKS_PER_LINE))
-                .saturating_add(u64::from(long_lines).saturating_mul(u64::from(
-                    NTSC_LONG_COLORCLOCKS_PER_LINE - COLORCLOCKS_PER_LINE,
-                )))
+                .saturating_mul(u64::from(short_cck))
+                .saturating_add(u64::from(long_lines).saturating_mul(u64::from(long_extra)))
         } else {
             // Uniform line length: PAL, LOLDIS, or programmable VARBEAMEN.
             u64::from(remaining_lines).saturating_mul(u64::from(current_line))
@@ -1195,24 +1396,36 @@ impl Agnus {
         }
     }
 
-    /// Read VPOSR as exposed by the replacement Agnus: top byte is
-    /// {LOF, chipset_id}, low byte is {LOL, 6'b0, V8}. V8 is the top bit of
-    /// the same vertical counter VHPOSR exposes in its high byte, so the
-    /// live readback steps it in the same colour clock (see
-    /// [`Agnus::read_vhposr`]). With the light pen enabled and a position
-    /// latched, V8 comes from the latch (LPENV high bit); LOF/LOL and the
-    /// chipset id stay live.
+    /// The vertical counter bits above V7 that VPOSR reads and VPOSW
+    /// writes, as a mask over `vpos >> 8`: V8 alone on OCS, V10-V8 on an
+    /// ECS Agnus or Alice, whose counter is eleven bits wide for the
+    /// programmable scan rates.
+    fn vpos_high_mask(&self) -> u32 {
+        if self.revision.is_ecs() {
+            0x7
+        } else {
+            0x1
+        }
+    }
+
+    /// Read VPOSR: top byte is {LOF, chipset_id}, low byte is
+    /// {LOL, 4'b0, V10, V9, V8}, with V10 and V9 present only on an ECS
+    /// Agnus or Alice. They are the top bits of the same vertical counter
+    /// VHPOSR exposes in its high byte, so the live readback steps them in
+    /// the same colour clock (see [`Agnus::read_vhposr`]). With the light
+    /// pen enabled and a position latched, they come from the latch (the
+    /// LPENV high bits); LOF/LOL and the chipset id stay live.
     pub fn read_vposr(&self) -> u16 {
         let (vpos, lof, lol) = match (self.lpen_latch_active(), self.ersy_freeze) {
             (Some((v, _)), _) => (v, self.lof, self.lol),
             (None, Some(freeze)) => (freeze.vpos, freeze.lof, freeze.lol),
             (None, None) => (self.read_live_beam_position().0, self.lof, self.lol),
         };
-        let v8 = ((vpos >> 8) & 0x01) as u16;
+        let v_high = ((vpos >> 8) & self.vpos_high_mask()) as u16;
         (u16::from(lof) << 15)
             | (self.revision.chipset_id(self.video_standard) << 8)
             | (u16::from(lol) << 7)
-            | v8
+            | v_high
     }
 
     /// Read VHPOSR: top byte = V[7:0], bottom byte = the horizontal beam
@@ -1295,9 +1508,14 @@ impl Agnus {
     }
 
     /// The internal LPENV/LPENH latches, exposed through VPOSR/VHPOSR while
-    /// BPLCON0.LPEN is set.
+    /// BPLCON0.LPEN is set and ECS BEAMCON0.LPENDIS is clear. LPENDIS is a
+    /// readback select, not a latch enable: "when the bit is a high the
+    /// light-pen latched value is ignored and the actual beam counter
+    /// position is read" (AA register list, BEAMCON0). The latch keeps
+    /// following the pen underneath and reads back again once LPENDIS is
+    /// cleared.
     fn lpen_latch_active(&self) -> Option<(u32, u32)> {
-        if self.lpen_enabled {
+        if self.lpen_enabled && !self.lpen_readback_disabled() {
             self.lpen_latch
         } else {
             None
@@ -1314,8 +1532,9 @@ impl Agnus {
         }
     }
 
-    /// ECS BEAMCON0.LPENDIS suppresses the light-pen latch entirely.
-    fn lpen_latch_disabled(&self) -> bool {
+    /// ECS BEAMCON0.LPENDIS: the position registers read the running beam
+    /// counters instead of the light-pen latch.
+    fn lpen_readback_disabled(&self) -> bool {
         self.revision.is_ecs() && self.beamcon0 & BEAMCON0_LPENDIS != 0
     }
 
@@ -1327,10 +1546,14 @@ impl Agnus {
     }
 
     /// The LP pin's falling edge at beam position (`vpos`, `hpos`): latch
-    /// it unless the pen is disabled, ECS LPENDIS holds the latch off, or
-    /// this field already latched a pulse.
+    /// it unless the pen is disabled or this field already latched a pulse.
+    /// ECS LPENDIS does not stop the latch; it only hides it from the
+    /// position registers (see [`Agnus::lpen_latch_active`]).
+    // A pen pulse is a rare event beside the beam loop that sweeps for it.
+    #[cold]
+    #[inline(never)]
     fn trigger_light_pen_at(&mut self, vpos: u32, hpos: u32) {
-        if !self.lpen_enabled || self.lpen_latch_disabled() || self.lpen_triggered_this_field {
+        if !self.lpen_enabled || self.lpen_triggered_this_field {
             return;
         }
         self.lpen_latch = Some((vpos, hpos));
@@ -1524,11 +1747,17 @@ impl Agnus {
         }
     }
 
+    /// VPOSW: bit 15 loads the long-field latch and the low bits load the
+    /// vertical counter above V7 (V8 on OCS, V10-V8 on an ECS Agnus or
+    /// Alice). The write also clears the long-line flip-flop, on every
+    /// Agnus that has one running (WinUAE VPOSW: "LOL is always reset when
+    /// VPOSW is written to"); bit 7 is not a load value for it.
     pub fn write_vposw(&mut self, val: u16) {
         self.vpos_read_delay = None;
         self.lof = val & 0x8000 != 0;
+        self.lol = false;
         let low = self.vpos & 0xFF;
-        let high = u32::from(val & 0x0001) << 8;
+        let high = (u32::from(val) & self.vpos_high_mask()) << 8;
         self.vpos = (high | low).min(self.current_frame_lines() - 1);
     }
 
@@ -1572,6 +1801,61 @@ mod tests {
         COLORCLOCKS_PER_LINE, DMACON_BPLEN, DMACON_DMAEN, NTSC_LINES,
         NTSC_LONG_COLORCLOCKS_PER_LINE, PAL_LINES, VHPOSR_LOOKAHEAD_CCK,
     };
+
+    #[test]
+    fn csy_pin_carries_blank_under_blanken_and_sync_otherwise() {
+        use super::{BEAMCON0_BLANKEN, BEAMCON0_VARCSYEN};
+
+        let mut agnus =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        agnus.write_hbstrt(0x10);
+        agnus.write_hbstop(0x30);
+        agnus.write_hsstrt(0x18);
+        agnus.write_hsstop(0x24);
+
+        // Hardwired sync on the pin: its pulse lies in the fixed blank.
+        agnus.write_beamcon0(BEAMCON0_PAL);
+        assert_eq!(agnus.csy_pin_blank_window(), None);
+        // BLANKEN: composite blank.
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_BLANKEN);
+        assert_eq!(agnus.csy_pin_blank_window(), Some((0x10, 0x30)));
+        // VARCSYEN: the programmed sync pulse.
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARCSYEN);
+        assert_eq!(agnus.csy_pin_blank_window(), Some((0x18, 0x24)));
+        // Both: active only where blank and sync overlap.
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_BLANKEN | BEAMCON0_VARCSYEN);
+        assert_eq!(agnus.csy_pin_blank_window(), Some((0x18, 0x24)));
+        agnus.write_hsstrt(0x40);
+        agnus.write_hsstop(0x50);
+        assert_eq!(agnus.csy_pin_blank_window(), None);
+        // A degenerate blank window never asserts.
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_BLANKEN);
+        agnus.write_hbstop(0x10);
+        assert_eq!(agnus.csy_pin_blank_window(), None);
+
+        // OCS Agnus has no programmable pin function at all.
+        let mut ocs = Agnus::with_video_standard(VideoStandard::Pal);
+        ocs.write_beamcon0(BEAMCON0_PAL | BEAMCON0_BLANKEN);
+        ocs.write_hbstrt(0x10);
+        ocs.write_hbstop(0x30);
+        assert_eq!(ocs.csy_pin_blank_window(), None);
+    }
+
+    #[test]
+    fn circular_window_overlap_follows_wraps_through_the_line_origin() {
+        use super::circular_window_overlap as overlap;
+
+        // Plain intervals.
+        assert_eq!(overlap((10, 30), (20, 40), 227), Some((20, 30)));
+        assert_eq!(overlap((10, 20), (20, 40), 227), None);
+        // One window wraps through the line origin.
+        assert_eq!(overlap((200, 20), (10, 40), 227), Some((10, 20)));
+        assert_eq!(overlap((200, 20), (190, 210), 227), Some((200, 210)));
+        // Both wrap: the overlap wraps too.
+        assert_eq!(overlap((200, 20), (210, 10), 227), Some((210, 10)));
+        // Two pieces: the longer one is reported.
+        assert_eq!(overlap((200, 100), (90, 205), 227), Some((90, 100)));
+    }
 
     #[test]
     fn nudge_debt_carries_across_small_advances() {
@@ -1689,6 +1973,188 @@ mod tests {
         agnus.lof = true;
         agnus.vpos = 0x100;
         assert_eq!(agnus.read_vposr(), 0x8001);
+    }
+
+    /// The frame deadline is a closed-form sum. It must equal a walk down
+    /// the remaining lines for every standard, field, line phase and
+    /// programmable total, since the bus arbiter schedules against it.
+    #[test]
+    fn cck_until_next_frame_equals_a_walk_down_the_remaining_lines() {
+        fn walk(agnus: &Agnus) -> u32 {
+            let mut cck = agnus.nudge_cck;
+            let mut hpos = agnus.hpos;
+            let mut vpos = agnus.vpos;
+            let mut lol = agnus.lol;
+            let frame_lines = agnus.current_frame_lines();
+            loop {
+                let line_cck = agnus.line_cck_for(lol);
+                cck = cck.saturating_add(line_cck.saturating_sub(hpos).max(1));
+                vpos += 1;
+                if agnus.long_line_toggles() {
+                    lol = !lol;
+                }
+                if vpos >= frame_lines {
+                    return cck;
+                }
+                hpos = 0;
+            }
+        }
+        let mut cases = 0;
+        for standard in [VideoStandard::Pal, VideoStandard::Ntsc] {
+            for revision in [AgnusRevision::Ocs, AgnusRevision::Ecs8372Rev4] {
+                for beamcon0 in [0, BEAMCON0_PAL, BEAMCON0_LOLDIS, BEAMCON0_VARBEAMEN] {
+                    for (lace, lof, lol) in [
+                        (false, false, false),
+                        (false, true, true),
+                        (true, false, true),
+                        (true, true, false),
+                    ] {
+                        let mut agnus = Agnus::with_video_standard_and_revision(standard, revision);
+                        agnus.write_htotal(0x71);
+                        agnus.write_vtotal(0x245);
+                        agnus.write_beamcon0(beamcon0);
+                        agnus.set_lace(lace);
+                        agnus.lof = lof;
+                        agnus.lol = lol;
+                        let lines = agnus.current_frame_lines();
+                        for vpos in [0, 1, 2, lines / 2, lines - 2, lines - 1, lines, lines + 3] {
+                            for hpos in [0, 1, 0x70, 0x71, 0xE2, 0xE3, 0xE4, 0x1FF] {
+                                for nudge in [0, 1] {
+                                    agnus.vpos = vpos;
+                                    agnus.hpos = hpos;
+                                    agnus.nudge_cck = nudge;
+                                    assert_eq!(
+                                        agnus.cck_until_next_frame(),
+                                        walk(&agnus),
+                                        "{standard:?} {revision:?} beamcon0={beamcon0:#x} \
+                                         lace={lace} lof={lof} lol={lol} v={vpos} h={hpos}"
+                                    );
+                                    cases += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(cases, 2 * 2 * 4 * 4 * 8 * 8 * 2);
+    }
+
+    /// A programmable scan can run past line 511. The ECS Agnus and Alice
+    /// carry the vertical counter to eleven bits, and VPOSR bits 2-0 read
+    /// V10-V8; OCS has a nine-bit counter and reads V8 alone.
+    #[test]
+    fn ecs_vposr_reads_v10_to_v8_of_a_tall_programmable_scan() {
+        for revision in [AgnusRevision::Ecs8372Rev4, AgnusRevision::AgaAlice] {
+            let mut agnus = Agnus::with_video_standard_and_revision(VideoStandard::Pal, revision);
+            agnus.write_vtotal(0x04FF);
+            agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
+            for (vpos, high) in [(0x0FF, 0), (0x100, 1), (0x200, 2), (0x3A5, 3), (0x4FF, 4)] {
+                agnus.vpos = vpos;
+                agnus.hpos = 0x40;
+                assert_eq!(
+                    agnus.read_vposr() & 0x0007,
+                    high,
+                    "{revision:?} line {vpos:#x}"
+                );
+                assert_eq!(agnus.read_vhposr() >> 8, (vpos & 0xFF) as u16);
+            }
+        }
+        let mut ocs = Agnus::with_video_standard(VideoStandard::Pal);
+        ocs.vpos = 0x100;
+        ocs.hpos = 0x40;
+        assert_eq!(ocs.read_vposr() & 0x0007, 1);
+    }
+
+    /// VPOSW loads V10-V8 on the eleven-bit counter and only V8 on OCS,
+    /// keeping the low byte VHPOSW owns.
+    #[test]
+    fn vposw_loads_v10_to_v8_on_ecs_and_v8_alone_on_ocs() {
+        let mut ecs =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        ecs.write_vtotal(0x07FF);
+        ecs.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
+        ecs.vpos = 0x0034;
+        ecs.write_vposw(0x8005);
+        assert_eq!(ecs.vpos, 0x0534);
+        assert!(ecs.lof);
+        ecs.write_vposw(0x0002);
+        assert_eq!(ecs.vpos, 0x0234);
+        assert!(!ecs.lof);
+
+        let mut ocs = Agnus::with_video_standard(VideoStandard::Pal);
+        ocs.vpos = 0x0034;
+        ocs.write_vposw(0x0006);
+        assert_eq!(ocs.vpos, 0x0034, "V9 and V10 do not exist on OCS");
+        ocs.write_vposw(0x0007);
+        assert_eq!(ocs.vpos, 0x0134);
+    }
+
+    /// SPRxCTL bit 6 (SV9) and bit 5 (EV9) are the tenth vertical start
+    /// and stop bits on the ECS Agnus and Alice; OCS has nine-bit
+    /// comparators and ignores them.
+    #[test]
+    fn sprite_control_words_carry_a_tenth_vertical_bit_on_ecs_only() {
+        use super::{sprite_vstart_from_words, sprite_vstop_from_ctl};
+        // Start line $234, stop line $2A0: SV9 | EV9 | EV7-EV0 = $A0,
+        // SV8 clear, EV8 clear.
+        let (pos, ctl) = (0x3440, 0xA060);
+        assert_eq!(sprite_vstart_from_words(pos, ctl, true), 0x234);
+        assert_eq!(sprite_vstop_from_ctl(ctl, true), 0x2A0);
+        assert_eq!(sprite_vstart_from_words(pos, ctl, false), 0x034);
+        assert_eq!(sprite_vstop_from_ctl(ctl, false), 0x0A0);
+        // All three start bits and all three stop bits together.
+        assert_eq!(sprite_vstart_from_words(0xFF00, 0x0044, true), 0x3FF);
+        assert_eq!(sprite_vstop_from_ctl(0xFF22, true), 0x3FF);
+        assert!(AgnusRevision::Ecs8372Rev4.sprite_v9());
+        assert!(AgnusRevision::Ecs8375.sprite_v9());
+        assert!(AgnusRevision::AgaAlice.sprite_v9());
+        assert!(!AgnusRevision::Ocs.sprite_v9());
+    }
+
+    /// A BEAMCON0 write reselects the standard but leaves the board strap
+    /// alone; the host selecting a standard moves the strap.
+    #[test]
+    fn beamcon0_pal_bit_does_not_move_the_board_standard() {
+        let mut agnus =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        assert_eq!(agnus.board_video_standard(), VideoStandard::Pal);
+        agnus.write_beamcon0(0);
+        assert_eq!(agnus.video_standard(), VideoStandard::Ntsc);
+        assert_eq!(agnus.board_video_standard(), VideoStandard::Pal);
+
+        agnus.set_video_standard(VideoStandard::Ntsc);
+        assert_eq!(agnus.board_video_standard(), VideoStandard::Ntsc);
+        agnus.write_beamcon0(BEAMCON0_PAL);
+        assert_eq!(agnus.video_standard(), VideoStandard::Pal);
+        assert_eq!(agnus.board_video_standard(), VideoStandard::Ntsc);
+    }
+
+    /// A VPOSW write clears the long-line flip-flop whatever bit 7 of the
+    /// written word says, on OCS and ECS alike.
+    #[test]
+    fn vposw_clears_the_long_line_flip_flop() {
+        for revision in [AgnusRevision::Ocs, AgnusRevision::Ecs8372Rev4] {
+            let mut ntsc = Agnus::with_video_standard_and_revision(VideoStandard::Ntsc, revision);
+            ntsc.advance_by_cck(COLORCLOCKS_PER_LINE);
+            assert!(ntsc.lol, "{revision:?}: second NTSC line is long");
+            ntsc.write_vposw(0x8080);
+            assert!(!ntsc.lol, "{revision:?}");
+            assert_eq!(ntsc.read_vposr() & 0x0080, 0);
+            // The alternation carries on from the cleared state.
+            ntsc.advance_by_cck(COLORCLOCKS_PER_LINE);
+            assert!(ntsc.lol, "{revision:?}");
+        }
+    }
+
+    /// The NTSC OCS parts (8361, 8370) identify themselves with bit 4 of
+    /// the ID field, the PAL ones (8367, 8371) with zero.
+    #[test]
+    fn ocs_ntsc_agnus_reports_chipset_id_10() {
+        let ntsc = Agnus::with_video_standard_and_revision(VideoStandard::Ntsc, AgnusRevision::Ocs);
+        assert_eq!(ntsc.read_vposr() & 0x7F00, 0x1000);
+        let pal = Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ocs);
+        assert_eq!(pal.read_vposr() & 0x7F00, 0x0000);
     }
 
     #[test]
@@ -2338,23 +2804,104 @@ mod tests {
             Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
         a.write_vtotal(149); // 150-line frame
         a.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
-        a.set_lace(true);
-        a.update_interlace_long_frame(true);
-        // Programmable totals win over the lace short/long selection.
+        // Programmable totals replace the fixed PAL counts, interlaced or
+        // not: nothing here is 312 or 313 lines.
         assert_eq!(a.current_frame_lines(), 150);
+        a.set_lace(true);
+        assert_ne!(a.current_frame_lines(), PAL_LINES);
+        assert_ne!(a.current_frame_lines(), PAL_LINES - 1);
     }
 
+    /// An interlaced programmable scan alternates a short field of
+    /// VTOTAL + 1 lines with a long field of VTOTAL + 2, following the
+    /// long-field latch as the fixed standards do. Without LACE every
+    /// field is VTOTAL + 1 lines whatever the latch holds.
     #[test]
-    fn programmable_frame_does_not_toggle_long_line() {
+    fn interlaced_programmable_scan_adds_a_line_to_the_long_field() {
+        let mut a =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        a.write_htotal(0x81);
+        a.write_vtotal(0x23D);
+        a.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
+        assert!(a.lof, "the latch powers up set");
+        assert_eq!(a.current_frame_lines(), 0x23E, "no LACE: VTOTAL + 1");
+        assert_eq!(a.nominal_frame_lines(), 0x23E);
+
+        // The first laced field after a progressive display is short.
+        a.update_interlace_long_frame(true);
+        assert!(!a.lof);
+        assert_eq!(a.current_frame_lines(), 0x23E);
+        a.update_interlace_long_frame(true);
+        assert!(a.lof);
+        assert_eq!(a.current_frame_lines(), 0x23F, "long field: VTOTAL + 2");
+        assert_eq!(a.nominal_frame_lines(), 0x23F);
+        assert_eq!(a.nominal_frame_cck(), 574.5 * 130.0);
+
+        // The beam really runs that many lines before wrapping.
+        a.vpos = 0;
+        a.hpos = 0;
+        let tick = a.advance_by_cck(0x23E * 130);
+        assert_eq!(tick.new_frames, 0);
+        assert_eq!(a.vpos, 0x23E);
+        assert_eq!(a.read_vposr() & 0x0007, 2);
+        let tick = a.advance_by_cck(130);
+        assert_eq!(tick.new_frames, 1);
+        assert_eq!(a.vpos, 0);
+
+        // VPOSW can force the latch; the field length follows it.
+        a.write_vposw(0x0000);
+        assert_eq!(a.current_frame_lines(), 0x23E);
+        a.write_vposw(0x8000);
+        assert_eq!(a.current_frame_lines(), 0x23F);
+
+        // Leaving interlace with the latch set goes back to VTOTAL + 1.
+        a.update_interlace_long_frame(false);
+        assert!(a.lof);
+        assert_eq!(a.current_frame_lines(), 0x23E);
+    }
+
+    /// VARBEAMEN does not stop the long/short line toggle. With the PAL
+    /// bit and LOLDIS both clear the lines of a programmable scan
+    /// alternate HTOTAL + 1 and HTOTAL + 2 colour clocks; LOLDIS or the
+    /// PAL bit pins them at HTOTAL + 1.
+    #[test]
+    fn programmable_scan_toggles_long_lines_until_loldis_or_pal() {
         let mut a = Agnus::with_video_standard_and_revision(
             VideoStandard::Ntsc,
             AgnusRevision::Ecs8372Rev4,
         );
-        a.write_htotal(140); // programmable line length 141
-        a.write_beamcon0(BEAMCON0_VARBEAMEN); // NTSC + programmable beam
+        a.write_htotal(140); // short line: 141 colour clocks
+        a.write_vtotal(399);
+        a.write_beamcon0(BEAMCON0_VARBEAMEN); // PAL and LOLDIS clear
+        assert!(a.long_line_toggles());
+        assert!(!a.lol);
         assert_eq!(a.current_line_cck(), 141);
+        a.advance_by_cck(141);
+        assert_eq!((a.vpos, a.hpos), (1, 0));
+        assert!(a.lol);
+        assert_eq!(a.current_line_cck(), 142, "long line: HTOTAL + 2");
+        a.advance_by_cck(142);
+        assert_eq!((a.vpos, a.hpos), (2, 0));
+        assert!(!a.lol);
+        assert_eq!(a.read_vposr() & 0x0080, 0);
+
+        // The line-start deadline counts both lengths: two short lines
+        // and one long line from the start of line 2 to line 5.
+        assert_eq!(a.cck_until_line_start(5), Some(141 + 142 + 141));
+        // Mean field length for the refresh rate: 400 lines of 141.5.
+        assert_eq!(a.nominal_frame_cck(), 400.0 * 141.5);
+
+        a.write_beamcon0(BEAMCON0_VARBEAMEN | BEAMCON0_LOLDIS);
         assert!(!a.long_line_toggles());
         a.advance_by_cck(141 * 3);
+        assert_eq!(a.vpos, 5);
+        assert!(!a.lol);
+        assert_eq!(a.current_line_cck(), 141);
+
+        a.write_beamcon0(BEAMCON0_VARBEAMEN | BEAMCON0_PAL);
+        assert!(!a.long_line_toggles());
+        a.advance_by_cck(141 * 3);
+        assert_eq!(a.vpos, 8);
         assert_eq!(a.current_line_cck(), 141);
     }
 
@@ -2622,14 +3169,14 @@ mod tests {
     }
 
     #[test]
-    fn ecs_lpendis_suppresses_light_pen_latch() {
+    fn ecs_lpendis_reads_the_running_counters_past_a_pen_pulse() {
         let mut agnus =
             Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
         agnus.set_lpen(true);
         agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_LPENDIS);
         agnus.advance_by_cck(10 * COLORCLOCKS_PER_LINE + 0x30);
         agnus.trigger_light_pen();
-        // No latch: reads stay live.
+        // The latched value is ignored: reads stay live.
         assert_eq!(
             agnus.read_vhposr(),
             (10 << 8) | (0x30 + VHPOSR_LOOKAHEAD_CCK as u16)
@@ -2639,6 +3186,47 @@ mod tests {
             agnus.read_vhposr(),
             (10 << 8) | (0x32 + VHPOSR_LOOKAHEAD_CCK as u16)
         );
+        // LPENDIS selects the readback only. The pulse was latched
+        // underneath and shows as soon as the bit is cleared.
+        agnus.write_beamcon0(BEAMCON0_PAL);
+        assert_eq!(agnus.read_vhposr(), (10 << 8) | 0x30);
+    }
+
+    /// With LPEN set and no pen pulse the latch freezes at the end of each
+    /// field, and a position latched before LPENDIS was set is still held.
+    /// Neither may reach the position registers while LPENDIS is set: they
+    /// read the running beam, on both VPOSR and VHPOSR.
+    #[test]
+    fn ecs_lpendis_reads_the_running_counters_past_a_held_latch() {
+        let mut agnus =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        agnus.set_lpen(true);
+        // A whole field with no pulse: the end-of-field position is held.
+        agnus.advance_by_cck(PAL_LINES * COLORCLOCKS_PER_LINE + 0x20);
+        let held = agnus.read_vhposr();
+        assert_eq!(held >> 8, ((PAL_LINES - 1) & 0xFF) as u16);
+        assert_eq!(agnus.read_vposr() & 0x0001, 1);
+
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_LPENDIS);
+        assert_eq!(
+            agnus.read_vhposr(),
+            0x20 + VHPOSR_LOOKAHEAD_CCK as u16,
+            "line 0 of the running beam"
+        );
+        assert_eq!(agnus.read_vposr() & 0x0001, 0);
+        agnus.advance_by_cck(3 * COLORCLOCKS_PER_LINE);
+        assert_eq!(
+            agnus.read_vhposr(),
+            (3 << 8) | (0x20 + VHPOSR_LOOKAHEAD_CCK as u16)
+        );
+
+        // OCS has no BEAMCON0: the same write changes nothing there.
+        let mut ocs = Agnus::with_video_standard(VideoStandard::Pal);
+        ocs.set_lpen(true);
+        ocs.advance_by_cck(PAL_LINES * COLORCLOCKS_PER_LINE + 0x20);
+        let held = ocs.read_vhposr();
+        ocs.write_beamcon0(BEAMCON0_PAL | BEAMCON0_LPENDIS);
+        assert_eq!(ocs.read_vhposr(), held);
     }
 
     #[test]

@@ -3,6 +3,8 @@
 ; chip RAM. Change only Ramsey's refresh rate, preserving fitted DRAM modes.
 ; Green = both register mirrors and the external interrupt gate passed, and
 ; Ramsey accepted a mode write and restoration. Red = a check failed.
+; Yellow = the interrupt latch answered at offset $09A but not elsewhere in
+; its four pages.
         machine 68040
         move.w  296(a6),d7       ; ExecBase AttnFlags
         jsr     -150(a6)         ; exec.library/SuperState
@@ -55,12 +57,32 @@
         move.w  #$8000,$dfb09a
         move.w  #255,d0
 .poll:  tst.w   d6
-        bne.s   ramsey
+        bne.s   second
         dbra    d0,.poll
 fail:   bra.s   fail
 irq:    addq.w  #1,d6
         move.w  #4,$09c(a6)
         rte
+        ; Gary has no A2-A11 pins: the latch must answer at any offset of
+        ; $DF8000-$DFBFFF, not only the documented $09A.
+second: move.w  #$2700,sr
+        moveq   #0,d6
+        move.w  #0,$df9180
+        move.w  #$8004,$09c(a6)
+        move.w  #$2000,sr
+        move.w  #255,d0
+.wait:  dbra    d0,.wait
+        tst.w   d6
+        bne.s   docfail
+        move.w  #$8000,$dfa000
+        move.w  #255,d0
+.poll:  tst.w   d6
+        bne.s   ramsey
+        dbra    d0,.poll
+        bra.s   fail
+docfail: move.w #$2700,sr
+        move.w  #$0ff0,$180(a6)
+.hold:  bra.s   .hold
 ramsey: move.w  #$2700,sr
         lea     $de0003,a0
         move.b  (a0),d1
@@ -74,12 +96,12 @@ ramsey: move.w  #$2700,sr
 .latch: cmp.b   (a0),d2
         beq.s   .restore
         dbra    d0,.latch
-        bra.s   fail
+        bra     fail
 .restore: move.b d1,(a0)
         move.w  #255,d0
 .check: cmp.b   (a0),d1
         beq.s   .ok
         dbra    d0,.check
-        bra.s   fail
+        bra     fail
 .ok:    move.w  #$02c4,$180(a6)
 .hold:  bra.s   .hold

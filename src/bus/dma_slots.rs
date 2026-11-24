@@ -1154,14 +1154,48 @@ impl Bus {
 
     /// RGA strobes share the refresh slots. They carry sync information to
     /// Denise/Lisa without allocating any additional chip-bus cycles.
+    ///
+    /// Agnus runs its four refresh cycles back to back, straight after its
+    /// horizontal counter wraps: in this numbering the line-end slot (E2, or
+    /// E3 on a long line) is the first of them and 1/3/5 follow. The first
+    /// cycle carries the strobe that classifies the line about to start
+    /// (STREQU/STRVBL/STRHOR); the second carries STRLONG when that line is a
+    /// long one (Agnus 8371 and Lisa specifications, "first" and "second"
+    /// refresh slot). A programmable line with no line-end refresh slot
+    /// reports them on its first two modelled refresh cycles instead.
     fn refresh_strobe(&self, hpos: u32) -> u16 {
         let a = &self.agnus;
-        if hpos != 1 {
-            return if hpos == 3 && a.lol { 0x03e } else { 0x1fe };
+        let line_cck = a.current_line_cck();
+        let has_line_end_slot = Self::line_end_refresh_slot(line_cck.wrapping_sub(1));
+        let (kind_slot, long_slot) = if has_line_end_slot {
+            (line_cck - 1, 1)
+        } else {
+            (1, 3)
+        };
+        if hpos == long_slot {
+            return if a.lol { 0x03e } else { 0x1fe };
         }
+        if hpos != kind_slot {
+            return 0x1fe;
+        }
+        // The line the strobe describes, and the line before it. The
+        // line-end cycle belongs to the line that follows it.
+        let frame_lines = a.current_frame_lines();
+        let (line, previous) = if has_line_end_slot {
+            let next = if a.vpos + 1 >= frame_lines {
+                0
+            } else {
+                a.vpos + 1
+            };
+            (next, a.vpos)
+        } else if a.vpos == 0 {
+            (0, frame_lines - 1)
+        } else {
+            (a.vpos, a.vpos - 1)
+        };
         let pal = a.video_standard() == VideoStandard::Pal;
         let equ_lines = if pal {
-            8 + u32::from(a.current_frame_lines() == crate::chipset::agnus::PAL_LINES)
+            8 + u32::from(frame_lines == crate::chipset::agnus::PAL_LINES)
         } else {
             10
         };
@@ -1175,17 +1209,12 @@ impl Bus {
                 & (crate::chipset::agnus::BEAMCON0_VARCSYEN
                     | crate::chipset::agnus::BEAMCON0_BLANKEN)
                 == 0)
-            && (first_equ..first_equ + equ_lines).contains(&a.vpos)
+            && (first_equ..first_equ + equ_lines).contains(&line)
         {
             return 0x038;
         }
         let blank = if let Some((start, stop)) = a.programmable_vertical_blank() {
-            // The RGA strobe precedes the vertical comparator on this line.
-            let previous = if a.vpos == 0 {
-                a.current_frame_lines() - 1
-            } else {
-                a.vpos - 1
-            };
+            // The RGA strobe precedes the vertical comparator on its line.
             if start < stop {
                 (start..stop).contains(&previous)
             } else {
@@ -1193,7 +1222,7 @@ impl Bus {
             }
         } else {
             let first_blank = u32::from(!self.mem.wcs.is_empty());
-            (first_blank..first_blank + if pal { 26 } else { 21 }).contains(&a.vpos)
+            (first_blank..first_blank + if pal { 26 } else { 21 }).contains(&line)
         };
         if blank {
             0x03a

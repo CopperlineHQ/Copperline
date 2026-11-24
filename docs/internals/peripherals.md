@@ -46,8 +46,13 @@ control register at `$DE0003` (refresh rate, page/burst/skip modes, DRAM
 geometry) and the read-only version register at `$DE0043` -- `$0D` for
 the A3000's Ramsey-04, `$0F` for the A4000's Ramsey-07, a distinction
 that matters because the two parts disagree about control bit 4
-(Ramsey-04 DRAM width versus Ramsey-07 cycle-skip mode). The geometry
-bits come up describing the fitted RAM. A control write takes effect at
+(Ramsey-04 DRAM width versus Ramsey-07 cycle-skip mode). Every bit has a
+power-up default: page, burst and wrap off, the depth bit from the board's
+RSIZE jumper (taken to match the fitted RAM), the Ramsey-04 width bit set,
+and the refresh rate from the RSPEED input, which selects 238 clocks on a
+25 MHz board. Only a power cycle reloads them. The /RESET line does not
+reach the register, so a warm reboot starts in whatever mode the last
+session left. A control write takes effect at
 the next refresh: until then Ramsey keeps the previous refresh rate and
 page, burst and skip modes. The register reads back the written byte
 immediately. Commodore's specification says the value cannot be read back
@@ -70,10 +75,31 @@ longword. WRAP permits a burst to continue at the beginning of the same
 
 Fat Gary also drives the motherboard interrupt-enable input on U701. A
 write to bit 15 at `$DF809A` gates the chipset IPL lines at the CPU. The
-same latch answers at `$DF909A`, `$DFA09A` and `$DFB09A`. A low-byte
-write leaves it alone. Reset enables interrupts at this gate. Paula keeps
+specification places the latch at that offset of the four 4 KiB pages
+`$DF8000`-`$DFBFFF`, but the part has no A2-A11 pins, so it cannot tell one
+offset from another: every write cycle in the range loads the latch from
+D31, the one data line Gary sees. The range is a 16-bit port, so that is
+the top bit of the byte on the upper data strobe. A long write runs two
+cycles and the second decides. A lone byte at an odd address is on the
+lower strobe and leaves the latch alone. Reset enables interrupts at this
+gate. Paula keeps
 its INTENA and INTREQ latches throughout, so re-enabling the gate exposes
 any request still pending. [Commodore Fat Gary specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/FatGary/390540-02_FatGary_specification.pdf)
+
+Fat Gary times the ROM cycle itself and ends it with `*STERM`. Two board
+jumpers on its ROMJP1 and ROMJP0 inputs select 5, 6, 7 or 8 CPU clocks; the
+access time the ROMs are allowed is one clock less, 160 to 280 ns at 25 MHz.
+The 25 MHz A3000 boards ship with J151 and J152 both at 1-2, eight clocks:
+the system ROMs need 250 ns, and 280 ns is the only 25 MHz setting that
+covers it. The A4000 ships with J151 at 1-2, six clocks (200 ns). The ROM
+is a 32-bit port, so one cycle delivers an aligned longword whatever the
+operand size, an operand across two longwords takes two cycles, and the
+second opcode word of a longword the CPU has just fetched costs none. In
+precise mode a ROM read is billed that way on both profiles; other boards
+keep the generic external cycle of four CPU clocks a word, and JIT bills
+ROM nothing. The CIA cycle on these boards (Fat Gary shortens ECLK's high
+time during a CIA access) is not modelled: it still follows the 68000 E
+clock rule. Golden probe `fatgary-romcycle`. [Commodore Fat Gary specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/FatGary/390540-02_FatGary_specification.pdf)
 
 Beyond Ramsey's four banks the big-box memory map reserves
 `$04000000`-`$06FFFFFF` for motherboard RAM expansion; on the A4000
@@ -1010,7 +1036,9 @@ provides a compatible ABI at `$F0FF60` (see
 The same `UaeLib` instance serves WinUAE's write-only printf ports at `$BFFF00`
 (arguments) and `$BFFF04` (format pointer), implemented in
 `uaelib/debug_port.rs`. The CPU bus decodes these writes after real RAM/ROM
-and before the CIA windows, preserving the ordinary unmapped-write timing.
+and before the CIA windows, and bills them as the hardware decode of those
+addresses would: an E-clock cycle with neither CIA selected on a Gary board,
+an unmapped write elsewhere.
 Reads and neighbouring addresses keep their normal hardware decode. Word
 transfers within one instruction are assembled in either order; a provisional
 high-word argument is replaced by the completed longword. The instruction-fetch
@@ -1662,8 +1690,8 @@ bus maps it back through the renderer's comparator origin
 (`bitplane::framebuffer_beam_position`) to the beam line and colour clock
 that paints that pixel and hands Agnus the target, and Agnus fires the
 latch as its counters sweep past that exact clock (`light_pen_sweep`),
-once per field, honouring BPLCON0 LPEN and ECS BEAMCON0 LPENDIS as
-before. The Denise output-pipeline delay is not subtracted -- a real pen
+once per field while BPLCON0 LPEN is set. ECS BEAMCON0 LPENDIS does not
+stop the latch: it makes VPOSR/VHPOSR read the running counters. The Denise output-pipeline delay is not subtracted -- a real pen
 reads late by the same clocks, and pen software calibrates it away. The
 tip switch / trigger is the port's third-button line (POTxX, read through
 POTGOR), because /FIRx is the pulse line and cannot also hold a switch;

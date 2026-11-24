@@ -17,17 +17,17 @@ use super::{
     CapturedBitplaneRow, CapturedSpriteLine, ChipBusOwner, CpuBusAccessKind, CpuTraceSlot,
     CpuWaitClass, CpuWaitSample, DeviceClock, DisplaySpriteDmaState, DisplaySpriteLineData,
     FrameBusTrace, LiveCollisionControl, LiveCollisionLineReplay, LiveSpriteCollisionSource,
-    PortDevice, RenderRegisterSnapshot, BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A,
-    BLTCON0_USE_B, BLTCON0_USE_C, BLTCON0_USE_D, BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA,
-    BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT, BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES,
-    BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_CIAA_IRQ, BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT,
-    BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL, BUS_EVENT_SPECIAL, BUS_EVENT_VB,
-    BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER, BUS_RECORD_COPPER, BUS_RECORD_CPU,
-    BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP, DENISE_HPOS_LAG_CCK, DMACON_BLTEN,
-    DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, IRQ_SOURCE_BITS, PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS,
-    RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0, RENDER_MIN_OVERSCAN_START_VPOS,
-    RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS, SPRITE_DMA_SLOT1_HPOS,
-    SPRITE_OUTPUT_DELAY_LORES,
+    PortDevice, RenderRegisterSnapshot, SpriteControlRegisterWrite,
+    BLITTER_SLOWDOWN_CPU_MISS_LIMIT, BLTCON0_USE_A, BLTCON0_USE_B, BLTCON0_USE_C, BLTCON0_USE_D,
+    BLTCON1_DOFF, BLTCON1_LINE, BPLCON0_ECSENA, BPLCON3_BRDRBLNK, BPLCON3_BRDSPRT,
+    BPLCON3_SPRES_HIRES, BPLCON3_SPRES_SHRES, BUS_EVENT_BLIT_FINAL_D, BUS_EVENT_CIAA_IRQ,
+    BUS_EVENT_COPPER_WAKE, BUS_EVENT_DDFSTRT, BUS_EVENT_INTREQ, BUS_EVENT_LOF, BUS_EVENT_LOL,
+    BUS_EVENT_SPECIAL, BUS_EVENT_VB, BUS_EVENT_VDIW, BUS_EVENT_VS, BUS_RECORD_BLITTER,
+    BUS_RECORD_COPPER, BUS_RECORD_CPU, BUS_RECORD_DISK, BUS_RECORD_SPRITE, CPU_WAIT_PC_CAP,
+    DENISE_HPOS_LAG_CCK, DMACON_BLTEN, DMACON_BLTPRI, DMACON_BPLEN, DMACON_SPREN, IRQ_SOURCE_BITS,
+    PAL_SPRITE_DMA_FIRST_ACTIVE_VPOS, RENDER_COPPER_WAIT_HPOS_FB0, RENDER_DIW_HSTART_FB0,
+    RENDER_MIN_OVERSCAN_START_VPOS, RENDER_VISIBLE_LINES, RENDER_VISIBLE_START_VPOS,
+    SPRITE_DMA_SLOT1_HPOS, SPRITE_OUTPUT_DELAY_LORES,
 };
 use crate::audio::AudioSink;
 use crate::chipset::agnus::{
@@ -297,22 +297,30 @@ fn full_bus_record_reports_refresh_strobes_in_both_field_phases() {
         b.agnus.lof = long;
         b.set_frame_analyzer_full(true);
         let lines = b.agnus.current_frame_lines();
-        for _ in 0..lines - 1 {
-            b.advance_chipset(b.agnus.current_line_cck());
+        // Lines alternate long and short from line 0 of an NTSC frame.
+        let mut line_end_slots = Vec::new();
+        for _ in 0..lines {
+            let line_cck = b.agnus.current_line_cck();
+            line_end_slots.push(line_cck as usize - 1);
+            b.advance_chipset(line_cck);
         }
-        b.advance_chipset(7);
+        let trace = b.frame_bus_trace().unwrap();
         let mut counts = [0; 3];
         let mut long_strobes = 0;
         for y in 0..lines as usize {
-            let trace = &b.current_frame_bus_trace;
-            let reg = trace.record_at(y, 1).unwrap().reg;
+            // The line-end refresh cycle is the first of Agnus's four and
+            // carries the strobe for the line it leads into.
+            let reg = trace.record_at(y, line_end_slots[y]).unwrap().reg;
             counts[usize::from((reg - 0x38) / 2)] += 1;
-            let second = trace.record_at(y, 3).unwrap().reg;
+            // STRLONG rides the second cycle, the first slot of a long line.
+            let second = trace.record_at(y, 1).unwrap().reg;
             if second == 0x3e {
+                assert_eq!(line_end_slots[y], 0xe3);
                 long_strobes += 1;
             } else {
                 assert_eq!(second, 0x1fe);
             }
+            assert_eq!(trace.record_at(y, 3).unwrap().reg, 0x1fe);
             assert_eq!(trace.record_at(y, 5).unwrap().reg, 0x1fe);
         }
         assert_eq!(counts, expected);
@@ -3099,7 +3107,7 @@ fn sync_strobes_are_documented_noops() {
 }
 
 #[test]
-fn bplcon3_writes_require_ecs_denise_and_enbplcn3() {
+fn bplcon3_latches_without_ecsena_on_ecs_denise_and_lisa() {
     use crate::chipset::denise::BPLCON3_PF2OF_DEFAULT;
 
     // OCS Denise has no BPLCON3: writes never latch.
@@ -3107,22 +3115,166 @@ fn bplcon3_writes_require_ecs_denise_and_enbplcn3() {
     assert!(!ocs.custom_write(0x100, 2, 0x0001));
     assert!(!ocs.custom_write(0x106, 2, 0x1234));
     assert_eq!(ocs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT);
+    assert!(!ocs.custom_reg_present(0x106));
 
-    // ECS Denise drops BPLCON3 writes while ENBPLCN3 (BPLCON0 bit 0)
-    // is clear and latches them while it is set.
+    // ECS Denise latches the write whatever ENBPLCN3 (BPLCON0 bit 0)
+    // says; the bit enables the features, not the register.
     let mut ecs = empty_bus();
     ecs.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
-    assert!(!ecs.custom_write(0x106, 2, 0x1234));
-    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT);
+    assert!(ecs.custom_reg_present(0x106));
+    assert!(!ecs.custom_write(0x106, 2, 0x0021));
+    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT | 0x0021);
+    // The border blank it selects stays off until ENBPLCN3 is set, and
+    // then needs no second BPLCON3 write.
+    let border_blank = |bus: &Bus| {
+        bus.denise.bplcon0 & BPLCON0_ECSENA != 0 && bus.denise.bplcon3 & BPLCON3_BRDRBLNK != 0
+    };
+    assert!(!border_blank(&ecs));
     assert!(!ecs.custom_write(0x100, 2, 0x0001));
-    assert!(!ecs.custom_write(0x106, 2, 0x5678));
-    assert_eq!(ecs.denise.bplcon3, 0x5678);
-
-    // Clearing ENBPLCN3 again keeps the last latched value but blocks
-    // further writes.
+    assert!(border_blank(&ecs));
     assert!(!ecs.custom_write(0x100, 2, 0x0000));
-    assert!(!ecs.custom_write(0x106, 2, 0x9ABC));
-    assert_eq!(ecs.denise.bplcon3, 0x5678);
+    assert!(!ecs.custom_write(0x106, 2, 0x0000));
+    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT);
+
+    // Lisa latches every bit, also without ECSENA.
+    let mut aga = empty_bus();
+    aga.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    assert!(!aga.custom_write(0x106, 2, 0x9ABC));
+    assert_eq!(aga.denise.bplcon3, 0x9ABC);
+}
+
+#[test]
+fn ecs_denise_bplcon3_has_only_its_four_control_bits() {
+    use crate::chipset::denise::BPLCON3_PF2OF_DEFAULT;
+
+    // BRDRBLNK, BRDNTRAN, ZDCLKEN and EXTBLKEN are the 8373's whole
+    // BPLCON3. Lisa's sprite-resolution, playfield 2 offset, border-sprite
+    // and palette-bank fields have no flip-flops there: the playfield 2
+    // colour offset stays at the fixed OCS value whatever is written.
+    let mut ecs = empty_bus();
+    ecs.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+    assert!(!ecs.custom_write(0x100, 2, 0x0001));
+    ecs.current_frame_render_events.clear();
+    assert!(!ecs.custom_write(0x106, 2, 0xFFFF));
+    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT | 0x0035);
+    assert!(!ecs.custom_write(0x106, 2, 0x0000));
+    assert_eq!(ecs.denise.bplcon3, BPLCON3_PF2OF_DEFAULT);
+    // The render replay is given what the chip latched.
+    let replayed: Vec<u16> = ecs
+        .current_frame_render_events
+        .iter()
+        .filter(|event| event.offset == 0x106)
+        .map(|event| event.value)
+        .collect();
+    assert_eq!(
+        replayed,
+        [BPLCON3_PF2OF_DEFAULT | 0x0035, BPLCON3_PF2OF_DEFAULT]
+    );
+}
+
+#[test]
+fn killehb_is_latched_by_ecs_denise_and_lisa_but_not_ocs_denise() {
+    const KILLEHB: u16 = 1 << 9;
+    let latched = |agnus: AgnusRevision, denise: DeniseRevision| {
+        let mut bus = empty_bus();
+        bus.set_chipset_revisions(agnus, denise);
+        bus.current_frame_render_events.clear();
+        assert!(!bus.custom_write(0x104, 2, u64::from(KILLEHB | 0x0024)));
+        let replayed = bus
+            .current_frame_render_events
+            .iter()
+            .rfind(|event| event.offset == 0x104)
+            .map(|event| event.value);
+        assert_eq!(replayed, Some(bus.denise.bplcon2));
+        bus.denise.bplcon2
+    };
+    // The 8362 has no KILLEHB flip-flop, also beside an ECS Agnus.
+    assert_eq!(latched(AgnusRevision::Ocs, DeniseRevision::Ocs), 0x0024);
+    assert_eq!(
+        latched(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ocs),
+        0x0024
+    );
+    // The 8373 and Lisa have it, and need no ECSENA for it.
+    assert_eq!(
+        latched(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ecs8373),
+        KILLEHB | 0x0024
+    );
+    assert_eq!(
+        latched(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa),
+        KILLEHB | 0x0024
+    );
+}
+
+#[test]
+fn ecs_denise_blanks_from_agnus_csy_pin_only_with_ecsena_and_extblken() {
+    const BLANKEN: u64 = 1 << 3;
+    const VARCSYEN: u64 = 1 << 4;
+    const PAL: u64 = 1 << 5;
+    let machine = |denise: DeniseRevision, beamcon0: u64| {
+        let mut bus = empty_bus();
+        bus.set_chipset_revisions(AgnusRevision::Ecs8372Rev4, denise);
+        bus.custom_write(0x1dc, 2, PAL | beamcon0);
+        bus.custom_write(0x1c4, 2, 0x40); // HBSTRT
+        bus.custom_write(0x1c6, 2, 0x48); // HBSTOP
+        bus.custom_write(0x1de, 2, 0x44); // HSSTRT
+        bus.custom_write(0x1c2, 2, 0x50); // HSSTOP
+        bus
+    };
+
+    // Agnus's BLANKEN alone changes nothing in the picture: it only puts
+    // composite blank on the CSY* pin. Denise listens to that pin when
+    // BPLCON3.EXTBLKEN is set and BPLCON0.ECSENA enables it.
+    let mut ecs = machine(DeniseRevision::Ecs8373, BLANKEN);
+    for (bplcon0, bplcon3, window) in [
+        (0, 0, None),
+        (1, 0, None),
+        (0, 1, None),
+        (1, 1, Some((0x200, 0x240))),
+    ] {
+        ecs.custom_write(0x100, 2, bplcon0);
+        ecs.custom_write(0x106, 2, bplcon3);
+        assert_eq!(ecs.display_horizontal_blank(), window);
+    }
+
+    // OCS Denise has neither bit and keeps its fixed blank decode.
+    let mut ocs_denise = machine(DeniseRevision::Ocs, BLANKEN);
+    ocs_denise.custom_write(0x100, 2, 1);
+    ocs_denise.custom_write(0x106, 2, 1);
+    assert_eq!(ocs_denise.display_horizontal_blank(), None);
+
+    // Without BLANKEN the pin carries composite sync. The hardwired pulse
+    // lies inside the fixed blank; a programmed one (VARCSYEN) blanks its
+    // own width; with both bits the pin is active where they overlap.
+    for (beamcon0, window) in [
+        (0, None),
+        (VARCSYEN, Some((0x220, 0x280))),
+        (BLANKEN | VARCSYEN, Some((0x220, 0x240))),
+    ] {
+        let mut bus = machine(DeniseRevision::Ecs8373, beamcon0);
+        bus.custom_write(0x100, 2, 1);
+        bus.custom_write(0x106, 2, 1);
+        assert_eq!(bus.display_horizontal_blank(), window, "{beamcon0:#06X}");
+    }
+}
+
+#[test]
+fn lisa_id_high_byte_is_the_motherboards() {
+    // Lisa answers $F8 in the low byte. The A1200 and CD32 boards read
+    // $00 above it, the A4000 board (Lisa beside Fat Gary) $FC.
+    let mut a1200 = empty_bus();
+    a1200.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    assert_eq!(a1200.custom_read(0x07C, 2), 0x00F8);
+
+    let mut a4000 = empty_bus();
+    a4000.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    a4000.attach_gary(crate::gary::Gary::new());
+    assert_eq!(a4000.custom_read(0x07C, 2), 0xFCF8);
+
+    // ECS Denise drives the whole word, on any board.
+    let mut a3000 = empty_bus();
+    a3000.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+    a3000.attach_gary(crate::gary::Gary::new());
+    assert_eq!(a3000.custom_read(0x07C, 2), 0xFFFC);
 }
 
 #[test]
@@ -3317,6 +3469,39 @@ fn cold_power_on_reset_clears_chip_ram_and_restores_overlay() {
         bus.mem.overlay,
         "ROM overlay must be re-enabled on cold boot"
     );
+}
+
+/// Agnus samples the board's PAL/NTSC strap while reset is asserted, so a
+/// standard that software selected through BEAMCON0's PAL bit lasts only
+/// until the next reset: keyboard reset and the CPU RESET instruction both
+/// bring the chip back in the board's standard.
+#[test]
+fn reset_returns_agnus_to_the_board_video_standard() {
+    use crate::chipset::agnus::NTSC_LINES;
+
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ecs8373);
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+
+    bus.agnus.write_beamcon0(0);
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Ntsc);
+    assert_eq!(bus.agnus.current_frame_lines(), NTSC_LINES);
+    bus.reset_for_keyboard_reset();
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+    assert_eq!(bus.agnus.current_frame_lines(), PAL_LINES);
+    assert_eq!(bus.agnus.read_vposr() & 0x7F00, 0x2000, "PAL ECS Agnus ID");
+
+    bus.agnus.write_beamcon0(0);
+    bus.reset_custom_chips_from_cpu_reset();
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+
+    // An NTSC board comes back as NTSC from a PAL selection.
+    bus.set_video_standard(VideoStandard::Ntsc);
+    bus.agnus.write_beamcon0(BEAMCON0_PAL);
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Pal);
+    bus.reset_for_keyboard_reset();
+    assert_eq!(bus.agnus.video_standard(), VideoStandard::Ntsc);
+    assert_eq!(bus.agnus.current_frame_lines(), NTSC_LINES);
 }
 
 #[test]
@@ -8195,6 +8380,87 @@ fn lowres_fallback_fetches_ignore_pointer_writes_after_plane_slot() {
     assert_eq!(fb[0], rgb12_to_rgba8(0x0000));
 }
 
+/// SPRxCTL bit 6 (SV9) and bit 5 (EV9) are the tenth bits of a sprite's
+/// vertical start and stop on an ECS Agnus or Alice, so a channel can be
+/// placed below line 511 of a tall programmable scan. Sprite DMA then
+/// fetches its data on those lines and nowhere 512 lines above them. OCS
+/// compares nine bits and ignores the two CTL bits.
+#[test]
+fn sprite_dma_compares_ten_vertical_bits_on_ecs_agnus() {
+    // VSTART $210, VSTOP $212, HSTART $83, with SV9 and EV9 set.
+    let (pos, ctl) = (0x1041u16, 0x1261u16);
+    for revision in [AgnusRevision::Ecs8372Rev4, AgnusRevision::AgaAlice] {
+        let mut bus = empty_bus();
+        bus.set_agnus_revision(revision);
+        bus.agnus.write_vtotal(0x270);
+        bus.agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
+        let sprite_ptr = 0x0100usize;
+        write_chip_word(&mut bus, sprite_ptr, pos);
+        write_chip_word(&mut bus, sprite_ptr + 2, ctl);
+        write_chip_word(&mut bus, sprite_ptr + 4, 0x1111);
+        write_chip_word(&mut bus, sprite_ptr + 6, 0x2222);
+        write_chip_word(&mut bus, sprite_ptr + 8, 0x3333);
+        write_chip_word(&mut bus, sprite_ptr + 10, 0x4444);
+        write_chip_word(&mut bus, sprite_ptr + 12, 0);
+        write_chip_word(&mut bus, sprite_ptr + 14, 0);
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN;
+        bus.denise.sprpt[0] = sprite_ptr as u32;
+        bus.display_dma_sprpt[0] = sprite_ptr as u32;
+
+        sprite_fetch_control_words_at_reset_line(&mut bus);
+        let state = bus.display_dma_sprite_state[0];
+        assert_eq!((state.vstrt, state.vstop), (0x210, 0x212), "{revision:?}");
+
+        // Nothing on the lines the low nine bits alone would select...
+        assert!(
+            bus.captured_sprite_line_at(0, 0x110).is_none(),
+            "{revision:?}"
+        );
+        assert!(
+            bus.captured_sprite_line_at(0, 0x20F).is_none(),
+            "{revision:?}"
+        );
+        // ...and the two data lines where the ten-bit compare puts them.
+        let first = bus
+            .captured_sprite_line_at(0, 0x210)
+            .expect("line $210 fetches data");
+        assert_eq!(
+            (first.beam_y, first.data, first.datb),
+            (0x210, 0x1111, 0x2222)
+        );
+        let second = bus
+            .captured_sprite_line_at(0, 0x211)
+            .expect("line $211 fetches data");
+        assert_eq!(
+            (second.beam_y, second.data, second.datb),
+            (0x211, 0x3333, 0x4444)
+        );
+        // The stop line fetches the next control words instead of data.
+        assert!(
+            bus.captured_sprite_line_at(0, 0x212).is_none(),
+            "{revision:?}"
+        );
+        assert_eq!(bus.display_dma_sprpt[0], sprite_ptr as u32 + 16);
+    }
+
+    let mut ocs = empty_bus();
+    ocs.poke_display_sprite_control_at(0, pos, SpriteControlRegisterWrite::Pos, 0);
+    ocs.poke_display_sprite_control_at(0, ctl, SpriteControlRegisterWrite::Ctl, 0);
+    let state = ocs.display_dma_sprite_state[0];
+    assert_eq!((state.vstrt, state.vstop), (0x010, 0x012));
+}
+
+/// A SPRxPOS write after SPRxCTL keeps both CTL-supplied start bits
+/// (SV8 and SV9) and replaces only the low eight.
+#[test]
+fn sprite_pos_write_keeps_the_ctl_supplied_start_high_bits() {
+    let mut bus = empty_bus();
+    bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+    bus.poke_display_sprite_control_at(0, 0x0044, SpriteControlRegisterWrite::Ctl, 0);
+    bus.poke_display_sprite_control_at(0, 0x5A00, SpriteControlRegisterWrite::Pos, 0);
+    assert_eq!(bus.display_dma_sprite_state[0].vstrt, 0x35A);
+}
+
 #[test]
 fn sprite_dma_capture_samples_line_words_at_beam_time() {
     let mut bus = empty_bus();
@@ -9006,6 +9272,49 @@ fn frame_geometry_latches_programmable_scan_at_frame_wrap() {
     assert_eq!(geometry.visible_lines, 569);
     assert_eq!(geometry.line_cck, 114);
     assert_eq!(geometry.frame_lines, 626);
+}
+
+/// The long field of an interlaced programmable scan is one line longer
+/// than the short one. Both fields must still present the same number of
+/// glass rows, or the deinterlacer would see two different scans and stop
+/// weaving them into one picture.
+#[test]
+fn laced_programmable_fields_present_the_same_glass_rows() {
+    use crate::chipset::agnus::{BEAMCON0_PAL, BEAMCON0_VARBEAMEN, BEAMCON0_VARVBEN};
+    const BEAMCON0_VARVSYEN: u16 = 1 << 9;
+
+    let mut bus = empty_bus();
+    bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    // The AmigaOS DblPAL constellation, interlaced.
+    bus.agnus.write_htotal(0x81);
+    bus.agnus.write_vtotal(0x23D);
+    bus.agnus.write_vsstrt(0x07);
+    bus.agnus.write_vsstop(0x0E);
+    bus.agnus.write_vbstrt(0x23E);
+    bus.agnus.write_vbstop(0x16);
+    bus.agnus
+        .write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN | BEAMCON0_VARVBEN | BEAMCON0_VARVSYEN);
+    bus.denise.bplcon0 = 0x0004; // LACE
+
+    let mut seen = Vec::new();
+    for _ in 0..4 {
+        bus.begin_new_beam_frame();
+        let geometry = bus.current_frame_geometry;
+        assert!(geometry.programmable && geometry.lace);
+        seen.push((
+            bus.agnus.lof,
+            geometry.frame_lines,
+            bus.current_frame_presentation_v_window,
+        ));
+    }
+    let long: Vec<_> = seen.iter().filter(|field| field.0).collect();
+    let short: Vec<_> = seen.iter().filter(|field| !field.0).collect();
+    assert_eq!((long.len(), short.len()), (2, 2), "{seen:?}");
+    assert!(long.iter().all(|field| field.1 == 0x23F), "{seen:?}");
+    assert!(short.iter().all(|field| field.1 == 0x23E), "{seen:?}");
+    // 574 lines less the seven of vertical sync, for both fields.
+    let glass = Some((0x16 - 0x0E, 0x23E - 7));
+    assert!(seen.iter().all(|field| field.2 == glass), "{seen:?}");
 }
 
 /// The renderer draws the frame that just completed. If the next frame
@@ -12037,7 +12346,8 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         write_chip_word(&mut bus, sprite_ptr + 8, 0);
         write_chip_word(&mut bus, sprite_ptr + 10, 0);
 
-        bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        // SPRES is a Lisa field: ECS Denise has no such BPLCON3 bits.
+        bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN | DMACON_BPLEN;
         bus.agnus.vpos = 0x2C;
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
@@ -12045,7 +12355,6 @@ fn bplcon3_spres_hires_narrows_live_sprite_playfield_clxdat() {
         bus.denise.diwstop = 0x2DC1;
         bus.denise.ddfstrt = 0x0038;
         bus.denise.ddfstop = 0x0038;
-        // ECSENA/ENBPLCN3 set so the live SPRES write below latches.
         bus.denise.bplcon0 = 0x9000 | BPLCON0_ECSENA;
         bus.denise.bplcon3 = bplcon3;
         // One-bitplane playfield: match only bitplane 1 so the absent planes
@@ -12090,7 +12399,8 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         write_chip_word(&mut bus, sprite_ptr + 8, 0);
         write_chip_word(&mut bus, sprite_ptr + 10, 0);
 
-        bus.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+        // SPRES is a Lisa field: ECS Denise has no such BPLCON3 bits.
+        bus.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
         bus.agnus.dmacon = DMACON_DMAEN | DMACON_SPREN | DMACON_BPLEN;
         bus.agnus.vpos = 0x2C;
         bus.agnus.hpos = SPRITE_DMA_SLOT1_HPOS[0] - 1;
@@ -12098,7 +12408,6 @@ fn same_line_bplcon3_spres_write_does_not_retime_earlier_live_sprite_playfield_c
         bus.denise.diwstop = 0x2DC1;
         bus.denise.ddfstrt = 0x0038;
         bus.denise.ddfstop = 0x0038;
-        // ECSENA/ENBPLCN3 set so the live SPRES write below latches.
         bus.denise.bplcon0 = 0x9000 | BPLCON0_ECSENA;
         bus.denise.bplcon3 = 0;
         // One-bitplane playfield: match only bitplane 1 so the absent planes
@@ -14541,12 +14850,12 @@ fn denise_write_only_reads_use_zero_bus_approximation() {
     let mut bus = empty_bus();
 
     assert!(!bus.custom_write(0x098, 2, 0x0A5A));
-    assert!(!bus.custom_write(0x104, 2, 0x1234));
+    assert!(!bus.custom_write(0x104, 2, 0x1434));
     assert!(!bus.custom_write(0x180, 2, u64::from(COLOR_TRANSPARENCY_BIT | 0x0BCD)));
     assert!(!bus.custom_write(0x1BE, 2, 0x0FED));
 
     assert_eq!(bus.denise.clxcon, 0x0A5A);
-    assert_eq!(bus.denise.bplcon2, 0x1234);
+    assert_eq!(bus.denise.bplcon2, 0x1434);
     assert_eq!(bus.denise.palette[0], COLOR_TRANSPARENCY_BIT | 0x0BCD);
     assert_eq!(bus.denise.palette[31], 0x0FED);
     assert_eq!(bus.custom_read(0x098, 2), 0);

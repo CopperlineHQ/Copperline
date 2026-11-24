@@ -71,7 +71,28 @@ pub struct Gary {
     /// Inverted so an older save state defaults to the reset level on /IENA.
     #[serde(default)]
     pub(crate) interrupts_disabled: bool,
+    /// ROMJP1:ROMJP0, the two board jumpers that set the ROM cycle length.
+    /// None in a save state written before the cycle was modelled, which
+    /// keeps the generic external-bus cost it was running with.
+    #[serde(default)]
+    rom_jumpers: Option<u8>,
+    /// Remainder when converting the board clocks of ROM cycles to CPU
+    /// clocks.
+    #[serde(default)]
+    pub(crate) rom_clock_remainder: u32,
+    /// The aligned longword the last ROM opcode fetch cycle read. The CPU
+    /// fetches opcodes a longword at a time, so the second word of that
+    /// longword needs no bus cycle.
+    #[serde(default)]
+    pub(crate) rom_fetch_latch: Option<u32>,
 }
+
+/// ROMJP1:ROMJP0 as the 25 MHz A3000 boards ship: J151 and J152 both 1-2,
+/// the 280 ns setting, the only one at 25 MHz that covers the 250 ns access
+/// time of the system ROMs.
+pub const ROM_JUMPERS_A3000: u8 = 0b11;
+/// ROMJP1:ROMJP0 as the A4000 ships: J151 at 1-2, the 200 ns setting.
+pub const ROM_JUMPERS_A4000: u8 = 0b01;
 
 impl Gary {
     /// A Gary out of a cold start, which is what the flag means.
@@ -81,7 +102,25 @@ impl Gary {
             timeout_enabled: false,
             coldboot: true,
             interrupts_disabled: false,
+            rom_jumpers: None,
+            rom_clock_remainder: 0,
+            rom_fetch_latch: None,
         }
+    }
+
+    /// Fit the board's ROM timing jumpers (ROMJP1:ROMJP0).
+    pub fn with_rom_jumpers(mut self, jumpers: u8) -> Self {
+        self.rom_jumpers = Some(jumpers & 3);
+        self
+    }
+
+    /// CPU clocks in one ROM cycle. Two jumpers select 5, 6, 7 or 8, and
+    /// Gary ends the cycle with *STERM (Fat Gary specification, "ROM
+    /// Timing", Table 6-6): the access time allowed is one clock less than
+    /// the cycle, 160 to 280 ns at 25 MHz. None when the jumpers were not
+    /// recorded.
+    pub fn rom_cycle_clocks(&self) -> Option<u32> {
+        self.rom_jumpers.map(|jumpers| 5 + u32::from(jumpers))
     }
 
     /// The system /RESET line (Ctrl-Amiga-Amiga, the CPU RESET instruction):
@@ -92,13 +131,18 @@ impl Gary {
     pub fn reset(&mut self) {
         *self = Self {
             coldboot: self.coldboot,
+            rom_jumpers: self.rom_jumpers,
             ..Self::new()
         };
     }
 
-    /// A power cycle: every register back to power-up, COLDBOOT set.
+    /// A power cycle: every register back to power-up, COLDBOOT set. The
+    /// jumpers are part of the board.
     pub fn power_on_reset(&mut self) {
-        *self = Self::new();
+        *self = Self {
+            rom_jumpers: self.rom_jumpers,
+            ..Self::new()
+        };
     }
 
     pub fn read_byte(&self, addr: u32) -> u8 {
