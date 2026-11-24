@@ -306,6 +306,7 @@ const DENISE_COLLISION_MATCH_DELAY_CCK: u32 = 2;
 const AGNUS_WRITE_EFFECT_DELAY_CCK: u32 = 2;
 const BPLCON0_ECSENA: u16 = 1 << 0;
 const BPLCON0_SHRES: u16 = 1 << 6;
+const BPLCON2_KILLEHB: u16 = 1 << 9;
 const BPLCON3_BRDSPRT: u16 = 1 << 1;
 const BPLCON3_BRDRBLNK: u16 = 1 << 5;
 /// The four BPLCON3 flip-flops ECS Denise (8373) has: BRDRBLNK, BRDNTRAN,
@@ -5272,14 +5273,15 @@ impl Bus {
         self.denise_ecs_registers()
     }
 
-    /// The value a BPLCON3 write leaves in the fitted Denise, which is
-    /// also what the render replay is given. ECS Denise (8373) implements
-    /// only four BPLCON3 bits: the sprite-resolution, playfield 2 offset
-    /// and palette-bank fields are Lisa's, so on the 8373 the
-    /// dual-playfield colour offset stays at the fixed OCS value whatever
-    /// is written.
+    /// The value a BPLCON2 or BPLCON3 write leaves in the fitted Denise,
+    /// which is also what the render replay is given. OCS Denise (8362)
+    /// has no KILLEHB flip-flop, and ECS Denise (8373) implements only
+    /// four BPLCON3 bits: the sprite-resolution, playfield 2 offset and
+    /// palette-bank fields are Lisa's, so on the 8373 the dual-playfield
+    /// colour offset stays at the fixed OCS value whatever is written.
     fn denise_control_latch_value(&self, off: u16, val: u16) -> u16 {
         match (off, self.denise_revision) {
+            (0x104, DeniseRevision::Ocs) => val & !BPLCON2_KILLEHB,
             (0x106, DeniseRevision::Ecs8373) => {
                 (val & BPLCON3_ECS_DENISE_BITS) | crate::chipset::denise::BPLCON3_PF2OF_DEFAULT
             }

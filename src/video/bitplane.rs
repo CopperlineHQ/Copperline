@@ -1201,6 +1201,10 @@ impl ControlState {
     fn extra_half_brite(&self) -> bool {
         // OCS EHB is selected by six bitplanes with HAM and dual-playfield
         // disabled. Bitplane 6 halves the intensity of colors 0..31.
+        // KILLEHB (BPLCON2 bit 9) is a flip-flop of ECS Denise and Lisa
+        // only, and needs no ECSENA; the bus never latches it into an OCS
+        // Denise (`Bus::denise_control_latch_value`), so it reads clear
+        // here on that chip.
         self.nplanes() == 6 && self.bplcon0 & 0x0C00 == 0 && self.bplcon2 & BPLCON2_KILLEHB == 0
     }
 

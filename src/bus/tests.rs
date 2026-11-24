@@ -3173,6 +3173,39 @@ fn ecs_denise_bplcon3_has_only_its_four_control_bits() {
 }
 
 #[test]
+fn killehb_is_latched_by_ecs_denise_and_lisa_but_not_ocs_denise() {
+    const KILLEHB: u16 = 1 << 9;
+    let latched = |agnus: AgnusRevision, denise: DeniseRevision| {
+        let mut bus = empty_bus();
+        bus.set_chipset_revisions(agnus, denise);
+        bus.current_frame_render_events.clear();
+        assert!(!bus.custom_write(0x104, 2, u64::from(KILLEHB | 0x0024)));
+        let replayed = bus
+            .current_frame_render_events
+            .iter()
+            .rfind(|event| event.offset == 0x104)
+            .map(|event| event.value);
+        assert_eq!(replayed, Some(bus.denise.bplcon2));
+        bus.denise.bplcon2
+    };
+    // The 8362 has no KILLEHB flip-flop, also beside an ECS Agnus.
+    assert_eq!(latched(AgnusRevision::Ocs, DeniseRevision::Ocs), 0x0024);
+    assert_eq!(
+        latched(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ocs),
+        0x0024
+    );
+    // The 8373 and Lisa have it, and need no ECSENA for it.
+    assert_eq!(
+        latched(AgnusRevision::Ecs8372Rev4, DeniseRevision::Ecs8373),
+        KILLEHB | 0x0024
+    );
+    assert_eq!(
+        latched(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa),
+        KILLEHB | 0x0024
+    );
+}
+
+#[test]
 fn ddf_low_bits_are_masked_by_fetch_mode() {
     assert_eq!(
         bitplane_words_per_row(AgnusRevision::Ocs, 0x0000, 0, 0x0038, 0x0043, false),
@@ -14745,12 +14778,12 @@ fn denise_write_only_reads_use_zero_bus_approximation() {
     let mut bus = empty_bus();
 
     assert!(!bus.custom_write(0x098, 2, 0x0A5A));
-    assert!(!bus.custom_write(0x104, 2, 0x1234));
+    assert!(!bus.custom_write(0x104, 2, 0x1434));
     assert!(!bus.custom_write(0x180, 2, u64::from(COLOR_TRANSPARENCY_BIT | 0x0BCD)));
     assert!(!bus.custom_write(0x1BE, 2, 0x0FED));
 
     assert_eq!(bus.denise.clxcon, 0x0A5A);
-    assert_eq!(bus.denise.bplcon2, 0x1234);
+    assert_eq!(bus.denise.bplcon2, 0x1434);
     assert_eq!(bus.denise.palette[0], COLOR_TRANSPARENCY_BIT | 0x0BCD);
     assert_eq!(bus.denise.palette[31], 0x0FED);
     assert_eq!(bus.custom_read(0x098, 2), 0);
