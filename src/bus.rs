@@ -5290,6 +5290,19 @@ impl Bus {
         }
     }
 
+    /// DENISEID/LISAID as the CPU reads it. Lisa drives only the low byte
+    /// (the chip revision, $F8); the high byte is the level the motherboard
+    /// leaves on D15-D8. The A4000 board (the Lisa machine built around
+    /// Fat Gary) reads $FC there, the A1200 and CD32 boards $00.
+    fn denise_id(&self) -> Option<u16> {
+        let id = self.denise_revision.id()?;
+        Some(if self.denise_is_lisa() && self.gary.is_some() {
+            id | 0xFC00
+        } else {
+            id
+        })
+    }
+
     fn denise_is_lisa(&self) -> bool {
         matches!(self.denise_revision, DeniseRevision::AgaLisa)
     }

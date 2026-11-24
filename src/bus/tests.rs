@@ -3258,6 +3258,26 @@ fn ecs_denise_blanks_from_agnus_csy_pin_only_with_ecsena_and_extblken() {
 }
 
 #[test]
+fn lisa_id_high_byte_is_the_motherboards() {
+    // Lisa answers $F8 in the low byte. The A1200 and CD32 boards read
+    // $00 above it, the A4000 board (Lisa beside Fat Gary) $FC.
+    let mut a1200 = empty_bus();
+    a1200.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    assert_eq!(a1200.custom_read(0x07C, 2), 0x00F8);
+
+    let mut a4000 = empty_bus();
+    a4000.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+    a4000.attach_gary(crate::gary::Gary::new());
+    assert_eq!(a4000.custom_read(0x07C, 2), 0xFCF8);
+
+    // ECS Denise drives the whole word, on any board.
+    let mut a3000 = empty_bus();
+    a3000.set_agnus_revision(AgnusRevision::Ecs8372Rev4);
+    a3000.attach_gary(crate::gary::Gary::new());
+    assert_eq!(a3000.custom_read(0x07C, 2), 0xFFFC);
+}
+
+#[test]
 fn ddf_low_bits_are_masked_by_fetch_mode() {
     assert_eq!(
         bitplane_words_per_row(AgnusRevision::Ocs, 0x0000, 0, 0x0038, 0x0043, false),

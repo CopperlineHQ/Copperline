@@ -28,8 +28,11 @@ impl DeniseRevision {
         !matches!(self, Self::Ocs)
     }
 
-    /// DENISEID ($DFF07C). OCS Denise (8362) does not drive the register
-    /// (the bus floats); ECS Denise (8373) drives $FFFC; Lisa drives $00F8.
+    /// DENISEID/LISAID ($DFF07C). OCS Denise (8362) does not drive the
+    /// register (the bus floats); ECS Denise (8373) reads $FFFC. Lisa
+    /// identifies itself in the low byte only ($F8): the high byte is the
+    /// motherboard's, so this is the $00F8 word of the A1200 and CD32
+    /// boards and `Bus::denise_id` supplies the A4000 board's $FC.
     pub fn id(self) -> Option<u16> {
         match self {
             Self::Ocs => None,
