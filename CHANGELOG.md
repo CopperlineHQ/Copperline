@@ -62,6 +62,12 @@ for the earlier release notes.
   chosen it shows which ffmpeg the recording will use, or that none was
   found, and **Browse** picks a different one. These settings are kept
   when the machine model is changed.
+- The Frame Analyzer shows the RGA strobe Agnus puts on its refresh
+  cycles. The four cycles run back to back across the line boundary: the
+  line-end slot (`$E2`, or `$E3` on a long line) carries STREQU, STRVBL
+  or STRHOR for the line it leads into, and slot 1 carries STRLONG on a
+  long NTSC line. An NTSC frame is traced 228 colour clocks wide so the
+  `$E3` slot of every long line is on the raster.
 
 ### Fixed
 
@@ -107,6 +113,61 @@ for the earlier release notes.
   machine, and wherever frames were presented unevenly. No frame is now
   shorter than two centiseconds: a frame replaced sooner is dropped, and
   the clip keeps its length.
+- Address decode on the Gary, Gayle and Fat Gary boards follows what each
+  part can see, from the Commodore specifications:
+  - The custom register bank repeats every `$200` inside any page that
+    selects it (`$DFF200` is `$DFF000` again); the chips receive only
+    RGA8-RGA1. Fat Gary selects the registers at `$C00000`-`$CFFFFF` and
+    `$DFC000`-`$DFFFFF`.
+  - On the A500, A1000, A2000 and CDTV the CIAs answer throughout
+    `$A00000`-`$BFFFFF`: CIA-A wherever A12 is low, CIA-B wherever A13 is
+    low, both where both are. Gayle and Fat Gary keep the two standard
+    pages.
+  - The Kickstart ROM is mirrored at `$E00000` on the A500, A2000, A600
+    and A1200, and at `$A80000`-`$B7FFFF` on the A600 and A1200.
+  - While OVL is asserted the ROM fills `$000000`-`$1FFFFF` on Gary and
+    Gayle boards and `$000000`-`$07FFFF` on Fat Gary. Gary takes OVL from
+    CIA-A, so a program can assert it again; Gayle holds it in a latch
+    that the first write to CIA-A clears until the next reset.
+  - Fat Gary's interrupt-enable latch gates the chipset interrupts at the
+    CPU. It answers every word of `$DF8000`-`$DFBFFF`, not only the
+    documented `$DF809A`.
+- Ramsey (A3000, A4000): a control write takes effect at the next
+  refresh, and in precise mode a motherboard RAM cycle costs what the
+  mode in force makes it cost (standard, page hit, page miss, skip,
+  burst). The register powers up with the specification's defaults,
+  refresh every 238 clocks on a 25 MHz board, and a warm reset no longer
+  clears it.
+- A1200, A4000, CD32: a long access to the custom registers takes two bus
+  cycles. They are a 16-bit port; only chip RAM is 32 bits wide.
+- ECS and AGA, tall programmable screen modes (DblPAL, DblNTSC,
+  Productivity and others):
+  - VPOSR and VPOSW carry vertical bits 9 and 10, so beam polls no longer
+    wrap at line 512. A VPOSW write clears the long-line flag.
+  - SPRxCTL bits 6 and 5 (SV9, EV9) are decoded: a sprite, such as the
+    Workbench pointer, can sit on line 512 and below.
+  - The long field of an interlaced programmable scan is VTOTAL + 2 lines.
+  - A programmable scan alternates long and short lines unless
+    BEAMCON0.PAL or LOLDIS is set.
+- ECS and AGA: reset returns Agnus to the board's PAL or NTSC standard,
+  whatever BEAMCON0 last selected. BEAMCON0.LPENDIS makes VPOSR and
+  VHPOSR read the running beam instead of the light-pen latch.
+- An OCS NTSC Agnus reports chipset ID `$10` in VPOSR.
+- AGA sprites: with FMODE.SSCAN2 set, SPRxPOS bit 7 enables vertical scan
+  doubling for that sprite alone.
+- AGA: HBSTRT and HBSTOP carry Lisa's fine position bits (35 ns steps)
+  and apply once BPLCON0.ECSENA and BPLCON3.EXTBLKEN are set. DIWHIGH's
+  fine bits move the display window edges in 70 ns steps (35 ns on a
+  super-hires canvas). Six-plane HAM works in super-hires. LISAID reads
+  `$FCF8` on the A4000.
+- ECS Denise:
+  - BPLCON3 latches every write; ECSENA only enables what its bits
+    select. The 8373 keeps BRDRBLNK, BRDNTRAN, ZDCLKEN and EXTBLKEN and
+    ignores the sprite-resolution, playfield-offset and border-sprite
+    bits, which are Lisa's.
+  - Programmable horizontal blanking needs BPLCON3.EXTBLKEN and ECSENA as
+    well as BEAMCON0.BLANKEN. BLANKEN alone no longer blanks the picture.
+- OCS Denise ignores BPLCON2.KILLEHB.
 
 ### Compatibility
 
@@ -115,6 +176,9 @@ for the earlier release notes.
   boards map. 1.2.0 skips the new chunk (with a log line), so the chunk
   does not stop it reading states this build writes. Save states keep
   container version 82 and every existing chunk keeps its version.
+- Save states gain optional fields for Ramsey's DRAM-depth jumper and
+  Agnus's board PAL/NTSC standard. States written before load as before
+  and take both from the machine they describe; no chunk version moves.
 
 ## 1.2.0 - 2026-11-21
 
