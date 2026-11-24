@@ -2109,7 +2109,7 @@ Either port accepts any device, as on real hardware:
   past it, and on the board that pin is also Agnus's `LP` input: while
   `BPLCON0` `LPEN` is set, `VPOSR`/`VHPOSR` then read the latched beam
   position instead of the live counters (ECS/AGA `BEAMCON0` `LPENDIS`
-  holds the latch off). Only one game port is wired to `LP`: port 1 on
+  switches the readback to the live counters). Only one game port is wired to `LP`: port 1 on
   the A1000, port 2 on the A500 and every later Amiga -- a pen in the
   other port has a working switch but its pulses reach nothing, and
   Copperline logs a warning at start-up. The pen's tip switch (a gun's

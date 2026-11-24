@@ -8,7 +8,7 @@ Selects fixed or programmable beam timing and sync/blanking controls.
 ## Bitfields
 
 - Bit 14: HARDDIS, disable the hardwired display limits.
-- Bit 13: LPENDIS, ignore the light-pen input.
+- Bit 13: LPENDIS, VPOSR and VHPOSR read the running beam counters instead of the light-pen latch.
 - Bit 12: VARVBEN, use VBSTRT/VBSTOP vertical blanking.
 - Bit 11: LOLDIS, disable NTSC long/short line alternation.
 - Bit 10: CSCBEN, composite-sync redirection.

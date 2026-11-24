@@ -1311,9 +1311,14 @@ impl Agnus {
     }
 
     /// The internal LPENV/LPENH latches, exposed through VPOSR/VHPOSR while
-    /// BPLCON0.LPEN is set.
+    /// BPLCON0.LPEN is set and ECS BEAMCON0.LPENDIS is clear. LPENDIS is a
+    /// readback select, not a latch enable: "when the bit is a high the
+    /// light-pen latched value is ignored and the actual beam counter
+    /// position is read" (AA register list, BEAMCON0). The latch keeps
+    /// following the pen underneath and reads back again once LPENDIS is
+    /// cleared.
     fn lpen_latch_active(&self) -> Option<(u32, u32)> {
-        if self.lpen_enabled {
+        if self.lpen_enabled && !self.lpen_readback_disabled() {
             self.lpen_latch
         } else {
             None
@@ -1330,8 +1335,9 @@ impl Agnus {
         }
     }
 
-    /// ECS BEAMCON0.LPENDIS suppresses the light-pen latch entirely.
-    fn lpen_latch_disabled(&self) -> bool {
+    /// ECS BEAMCON0.LPENDIS: the position registers read the running beam
+    /// counters instead of the light-pen latch.
+    fn lpen_readback_disabled(&self) -> bool {
         self.revision.is_ecs() && self.beamcon0 & BEAMCON0_LPENDIS != 0
     }
 
@@ -1343,10 +1349,11 @@ impl Agnus {
     }
 
     /// The LP pin's falling edge at beam position (`vpos`, `hpos`): latch
-    /// it unless the pen is disabled, ECS LPENDIS holds the latch off, or
-    /// this field already latched a pulse.
+    /// it unless the pen is disabled or this field already latched a pulse.
+    /// ECS LPENDIS does not stop the latch; it only hides it from the
+    /// position registers (see [`Agnus::lpen_latch_active`]).
     fn trigger_light_pen_at(&mut self, vpos: u32, hpos: u32) {
-        if !self.lpen_enabled || self.lpen_latch_disabled() || self.lpen_triggered_this_field {
+        if !self.lpen_enabled || self.lpen_triggered_this_field {
             return;
         }
         self.lpen_latch = Some((vpos, hpos));
@@ -2721,14 +2728,14 @@ mod tests {
     }
 
     #[test]
-    fn ecs_lpendis_suppresses_light_pen_latch() {
+    fn ecs_lpendis_reads_the_running_counters_past_a_pen_pulse() {
         let mut agnus =
             Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
         agnus.set_lpen(true);
         agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_LPENDIS);
         agnus.advance_by_cck(10 * COLORCLOCKS_PER_LINE + 0x30);
         agnus.trigger_light_pen();
-        // No latch: reads stay live.
+        // The latched value is ignored: reads stay live.
         assert_eq!(
             agnus.read_vhposr(),
             (10 << 8) | (0x30 + VHPOSR_LOOKAHEAD_CCK as u16)
@@ -2738,6 +2745,47 @@ mod tests {
             agnus.read_vhposr(),
             (10 << 8) | (0x32 + VHPOSR_LOOKAHEAD_CCK as u16)
         );
+        // LPENDIS selects the readback only. The pulse was latched
+        // underneath and shows as soon as the bit is cleared.
+        agnus.write_beamcon0(BEAMCON0_PAL);
+        assert_eq!(agnus.read_vhposr(), (10 << 8) | 0x30);
+    }
+
+    /// With LPEN set and no pen pulse the latch freezes at the end of each
+    /// field, and a position latched before LPENDIS was set is still held.
+    /// Neither may reach the position registers while LPENDIS is set: they
+    /// read the running beam, on both VPOSR and VHPOSR.
+    #[test]
+    fn ecs_lpendis_reads_the_running_counters_past_a_held_latch() {
+        let mut agnus =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        agnus.set_lpen(true);
+        // A whole field with no pulse: the end-of-field position is held.
+        agnus.advance_by_cck(PAL_LINES * COLORCLOCKS_PER_LINE + 0x20);
+        let held = agnus.read_vhposr();
+        assert_eq!(held >> 8, ((PAL_LINES - 1) & 0xFF) as u16);
+        assert_eq!(agnus.read_vposr() & 0x0001, 1);
+
+        agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_LPENDIS);
+        assert_eq!(
+            agnus.read_vhposr(),
+            0x20 + VHPOSR_LOOKAHEAD_CCK as u16,
+            "line 0 of the running beam"
+        );
+        assert_eq!(agnus.read_vposr() & 0x0001, 0);
+        agnus.advance_by_cck(3 * COLORCLOCKS_PER_LINE);
+        assert_eq!(
+            agnus.read_vhposr(),
+            (3 << 8) | (0x20 + VHPOSR_LOOKAHEAD_CCK as u16)
+        );
+
+        // OCS has no BEAMCON0: the same write changes nothing there.
+        let mut ocs = Agnus::with_video_standard(VideoStandard::Pal);
+        ocs.set_lpen(true);
+        ocs.advance_by_cck(PAL_LINES * COLORCLOCKS_PER_LINE + 0x20);
+        let held = ocs.read_vhposr();
+        ocs.write_beamcon0(BEAMCON0_PAL | BEAMCON0_LPENDIS);
+        assert_eq!(ocs.read_vhposr(), held);
     }
 
     #[test]

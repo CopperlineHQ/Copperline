@@ -1673,8 +1673,8 @@ bus maps it back through the renderer's comparator origin
 (`bitplane::framebuffer_beam_position`) to the beam line and colour clock
 that paints that pixel and hands Agnus the target, and Agnus fires the
 latch as its counters sweep past that exact clock (`light_pen_sweep`),
-once per field, honouring BPLCON0 LPEN and ECS BEAMCON0 LPENDIS as
-before. The Denise output-pipeline delay is not subtracted -- a real pen
+once per field while BPLCON0 LPEN is set. ECS BEAMCON0 LPENDIS does not
+stop the latch: it makes VPOSR/VHPOSR read the running counters. The Denise output-pipeline delay is not subtracted -- a real pen
 reads late by the same clocks, and pen software calibrates it away. The
 tip switch / trigger is the port's third-button line (POTxX, read through
 POTGOR), because /FIRx is the pulse line and cannot also hold a switch;
