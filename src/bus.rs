@@ -5496,9 +5496,8 @@ impl Bus {
         if let Some(gary) = self.gary.as_mut() {
             gary.reset();
         }
-        if let Some(ramsey) = self.ramsey.as_mut() {
-            ramsey.reset();
-        }
+        // Ramsey's control register is loaded by *PWRUP alone: the reset
+        // line leaves its mode, and its refresh counter, running.
         if let Some(sdmac) = self.sdmac.as_mut() {
             sdmac.reset();
         }
@@ -5655,6 +5654,10 @@ impl Bus {
         // cycle sets it, so Kickstart takes its cold path.
         if let Some(gary) = self.gary.as_mut() {
             gary.power_on_reset();
+        }
+        let ramsey_clock = self.ramsey_clock();
+        if let Some(ramsey) = self.ramsey.as_mut() {
+            ramsey.power_on_reset(ramsey_clock);
         }
         // The warm-reset path above keeps a spinning disc's cached
         // lead-in; a power cycle stops the mechanism, so a mounted disc

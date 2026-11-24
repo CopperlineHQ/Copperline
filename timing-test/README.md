@@ -1019,15 +1019,17 @@ later after restoring the save. The run uses the bundled AROS ROM and an empty S
 
 ## Gary, Ramsey and Lisa board probes
 
-From this directory run `./build.sh gary-overlay`, `./build.sh fatgary-ramsey`
-or `./build.sh lisa-scanblank` to produce a bootable ADF. Cold boot the
-matching machine from the disk. Each probe takes over and stays on its
-result until reset.
+From this directory run `./build.sh gary-overlay`, `./build.sh gary-decode`,
+`./build.sh fatgary-ramsey`, `./build.sh ramsey-cycles` or
+`./build.sh lisa-scanblank` to produce a bootable ADF. Cold boot the matching machine from the disk. Each probe takes
+over and stays on its result until reset.
 
 | Probe | Board | Expected observation |
 |---|---|---|
 | `gary-overlay` | A500 with at least 128 KiB of RAM at `$C00000` | Green if all four ROM aliases compare equal and a write during OVL preserves underlying RAM. The test runs from trapdoor RAM. |
-| `fatgary-ramsey` | A3000 or A4000 | Green after checking custom mirrors, blocking then delivering a pending level-one interrupt through Fat Gary, and changing then restoring Ramsey's refresh rate. Red indicates an incomplete or failed check. |
+| `gary-decode` | A500 or A2000 (Gary), A600 or A1200 (Gayle) | Eight bands, green where a device answered and blue where none did: CIA-A at `$A0E301`, CIA-B at `$A0D200`, both CIAs from one word at `$BFC300`, CIA-A at `$BFF301`, the register bank at `$DFF200`, and the ROM at `$E00000`, `$A80000` and `$B00000`. Gary with a 512 KiB Kickstart: bands 1, 2, 3, 5 and 6 green. Gayle: bands 5, 6, 7 and 8 green. A 1 MiB ROM set answers at `$E00000` with its own second part, so band 6 is blue there, as in the CI goldens (`gary-decode`, `gayle-decode`). vAmiga 4.4 with Kickstart 1.3 draws the Gary pattern. |
+| `fatgary-ramsey` | A3000 or A4000 | Green after checking custom mirrors, blocking then delivering a pending level-one interrupt through Fat Gary (at the documented `$DF809A`, then at other offsets of its four pages), and changing then restoring Ramsey's refresh rate. Red indicates an incomplete or failed check; yellow means the interrupt latch answered at `$09A` only. |
+| `ramsey-cycles` | A3000 or A4000 with motherboard fast RAM | Four bands whose heights are the lines 3000 double reads of motherboard RAM take in standard mode (white), page mode within one row (green), page mode alternating rows (yellow) and Ramsey-07 skip mode (pink). Green is the shortest and yellow the tallest; on a Ramsey-04 pink equals white. |
 | `lisa-scanblank` | A1200 or A4000 with Lisa and Alice | Blue field with a two-sample black slit at colour clock `$60`. Red sprite stripes are two beam lines tall, green stripes one. Both start on an odd line. |
 
 The register timing tests in `src/ramsey.rs` and `src/cpu.rs` count

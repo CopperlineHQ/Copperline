@@ -76,6 +76,8 @@ enum Machine {
     Aga,
     /// A1200 profile exercising NTSC field geometry.
     AgaNtsc,
+    /// A1200 profile, PAL: the Gayle address decode.
+    A1200,
     A4000,
     A4000Buster,
 }
@@ -168,15 +170,17 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         Machine::Jit => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
-        Machine::Aga | Machine::AgaNtsc | Machine::A4000 | Machine::A4000Buster => {
-            "revision = \"AGA\"\n"
-        }
+        Machine::Aga
+        | Machine::AgaNtsc
+        | Machine::A1200
+        | Machine::A4000
+        | Machine::A4000Buster => "revision = \"AGA\"\n",
     };
     let (cpu, memory) = match machine {
         Machine::A4000 | Machine::A4000Buster => ("68040", "chip = \"2M\"\n"),
         Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
         Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
-        Machine::Aga | Machine::AgaNtsc => ("68EC020", "chip = \"2M\"\n"),
+        Machine::Aga | Machine::AgaNtsc | Machine::A1200 => ("68EC020", "chip = \"2M\"\n"),
     };
     let acceleration = if matches!(machine, Machine::Jit) {
         "jit = true\nclock_mhz = 25\n"
@@ -196,10 +200,14 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
             ),
             "PAL",
         )
-    } else if matches!(machine, Machine::AgaNtsc) {
+    } else if matches!(machine, Machine::AgaNtsc | Machine::A1200) {
         (
             "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n".to_owned(),
-            "NTSC",
+            if matches!(machine, Machine::AgaNtsc) {
+                "NTSC"
+            } else {
+                "PAL"
+            },
         )
     } else {
         (String::new(), "PAL")
@@ -333,7 +341,11 @@ fn run_probe(p: &Probe) {
     let shot_path = capture_probe(p, &work);
     let golden_path = golden_dir.join(format!("{name}.png"));
     let actual = load_png(&shot_path).expect("load capture");
-    if matches!(p.machine, Machine::A4000 | Machine::A4000Buster) || name == "gary-overlay" {
+    // The pass/fail probes paint one success colour; ramsey-cycles draws
+    // its measurements instead.
+    if (matches!(p.machine, Machine::A4000 | Machine::A4000Buster) && name != "ramsey-cycles")
+        || name == "gary-overlay"
+    {
         let center =
             (actual.height as usize / 2 * actual.width as usize + actual.width as usize / 2) * 4;
         assert_eq!(
@@ -632,6 +644,14 @@ probe_tests! {
     // FS-UAE-verified exact placement.
     golden_gary_overlay => probe("gary-overlay", "gary-overlay.bin", 16.0);
     golden_fatgary_ramsey => Probe { name: "fatgary-ramsey", program: "fatgary-ramsey.bin", seconds: 8.0, machine: Machine::A4000 };
+    // Gary's /VPA range and CIA selects by A12/A13, the register bank
+    // repeating every $200, and the ROM mirrors, as eight green/blue bands.
+    // The same program on the A1200 profile shows Gayle's decode.
+    golden_gary_decode => probe("gary-decode", "gary-decode.bin", 16.0);
+    golden_gayle_decode => Probe { name: "gayle-decode", program: "gary-decode.bin", seconds: 16.0, machine: Machine::A1200 };
+    // Ramsey's DRAM cycle length in standard, page-hit, page-miss and skip
+    // modes, as band heights.
+    golden_ramsey_cycles => Probe { name: "ramsey-cycles", program: "ramsey-cycles.bin", seconds: 10.0, machine: Machine::A4000 };
     golden_lisa_scanblank => probe_aga("lisa-scanblank", "lisa-scanblank.bin", 16.0);
     golden_dblpal_hires_lace => probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
     // Alice wide-fetch addressing: FMODE 10 duplicates the first word and

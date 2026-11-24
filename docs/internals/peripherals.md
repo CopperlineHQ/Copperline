@@ -46,8 +46,13 @@ control register at `$DE0003` (refresh rate, page/burst/skip modes, DRAM
 geometry) and the read-only version register at `$DE0043` -- `$0D` for
 the A3000's Ramsey-04, `$0F` for the A4000's Ramsey-07, a distinction
 that matters because the two parts disagree about control bit 4
-(Ramsey-04 DRAM width versus Ramsey-07 cycle-skip mode). The geometry
-bits come up describing the fitted RAM. A control write takes effect at
+(Ramsey-04 DRAM width versus Ramsey-07 cycle-skip mode). Every bit has a
+power-up default: page, burst and wrap off, the depth bit from the board's
+RSIZE jumper (taken to match the fitted RAM), the Ramsey-04 width bit set,
+and the refresh rate from the RSPEED input, which selects 238 clocks on a
+25 MHz board. Only a power cycle reloads them. The /RESET line does not
+reach the register, so a warm reboot starts in whatever mode the last
+session left. A control write takes effect at
 the next refresh: until then Ramsey keeps the previous refresh rate and
 page, burst and skip modes. The register reads back the written byte
 immediately. Commodore's specification says the value cannot be read back
@@ -70,8 +75,14 @@ longword. WRAP permits a burst to continue at the beginning of the same
 
 Fat Gary also drives the motherboard interrupt-enable input on U701. A
 write to bit 15 at `$DF809A` gates the chipset IPL lines at the CPU. The
-same latch answers at `$DF909A`, `$DFA09A` and `$DFB09A`. A low-byte
-write leaves it alone. Reset enables interrupts at this gate. Paula keeps
+specification places the latch at that offset of the four 4 KiB pages
+`$DF8000`-`$DFBFFF`, but the part has no A2-A11 pins, so it cannot tell one
+offset from another: every write cycle in the range loads the latch from
+D31, the one data line Gary sees. The range is a 16-bit port, so that is
+the top bit of the byte on the upper data strobe. A long write runs two
+cycles and the second decides. A lone byte at an odd address is on the
+lower strobe and leaves the latch alone. Reset enables interrupts at this
+gate. Paula keeps
 its INTENA and INTREQ latches throughout, so re-enabling the gate exposes
 any request still pending. [Commodore Fat Gary specification](https://github.com/nonarkitten/amiga_replacement_project/blob/143ad5f1b5acae093ea66186e832a8ab4fb1bc0f/FatGary/390540-02_FatGary_specification.pdf)
 
