@@ -5313,6 +5313,18 @@ impl Bus {
         matches!(self.agnus.revision(), AgnusRevision::AgaAlice)
     }
 
+    /// Whether the custom registers are a narrower CPU port than chip RAM.
+    /// Beside Alice chip RAM is 32 bits wide and the registers 16, so the
+    /// CPU bus runs a long register access as two separate word cycles.
+    ///
+    /// TODO: the 16-bit boards still hand a long register access to
+    /// `custom_read`/`custom_write` whole. Reads sample each word on its
+    /// own cycle there, but a long write applies both words after its
+    /// second cycle.
+    pub(crate) fn register_port_narrower_than_chip_ram(&self) -> bool {
+        self.aga_enabled()
+    }
+
     pub fn reset_custom_chips_from_cpu_reset(&mut self) {
         // The CPU RESET instruction asserts the external reset line without
         // resetting the CPU core or clearing RAM. Reuse the warm device reset

@@ -5037,6 +5037,14 @@ impl CpuBus {
             }
         }
         if let Some(off) = self.custom_reg_page_offset(addr) {
+            if size == 4 && self.bus.register_port_narrower_than_chip_ram() {
+                // Two word cycles on the registers' 16-bit port. Each is
+                // decoded and sampled on its own, so the second word comes
+                // one cycle later and from whatever its address selects.
+                let hi = self.read_bus_cycle(addr, 2, kind);
+                let lo = self.read_bus_cycle(addr.wrapping_add(2), 2, kind);
+                return (hi << 16) | (lo & 0xffff);
+            }
             // Custom registers live on the chip bus; custom_read itself
             // grants the contended chip-bus slot.
             return self.bus.custom_read(u64::from(off), size) as u32;
@@ -5538,6 +5546,18 @@ impl CpuBus {
                 );
                 self.bus.cdtv = Some(cdtv);
             }
+            return;
+        }
+        if size == 4
+            && self.bus.register_port_narrower_than_chip_ram()
+            && self.custom_reg_page_offset(addr).is_some()
+        {
+            // Two word cycles on the registers' 16-bit port: each word is
+            // decoded and lands on its own cycle. Each cycle settles the
+            // translation-cache exclusions for what it reaches.
+            self.jit_cache_exclusions_current = exclusions_were_current;
+            self.write_bus_cycle(addr, 2, value >> 16);
+            self.write_bus_cycle(addr.wrapping_add(2), 2, value & 0xffff);
             return;
         }
         if let Some(off) = self.custom_reg_page_offset(addr) {
@@ -9516,6 +9536,57 @@ mod tests {
         let before = b.bus.emulated_cck();
         b.write_long(0xdff180, 0x0123_0456);
         assert_eq!(b.bus.emulated_cck() - before, reg_long);
+    }
+
+    #[test]
+    fn aga_long_register_access_is_two_separately_decoded_word_cycles() {
+        use crate::chipset::agnus::AgnusRevision;
+        use crate::chipset::denise::DeniseRevision;
+
+        let machine = || {
+            let mut rom = vec![0u8; 512 * 1024];
+            rom[..2].copy_from_slice(&[0x00, 0x07]);
+            let mut machine = test_bus(rom);
+            machine.attach_gayle(crate::gayle::Gayle::new(0xd0));
+            machine.set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
+            machine.set_cpu_bus_arbitration_enabled(true);
+            machine.advance_chipset(0x40);
+            cpu_bus(machine)
+        };
+        // The second word of a long at the last register word comes from
+        // what its own address selects: Gayle's ROM mirror at $E00000.
+        let mut b = machine();
+        assert_eq!(b.read_long(0xdffffe) & 0xffff, 0x0007);
+
+        // A long read is two word reads in what it samples and in how
+        // long it takes: VHPOSR is read a cycle after VPOSR.
+        let mut long = machine();
+        let mut words = machine();
+        let value = long.read_long(0xdff004);
+        let hi = words.read_word(0xdff004);
+        let lo = words.read_word(0xdff006);
+        assert_eq!(value, (u32::from(hi) << 16) | u32::from(lo));
+        assert_eq!(long.bus.emulated_cck(), words.bus.emulated_cck());
+
+        // A long write lands each word on its own cycle, where a word
+        // write of that register would land it.
+        let mut long = machine();
+        let mut words = machine();
+        long.write_long(0xdff180, 0x0123_0456);
+        words.write_word(0xdff180, 0x0123);
+        words.write_word(0xdff182, 0x0456);
+        assert_eq!(long.bus.emulated_cck(), words.bus.emulated_cck());
+        let landed = |b: &CpuBus| {
+            b.bus
+                .current_render_events()
+                .iter()
+                .map(|event| (event.vpos, event.hpos))
+                .collect::<Vec<_>>()
+        };
+        let positions = landed(&long);
+        assert_eq!(positions.len(), 2);
+        assert_ne!(positions[0], positions[1]);
+        assert_eq!(positions, landed(&words));
     }
 
     #[test]

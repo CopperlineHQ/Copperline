@@ -11,8 +11,10 @@
 ; Chip RAM is a 32-bit port beside Alice, but Gayle and Fat Gary end a
 ; register cycle with DSACK1 alone (Fat Gary specification, "Chip
 ; Registers"), so the CPU runs a long register access as two word cycles:
-; bands 3 and 4 are taller than bands 1 and 2. Each loop starts at the top
-; of line $21, so the heights do not depend on when the probe was entered.
+; band 3 is taller than band 2 by a whole register read cycle, data wait
+; included, and band 4 is taller than a long write to chip RAM would be.
+; Each loop starts at the top of line $21, so the heights do not depend
+; on when the probe was entered.
 ; No emulator reference: vAmiga has no AGA machine.
 CUST    equ     $dff000
 PASSES  equ     1000

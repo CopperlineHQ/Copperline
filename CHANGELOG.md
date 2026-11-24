@@ -142,7 +142,8 @@ for the earlier release notes.
   refresh every 238 clocks on a 25 MHz board, and a warm reset no longer
   clears it.
 - A1200, A4000, CD32: a long access to the custom registers takes two bus
-  cycles. They are a 16-bit port; only chip RAM is 32 bits wide.
+  cycles, each word read or written on its own. They are a 16-bit port;
+  only chip RAM is 32 bits wide.
 - ECS and AGA, tall programmable screen modes (DblPAL, DblNTSC,
   Productivity and others):
   - VPOSR and VPOSW carry vertical bits 9 and 10, so beam polls no longer
