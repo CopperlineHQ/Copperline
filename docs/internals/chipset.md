@@ -368,6 +368,14 @@ DIWHIGH and then touches DIWSTRT/DIWSTOP falls back to the implicit
 window, so the replay must drop the stale DIWHIGH on those writes rather
 than hold it.
 
+Lisa's DIWHIGH also carries two fine bits per edge (bits 4-3 for the
+start, 12-11 for the stop): H1 is a 70 ns step and H0 a 35 ns step below
+the low-resolution position DIWSTRT/DIWSTOP name, in every resolution.
+They extend the window comparators, not the bitplane position, so an edge
+moves across a picture that stays put. ECS Denise has no such bits. The
+beam-timed collision path and the frame analyzer's window markers still
+use the low-resolution window.
+
 DIWSTRT value zero is still a real Denise comparator position. The emulator
 only treats the display window as unprogrammed when DIWSTRT and DIWSTOP are
 both zero; a zero start paired with a non-zero stop opens the window at beam

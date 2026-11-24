@@ -13,6 +13,7 @@ fn h_row_for(control: ControlState) -> HWindowRow {
     HWindowRow {
         open_runs: vec![control.display_window_x()],
         comparator_anchor: Some(control.display_window_x().0),
+        ..HWindowRow::default()
     }
 }
 
@@ -181,6 +182,254 @@ fn static_h_window_transition_solver_matches_counter_replay() {
             );
         }
     }
+}
+
+/// Runs `body` with the render thread's canvas at 35 ns columns, as a
+/// programmable super-hires scan selects, and puts the 70 ns canvas back.
+fn with_35ns_canvas<T>(body: impl FnOnce() -> T) -> T {
+    ACTIVE_CANVAS_SCALE.with(|scale| scale.set(2));
+    let result = body();
+    ACTIVE_CANVAS_SCALE.with(|scale| scale.set(1));
+    result
+}
+
+/// A standard-width window ($81..$1C1) through an explicit DIWHIGH, with
+/// `fine` ORed into it.
+fn fine_window_control(agnus_revision: AgnusRevision, fine: u16) -> ControlState {
+    ControlState {
+        diwstrt: 0x2C81,
+        diwstop: 0x2CC1,
+        diwhigh: DiwHigh::ecs_explicit(0x2000 | fine),
+        agnus_revision,
+        ..ControlState::default()
+    }
+}
+
+#[test]
+fn lisa_diwhigh_h1_bits_move_each_window_edge_by_70ns() {
+    let row = |fine: u16| {
+        compute_h_window_rows(
+            &[fine_window_control(AgnusRevision::AgaAlice, fine)],
+            &[Vec::new()],
+            PAL_VISIBLE_LINE0,
+        )
+        .remove(0)
+    };
+    // The plain window, and the anchor the fetched picture hangs from.
+    assert_eq!(row(0).open_runs(), &[(62, 702)]);
+    assert_eq!(row(0).comparator_anchor, Some(62));
+    assert!(!row(0).fine_edges);
+    // Start H1 (bit 4): the window opens one 70 ns column later. The
+    // anchor stays on the low-resolution match, so the picture does not
+    // move with the edge.
+    let start = row(0x0010);
+    assert_eq!(start.open_runs(), &[(63, 702)]);
+    assert_eq!(start.comparator_anchor, Some(62));
+    assert!(start.fine_edges);
+    // Stop H1 (bit 12): the window closes one 70 ns column later.
+    assert_eq!(row(0x1000).open_runs(), &[(62, 703)]);
+    assert_eq!(row(0x1010).open_runs(), &[(63, 703)]);
+}
+
+#[test]
+fn ecs_denise_ignores_the_fine_diwhigh_bits() {
+    for revision in [AgnusRevision::Ocs, AgnusRevision::Ecs8372Rev4] {
+        let rows = compute_h_window_rows(
+            &[fine_window_control(revision, 0x1818)],
+            &[Vec::new()],
+            PAL_VISIBLE_LINE0,
+        );
+        assert_eq!(rows[0].open_runs(), &[(62, 702)]);
+        assert!(!rows[0].fine_edges);
+        assert!(rows[0].closed_halves.is_empty());
+    }
+}
+
+#[test]
+fn lisa_diwhigh_h0_bits_need_a_35ns_canvas_to_show() {
+    let row = |fine: u16| {
+        compute_h_window_rows(
+            &[fine_window_control(AgnusRevision::AgaAlice, fine)],
+            &[Vec::new()],
+            PAL_VISIBLE_LINE0,
+        )
+        .remove(0)
+    };
+    // 70 ns canvas: half a column is below the output pitch.
+    for fine in [0x0008, 0x0800, 0x0808] {
+        assert_eq!(row(fine).open_runs(), &[(62, 702)]);
+        assert!(row(fine).closed_halves.is_empty());
+    }
+    with_35ns_canvas(|| {
+        // Start H0 (bit 3): the first half of column 62 stays border.
+        let start = row(0x0008);
+        assert_eq!(start.open_runs(), &[(62, 702)]);
+        assert_eq!(start.closed_halves, [124]);
+        // Stop H0 (bit 11): the first half of column 702 is still open.
+        let stop = row(0x0800);
+        assert_eq!(stop.open_runs(), &[(62, 703)]);
+        assert_eq!(stop.closed_halves, [1405]);
+        // H1 and H0 together are three 35 ns samples.
+        let both = row(0x1818);
+        assert_eq!(both.open_runs(), &[(63, 704)]);
+        assert_eq!(both.closed_halves, [126, 1407]);
+    });
+}
+
+#[test]
+fn fine_window_edges_in_one_low_resolution_position_act_in_sample_order() {
+    // HSTART and HSTOP on the same low-resolution position.
+    let control = |fine: u16| ControlState {
+        diwstrt: 0x2C81,
+        diwstop: 0x2C81,
+        diwhigh: DiwHigh::ecs_explicit(fine),
+        agnus_revision: AgnusRevision::AgaAlice,
+        ..ControlState::default()
+    };
+    let scan = |fine: u16, initial: bool| {
+        let mut flop = initial;
+        let mut row = HWindowRow::default();
+        scan_h_window_line(&mut flop, 0x40, true, control(fine), &[], Some(&mut row));
+        (flop, row.open_runs)
+    };
+    // Same sample: the stop wins, as on OCS and ECS.
+    assert_eq!(scan(0, false), (false, vec![]));
+    assert_eq!(scan(0, true), (false, vec![(0, 62)]));
+    // Start first (H1 on the stop): a one-column window, then closed.
+    assert_eq!(scan(0x1000, false), (false, vec![(62, 63)]));
+    // Stop first (H1 on the start): closes, then reopens for the line.
+    assert_eq!(scan(0x0010, true), (true, vec![(0, 62), (63, FB_WIDTH)]));
+}
+
+#[test]
+fn fine_window_scan_solver_matches_counter_replay() {
+    let mut seed = 0x1234_5678u32;
+    for case in 0..2000 {
+        seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let random = seed >> 4;
+        let hstart = (random & 0x1FF) as u16;
+        let hstop = ((random >> 9) & 0x1FF) as u16;
+        let fine = ((random >> 18) & 0x3) as u16;
+        let fine_stop = ((random >> 20) & 0x3) as u16;
+        let control = ControlState {
+            diwstrt: hstart & 0x00FF,
+            diwstop: hstop & 0x00FF,
+            diwhigh: DiwHigh::ecs_explicit(
+                ((hstart >> 8) << 5) | ((hstop >> 8) << 13) | (fine << 3) | (fine_stop << 11),
+            ),
+            agnus_revision: AgnusRevision::AgaAlice,
+            ..ControlState::default()
+        };
+        let inert_segment = [ControlSegment { x: 2000, control }];
+        for (canvas_35ns, initial_flop) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let scan = |segments: &[ControlSegment]| {
+                let mut flop = initial_flop;
+                let mut row = HWindowRow::default();
+                scan_h_window_line(&mut flop, 0x40, true, control, segments, Some(&mut row));
+                (
+                    flop,
+                    row.open_runs,
+                    row.comparator_anchor,
+                    row.closed_halves,
+                )
+            };
+            let (solved, replayed) = if canvas_35ns {
+                with_35ns_canvas(|| (scan(&[]), scan(&inert_segment)))
+            } else {
+                (scan(&[]), scan(&inert_segment))
+            };
+            assert_eq!(solved, replayed, "case {case}");
+        }
+    }
+}
+
+#[test]
+fn fine_window_edge_restores_border_on_the_closed_half_column() {
+    let control = fine_window_control(AgnusRevision::AgaAlice, 0);
+    let mut palette = Palette::from_ocs([0; 32]);
+    palette.write_ocs(0, 0x0123);
+    let h_window_rows = vec![HWindowRow {
+        open_runs: vec![(62, 703)],
+        comparator_anchor: Some(62),
+        closed_halves: vec![124, 1405],
+        fine_edges: true,
+    }];
+    const PICTURE: u32 = 0xFFAA_BBCC;
+    let border = background_pixel(&control, 0x0123, true);
+    let fb = with_35ns_canvas(|| {
+        let mut fb = vec![PICTURE; FB_WIDTH * 2];
+        enforce_h_window_closed_intervals(
+            &mut fb,
+            &[palette],
+            &[Vec::new()],
+            &[control],
+            &[Vec::new()],
+            &h_window_rows,
+            &[true],
+            PAL_VISIBLE_LINE0,
+            1,
+        );
+        fb
+    });
+    // Column 62 opens on its second 35 ns half.
+    assert_eq!(&fb[122..126], &[border, border, border, PICTURE]);
+    // Column 702 closes after its first half.
+    assert_eq!(&fb[1403..1407], &[PICTURE, PICTURE, border, border]);
+}
+
+#[test]
+fn low_resolution_pixel_under_a_fine_window_edge_shows_its_open_column_only() {
+    // Lit low-resolution pixels at columns 68-69 and 70-71; a window
+    // opened and closed with H1 covers the second column of the first and
+    // the first column of the second.
+    let row_words = vec![vec![0xFF00u16; 1]; 1];
+    let line_plan = DenisePlannedPlayfieldLine::new(0, 68, 72, &row_words, 16);
+    let control = ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        ..visible_lowres_control(0x1000)
+    };
+    let mut palette = Palette::new();
+    palette.write_ocs(1, 0x0F00);
+    let h_row = HWindowRow {
+        open_runs: vec![(69, 71)],
+        comparator_anchor: Some(68),
+        closed_halves: Vec::new(),
+        fine_edges: true,
+    };
+    let mut fb = vec![0; FB_PIXELS];
+    let mut playfield_mask = vec![0; FB_PIXELS];
+    let mut collision_pixels = vec![CollisionPixel::default(); FB_PIXELS];
+    let mut clxdat = 0;
+
+    render_planned_playfield_line(
+        &line_plan,
+        &mut fb,
+        &mut playfield_mask,
+        &mut collision_pixels,
+        &mut CollisionLookup::new(),
+        &mut IndexedOutputCache::default(),
+        &mut clxdat,
+        palette,
+        &[],
+        0,
+        control,
+        &[],
+        0,
+        control.bplcon1,
+        control.bplcon0,
+        0,
+        0,
+        &h_row,
+        PAL_VISIBLE_LINE0,
+        0.0,
+        0,
+    );
+
+    let red = rgb12_to_rgba8(0x0F00);
+    assert_eq!(&fb[68..72], &[0, red, red, 0]);
+    assert_eq!(&playfield_mask[68..72], &[0x00, 0x02, 0x02, 0x00]);
 }
 
 #[test]
@@ -1595,6 +1844,7 @@ fn closed_interval_repaint_follows_copper_color00_writes() {
     let h_window_rows = vec![HWindowRow {
         open_runs: vec![(100, FB_WIDTH)],
         comparator_anchor: Some(100),
+        ..HWindowRow::default()
     }];
     let mut fb = vec![0u32; FB_WIDTH];
 

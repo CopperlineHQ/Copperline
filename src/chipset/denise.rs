@@ -89,6 +89,27 @@ impl DiwHigh {
             Self::EcsExplicit(bits) => low | (((bits >> 13) & 0x0001) << 8),
         }
     }
+
+    /// Lisa's fine horizontal start bits, DIWHIGH bits 4-3 (H1, H0), in
+    /// 35 ns samples: 0..=3 quarters of the low-resolution pixel that
+    /// [`Self::h_start`] names. Only Lisa has these comparator bits; the
+    /// caller gates on AGA, because the same register bits are don't-care
+    /// on ECS Denise.
+    pub fn h_start_fine(self) -> u8 {
+        match self {
+            Self::OcsImplicit => 0,
+            Self::EcsExplicit(bits) => ((bits >> 3) & 0x0003) as u8,
+        }
+    }
+
+    /// Lisa's fine horizontal stop bits, DIWHIGH bits 12-11 (H1, H0); see
+    /// [`Self::h_start_fine`].
+    pub fn h_stop_fine(self) -> u8 {
+        match self {
+            Self::OcsImplicit => 0,
+            Self::EcsExplicit(bits) => ((bits >> 11) & 0x0003) as u8,
+        }
+    }
 }
 
 /// Display palette store, generation-agnostic. AGA's 256 colour
