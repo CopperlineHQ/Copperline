@@ -1199,24 +1199,36 @@ impl Agnus {
         }
     }
 
-    /// Read VPOSR as exposed by the replacement Agnus: top byte is
-    /// {LOF, chipset_id}, low byte is {LOL, 6'b0, V8}. V8 is the top bit of
-    /// the same vertical counter VHPOSR exposes in its high byte, so the
-    /// live readback steps it in the same colour clock (see
-    /// [`Agnus::read_vhposr`]). With the light pen enabled and a position
-    /// latched, V8 comes from the latch (LPENV high bit); LOF/LOL and the
-    /// chipset id stay live.
+    /// The vertical counter bits above V7 that VPOSR reads and VPOSW
+    /// writes, as a mask over `vpos >> 8`: V8 alone on OCS, V10-V8 on an
+    /// ECS Agnus or Alice, whose counter is eleven bits wide for the
+    /// programmable scan rates.
+    fn vpos_high_mask(&self) -> u32 {
+        if self.revision.is_ecs() {
+            0x7
+        } else {
+            0x1
+        }
+    }
+
+    /// Read VPOSR: top byte is {LOF, chipset_id}, low byte is
+    /// {LOL, 4'b0, V10, V9, V8}, with V10 and V9 present only on an ECS
+    /// Agnus or Alice. They are the top bits of the same vertical counter
+    /// VHPOSR exposes in its high byte, so the live readback steps them in
+    /// the same colour clock (see [`Agnus::read_vhposr`]). With the light
+    /// pen enabled and a position latched, they come from the latch (the
+    /// LPENV high bits); LOF/LOL and the chipset id stay live.
     pub fn read_vposr(&self) -> u16 {
         let (vpos, lof, lol) = match (self.lpen_latch_active(), self.ersy_freeze) {
             (Some((v, _)), _) => (v, self.lof, self.lol),
             (None, Some(freeze)) => (freeze.vpos, freeze.lof, freeze.lol),
             (None, None) => (self.read_live_beam_position().0, self.lof, self.lol),
         };
-        let v8 = ((vpos >> 8) & 0x01) as u16;
+        let v_high = ((vpos >> 8) & self.vpos_high_mask()) as u16;
         (u16::from(lof) << 15)
             | (self.revision.chipset_id(self.video_standard) << 8)
             | (u16::from(lol) << 7)
-            | v8
+            | v_high
     }
 
     /// Read VHPOSR: top byte = V[7:0], bottom byte = the horizontal beam
@@ -1528,11 +1540,17 @@ impl Agnus {
         }
     }
 
+    /// VPOSW: bit 15 loads the long-field latch and the low bits load the
+    /// vertical counter above V7 (V8 on OCS, V10-V8 on an ECS Agnus or
+    /// Alice). The write also clears the long-line flip-flop, on every
+    /// Agnus that has one running (WinUAE VPOSW: "LOL is always reset when
+    /// VPOSW is written to"); bit 7 is not a load value for it.
     pub fn write_vposw(&mut self, val: u16) {
         self.vpos_read_delay = None;
         self.lof = val & 0x8000 != 0;
+        self.lol = false;
         let low = self.vpos & 0xFF;
-        let high = u32::from(val & 0x0001) << 8;
+        let high = (u32::from(val) & self.vpos_high_mask()) << 8;
         self.vpos = (high | low).min(self.current_frame_lines() - 1);
     }
 
@@ -1693,6 +1711,73 @@ mod tests {
         agnus.lof = true;
         agnus.vpos = 0x100;
         assert_eq!(agnus.read_vposr(), 0x8001);
+    }
+
+    /// A programmable scan can run past line 511. The ECS Agnus and Alice
+    /// carry the vertical counter to eleven bits, and VPOSR bits 2-0 read
+    /// V10-V8; OCS has a nine-bit counter and reads V8 alone.
+    #[test]
+    fn ecs_vposr_reads_v10_to_v8_of_a_tall_programmable_scan() {
+        for revision in [AgnusRevision::Ecs8372Rev4, AgnusRevision::AgaAlice] {
+            let mut agnus = Agnus::with_video_standard_and_revision(VideoStandard::Pal, revision);
+            agnus.write_vtotal(0x04FF);
+            agnus.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
+            for (vpos, high) in [(0x0FF, 0), (0x100, 1), (0x200, 2), (0x3A5, 3), (0x4FF, 4)] {
+                agnus.vpos = vpos;
+                agnus.hpos = 0x40;
+                assert_eq!(
+                    agnus.read_vposr() & 0x0007,
+                    high,
+                    "{revision:?} line {vpos:#x}"
+                );
+                assert_eq!(agnus.read_vhposr() >> 8, (vpos & 0xFF) as u16);
+            }
+        }
+        let mut ocs = Agnus::with_video_standard(VideoStandard::Pal);
+        ocs.vpos = 0x100;
+        ocs.hpos = 0x40;
+        assert_eq!(ocs.read_vposr() & 0x0007, 1);
+    }
+
+    /// VPOSW loads V10-V8 on the eleven-bit counter and only V8 on OCS,
+    /// keeping the low byte VHPOSW owns.
+    #[test]
+    fn vposw_loads_v10_to_v8_on_ecs_and_v8_alone_on_ocs() {
+        let mut ecs =
+            Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ecs8372Rev4);
+        ecs.write_vtotal(0x07FF);
+        ecs.write_beamcon0(BEAMCON0_PAL | BEAMCON0_VARBEAMEN);
+        ecs.vpos = 0x0034;
+        ecs.write_vposw(0x8005);
+        assert_eq!(ecs.vpos, 0x0534);
+        assert!(ecs.lof);
+        ecs.write_vposw(0x0002);
+        assert_eq!(ecs.vpos, 0x0234);
+        assert!(!ecs.lof);
+
+        let mut ocs = Agnus::with_video_standard(VideoStandard::Pal);
+        ocs.vpos = 0x0034;
+        ocs.write_vposw(0x0006);
+        assert_eq!(ocs.vpos, 0x0034, "V9 and V10 do not exist on OCS");
+        ocs.write_vposw(0x0007);
+        assert_eq!(ocs.vpos, 0x0134);
+    }
+
+    /// A VPOSW write clears the long-line flip-flop whatever bit 7 of the
+    /// written word says, on OCS and ECS alike.
+    #[test]
+    fn vposw_clears_the_long_line_flip_flop() {
+        for revision in [AgnusRevision::Ocs, AgnusRevision::Ecs8372Rev4] {
+            let mut ntsc = Agnus::with_video_standard_and_revision(VideoStandard::Ntsc, revision);
+            ntsc.advance_by_cck(COLORCLOCKS_PER_LINE);
+            assert!(ntsc.lol, "{revision:?}: second NTSC line is long");
+            ntsc.write_vposw(0x8080);
+            assert!(!ntsc.lol, "{revision:?}");
+            assert_eq!(ntsc.read_vposr() & 0x0080, 0);
+            // The alternation carries on from the cleared state.
+            ntsc.advance_by_cck(COLORCLOCKS_PER_LINE);
+            assert!(ntsc.lol, "{revision:?}");
+        }
     }
 
     /// The NTSC OCS parts (8361, 8370) identify themselves with bit 4 of
