@@ -106,7 +106,11 @@ pub enum AgnusRevision {
 impl AgnusRevision {
     fn chipset_id(self, video_standard: VideoStandard) -> u16 {
         match (self, video_standard) {
-            (Self::Ocs, _) => 0x00,
+            // OCS has one part per standard, and the NTSC one sets bit 4:
+            // the AA registers list gives "8361 (regular) or 8370 (fat)
+            // (agnus-ntsc) = 10" and "8367 (pal) or 8371 (fat-pal) = 00".
+            (Self::Ocs, VideoStandard::Pal) => 0x00,
+            (Self::Ocs, VideoStandard::Ntsc) => 0x10,
             // Every ECS Agnus reports the same ID: the HRM's "8372 (Fat-hr)
             // rev 5" = $22 row is a part that apparently never shipped, and the
             // 2 MB Agnus is not distinguishable from the 1 MB one here. $22 is
@@ -1689,6 +1693,16 @@ mod tests {
         agnus.lof = true;
         agnus.vpos = 0x100;
         assert_eq!(agnus.read_vposr(), 0x8001);
+    }
+
+    /// The NTSC OCS parts (8361, 8370) identify themselves with bit 4 of
+    /// the ID field, the PAL ones (8367, 8371) with zero.
+    #[test]
+    fn ocs_ntsc_agnus_reports_chipset_id_10() {
+        let ntsc = Agnus::with_video_standard_and_revision(VideoStandard::Ntsc, AgnusRevision::Ocs);
+        assert_eq!(ntsc.read_vposr() & 0x7F00, 0x1000);
+        let pal = Agnus::with_video_standard_and_revision(VideoStandard::Pal, AgnusRevision::Ocs);
+        assert_eq!(pal.read_vposr() & 0x7F00, 0x0000);
     }
 
     #[test]

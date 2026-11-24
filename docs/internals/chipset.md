@@ -68,8 +68,8 @@ pointer.
 Agnus revisions are modelled independently of Denise (machines shipped
 mixed): OCS (8370/8371), ECS 8372A (1M chip RAM reach), ECS 8375 (2M), and
 AGA Alice (2M, HRM IDs $23/$33). VPOSR bits 8-14 report the chipset ID:
-$00 on OCS, $20/$30 (PAL/NTSC) on every ECS Agnus regardless of revision,
-and the Alice IDs above. The ECS Agnus adds DIWHIGH and the
+$00/$10 (PAL/NTSC) on OCS, $20/$30 on every ECS Agnus regardless of
+revision, and the Alice IDs above. The ECS Agnus adds DIWHIGH and the
 implemented subset of BEAMCON0 (PAL/VARBEAMEN/LOLDIS/HARDDIS and friends);
 Alice adds the FMODE wide-fetch latch, which scales the bitplane and
 sprite fetch quanta (FMODE=0 stays byte-identical to the OCS/ECS slot
