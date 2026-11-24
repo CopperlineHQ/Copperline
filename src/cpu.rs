@@ -6526,8 +6526,16 @@ mod tests {
             (CONTROL_BURST | CONTROL_WRAP, 11, 0),
         ] {
             b.write_byte(RAMSEY_CONTROL, control | CONTROL_RAMSIZE);
-            b.bus.advance_devices(24);
+            // The register answers at once, as detection code expects.
             assert_eq!(b.read_byte(RAMSEY_CONTROL), control | CONTROL_RAMSIZE);
+            b.bus.advance_devices(24);
+            // Ramsey catches up lazily: the next access after a refresh
+            // finds the new mode in force.
+            assert_eq!(b.read_byte(RAMSEY_CONTROL), control | CONTROL_RAMSIZE);
+            assert_eq!(
+                b.bus.ramsey.as_ref().map(Ramsey::control),
+                Some(control | CONTROL_RAMSIZE)
+            );
             b.dcache = Some(Box::default());
             b.apply_cache_control((1 << 12) | (1 << 8), 0, 0);
             assert_eq!(cost(b, base + 8), first);

@@ -47,11 +47,18 @@ geometry) and the read-only version register at `$DE0043` -- `$0D` for
 the A3000's Ramsey-04, `$0F` for the A4000's Ramsey-07, a distinction
 that matters because the two parts disagree about control bit 4
 (Ramsey-04 DRAM width versus Ramsey-07 cycle-skip mode). The geometry
-bits come up describing the fitted RAM. A control write becomes readable
-on the next refresh. The rate field selects 154, 238 or 380 board clocks
-between refreshes, or disables refresh. When software restarts a stopped
-counter, Copperline schedules the first edge one newly selected interval
-later.
+bits come up describing the fitted RAM. A control write takes effect at
+the next refresh: until then Ramsey keeps the previous refresh rate and
+page, burst and skip modes. The register reads back the written byte
+immediately. Commodore's specification says the value cannot be read back
+before that refresh, but detection code such as SysInfo's writes a mode
+and reads it back on the next instruction with no retry, and would report
+no Ramsey (and skip its Gary probe) on most boots under that rule.
+Kickstart spins until it reads its value back, so it works either way.
+The read-back delay has not been measured on a board. The rate field
+selects 154, 238 or 380 board clocks between refreshes, or disables
+refresh. When software restarts a stopped counter, Copperline schedules
+the first edge one newly selected interval later.
 
 In precise mode a stock 25 MHz motherboard access costs five board clocks,
 or four with Ramsey-07 cycle skip. Page mode models static-column DRAM. An
