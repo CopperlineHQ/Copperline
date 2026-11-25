@@ -8092,6 +8092,68 @@ fn ham_dual_playfield_runs_the_resolved_index_through_ham() {
     );
 }
 
+#[test]
+fn lisa_bplam_preserves_playfield_priority_and_transparency() {
+    let mut palette = Palette::new();
+    palette.write_ocs(13, 0x8f00);
+    let pf = ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x6400,
+        bplcon3: 3 << 10, // PF2 starts at entry 8
+        bplcon4: 4 << 8,
+        ..ControlState::default()
+    };
+    let mut held = 0;
+    let out = denise_playfield_output(pf, &palette, 2, &mut held);
+    assert_eq!(
+        (out.color, out.color_latch, out.pf_mask),
+        (0xff0000, 0x8f00, 2)
+    );
+    assert_eq!(
+        denise_playfield_output(pf, &palette, 3, &mut held).pf_mask,
+        1
+    );
+    for mode in [0x4000, 0x6400, 0x6800, 0x0810] {
+        let control = ControlState {
+            bplcon0: mode,
+            ..pf
+        };
+        assert_eq!(
+            denise_playfield_output(control, &palette, 0, &mut held).pf_mask,
+            0
+        );
+        assert_ne!(
+            denise_playfield_output(control, &palette, 4, &mut held).pf_mask,
+            0
+        );
+    }
+}
+
+#[test]
+fn lisa_ham6_preserves_unmodified_component_bits() {
+    let mut palette = Palette::new();
+    palette.write_banked(0, 1, false, 0x8135);
+    palette.write_banked(0, 1, true, 0x0246);
+    let control = ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x6800,
+        ..ControlState::default()
+    };
+    let mut held = 0;
+    for (index, expected) in [
+        (1, 0x123456),
+        (0x1a, 0x1234aa),
+        (0x2b, 0xbb34aa),
+        (0x3c, 0xbbccaa),
+    ] {
+        assert_eq!(
+            denise_playfield_output(control, &palette, index, &mut held).color,
+            expected
+        );
+        assert_eq!(held, expected);
+    }
+}
+
 /// Plan 3.3: the Lisa resolution path. BPLAM XORs the pixel index,
 /// HAM8 modifies six bits per component, EHB halves in 8-bit space,
 /// and palette lookups read the full 24-bit banked store.

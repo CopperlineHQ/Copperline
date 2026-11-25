@@ -704,6 +704,13 @@ impl Blitter {
         self.debug_watched_write.take()
     }
 
+    /// The normal blit has signalled completion, but its last destination
+    /// word still needs a DMA grant.
+    pub(crate) fn final_d_write_pending(&self) -> bool {
+        matches!(self.pending.as_ref(), Some(PendingBlit::Normal(state))
+            if matches!(state.phase, NormalBlitPhase::F) && state.current_slot_needs_bus())
+    }
+
     pub(crate) fn start_strobe_pending(&self) -> bool {
         self.start_strobe_clocks != 0
     }

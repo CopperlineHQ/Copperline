@@ -1222,7 +1222,9 @@ impl Paula {
     /// ninth data bit or the first stop bit depending on SERPER. The
     /// model keeps a one-word transmit buffer and a timed shift register.
     pub fn write_serdat(&mut self, val: u16) -> u16 {
-        self.serial_tx_buffer = Some(val);
+        // The highest set bit terminates a frame. An empty SERDAT clears
+        // the holding register, including a word queued behind an active shift.
+        self.serial_tx_buffer = (val != 0).then_some(val);
         self.load_serial_shift_if_idle()
     }
 
@@ -1688,7 +1690,7 @@ impl Paula {
         if self.serial_tx_shift.is_some() {
             return 0;
         }
-        let Some(word) = self.serial_tx_buffer.take() else {
+        let Some(word) = self.serial_tx_buffer.take().filter(|&word| word != 0) else {
             return 0;
         };
         let long = self.serial_long();
@@ -1699,7 +1701,7 @@ impl Paula {
             bit_cck,
             remaining_cck: bit_cck,
             bit_index: 0,
-            total_bits: Self::serial_tx_total_bits(word, long),
+            total_bits: (1 + u16::BITS - word.leading_zeros()) as u8,
             break_seen: self.uart_break_active(),
         };
         self.serial_tx_pin_high = Self::serial_tx_bit(&shift);
@@ -1737,14 +1739,6 @@ impl Paula {
 
     fn uart_break_active(&self) -> bool {
         self.adkcon & ADKCON_UARTBRK != 0
-    }
-
-    fn serial_tx_total_bits(word: u16, long: bool) -> u8 {
-        if word == 0 {
-            return if long { 11 } else { 10 };
-        }
-        let highest = u16::BITS as u8 - 1 - word.leading_zeros() as u8;
-        1 + highest + 1
     }
 
     fn serial_tx_bit(shift: &SerialTxShift) -> bool {
@@ -4071,6 +4065,29 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn serdat_zero_clears_the_buffer_and_leaves_the_shifter_alone() {
+        for (format, nul, clocks) in [(0, 0x100, 10), (SERPER_LONG, 0x200, 11)] {
+            let (mut paula, written, _) = paula_with_collect_serial_words();
+            paula.serper = format;
+            assert_eq!(paula.write_serdat(0), 0);
+            assert_eq!(paula.next_serial_event_cck(), None);
+            assert!(paula.serial_txd_pin_high());
+            assert_eq!(paula.read_serdatr() & 0x3000, 0x3000);
+
+            assert_eq!(paula.write_serdat(nul), INT_TBE);
+            assert_eq!(paula.write_serdat(nul | 0x41), 0);
+            assert_eq!(paula.read_serdatr() & 0x3000, 0);
+            assert_eq!(paula.write_serdat(0), 0);
+            assert_eq!(paula.read_serdatr() & 0x3000, 0x2000);
+            assert!(!paula.serial_txd_pin_high());
+            assert_eq!(paula.tick_serial(clocks, 0), 0);
+            assert_eq!(&*written.lock().unwrap(), &[(0, format != 0)]);
+            assert_eq!(paula.next_serial_event_cck(), None);
+            assert_eq!(paula.read_serdatr() & 0x3000, 0x3000);
+        }
     }
 
     #[test]

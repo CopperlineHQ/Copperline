@@ -869,6 +869,11 @@ impl Bus {
     pub(super) fn blitter_yields_to_waiting_cpu(&self) -> bool {
         self.blitter_slowdown_counter_enabled()
             && self.blitter_slowdown_cpu_misses >= exp_miss_limit()
+            // A1200 and A4000 board logic inhibits BLS on Alice's blitter
+            // completion signal. The pending D word gets the next free slot.
+            && !(self.aga_enabled()
+                && (self.gayle.is_some() || self.gary.is_some())
+                && self.blitter.final_d_write_pending())
     }
 
     pub(super) fn cpu_can_use_current_slot(&self) -> bool {

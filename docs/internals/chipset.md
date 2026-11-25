@@ -198,6 +198,11 @@ source fetches directly without a pre-read source snapshot or D overlay (see
 the save-state struct only so older active saves still deserialize; new blits
 leave them empty.
 
+On the A1200 and A4000, Alice's blitter-completion signal inhibits the
+motherboard blitter slowdown for the final normal-mode destination write.
+A waiting CPU can still take a preceding body slot, and fixed DMA keeps
+its usual priority over the final write.
+
 ## Paula (`paula.rs`)
 
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
@@ -260,7 +265,8 @@ The rest of Paula:
 - **Serial**: SERDAT through a one-word transmit buffer and a timed shift
   register to the configured serial sink (stdout by default; see
   [peripherals](peripherals.md#serial-sink)); SERDATR reports
-  TBE/TSRE/RBF. DiagROM's diagnostic stream arrives this way.
+  TBE/TSRE/RBF. A zero SERDAT clears the waiting word and leaves an active
+  shift running. An 8-bit NUL frame includes its stop bit ($0100). DiagROM's diagnostic stream arrives this way.
 - **Disk registers**: DSKLEN/DSKBYTR/DSKSYNC/DSKDAT and the disk-block
   interrupt, fed by the floppy controller below.
 - **Pots**: POTGO/POTGOR's integrating converter is H-sync-clocked. START
@@ -300,7 +306,11 @@ palette banks. The two BPLCON4 fields are on different Lisa timing paths:
 the low byte that selects sprite palette bases (ESPRM/OSPRM) reaches sprite
 colour lookup on an earlier sprite palette-control path than ordinary COLORxx
 palette writes, while the high-byte BPLAM XOR continues on the normal
-bitplane/control path. AGA also widens dual
+bitplane/control path. Lisa selects the winning playfield from the raw plane
+bits, adds the PF2 palette offset when appropriate, then applies BPLAM to
+the colour address. The XOR therefore cannot change sprite priority.
+Lisa HAM6 loads all 24 bits of a base colour and retains both nibbles of
+each unmodified component. AGA also widens dual
 playfield: OCS/ECS split six bitplanes into two three-bit fields (PF1 =
 planes 1/3/5, PF2 = planes 2/4/6), while Lisa extends each field to four
 bits by feeding bitplane 7 into PF1 and bitplane 8 into PF2, so a 7-8

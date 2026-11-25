@@ -426,58 +426,41 @@ pub(super) fn denise_playfield_output(
     }
 }
 
-/// Lisa pixel resolution: 24-bit colours from the banked palette, BPLCON4
-/// BPLAM XOR applied to the full pixel index, HAM8 with 8 bitplanes (HAM
-/// with 5/6 planes keeps the OCS-compatible HAM6 maths on the high
-/// nibbles), and EHB halving in 8-bit component space.
+/// Lisa resolves playfield priority from the shifter bits. BPLAM acts on
+/// the resulting palette address, after the winning playfield and PF2OF.
 pub(super) fn denise_aga_playfield_output(
     control: ControlState,
     palette: &Palette,
     idx: u8,
     ham_color: &mut u32,
 ) -> DenisePlayfieldOutput {
-    let idx = idx ^ control.bplam();
-    let color_latch = palette[(idx as usize) & 0xFF];
-
-    if control.bplcon0 & 0x0800 != 0 && control.nplanes() == 8 {
-        *ham_color = ham8_rgb24(palette, idx, *ham_color);
-        return DenisePlayfieldOutput {
-            color: *ham_color,
-            color_latch,
-            pf_mask: u8::from(idx != 0) * 2,
-        };
-    }
-    if control.hold_and_modify() {
-        let previous = rgb24_to_rgb12_hi(*ham_color);
-        *ham_color = rgb12_to_rgb24(ham6_rgb12(palette, idx, previous));
-        return DenisePlayfieldOutput {
-            color: *ham_color,
-            color_latch,
-            pf_mask: u8::from(idx != 0) * 2,
-        };
-    }
-
-    if control.dual_playfield() {
-        let (pf_mask, color_idx) = dual_playfield_pixel(idx, control);
-        let color = palette.rgb24(color_idx) & 0x00FF_FFFF;
-        *ham_color = color;
-        return DenisePlayfieldOutput {
-            color,
-            color_latch: palette.get(color_idx).copied().unwrap_or(0),
-            pf_mask,
-        };
-    }
-
-    let mut color = palette.rgb24((idx as usize) & 0xFF) & 0x00FF_FFFF;
-    if control.extra_half_brite() && idx & 0x20 != 0 {
-        color = palette.rgb24((idx as usize) & 0x1F) & 0x00FF_FFFF;
-        color = (color >> 1) & 0x007F_7F7F;
-    }
+    let (pf_mask, address) = if control.dual_playfield() && !control.ham() {
+        dual_playfield_pixel(idx, control)
+    } else {
+        (u8::from(idx != 0) * 2, usize::from(idx))
+    };
+    let address = address as u8 ^ control.bplam();
+    let color = if control.ham8() {
+        ham8_rgb24(palette, address, *ham_color)
+    } else if control.hold_and_modify() {
+        let nibble = address & 0x0f;
+        let component = u32::from(nibble) * 0x11;
+        match address & 0x30 {
+            0x00 => palette.rgb24(usize::from(nibble)) & 0x00ff_ffff,
+            0x10 => (*ham_color & 0xffff00) | component,
+            0x20 => (*ham_color & 0x00ffff) | (component << 16),
+            _ => (*ham_color & 0xff00ff) | (component << 8),
+        }
+    } else if !control.dual_playfield() && control.extra_half_brite() && address & 0x20 != 0 {
+        (palette.rgb24(usize::from(address & 0x1f)) >> 1) & 0x007f_7f7f
+    } else {
+        palette.rgb24(usize::from(address)) & 0x00ff_ffff
+    };
     *ham_color = color;
     DenisePlayfieldOutput {
         color,
-        color_latch,
-        pf_mask: u8::from(idx != 0) * 2,
+        color_latch: palette[usize::from(address)],
+        pf_mask,
     }
 }
 

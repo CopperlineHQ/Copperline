@@ -709,6 +709,16 @@ CPU grant does. After `BLITTER_SLOWDOWN_CPU_MISS_LIMIT` (3) misses, the
 blitter yields one slot, matching the HRM "one bus cycle in four" rule and
 the Minimig RTL. BLTPRI disables this starvation yield.
 
+On A1200 and A4000 motherboards the blitter-completion signal inhibits BLS.
+When Alice has cleared BBUSY and still has one destination word to write,
+the CPU waits for that write. Fixed DMA can still delay it. The board
+connections are visible on [A1200 rev 1 sheet 2](https://amigawiki.de/dnl/schematics/A1200_R1.pdf),
+[A1200 rev 2 sheet 2](https://amigawiki.de/dnl/schematics/A1200_R2.pdf)
+and the [A4000 rev B Alice sheet](https://amigawiki.de/dnl/schematics/A4000_Rb.pdf).
+[WinUAE's CPU bus cycle](https://github.com/tonioni/WinUAE/blob/ee784914c8d61bb503d137e358b22fcc4758a294/custom.cpp#L12843-L12850)
+describes the seven-plane case. [Minimig's arbiter](https://github.com/MiSTer-devel/Minimig-AGA_MiSTer/blob/575b8e72d96ed9ecad51006d34b3a4483e61d439/rtl/agnus.v#L208)
+also gives the pending write priority.
+
 With BLTPRI set, the blitter wins only a slot where its current micro-cycle
 requests a bus access. Idle startup and pipeline cycles remain available to
 the CPU, including startup-ladder cycles and the empty first-D bubble. Once

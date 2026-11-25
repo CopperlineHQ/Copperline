@@ -11,4 +11,4 @@ Queues a serial transmit word, including its stop bit.
 - Bit 8: Stop bit in 8-bit mode, or the ninth data bit in 9-bit mode.
 - Bits 7-0: Data byte.
 
-Paula sends a start bit, then shifts the word out from bit 0 up to its highest set bit, so the stop bit also sets the frame length. SERPER sets the bit period and the 8/9-bit word format.
+Paula sends a start bit, then shifts the word out from bit 0 up to its highest set bit, so the stop bit also sets the frame length. Writing $0000 empties the holding register. An active frame finishes normally. An 8-bit NUL is $0100 with its stop bit set. SERPER sets the bit period and the 8/9-bit word format.
