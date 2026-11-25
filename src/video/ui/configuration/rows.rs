@@ -1009,6 +1009,7 @@ pub(in crate::video::ui) fn draw_launcher_row(
                     r.field,
                     LauncherField::Rom
                         | LauncherField::FmvRom
+                        | LauncherField::CartridgeRom
                         | LauncherField::ScsiRom
                         | LauncherField::RecordingFfmpeg
                 ) || {

@@ -4729,6 +4729,32 @@ fn cartridge_rejects_unknown_models_and_an_image_without_a_cartridge() {
 }
 
 #[test]
+fn demon2_needs_its_own_image_and_an_a500_side_port() -> Result<()> {
+    let cartridge = "[cartridge]\nmodel = \"demon2\"\nrom = \"/roms/demon2.rom\"";
+    for model in ["A500", "A500OCS", "A500+", "A1200"] {
+        let config = parse_config(&format!("[machine]\nprofile = \"{model}\"\n{cartridge}"));
+        if model == "A1200" {
+            assert!(config
+                .unwrap_err()
+                .to_string()
+                .contains("side expansion port"));
+        } else {
+            let cart = config?.cartridge;
+            assert_eq!(cart.model, Some(crate::cartridge::CartridgeModel::Demon2));
+            assert_eq!(
+                cart.rom.as_deref(),
+                Some(std::path::Path::new("/roms/demon2.rom"))
+            );
+        }
+    }
+    assert!(parse_config("[cartridge]\nmodel = \"demon2\"")
+        .unwrap_err()
+        .to_string()
+        .contains("256 KiB EPROM"));
+    Ok(())
+}
+
+#[test]
 fn cartridge_cli_override_matches_the_config_field() -> Result<()> {
     use crate::cartridge::CartridgeModel;
     use std::path::Path;

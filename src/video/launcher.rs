@@ -895,8 +895,7 @@ pub struct MachineSetup {
     /// Audio page (`[toccata] enabled`). No other options exist yet.
     toccata: bool,
     /// The freezer cartridge (`[cartridge] model`), edited in the System
-    /// tab, and an image of the user's own (`[cartridge] rom`), carried
-    /// across the round trip without a row.
+    /// tab together with the cartridge image (`[cartridge] rom`).
     cartridge: Option<crate::cartridge::CartridgeModel>,
     cartridge_rom: Option<PathBuf>,
     /// The MHI virtual MPEG audio decoder board, edited on the same Audio
@@ -1378,6 +1377,7 @@ impl MachineSetup {
             }
             // Only an MP4 recording runs ffmpeg; an AVI is written by
             // Copperline itself.
+            F::CartridgeRom => self.cartridge.is_none(),
             F::RecordingFfmpeg => self.video_format != crate::config::VideoFormat::Mp4,
             // No controller, no SCSI: the ROM and unit rows go rather than
             // stand greyed under a setting most machines leave at None. They
@@ -1546,6 +1546,7 @@ impl MachineSetup {
                 reason(self.has_cd(), "needs CDTV/CD32; on a bus, use a drive slot")
             }
             F::Cd32Nvram => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
+            F::CartridgeRom => reason(self.cartridge.is_some(), "Fit a freezer cartridge"),
             F::FmvRom => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
             F::Df0Image | F::Df0WriteProtect => reason(self.floppy_drives >= 1, "drive off"),
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),
@@ -1704,6 +1705,7 @@ impl MachineSetup {
     /// The current path of a path field, if any.
     pub fn path(&self, field: LauncherField) -> Option<&Path> {
         match field {
+            F::CartridgeRom => self.cartridge_rom.as_deref(),
             F::Rom => self.rom.as_deref(),
             F::Mt32ControlRom => self.mt32_control_rom.as_deref(),
             #[cfg(feature = "coppersynth")]
@@ -2245,6 +2247,7 @@ impl MachineSetup {
             && self.path(field).is_none()
             && !crate::config::is_cd_image_path(&path);
         match field {
+            F::CartridgeRom => self.cartridge_rom = Some(path),
             F::Rom => self.rom = Some(path),
             F::Mt32ControlRom => self.mt32_control_rom = Some(path),
             #[cfg(feature = "coppersynth")]
@@ -2334,6 +2337,7 @@ impl MachineSetup {
             return;
         }
         match field {
+            F::CartridgeRom => self.cartridge_rom = None,
             F::Rom => self.rom = None,
             F::ExtendedRom => self.extended_rom = None,
             // Clearing the ROM keeps the module fitted, on the bundled ROM;

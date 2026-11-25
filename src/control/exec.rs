@@ -4027,7 +4027,7 @@ fn reverse_result(emu: &Emulator, outcome: ReverseOutcome<String>) -> Result<Val
 }
 
 const UAELIB_DISABLED: &str = "uaelib trap not fitted ([emulation] uaelib = false)";
-const NO_CARTRIDGE: &str = "no freezer cartridge fitted ([cartridge] model = \"hrtmon\")";
+const NO_CARTRIDGE: &str = "no freezer cartridge fitted";
 
 /// The `cartridge.get` / `cartridge.freeze` reply body.
 fn cartridge_value(cartridge: &crate::cartridge::Cartridge) -> Value {

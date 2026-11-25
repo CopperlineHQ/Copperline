@@ -5165,11 +5165,24 @@ fn the_freezer_cartridge_row_cycles_and_round_trips() {
     assert_eq!(back.value_label(LauncherField::Cartridge), "HRTMon");
 
     s.cycle(LauncherField::Cartridge, true);
+    assert_eq!(s.value_label(LauncherField::Cartridge), "DeMoN II");
+    assert!(s.build_config().is_err());
+    s.set_path(
+        LauncherField::CartridgeRom,
+        PathBuf::from("/roms/demon.rom"),
+    );
+    let cfg = s.build_config().unwrap();
+    assert_eq!(cfg.cartridge.model, Some(CartridgeModel::Demon2));
+    assert_eq!(
+        cfg.cartridge.rom.as_deref(),
+        Some(std::path::Path::new("/roms/demon.rom"))
+    );
+    s.cycle(LauncherField::Cartridge, true);
     assert_eq!(s.value_label(LauncherField::Cartridge), "None");
     assert!(s.to_raw().cartridge.model.is_none());
 
-    // An image of the user's own has no row of its own: it rides along
-    // while the cartridge stays fitted and goes when it is unfitted.
+    // An explicit image survives the configuration round trip and clears
+    // when the user removes the cartridge.
     let raw: RawConfig =
         toml::from_str("[cartridge]\nmodel = \"hrtmon\"\nrom = \"/roms/hrtmon.rom\"\n").unwrap();
     let mut setup = MachineSetup::from_raw(&raw).unwrap();
@@ -5178,7 +5191,7 @@ fn the_freezer_cartridge_row_cycles_and_round_trips() {
         setup.to_raw().cartridge.rom.as_deref(),
         Some("/roms/hrtmon.rom")
     );
-    setup.cycle(LauncherField::Cartridge, true);
+    setup.cycle(LauncherField::Cartridge, false);
     assert!(setup.to_raw().cartridge.model.is_none());
     assert!(setup.to_raw().cartridge.rom.is_none());
 }

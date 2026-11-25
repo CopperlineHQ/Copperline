@@ -2971,7 +2971,7 @@ const SHORTCUT_ROWS: [(&str, &str, bool); 29] = [
     ("D", "Swap queued disk", true),
     ("G", "Capture mouse", true),
     ("B", "Debugger", true),
-    ("Shift+B", "Freeze (HRTMon)", true),
+    ("Shift+B", "Freeze cartridge", true),
     ("K", "Console", true),
     ("J", "Joystick input mode", true),
     ("M", "Monitor bezel off/on", true),

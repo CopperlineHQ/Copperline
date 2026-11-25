@@ -237,7 +237,9 @@ fn resolve_bundled_fmv_rom(cfg: &mut Config) -> Result<()> {
 /// Resolve a [`BUNDLED_HRTMON_ROM`] sentinel in `[cartridge] rom` to the
 /// located bundled image, or fail telling the user where to install one.
 fn resolve_bundled_hrtmon_rom(cfg: &mut Config) -> Result<()> {
-    if cfg.cartridge.rom.as_deref() != Some(Path::new(BUNDLED_HRTMON_ROM)) {
+    if cfg.cartridge.model != Some(crate::cartridge::CartridgeModel::Hrtmon)
+        || cfg.cartridge.rom.as_deref() != Some(Path::new(BUNDLED_HRTMON_ROM))
+    {
         return Ok(());
     }
     let rom = crate::romsearch::find_bundled_hrtmon().ok_or_else(|| {

@@ -267,7 +267,7 @@ timestamps. Every flag repeats:
 | `--defer-disk-insert SECS DFN` | Start with DFN empty and insert its configured disk at SECS |
 | `--eject-disk-after SECS DFN` | Eject the disk in DFN at SECS, leaving the drive empty ([below](#ejecting-floppy-disks)) |
 | `--insert-cd-after SECS PATH` | Swap the CD image (`.cue`, `.iso`, `.nrg`, `.chd`) in the machine's CD drive |
-| `--freeze-after SECS` | Press the freezer cartridge's button (`--cartridge hrtmon`): HRTMon takes over at SECS |
+| `--freeze-after SECS` | Press the fitted freezer cartridge's button at SECS |
 | `--expect-screenshot SECS PATH [TOLERANCE]` | Compare the frame at SECS with a PNG ([above](#screenshot-expectations)) |
 | `--script FILE` | Read scripted-input directives from FILE ([below](#input-recording-and-script-files)) |
 | `--record-input PATH` | Record all machine-bound input for the whole run and write it as a script to PATH on exit |
@@ -339,7 +339,7 @@ wires to `LP` (port 2 on every Amiga after the A1000). Joysticks in the
 parallel-port four-player adapter (`--parallel joystick-adapter`) are ports
 `3` and `4` in `--joy-after`'s trailing PORT token.
 
-`--freeze-after` requires an enabled cartridge (`--cartridge hrtmon` or
+`--freeze-after` requires an enabled cartridge (`--cartridge MODEL` or
 `[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)).
 Later `--screenshot-after` captures show the monitor screen, and a
 `--save-state-after` snapshot taken inside the monitor resumes inside it.

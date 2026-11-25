@@ -1374,11 +1374,17 @@ where
                 )?;
                 freeze_after.push(secs);
             }
-            "--cartridge" => {
-                overrides.cartridge = Some(
+            "--cartridge-rom" => {
+                overrides.cartridge_rom = Some(
                     args.next()
-                        .ok_or_else(|| anyhow!("--cartridge requires a model (none/hrtmon)"))?,
+                        .ok_or_else(|| anyhow!("--cartridge-rom requires an image path"))?,
                 );
+            }
+            "--cartridge" => {
+                overrides.cartridge =
+                    Some(args.next().ok_or_else(|| {
+                        anyhow!("--cartridge requires a model (none/hrtmon/demon2)")
+                    })?);
             }
             "--press-after" => {
                 const USAGE: &str = "--press-after requires SECS KEY";
@@ -2220,9 +2226,8 @@ fn help_text() -> String {
          --clipboard / --no-clipboard   share the host clipboard with the guest's\n  \
          \x20                            clipboard.device; fits an extra autoconfig board,\n  \
          \x20                            so it is off unless asked for (default: off)\n  \
-         --cartridge MODEL              freezer cartridge: none (default) or hrtmon (the\n  \
-         \x20                            bundled HRTMon monitor, entered with --freeze-after,\n  \
-         \x20                            the Freeze menu item, or cartridge.freeze)\n  \
+         --cartridge MODEL              freezer cartridge: none, hrtmon or demon2\n  \
+         --cartridge-rom PATH           cartridge image (required for DeMoN II)\n  \
          --chip SIZE                    chip RAM size, e.g. 512K, 1M, 2M\n  \
          --fast SIZE                    Zorro II fast RAM size, e.g. 0, 1M, 4M, 8M\n  \
          --slow SIZE                    trapdoor slow RAM at $C00000, e.g. 0, 512K\n  \
@@ -2372,8 +2377,8 @@ fn help_text() -> String {
          --insert-cd-after SECS PATH    swap the CD image (cue/iso/nrg/chd) in the machine's CD\n  \
          \x20                            drive (CDTV, CD32, or a SCSI CD-ROM unit) after\n  \
          \x20                            SECS seconds\n  \
-         --freeze-after SECS            press the freezer cartridge's button (--cartridge\n  \
-         \x20                            hrtmon) after SECS seconds\n  \
+         --freeze-after SECS            press the fitted freezer cartridge's button\n  \
+         \x20                            after SECS seconds\n  \
          --audio                        enable real-time stereo audio output via cpal (default)\n  \
          --noaudio                      disable real-time audio output\n  \
          --audio-device NAME            host audio output device (substring match)\n  \

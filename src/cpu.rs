@@ -3376,7 +3376,14 @@ impl M68kMachine {
         if matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010) {
             return false;
         }
-        !(self.debug_hooks_armed() || (!self.fpu_enabled && self.cpu.cpu_type == CpuType::M68040))
+        !(self.debug_hooks_armed()
+            || (!self.fpu_enabled && self.cpu.cpu_type == CpuType::M68040)
+            || self
+                .bus
+                .bus
+                .cartridge
+                .as_ref()
+                .is_some_and(|c| c.model() == crate::cartridge::CartridgeModel::Demon2))
     }
 
     /// Whether any per-instruction debug or diagnostic hook is armed: the
@@ -3532,6 +3539,9 @@ impl M68kMachine {
             #[cfg(feature = "control")]
             let profile_start =
                 self.profile_sample_start(self.cpu.pc, self.bus.bus.cpu_wait_cck_total());
+            if let Some(cart) = &mut self.bus.bus.cartridge {
+                cart.instruction_at(self.cpu.pc & self.cpu.address_mask);
+            }
             let coverage_pc = self.cpu.pc;
             if DEBUG_HOOKS && self.coverage_arm.is_some() {
                 self.coverage_check_load();
@@ -4042,18 +4052,18 @@ impl CpuBus {
         ) {
             return Some(PlainMemRegion::ExtendedRom(off));
         }
-        if let Some(region) = self.rom_mirror_region(addr, size) {
-            return Some(region);
-        }
-        if let Some(off) = self
-            .bus
-            .cartridge
-            .as_ref()
+        let cart = self.bus.cartridge.as_ref();
+        let cartridge_region = cart
             .and_then(|c| c.offset(addr, size))
+            .map(PlainMemRegion::Cartridge);
+        // The sidecar asserts /OVR while its bank is visible. The UAE
+        // HRTMon mapping retains the motherboard's ROM mirror priority.
+        if cartridge_region.is_some()
+            && cart.is_some_and(|c| c.model() == crate::cartridge::CartridgeModel::Demon2)
         {
-            return Some(PlainMemRegion::Cartridge(off));
+            return cartridge_region;
         }
-        None
+        self.rom_mirror_region(addr, size).or(cartridge_region)
     }
 
     /// The Kickstart images a board's address decoder adds beside the
@@ -4249,9 +4259,11 @@ impl CpuBus {
             Some(PlainMemRegion::AccelRam(off)) => self.bus.mem.accel_ram[off],
             Some(PlainMemRegion::Wcs(off)) => self.bus.mem.wcs[off],
             Some(PlainMemRegion::ExtendedRom(off)) => self.bus.mem.extended_rom[off],
-            Some(PlainMemRegion::Cartridge(off)) => {
-                self.bus.cartridge.as_ref().map_or(0xFF, |c| c.bank()[off])
-            }
+            Some(PlainMemRegion::Cartridge(off)) => self
+                .bus
+                .cartridge
+                .as_ref()
+                .map_or(0xFF, |c| c.read_byte(off, self.bus.data_bus)),
             None => {
                 if crate::uaelib::UaeLib::decodes(addr) {
                     if let Some(b) = self
@@ -4270,17 +4282,21 @@ impl CpuBus {
 
     /// The regions `debug_write_byte` mutates; keep the two in step.
     fn debug_memory_writable(&self, address: u32) -> bool {
-        matches!(
-            self.classify_plain_memory(self.mask(address), 1),
+        match self.classify_plain_memory(self.mask(address), 1) {
+            Some(PlainMemRegion::Cartridge(off)) => self
+                .bus
+                .cartridge
+                .as_ref()
+                .is_some_and(|c| c.ram_writable(off)),
             Some(
                 PlainMemRegion::ChipRam(_)
-                    | PlainMemRegion::ZorroRam(..)
-                    | PlainMemRegion::SlowRam(_)
-                    | PlainMemRegion::MbRam(_)
-                    | PlainMemRegion::AccelRam(_)
-                    | PlainMemRegion::Cartridge(_)
-            )
-        )
+                | PlainMemRegion::ZorroRam(..)
+                | PlainMemRegion::SlowRam(_)
+                | PlainMemRegion::MbRam(_)
+                | PlainMemRegion::AccelRam(_),
+            ) => true,
+            _ => false,
+        }
     }
 
     fn debug_write_byte(&mut self, address: u32, value: u8) -> bool {
@@ -4313,7 +4329,10 @@ impl CpuBus {
             }
             Some(PlainMemRegion::Cartridge(off)) => {
                 if let Some(cartridge) = self.bus.cartridge.as_mut() {
-                    cartridge.bank_mut()[off] = value;
+                    if !cartridge.ram_writable(off) {
+                        return false;
+                    }
+                    cartridge.write_byte(off, value);
                 }
                 self.invalidate_debug_write(addr, 1);
                 true
@@ -4812,6 +4831,15 @@ impl CpuBus {
 
     fn read_bus_cycle(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
         let addr = self.mask(address);
+        if let Some(value) = self
+            .bus
+            .cartridge
+            .as_mut()
+            .and_then(|c| c.observe_read(addr, size, kind == CpuBusAccessKind::Fetch))
+        {
+            self.bill_external_access(size);
+            return value;
+        }
         match self.classify_plain_memory(addr, size) {
             Some(PlainMemRegion::OverlayRom(off)) => {
                 self.bill_rom(addr, size, kind);
@@ -4876,11 +4904,11 @@ impl CpuBus {
                 // The freezer cartridge's bank: RAM on the expansion bus,
                 // off the chip bus, at external-bus cost like Zorro RAM.
                 self.bill_external_access(size);
-                return self
-                    .bus
-                    .cartridge
-                    .as_ref()
-                    .map_or(0xFFFF_FFFF, |c| read_be(c.bank(), off, size));
+                return self.bus.cartridge.as_ref().map_or(0xFFFF_FFFF, |c| {
+                    (0..size).fold(0, |v, i| {
+                        v << 8 | u32::from(c.read_byte(off + i, self.bus.data_bus))
+                    })
+                });
             }
             None => {}
         }
@@ -5273,6 +5301,9 @@ impl CpuBus {
 
     fn write_bus_cycle(&mut self, address: u32, size: usize, value: u32) {
         let addr = self.mask(address);
+        if let Some(cart) = &mut self.bus.cartridge {
+            cart.observe_write(addr, size, value);
+        }
         self.note_cpu_data_bus(addr, size, value);
         if self.bus.smc.is_some() {
             self.note_self_modifying_write(addr, size as u32);
@@ -5379,7 +5410,9 @@ impl CpuBus {
             Some(PlainMemRegion::Cartridge(off)) => {
                 self.bill_external_access(size);
                 if let Some(cartridge) = self.bus.cartridge.as_mut() {
-                    write_be(cartridge.bank_mut(), off, size, value);
+                    for i in 0..size {
+                        cartridge.write_byte(off + i, (value >> (8 * (size - 1 - i))) as u8);
+                    }
                 }
                 self.dbg_note_memw(addr, size);
                 return;
@@ -10818,6 +10851,33 @@ mod tests {
             image[at..at + 2].copy_from_slice(&word.to_be_bytes());
         }
         crate::cartridge::Cartridge::hrtmon(&image).unwrap()
+    }
+
+    #[test]
+    fn demon2_nmi_runs_from_eprom_and_returns_with_the_guest_vector_intact() -> Result<()> {
+        for cpu in [CpuModel::M68000, CpuModel::M68010, CpuModel::M68EC020] {
+            let mut bus = test_bus_with_pc(0x100);
+            write_program(&mut bus, 0x100, &[0x4e71, 0x60fc]); // NOP / BRA.S
+            let mut eprom = vec![0xff; 0x40000];
+            eprom[0x7c..0x80].copy_from_slice(&0x00a80100u32.to_be_bytes());
+            // MOVE.W #$1234,$1000.W / RTE
+            eprom[0x100..0x108].copy_from_slice(&[0x31, 0xfc, 0x12, 0x34, 0x10, 0, 0x4e, 0x73]);
+            let cart = crate::cartridge::Cartridge::demon2(&eprom).unwrap();
+            bus.attach_cartridge(cart);
+            set_autovector(&mut bus, 7, 0x123456);
+            bus.irq_latency_setting = 0;
+            let mut machine = M68kMachine::new(bus, cpu, false)?;
+            machine.step_slice(2)?;
+            machine.cartridge_freeze()?;
+            machine.step_slice(6)?;
+            assert_eq!(read_chip_word(machine.bus(), 0x1000), 0x1234);
+            assert_eq!(
+                &machine.bus().mem.chip_ram[0x7c..0x80],
+                &[0, 0x12, 0x34, 0x56]
+            );
+            assert!(!machine.bus().cartridge.as_ref().unwrap().entered());
+        }
+        Ok(())
     }
 
     #[test]

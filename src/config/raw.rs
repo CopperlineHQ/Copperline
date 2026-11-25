@@ -1352,7 +1352,7 @@ pub(crate) struct RawClipboard {
 #[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawCartridge {
-    /// Which cartridge: "none" (the default) or "hrtmon".
+    /// Which cartridge: "none" (the default), "hrtmon" or "demon2".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model: Option<String>,
     /// A cartridge image of the user's own instead of the bundled one.

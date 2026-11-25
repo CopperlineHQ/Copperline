@@ -1064,13 +1064,28 @@ impl TryFrom<RawConfig> for Config {
                 .map(|p| locate_media(p, Media::Rom));
             if rom.is_some() && model.is_none() {
                 return Err(anyhow!(
-                    "[cartridge] rom applies only to a fitted cartridge (model = \"hrtmon\")"
+                    "[cartridge] rom applies only to a fitted cartridge"
                 ));
             }
-            CartridgeConfig {
-                model,
-                rom: model.and(rom.or_else(|| Some(PathBuf::from(BUNDLED_HRTMON_ROM)))),
-            }
+            use crate::cartridge::CartridgeModel::{Demon2, Hrtmon};
+            let rom = match model {
+                Some(Hrtmon) => rom.or_else(|| Some(PathBuf::from(BUNDLED_HRTMON_ROM))),
+                Some(Demon2) => {
+                    if !matches!(
+                        machine,
+                        None | Some(
+                            MachineModel::A500 | MachineModel::A500Ocs | MachineModel::A500Plus
+                        )
+                    ) {
+                        bail!("DeMoN II fits the side expansion port on the A500 and A500+");
+                    }
+                    Some(rom.ok_or_else(|| anyhow!(
+                        "DeMoN II requires a 256 KiB EPROM image in [cartridge] rom or --cartridge-rom"
+                    ))?)
+                }
+                None => None,
+            };
+            CartridgeConfig { model, rom }
         };
         let mhi = raw.mhi.enabled.unwrap_or(defaults.mhi);
 
