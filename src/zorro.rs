@@ -1208,7 +1208,24 @@ impl ZorroChain {
 
     /// Locate `addr..addr+size` inside a configured board's RAM window.
     /// Returns the board index and byte offset.
+    #[inline]
     pub fn region_at(&self, addr: u32, size: usize) -> Option<(usize, usize)> {
+        // Every CPU access that misses chip RAM asks this. Without a Buster
+        // every configured window is selected, so that case stays inline.
+        if self.controller == crate::buster::Revision::Absent {
+            for &(base, len, idx) in &self.regions {
+                let off = addr.wrapping_sub(base);
+                if u64::from(off) + size as u64 <= u64::from(len) {
+                    return Some((idx, off as usize));
+                }
+            }
+            return None;
+        }
+        self.region_in_decoded_windows(addr, size)
+    }
+
+    #[inline(never)]
+    fn region_in_decoded_windows(&self, addr: u32, size: usize) -> Option<(usize, usize)> {
         for &(base, len, idx) in &self.regions {
             let off = addr.wrapping_sub(base);
             if u64::from(off) + size as u64 <= u64::from(len)

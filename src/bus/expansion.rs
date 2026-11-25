@@ -62,10 +62,19 @@ impl Bus {
         Ok(())
     }
 
+    #[inline]
     pub(crate) fn sample_buster_requests(&mut self) {
-        if !self.buster.wired {
-            return;
+        // Called on every device advance; a machine with no Buster-wired
+        // DMA master has nothing to sample.
+        if self.buster.wired {
+            self.sample_wired_buster_requests();
+        } else {
+            self.buster.settle_idle();
         }
+    }
+
+    #[inline(never)]
+    fn sample_wired_buster_requests(&mut self) {
         let mut z2 = 0;
         let mut z3 = 0;
         for (slot, index) in self.buster.devices.iter().enumerate() {
@@ -90,6 +99,7 @@ impl Bus {
                 _ => {}
             }
         }
+        self.buster.note_requests_sampled();
         self.buster.z2 = z2;
         self.buster.sample_registration(z3);
         self.buster.local_request = self
