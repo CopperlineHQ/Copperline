@@ -315,12 +315,67 @@ pub(super) fn rgba8_blend_halves(a: u32, b: u32) -> u32 {
     (a & b) + (((a ^ b) & 0xFEFE_FEFE) >> 1)
 }
 
+/// ECS Denise super-hi-res colour register index of sub-pixel `p` (0..3)
+/// of an aligned group of four super-hi-res pixels, one lo-res pixel wide.
+/// Denise cannot look a colour up at the 35 ns dot rate, so it combines
+/// two pixels into one 4-bit index, pairing across the group rather than
+/// side by side: pixels 0 and 2 form one index, pixels 1 and 3 the other,
+/// the later pixel giving the high bit pair. Two bitplanes therefore reach
+/// COLOR00..COLOR15. (A500+ photographs: vAmigaTS Denise/Modes/shres
+/// shspot1-16, shindex1-5, sh1bpl1-5.)
+pub(super) fn ecs_shres_group_index(group: [u8; 4], p: usize) -> u8 {
+    let base = p & 1;
+    ((group[base + 2] & 3) << 2) | (group[base] & 3)
+}
+
+/// The share of an ECS Denise super-hi-res colour register one sub-pixel
+/// shows: the first (even) sub-pixel of a 70 ns column takes the high bit
+/// pair of each RGB nibble, the second the low pair, each pair replicated
+/// over the whole nibble (0, 1, 2, 3 -> $0, $5, $A, $F). A monitor blends
+/// the two, so the brightness follows the sum of the bit pairs, not the
+/// register value (vAmigaTS shramp1-7, A500+). Which sub-pixel takes which
+/// half is not observable on the photographs; the high pair goes first as
+/// in vAmiga and Amiberry.
+pub(super) fn ecs_shres_nibble_half(rgb12: u16, low_pair: bool) -> u16 {
+    let shift = if low_pair { 0 } else { 2 };
+    (0..3).fold(0, |out, component| {
+        let pair = (rgb12 >> (component * 4 + shift)) & 3;
+        out | ((pair * 5) << (component * 4))
+    })
+}
+
+/// Resolve one 70 ns framebuffer column of an ECS Denise super-hi-res
+/// playfield. `group` holds the four (plane-masked) pixel indices of the
+/// lo-res-wide group the column belongs to; whichever half of the group
+/// the column is, its even sub-pixel shows the high half of register
+/// `ecs_shres_group_index(group, 0)` and its odd sub-pixel the low half
+/// of `ecs_shres_group_index(group, 1)`, so both columns of a group come
+/// out alike. `own` are the column's own two pixel indices: the
+/// playfield mask keeps describing the bitplane bits, as sprite priority
+/// does on hardware.
+pub(super) fn ecs_denise_shres_pair_outputs(
+    palette: &Palette,
+    group: [u8; 4],
+    own: [u8; 2],
+) -> (DenisePlayfieldOutput, DenisePlayfieldOutput) {
+    let half = |sub: usize| {
+        let idx = ecs_shres_group_index(group, sub);
+        let color_latch = palette[idx as usize];
+        DenisePlayfieldOutput {
+            color: rgb12_to_rgb24(ecs_shres_nibble_half(color_rgb12(color_latch), sub == 1)),
+            color_latch,
+            pf_mask: u8::from(own[sub] != 0) * 2,
+        }
+    };
+    (half(0), half(1))
+}
+
 /// Resolve the two 35 ns samples of one 70 ns framebuffer column, each
-/// through the full palette pipeline (ECS Denise carries at most two
-/// bitplanes into SHRES; AGA Lisa runs the complete 8-bit index path). On
-/// a 35 ns-pitch canvas each half is emitted as its own pixel; on the
-/// classic hi-res-pitch canvas the pair is blended by
-/// [`denise_shres_playfield_output`].
+/// through the full palette pipeline: AGA Lisa runs the complete 8-bit
+/// index path per super-hi-res pixel (ECS Denise pairs pixels instead,
+/// [`ecs_denise_shres_pair_outputs`]). On a 35 ns-pitch canvas each half
+/// is emitted as its own pixel; on the classic hi-res-pitch canvas the
+/// pair is blended by [`blend_shres_outputs`].
 pub(super) fn denise_shres_playfield_output_pair(
     control: ControlState,
     palette: &Palette,
@@ -333,9 +388,11 @@ pub(super) fn denise_shres_playfield_output_pair(
     (left, right)
 }
 
-/// Merge a resolved 35 ns pair into one hi-res-pitch output: the blend is
-/// a framebuffer-pitch compromise, not hardware, used when the canvas
-/// carries one colour per 70 ns pixel.
+/// Merge a resolved 35 ns pair into one hi-res-pitch output, used when the
+/// canvas carries one colour per 70 ns pixel. The mean is taken on the
+/// DAC values, before any gamma, as a monitor's video amplifier smears
+/// two sub-pixels it cannot resolve (which is what makes ECS Denise's
+/// nibble split read as the sum of the two bit pairs).
 pub(super) fn blend_shres_outputs(
     left: DenisePlayfieldOutput,
     right: DenisePlayfieldOutput,

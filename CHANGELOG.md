@@ -83,6 +83,17 @@ for the earlier release notes.
 
 ### Fixed
 
+- Super-hires screens on an ECS Denise (A500+, A600, A3000) show the
+  colours the hardware shows. ECS Denise cannot look a colour up for every
+  super-hires pixel: it combines two pixels of each lo-res-wide group of
+  four into one colour register (so two bitplanes reach COLOR00 to
+  COLOR15), and shows the high bit pair of each RGB nibble of that
+  register on one half of the pair and the low bit pair on the other.
+  Copperline looked every pixel up, so a super-hires picture whose pixel
+  pairs reach a register other than the pixel's own, or whose palette has
+  nibbles other than $0, $5, $A and $F, came out in the wrong colours or
+  brightness. AGA Lisa still looks every super-hires pixel up, and an OCS
+  Denise is unchanged.
 - A save state preserves the 68040/68060 MMU translation cache. Resuming
   keeps the resident page mappings and the bus clocks a table walk would
   consume on a miss.

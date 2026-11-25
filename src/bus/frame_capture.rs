@@ -1856,6 +1856,7 @@ impl Bus {
         RenderRegisterSnapshot {
             agnus_revision: self.agnus.revision(),
             beamcon0_lifts_ddf_stop: self.beamcon0_lifts_ddf_hard_stop(),
+            denise_revision: self.denise_revision,
             dmacon: self.agnus.dmacon,
             bplcon0: self.denise.bplcon0,
             bplcon1: self.denise.bplcon1,

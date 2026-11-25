@@ -22,8 +22,8 @@ use crate::chipset::agnus::{
 #[cfg(test)]
 use crate::chipset::denise::BPLCON3_PF2OF_DEFAULT;
 use crate::chipset::denise::{
-    color_register_value, rgb12_to_rgb24, rgb12_to_rgba8, rgb24_to_rgba8, BitplaneMode, DiwHigh,
-    Palette, COLOR_RGB_MASK, COLOR_TRANSPARENCY_BIT,
+    color_register_value, rgb12_to_rgb24, rgb12_to_rgba8, rgb24_to_rgba8, BitplaneMode,
+    DeniseRevision, DiwHigh, Palette, COLOR_RGB_MASK, COLOR_TRANSPARENCY_BIT,
 };
 #[cfg(feature = "profile-stats")]
 use crate::timebase::Instant;
@@ -470,6 +470,7 @@ fn palette_entry_for_write(bplcon3: u16, aga: bool, idx: usize) -> (u8, bool) {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ControlState {
     agnus_revision: AgnusRevision,
+    denise_revision: DeniseRevision,
     harddis: bool,
     dmacon: u16,
     bplcon0: u16,
@@ -1018,6 +1019,7 @@ impl ControlState {
     fn from_render_state(state: &RenderState) -> Self {
         Self {
             agnus_revision: state.agnus_revision,
+            denise_revision: state.denise_revision,
             harddis: state.harddis,
             dmacon: state.dmacon,
             bplcon0: state.bplcon0,
@@ -1356,6 +1358,22 @@ impl ControlState {
 
     fn dual_playfield(&self) -> bool {
         self.bplcon0 & 0x0400 != 0
+    }
+
+    /// ECS Denise (8373) cannot look a colour up at the super-hi-res dot
+    /// rate: it combines two pixels of each lo-res-wide group of four into
+    /// one colour register index and splits that register's RGB nibbles
+    /// across the pair ([`ecs_denise_shres_pair_outputs`]). OCS Denise has
+    /// no super-hi-res and Lisa resolves every pixel, so both keep the
+    /// per-pixel lookup. Dual playfield (and HAM, which needs more planes
+    /// than ECS super-hi-res fetches) keep it too: the measured rule covers
+    /// a single playfield only.
+    fn ecs_denise_shres_pairs_pixels(&self) -> bool {
+        self.denise_revision == DeniseRevision::Ecs8373
+            && self.shres()
+            && !self.aga()
+            && !self.dual_playfield()
+            && !self.ham()
     }
 
     fn pf2_priority(&self) -> bool {
@@ -2564,6 +2582,7 @@ impl DisplayFramePlan {
 /// and then optionally overridden by recorded beam events.
 struct RenderState {
     agnus_revision: AgnusRevision,
+    denise_revision: DeniseRevision,
     harddis: bool,
     dmacon: u16,
     bplcon0: u16,
@@ -2607,6 +2626,7 @@ impl RenderState {
     fn from_snapshot(snapshot: RenderRegisterSnapshot) -> Self {
         Self {
             agnus_revision: snapshot.agnus_revision,
+            denise_revision: snapshot.denise_revision,
             harddis: snapshot.beamcon0_lifts_ddf_stop,
             dmacon: snapshot.dmacon,
             bplcon0: snapshot.bplcon0,
@@ -6991,6 +7011,7 @@ fn render_planned_playfield_line_impl(
             .native_x_offset(pixel_diw_h_start, pixel_repeat)
             .saturating_sub(carried_open_ext_fb / pixel_repeat * native_per_pixel);
         let shres = pixel_control.shres();
+        let ecs_shres_pairs = output_control.ecs_denise_shres_pairs_pixels();
         let canvas_scale = active_canvas_scale();
         let out_w = FB_WIDTH * canvas_scale;
         let line_visible =
@@ -7314,7 +7335,20 @@ fn render_planned_playfield_line_impl(
             let (sample, output, shres_pair, shres_sample_pair) = if shres {
                 let left = plan.sample_prepared(nplanes, &delays, native_x);
                 let right = plan.sample_prepared(nplanes, &delays, native_x + 1);
-                let (left_out, right_out) = if let Some(outputs) = indexed_outputs {
+                let (left_out, right_out) = if ecs_shres_pairs {
+                    // The fetched data starts on a native multiple of 4 and
+                    // ECS scrolls in whole lo-res pixels (4 samples), so
+                    // this grid is the data's lo-res pixel grid.
+                    let base = native_x & !3;
+                    let group = std::array::from_fn(|i| {
+                        plan.sample_prepared(nplanes, &delays, base + i).idx & plane_mask
+                    });
+                    ecs_denise_shres_pair_outputs(
+                        &palette,
+                        group,
+                        [left.idx & plane_mask, right.idx & plane_mask],
+                    )
+                } else if let Some(outputs) = indexed_outputs {
                     let left_out =
                         cached_indexed_output(outputs, left.idx & plane_mask, &mut ham_color);
                     let right_out =
@@ -7896,13 +7930,30 @@ fn draw_manual_bpl_word(
         };
         let (source_output, manual_shres_pair) = if source_control.shres() {
             let right_sample = right_sample.expect("SHRES right sample");
-            let (left_out, right_out) = denise_shres_playfield_output_pair(
-                source_control,
-                &source_palette,
-                left_sample.idx & plane_mask,
-                right_sample.idx & plane_mask,
-                ham_color,
-            );
+            let (left_out, right_out) = if source_control.ecs_denise_shres_pairs_pixels() {
+                // A manual word starts on a lo-res pixel of its own grid.
+                let base = native_idx & !3;
+                let group = std::array::from_fn(|i| {
+                    shifter
+                        .sample(source_control, base + i)
+                        .unwrap_or_default()
+                        .idx
+                        & plane_mask
+                });
+                ecs_denise_shres_pair_outputs(
+                    &source_palette,
+                    group,
+                    [left_sample.idx & plane_mask, right_sample.idx & plane_mask],
+                )
+            } else {
+                denise_shres_playfield_output_pair(
+                    source_control,
+                    &source_palette,
+                    left_sample.idx & plane_mask,
+                    right_sample.idx & plane_mask,
+                    ham_color,
+                )
+            };
             (
                 blend_shres_outputs(left_out, right_out),
                 Some((left_out, right_out)),
