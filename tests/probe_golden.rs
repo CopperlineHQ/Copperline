@@ -749,6 +749,14 @@ probe_tests! {
     // keeps its fixed blank.
     golden_ecsblank_pin => Probe { name: "ecsblank-pin", program: "ecsblank-pin.bin", seconds: 16.0, machine: Machine::EcsDenise };
     golden_ecsblank_pin_ocs_denise => probe_ecs("ecsblank-pin-ocs-denise", "ecsblank-pin.bin", 16.0);
+    // Denise's display gate is the DIW flip-flop AND the line's first
+    // BPL1DAT load: under BRDRBLNK a plane-less line is black edge to edge
+    // and a late-DDF line is black up to its first data pixel; BRDRBLNK
+    // toggles land at the colour-output position mid-line; sprites are
+    // clipped by the same gate. The OCS-Denise run has no BRDRBLNK, so only
+    // the sprite gate is visible there.
+    golden_gateprobe_brdrblnk => Probe { name: "gateprobe-brdrblnk", program: "gateprobe-brdrblnk.bin", seconds: 16.0, machine: Machine::EcsDenise };
+    golden_gateprobe_brdrblnk_ocs_denise => probe_ecs("gateprobe-brdrblnk-ocs-denise", "gateprobe-brdrblnk.bin", 16.0);
     // BPLCON2.KILLEHB is a bit of ECS Denise and Lisa: an OCS Denise
     // ignores it and keeps six planes extra-half-brite.
     golden_ehbprobe_kill => probe("ehbprobe-kill", "ehbprobe-kill.bin", 16.0);
