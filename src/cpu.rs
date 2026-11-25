@@ -4473,7 +4473,25 @@ impl CpuBus {
 
     /// A physical select collision or an injected fault raises BERR before
     /// the responding devices can consume this access.
+    #[inline(always)]
     fn check_bus_fault(&mut self, address: u32, len: u32, write: bool) -> Result<(), BusFault> {
+        // Without Buster there are no select collisions; with no injected
+        // fault armed either, no access can fault here.
+        if self.bus.buster.revision == crate::buster::Revision::Absent
+            && !self.bus.bus_faults_armed()
+        {
+            return Ok(());
+        }
+        self.check_bus_fault_slow(address, len, write)
+    }
+
+    #[inline(never)]
+    fn check_bus_fault_slow(
+        &mut self,
+        address: u32,
+        len: u32,
+        write: bool,
+    ) -> Result<(), BusFault> {
         let addr = self.mask(address);
         if self
             .bus
@@ -4742,7 +4760,34 @@ impl CpuBus {
         size
     }
 
+    /// No boot overlay and no Buster: the operand cannot straddle the
+    /// overlay ROM image or split at a Zorro port width, and no expansion
+    /// master holds a grant to finish first. The access goes straight to
+    /// `read_bus_cycle`/`write_bus_cycle`, which still run any cycles the
+    /// target itself needs (an AGA custom register longword is two word
+    /// cycles there).
+    #[inline(always)]
+    fn skips_overlay_split_and_buster(&self) -> bool {
+        !self.bus.mem.overlay
+            && self.bus.buster.revision == crate::buster::Revision::Absent
+            && !self.bus.buster.wired
+    }
+
+    #[inline(always)]
     fn read_sized_uncached(&mut self, address: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
+        if self.skips_overlay_split_and_buster() {
+            return self.read_bus_cycle(address, size, kind);
+        }
+        self.read_sized_uncached_split(address, size, kind)
+    }
+
+    #[inline(never)]
+    fn read_sized_uncached_split(
+        &mut self,
+        address: u32,
+        size: usize,
+        kind: CpuBusAccessKind,
+    ) -> u32 {
         if size > 1 && (size > 2 || address & 1 != 0) {
             let addr = self.mask(address);
             let first = self.first_memory_beat(addr, size);
@@ -5193,7 +5238,17 @@ impl CpuBus {
         }
     }
 
+    #[inline(always)]
     fn write_sized_unobserved(&mut self, address: u32, size: usize, value: u32) {
+        if self.skips_overlay_split_and_buster() {
+            self.write_bus_cycle(address, size, value);
+            return;
+        }
+        self.write_sized_unobserved_split(address, size, value);
+    }
+
+    #[inline(never)]
+    fn write_sized_unobserved_split(&mut self, address: u32, size: usize, value: u32) {
         if size > 1 && (size > 2 || address & 1 != 0) {
             let addr = self.mask(address);
             let first = self.first_memory_beat(addr, size);

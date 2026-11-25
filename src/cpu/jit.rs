@@ -130,17 +130,24 @@ impl CpuBus {
     /// instruction may still finish in this batch: the core repeats a fetch
     /// when the host yields between fetch and dispatch, which would bill the
     /// same shared-bus fetch twice. Interrupts and deadlines still yield there.
+    #[inline(always)]
     pub(super) fn note_jit_bus_access(&mut self, address: u32, size: usize, access: JitAccess) {
-        let fetch = access == JitAccess::Fetch;
         // A one-instruction batch has no completed prefix before this access,
         // and returns to the host before the next instruction anyway. A lump
-        // defers nothing and bills at its end.
-        if matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_)))
-            && !match access {
-                JitAccess::Write => self.jit_plain_memory(self.mask(address), size) == Some(true),
-                JitAccess::Read | JitAccess::Fetch => self.jit_plain_access(address, size),
-            }
-        {
+        // defers nothing and bills at its end. Every interpreted CPU access
+        // passes here, so that common case stays inline.
+        if matches!(self.jit_batch, Some(JitBatchTiming::Multiple(_))) {
+            self.note_jit_batch_bus_access(address, size, access);
+        }
+    }
+
+    #[inline(never)]
+    fn note_jit_batch_bus_access(&mut self, address: u32, size: usize, access: JitAccess) {
+        let fetch = access == JitAccess::Fetch;
+        if !match access {
+            JitAccess::Write => self.jit_plain_memory(self.mask(address), size) == Some(true),
+            JitAccess::Read | JitAccess::Fetch => self.jit_plain_access(address, size),
+        } {
             self.flush_jit_batch_prefix();
             if let Some(JitBatchTiming::Multiple(timing)) = self.jit_batch.as_mut() {
                 // The access itself can raise interrupts or move the beam.

@@ -278,18 +278,7 @@ impl Bus {
             }
         }
         if self.buster_pending() && !self.buster.cpu_driving {
-            let available = owner == ChipBusOwner::Idle
-                || (owner == ChipBusOwner::Blitter && self.blitter_yields_to_waiting_cpu());
-            if self.service_buster(
-                available
-                    && forced_owner.is_none()
-                    && self.emulated_cck >= self.cpu_chip_port_free_at,
-            ) {
-                // An external master drives the 68000 side of Agnus's CPU port.
-                self.cpu_chip_port_free_at = self.emulated_cck + u64::from(CHIP_BUS_SLOT_CCK);
-                owner = ChipBusOwner::Cpu;
-                self.note_cpu_granted_chip_bus_cycle();
-            }
+            owner = self.arbitrate_buster_quantum(owner, forced_owner.is_none());
         }
         if diag_blt_slots() && self.blitter.busy {
             eprintln!(
@@ -551,6 +540,25 @@ impl Bus {
         if self.wave_on {
             self.wave_tap_quantum(owner);
         }
+    }
+
+    /// Offer this colour clock to a Buster-granted expansion master. Only
+    /// reached while a request or grant is outstanding; kept out of line so
+    /// the per-clock quantum body stays small on boards with no DMA master.
+    #[cold]
+    #[inline(never)]
+    fn arbitrate_buster_quantum(&mut self, owner: ChipBusOwner, unforced: bool) -> ChipBusOwner {
+        let available = owner == ChipBusOwner::Idle
+            || (owner == ChipBusOwner::Blitter && self.blitter_yields_to_waiting_cpu());
+        if self.service_buster(
+            available && unforced && self.emulated_cck >= self.cpu_chip_port_free_at,
+        ) {
+            // An external master drives the 68000 side of Agnus's CPU port.
+            self.cpu_chip_port_free_at = self.emulated_cck + u64::from(CHIP_BUS_SLOT_CCK);
+            self.note_cpu_granted_chip_bus_cycle();
+            return ChipBusOwner::Cpu;
+        }
+        owner
     }
 
     /// Step the Copper through one eligible color clock and apply any register

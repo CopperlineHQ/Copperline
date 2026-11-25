@@ -115,6 +115,17 @@ pub struct Buster {
     served_z3: u8,
     cycles: u8,
     pub(crate) ready_at: u64,
+    /// False only while no request line or grant can be outstanding, so the
+    /// per-clock arbitration test is one flag on boards with no DMA master.
+    /// Every path that raises a request or grant sets it; it clears once
+    /// [`Self::pending`] has seen nothing outstanding. A restored state
+    /// starts conservatively armed and clears on the first quiet check.
+    #[serde(skip, default = "request_may_be_pending")]
+    may_be_pending: bool,
+}
+
+fn request_may_be_pending() -> bool {
+    true
 }
 
 pub(crate) const LOCAL_MASTER: usize = 5;
@@ -126,6 +137,7 @@ impl Buster {
     /// registration/deregistration pulse. A revision 9 registration sampled
     /// at the start of a slave cycle can wedge the expansion arbiter.
     pub(crate) fn sample_registration(&mut self, requests: u8) {
+        self.may_be_pending = true;
         let rising = requests & !self.z3;
         if self.revision == Revision::Rev9 && self.slave_start && rising != 0 {
             self.rev9_lock = true;
@@ -148,7 +160,26 @@ impl Buster {
         self.revision.z3_master() && !self.rev9_lock
     }
 
+    #[inline(always)]
     pub(crate) fn pending(&self) -> bool {
+        self.may_be_pending && self.request_or_grant()
+    }
+
+    /// Mark the request lines just sampled from the masters.
+    pub(crate) fn note_requests_sampled(&mut self) {
+        self.may_be_pending = true;
+    }
+
+    /// Clear the arming flag once nothing is outstanding. Exact: the flag
+    /// only ever hides a `pending()` that would have answered false.
+    #[inline(always)]
+    pub(crate) fn settle_idle(&mut self) {
+        if self.may_be_pending && !self.request_or_grant() {
+            self.may_be_pending = false;
+        }
+    }
+
+    fn request_or_grant(&self) -> bool {
         self.local_request
             || self.z2 != 0
             || (!self.rev9_lock && self.registered != 0)
@@ -156,6 +187,7 @@ impl Buster {
     }
 
     pub(crate) fn grant(&mut self, now: u64) -> Option<usize> {
+        self.may_be_pending = true;
         if self.claim_by.is_some_and(|deadline| now >= deadline) {
             if let Some(slot) = self.owner.take().filter(|&s| s < self.devices.len()) {
                 self.timed_out |= 1 << slot;
