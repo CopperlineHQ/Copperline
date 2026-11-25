@@ -15,14 +15,11 @@ pub enum LauncherTab {
     Storage,
     /// FluxBridge settings for one bay, reached from its Configure button.
     FluxBridge,
+    /// The boot order: every hard-disk drive and its priority. A fully
+    /// fitted machine reaches twenty drives across four board families,
+    /// more than the page shows at once, and the list scrolls under its
+    /// column titles ([`MachineSetup::boot_scroll`]).
     BootPriority,
-    /// The rest of the boot order when one page cannot hold it: page `N`
-    /// (`N` >= 2) of the list, reached by the "Next Page >" button and
-    /// returning to the first page via its own Back. A fully fitted machine
-    /// reaches twenty drives across four board families, more than one page
-    /// holds, so however many pages the row count needs are offered --
-    /// [`MachineSetup::boot_priority_page_count`] says how many there are.
-    BootPriorityMore(u8),
     HostFs,
     /// Direct WHDLoad boot (src/whdload.rs): the game to launch and what
     /// staging draws on, reached from the Storage tab.
@@ -147,7 +144,7 @@ impl LauncherTab {
             LauncherTab::Floppy => "Floppy",
             LauncherTab::FluxBridge => "FluxBridge",
             LauncherTab::Storage => "Storage",
-            LauncherTab::BootPriority | LauncherTab::BootPriorityMore(_) => "Boot Priority",
+            LauncherTab::BootPriority => "Boot Priority",
             LauncherTab::HostFs => "Host Folder",
             LauncherTab::Whdload => "WHDLoad",
             // The strip's own name for it. Inside the WHDLoad pages the
@@ -194,7 +191,6 @@ impl LauncherTab {
             | LauncherTab::HostFs
             | LauncherTab::HostDisk
             | LauncherTab::BootPriority
-            | LauncherTab::BootPriorityMore(_)
             | LauncherTab::Lide
             | LauncherTab::Copperhf
             | LauncherTab::Sf2000Sd
@@ -239,7 +235,6 @@ impl LauncherTab {
             // Every later page's Back goes straight to the first rather than
             // stepping back one page at a time -- the same "one fixed
             // parent" shape every other sub-page's Back button has.
-            LauncherTab::BootPriorityMore(_) => Some(LauncherTab::BootPriority),
             LauncherTab::FluxBridge => Some(LauncherTab::Floppy),
             _ => None,
         }
@@ -761,11 +756,11 @@ pub(super) const fn section_header(label: &'static str) -> Row {
     }
 }
 
-/// How many drives one Boot Priority page holds. Nine is a machine without a
-/// Lide board -- two IDE bays and a full seven-unit SCSI chain -- and it is
-/// also as many rows as the panel has room for under the column titles with
-/// the "Info:" note still below them. A Lide board's drives take the list
-/// past it, and onto a second page.
+/// How many drives the Boot Priority page shows at once. Nine is a machine
+/// without a Lide board -- two IDE bays and a full seven-unit SCSI chain --
+/// and it is also as many rows as the panel has room for under the column
+/// titles with the "Info:" note still below them. A Lide board's drives take
+/// the list past it, and the list scrolls.
 pub const BOOTPRI_PAGE_ROWS: usize = 9;
 
 /// The greyed column-title row on the Boot Priority page (see
@@ -1024,8 +1019,8 @@ pub(super) const HOSTFS_ROWS: [Row; 12] = [
 ];
 // One boot-priority row per hard-disk drive. The IDE bays stand their
 // ground greyed when empty; a SCSI unit or Lide slot is listed only once it
-// carries a disk (`row_hidden`). More rows than one page holds run onto a
-// second page -- see `MachineSetup::boot_page_of`.
+// carries a disk (`row_hidden`). More rows than the page shows at once
+// scroll -- see `MachineSetup::boot_scroll`.
 pub(super) const BOOTPRI_ROWS: [Row; 21] = [
     row(F::IdeMasterBoot, "IDE master", Bootpri),
     row(F::IdeSlaveBoot, "IDE slave", Bootpri),
@@ -1456,11 +1451,11 @@ pub fn rows(
         // in the same place as each sub-page's Back button, so they are not part
         // of the row grid.
         LauncherTab::Storage => Cow::Borrowed(&STORAGE_ROWS),
-        // Every boot page carries the same table and the same column
-        // titles; which drives each one draws is decided per drive by
-        // `MachineSetup::boot_page_of`, since only the machine knows which
-        // slots are filled.
-        LauncherTab::BootPriority | LauncherTab::BootPriorityMore(_) => {
+        // The whole table and its column titles; which drives are drawn is
+        // decided per drive by `MachineSetup::row_on_page`, since only the
+        // machine knows which slots are filled and how far the list is
+        // scrolled.
+        LauncherTab::BootPriority => {
             // The greyed column titles, then one row per hard-disk drive.
             let mut rows = vec![bootpri_header()];
             rows.extend_from_slice(&BOOTPRI_ROWS);

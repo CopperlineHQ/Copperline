@@ -69,6 +69,18 @@ for the earlier release notes.
   long NTSC line. An NTSC frame is traced 228 colour clocks wide so the
   `$E3` slot of every long line is on the raster.
 
+### Changed
+
+- The machine configuration screen, the menu and the status bar are drawn
+  with egui over the presented frame, at the window's own resolution,
+  rather than into the presentation texture and scaled with the picture.
+  They look, click and navigate as before. A value box being typed in is
+  now a host text field: text can be selected, copied, cut and pasted, and
+  IME input works.
+- The Boot Priority page scrolls a list of more than nine drives -- with
+  the arrows at its right, the mouse wheel, or by stepping past the last
+  drive in view -- instead of paging through it with **Next Page >**.
+
 ### Fixed
 
 - A save state preserves the 68040/68060 MMU translation cache. Resuming

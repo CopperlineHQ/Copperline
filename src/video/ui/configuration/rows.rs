@@ -324,14 +324,13 @@ pub(in crate::video::ui) fn greyed_presentation(
 }
 
 pub(in crate::video::ui) fn draw_launcher_row(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     r: &launcher::Row,
     i: usize,
     y_offset: usize,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     let setup = &state.setup;
     let row_y = launcher_row_y(rect, i) + y_offset;
@@ -347,15 +346,7 @@ pub(in crate::video::ui) fn draw_launcher_row(
         } else {
             r.label
         };
-        draw_panel_text(
-            frame,
-            launcher_pane_x(rect),
-            row_y + 8,
-            text,
-            PANEL_TEXT_DIM,
-            1,
-            scale,
-        );
+        canvas.text(launcher_pane_x(rect), row_y + 8, text, PANEL_TEXT_DIM, 1);
         return;
     }
     // The ROM tab's identification lines: one greyed fact per row --
@@ -372,15 +363,13 @@ pub(in crate::video::ui) fn draw_launcher_row(
         // The prefix in grey, the fact itself in full text colour.
         let x = launcher_pane_x(rect) + 4 * font::GLYPH_W;
         let prefix = format!("{}: ", r.label);
-        draw_panel_text(frame, x, row_y + 4, &prefix, PANEL_TEXT_DIM, 1, scale);
-        draw_panel_text(
-            frame,
+        canvas.text(x, row_y + 4, &prefix, PANEL_TEXT_DIM, 1);
+        canvas.text(
             x + prefix.chars().count() * font::GLYPH_W,
             row_y + 4,
             &value,
             PANEL_TEXT,
             1,
-            scale,
         );
         return;
     }
@@ -391,7 +380,7 @@ pub(in crate::video::ui) fn draw_launcher_row(
             (launcher_control_x(rect), "Priority"),
             (launcher_bootable_rect(rect, row_y).x, "Status"),
         ] {
-            draw_panel_text(frame, x, row_y + 8, title, PANEL_TEXT_DIM, 1, scale);
+            canvas.text(x, row_y + 8, title, PANEL_TEXT_DIM, 1);
         }
         return;
     }
@@ -436,15 +425,7 @@ pub(in crate::video::ui) fn draw_launcher_row(
     } else {
         r.label
     };
-    draw_panel_text(
-        frame,
-        launcher_pane_x(rect),
-        row_y + 8,
-        label,
-        label_color,
-        1,
-        scale,
-    );
+    canvas.text(launcher_pane_x(rect), row_y + 8, label, label_color, 1);
     let greyed_as = reason.map(|_| greyed_presentation(r, setup));
     let greyed_shows_reason = greyed_as == Some(GreyedAs::DimmedReason);
     let disabled = reason.is_some();
@@ -458,14 +439,12 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 // column's own left edge, so a reason lines up with the
                 // values above and below it rather than standing in from
                 // them by the width of a stepper arrow.
-                draw_panel_text(
-                    frame,
+                canvas.text(
                     launcher_control_x(rect),
                     row_y + 8,
                     reason,
                     PANEL_TEXT_DIM,
                     1,
-                    scale,
                 );
             }
             return;
@@ -497,7 +476,7 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 #[cfg(not(feature = "midi"))]
                 let host_hint = crate::config::SERIAL_DEFAULT_HOST;
                 draw_serial_half_box(
-                    frame,
+                    canvas,
                     host_box,
                     state,
                     UiControl::LauncherSerialHostEdit(r.field),
@@ -505,19 +484,16 @@ pub(in crate::video::ui) fn draw_launcher_row(
                         Some(launcher::EditTarget::SerialHost(f)) if f == r.field),
                     host,
                     host_hint,
-                    scale,
                 );
-                draw_panel_text(
-                    frame,
+                canvas.text(
                     host_box.x + host_box.w + 4,
                     row_y + 8,
                     ":",
                     PANEL_TEXT_DIM,
                     1,
-                    scale,
                 );
                 draw_serial_half_box(
-                    frame,
+                    canvas,
                     port_box,
                     state,
                     UiControl::LauncherSerialPortEdit(r.field),
@@ -525,17 +501,15 @@ pub(in crate::video::ui) fn draw_launcher_row(
                         Some(launcher::EditTarget::SerialPort(f)) if f == r.field),
                     port.map(|p| p.to_string()),
                     &crate::config::SERIAL_DEFAULT_PORT.to_string(),
-                    scale,
                 );
             } else {
                 draw_launcher_value_box(
-                    frame,
+                    canvas,
                     launcher_text_rect(rect, row_y, r.field),
                     state,
                     r.field,
                     disabled,
                     false,
-                    scale,
                 );
             }
         }
@@ -543,17 +517,15 @@ pub(in crate::video::ui) fn draw_launcher_row(
             // A number to type, with the unit written beside it. The unit
             // is text rather than a button: clicking it swaps MB and GB.
             draw_launcher_value_box(
-                frame,
+                canvas,
                 launcher_size_box_rect(rect, row_y),
                 state,
                 r.field,
                 disabled,
                 false,
-                scale,
             );
             let unit = launcher_size_unit_rect(rect, row_y);
-            draw_panel_text(
-                frame,
+            canvas.text(
                 unit.x,
                 unit.y + 6,
                 state.workshop.size_unit.label(),
@@ -563,18 +535,16 @@ pub(in crate::video::ui) fn draw_launcher_row(
                     PANEL_TEXT
                 },
                 1,
-                scale,
             );
         }
         RowKind::Number => {
             draw_launcher_value_box(
-                frame,
+                canvas,
                 launcher_number_rect(rect, row_y),
                 state,
                 r.field,
                 disabled,
                 false,
-                scale,
             );
         }
         RowKind::FsFamily => {
@@ -584,7 +554,7 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 .zip(launcher::FsFamily::ALL)
             {
                 draw_launcher_tick_choice(
-                    frame,
+                    canvas,
                     at,
                     family.label(),
                     state.workshop_fs_family_set(r.field, family),
@@ -596,7 +566,6 @@ pub(in crate::video::ui) fn draw_launcher_row(
                             family,
                         },
                     ),
-                    scale,
                 );
             }
         }
@@ -610,7 +579,7 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 .zip(FS_VARIANTS)
             {
                 draw_launcher_tick_choice(
-                    frame,
+                    canvas,
                     at,
                     variant.label(),
                     state.workshop_fs_variant_set(r.field, variant),
@@ -622,7 +591,6 @@ pub(in crate::video::ui) fn draw_launcher_row(
                             variant,
                         },
                     ),
-                    scale,
                 );
             }
         }
@@ -638,23 +606,21 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 forward: true,
             };
             let stepper = nav_lit(back);
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 prev,
                 "<",
                 !disabled,
                 stepper_light(hover, back, stepper),
-                scale,
             );
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 next,
                 ">",
                 !disabled,
                 stepper_light(hover, forward, stepper),
-                scale,
             );
-            draw_launcher_value_box(frame, value, state, r.field, disabled, true, scale);
+            draw_launcher_value_box(canvas, value, state, r.field, disabled, true);
         }
         RowKind::GeometryMode => {
             // Auto and Custom sit together as one choice, the chosen one
@@ -663,31 +629,28 @@ pub(in crate::video::ui) fn draw_launcher_row(
             let (auto, custom, configure) = launcher_geometry_rects(rect, row_y);
             let by_hand = state.workshop.geometry_custom;
             draw_launcher_chip(
-                frame,
+                canvas,
                 auto,
                 "Auto",
                 !by_hand,
                 lit(hover, UiControl::LauncherGeometryAuto),
                 false,
-                scale,
             );
             draw_launcher_chip(
-                frame,
+                canvas,
                 custom,
                 "Custom",
                 by_hand,
                 lit(hover, UiControl::LauncherGeometryCustom),
                 false,
-                scale,
             );
             if by_hand {
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     configure,
                     "Configure",
                     true,
                     lit(hover, UiControl::LauncherTab(LauncherTab::CreateGeometry)),
-                    scale,
                 );
             }
         }
@@ -697,13 +660,12 @@ pub(in crate::video::ui) fn draw_launcher_row(
             } else {
                 state.workshop_action_label(r.field)
             };
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 launcher_action_rect(rect, row_y),
                 &label,
                 !disabled,
                 lit(hover, launcher_row_action(r.field)),
-                scale,
             );
             if let Some(second) = launcher_second_action(r.field) {
                 let label = if second.is_netplay() {
@@ -711,13 +673,12 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 } else {
                     state.workshop_action_label(second)
                 };
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     launcher_action2_rect(rect, row_y),
                     &label,
                     state.row_applies(second),
                     lit(hover, launcher_row_action(second)),
-                    scale,
                 );
             }
         }
@@ -735,21 +696,19 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 forward: true,
             };
             let stepper = nav_lit(back);
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 prev,
                 "<",
                 !disabled,
                 stepper_light(hover, back, stepper),
-                scale,
             );
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 next,
                 ">",
                 !disabled,
                 stepper_light(hover, forward, stepper),
-                scale,
             );
             // Clip a long value (e.g. a wordy MIDI device name) to the box so
             // it cannot spill over the ">" stepper.
@@ -772,7 +731,7 @@ pub(in crate::video::ui) fn draw_launcher_row(
                     PANEL_TEXT_HILIGHT
                 }
             };
-            draw_panel_text(frame, tx, value.y + 6, &text, color, 1, scale);
+            canvas.text(tx, value.y + 6, &text, color, 1);
         }
         RowKind::Bootpri => {
             // Priority column: a `< value >` stepper whose value is also a text
@@ -800,37 +759,28 @@ pub(in crate::video::ui) fn draw_launcher_row(
                     forward: true,
                 };
                 let stepper = nav_lit(back);
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     prev,
                     "<",
                     !disabled,
                     stepper_light(hover, back, stepper),
-                    scale,
                 );
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     next,
                     ">",
                     !disabled,
                     stepper_light(hover, forward, stepper),
-                    scale,
                 );
-                draw_rect_bevel(
-                    frame,
-                    scale_rect(value, scale),
-                    BUTTON_EDGE_DARK,
-                    BUTTON_EDGE_LIGHT,
-                    scale,
-                );
+                canvas.bevel(value, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT);
             }
             let editing = state.editing() == Some(EditTarget::DriveBootpri(r.field));
             light_edit_box(
-                frame,
+                canvas,
                 value,
                 UiControl::LauncherDriveBootpriEdit(r.field),
                 editing,
-                scale,
             );
             let text = if let Some(reason) = reason.filter(|_| greyed_shows_reason) {
                 reason.to_string()
@@ -858,25 +808,21 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 PANEL_TEXT
             };
             if editing {
-                draw_edit_line(
-                    frame,
+                typed_text(
+                    canvas,
+                    state,
+                    value,
                     value.x + 4,
                     value.y + 6,
-                    state.edit_buffer(),
-                    state.edit_caret().at(),
-                    PANEL_TEXT_HILIGHT,
-                    PANEL_BG,
                     value.w.saturating_sub(8),
-                    scale,
                 );
             } else {
-                draw_panel_text(frame, tx, value.y + 6, &text, color, 1, scale);
+                canvas.text(tx, value.y + 6, &text, color, 1);
             }
             // Status column: the "Bootable" label then a tick box, ticked when
             // the drive is bootable.
             let cell = launcher_bootable_rect(rect, row_y);
-            draw_panel_text(
-                frame,
+            canvas.text(
                 cell.x,
                 cell.y + 6,
                 BOOTABLE_LABEL,
@@ -886,34 +832,27 @@ pub(in crate::video::ui) fn draw_launcher_row(
                     PANEL_TEXT
                 },
                 1,
-                scale,
             );
             let box_rect = launcher_bootable_box(cell);
             let hovered = lit(hover, UiControl::LauncherDriveBootToggle(r.field));
-            fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
+            canvas.fill(box_rect, ENTRY_BG);
             // Green on its edge, like every other tick box: this one is
             // drawn by hand rather than by draw_tick_box, and lighting
             // its whole face was the one box that did not match.
-            draw_outline(
-                frame,
+            outline(
+                canvas,
                 box_rect,
                 tick_outline(hovered).unwrap_or(BUTTON_EDGE_LIGHT),
-                scale,
             );
             if !disabled {
-                fill_rect(
-                    frame,
-                    scale_rect(
-                        Rect {
-                            x: box_rect.x + 3,
-                            y: box_rect.y + 3,
-                            w: 6,
-                            h: 6,
-                        },
-                        scale,
-                    ),
+                canvas.fill(
+                    Rect {
+                        x: box_rect.x + 3,
+                        y: box_rect.y + 3,
+                        w: 6,
+                        h: 6,
+                    },
                     PANEL_TEXT_HILIGHT,
-                    scale,
                 );
             }
         }
@@ -925,35 +864,32 @@ pub(in crate::video::ui) fn draw_launcher_row(
             if bridged {
                 let bay = bay.expect("bridged implies a bay");
                 let text = setup.drive_bridge_label(bay);
-                draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
+                canvas.text(value_x, browse.y + 6, &text, PANEL_TEXT, 1);
                 let button = launcher_bridge_configure_rect(rect, row_y);
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     button,
                     "Configure",
                     true,
                     lit(hover, UiControl::LauncherBridgeConfigure(bay)),
-                    scale,
                 );
             } else {
                 let avail = browse.x.saturating_sub(value_x + 8);
                 let text = truncate_to_width(&setup.value_label(r.field), avail);
-                draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
-                draw_text_button(
-                    frame,
+                canvas.text(value_x, browse.y + 6, &text, PANEL_TEXT, 1);
+                text_button(
+                    canvas,
                     browse,
                     "Browse",
                     true,
                     lit(hover, UiControl::LauncherBrowse(r.field)),
-                    scale,
                 );
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     clear,
                     "Clear",
                     launcher_clear_enabled(setup, r.field),
                     lit(hover, UiControl::LauncherClear(r.field)),
-                    scale,
                 );
             }
         }
@@ -963,32 +899,26 @@ pub(in crate::video::ui) fn draw_launcher_row(
             #[cfg_attr(not(feature = "fluxbridge"), allow(unused_variables))]
             let (protect_cell, bridge_cell) = launcher_floppy_flag_rects(rect, row_y);
             let mut tick = |cell: Rect, label: &str, on: bool, hot: f32| {
-                draw_panel_text(frame, cell.x, cell.y + 6, label, PANEL_TEXT, 1, scale);
+                canvas.text(cell.x, cell.y + 6, label, PANEL_TEXT, 1);
                 let box_rect = launcher_flag_box(cell, label);
                 // The box keeps its own face: a tick box says what it
                 // says with its outline, and a filled middle reads as
                 // a tick that is not there.
-                fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
-                draw_outline(
-                    frame,
+                canvas.fill(box_rect, ENTRY_BG);
+                outline(
+                    canvas,
                     box_rect,
                     tick_outline(hot).unwrap_or(BUTTON_EDGE_LIGHT),
-                    scale,
                 );
                 if on {
-                    fill_rect(
-                        frame,
-                        scale_rect(
-                            Rect {
-                                x: box_rect.x + 3,
-                                y: box_rect.y + 3,
-                                w: 6,
-                                h: 6,
-                            },
-                            scale,
-                        ),
+                    canvas.fill(
+                        Rect {
+                            x: box_rect.x + 3,
+                            y: box_rect.y + 3,
+                            w: 6,
+                            h: 6,
+                        },
                         PANEL_TEXT_HILIGHT,
-                        scale,
                     );
                 }
             };
@@ -1024,18 +954,16 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 h: 10,
             };
             draw_tick_box(
-                frame,
+                canvas,
                 box_rect.x,
-                box_rect.y,
-                // A setting that does not apply is not in force: showing a
+                box_rect.y, // A setting that does not apply is not in force: showing a
                 // tick on a row that cannot boot would promise a boot.
                 on && !disabled,
                 if disabled { PANEL_TEXT_DIM } else { TICK_GREEN },
-                scale,
             );
             if !disabled {
                 if let Some(edge) = tick_outline(hot) {
-                    draw_outline(frame, box_rect, edge, scale);
+                    outline(canvas, box_rect, edge);
                 }
             }
         }
@@ -1046,13 +974,12 @@ pub(in crate::video::ui) fn draw_launcher_row(
             } else {
                 "Off"
             };
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 button,
                 label,
                 true,
                 lit(hover, UiControl::LauncherToggle(r.field)),
-                scale,
             );
         }
         RowKind::Path => {
@@ -1102,16 +1029,15 @@ pub(in crate::video::ui) fn draw_launcher_row(
             } else {
                 (PANEL_TEXT, value_x)
             };
-            draw_panel_text(frame, text_x, browse.y + 6, &text, value_color, 1, scale);
+            canvas.text(text_x, browse.y + 6, &text, value_color, 1);
             let (has_browse, has_clear) = launcher_path_buttons(setup, r.field);
             if has_browse {
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     browse,
                     "Browse",
                     true,
                     lit(hover, UiControl::LauncherBrowse(r.field)),
-                    scale,
                 );
             }
             if has_clear {
@@ -1120,13 +1046,12 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 // other rows clear, including the SoundFont row whose clear
                 // also lands on a bundled default.
                 let enabled = launcher_clear_enabled(setup, r.field);
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     clear,
                     launcher_clear_label(setup, r.field),
                     enabled,
                     lit(hover, UiControl::LauncherClear(r.field)),
-                    scale,
                 );
             }
         }
@@ -1139,23 +1064,20 @@ pub(in crate::video::ui) fn draw_launcher_row(
             let (button, _) = launcher_path_rects(rect, row_y);
             let signed_in = state.openretro.is_some();
             if signed_in {
-                draw_panel_text(
-                    frame,
+                canvas.text(
                     launcher_control_x(rect),
                     button.y + 6,
                     "logged in",
                     PANEL_TEXT,
                     1,
-                    scale,
                 );
             }
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 button,
                 if signed_in { "Log out" } else { "Log in" },
                 true,
                 lit(hover, UiControl::LauncherOpenRetroLogin),
-                scale,
             );
         }
         #[cfg(not(feature = "game-library"))]
@@ -1175,20 +1097,19 @@ pub(in crate::video::ui) fn draw_launcher_row(
                     &setup.host_disk_label(&disk.device),
                     browse.x.saturating_sub(value_x + 8),
                 );
-                draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
+                canvas.text(value_x, browse.y + 6, &text, PANEL_TEXT, 1);
                 let unmount = Rect {
                     x: browse.x,
                     y: browse.y,
                     w: clear.x + clear.w - browse.x,
                     h: browse.h,
                 };
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     unmount,
                     "Unmount",
                     true,
                     lit(hover, UiControl::LauncherHostDiskUnmount(r.field)),
-                    scale,
                 );
                 return;
             }
@@ -1218,22 +1139,15 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 (true, Some(p)) => clip_path_keep_name(&p.to_string_lossy(), avail),
                 _ => truncate_to_width(&setup.value_label(r.field), avail),
             };
-            draw_panel_text(frame, value_x, browse.y + 6, &text, PANEL_TEXT, 1, scale);
+            canvas.text(value_x, browse.y + 6, &text, PANEL_TEXT, 1);
             if has_image {
-                draw_rect_bevel(
-                    frame,
-                    scale_rect(name_box, scale),
-                    BUTTON_EDGE_DARK,
-                    BUTTON_EDGE_LIGHT,
-                    scale,
-                );
+                canvas.bevel(name_box, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT);
                 let editing = state.editing() == Some(EditTarget::DriveName(r.field));
                 light_edit_box(
-                    frame,
+                    canvas,
                     name_box,
                     UiControl::LauncherDriveNameEdit(r.field),
                     editing,
-                    scale,
                 );
                 let (label, color) = if let Some(name) = setup.drive_name(r.field) {
                     (name.to_string(), PANEL_TEXT)
@@ -1241,28 +1155,17 @@ pub(in crate::video::ui) fn draw_launcher_row(
                     ("(volume)".to_string(), PANEL_TEXT_DIM)
                 };
                 if editing {
-                    draw_edit_line(
-                        frame,
+                    typed_text(
+                        canvas,
+                        state,
+                        name_box,
                         name_box.x + 4,
                         name_box.y + 6,
-                        state.edit_buffer(),
-                        state.edit_caret().at(),
-                        PANEL_TEXT_HILIGHT,
-                        PANEL_BG,
                         name_box.w.saturating_sub(8),
-                        scale,
                     );
                 } else {
                     let shown = truncate_to_width(&label, name_box.w.saturating_sub(8));
-                    draw_panel_text(
-                        frame,
-                        name_box.x + 4,
-                        name_box.y + 6,
-                        &shown,
-                        color,
-                        1,
-                        scale,
-                    );
+                    canvas.text(name_box.x + 4, name_box.y + 6, &shown, color, 1);
                 }
             }
             if has_fs_toggle {
@@ -1271,43 +1174,39 @@ pub(in crate::video::ui) fn draw_launcher_row(
                 } else {
                     "OFS"
                 };
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     fs_box,
                     label,
                     true,
                     lit(hover, UiControl::LauncherDriveFilesystemToggle(r.field)),
-                    scale,
                 );
             }
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 browse,
                 "Browse",
                 true,
                 lit(hover, UiControl::LauncherBrowse(r.field)),
-                scale,
             );
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 clear,
                 "Clear",
                 launcher_clear_enabled(setup, r.field),
                 lit(hover, UiControl::LauncherClear(r.field)),
-                scale,
             );
             // A support archive with nothing chosen offers to fetch its
             // own, from the same place and against the same digest the
             // packaging script uses.
             #[cfg(feature = "game-library")]
             if row_archive(r.field).is_some() && setup.path(r.field).is_none() {
-                draw_text_button(
-                    frame,
+                text_button(
+                    canvas,
                     launcher_download_rect(rect, row_y),
                     "Download",
                     true,
                     lit(hover, UiControl::LauncherWhdloadDownload(r.field)),
-                    scale,
                 );
             }
         }

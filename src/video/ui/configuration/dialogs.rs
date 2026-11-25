@@ -42,60 +42,48 @@ pub(in crate::video::ui) fn launcher_confirm_button_rects(rect: Rect) -> (Rect, 
 }
 
 pub(in crate::video::ui) fn draw_launcher_confirm(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     if !state.confirm_reset {
         return;
     }
-    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    canvas.blend(rect, SCRIM, SCRIM_ALPHA);
     let dialog = launcher_confirm_rect(rect);
-    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
-    draw_rect_bevel(
-        frame,
-        scale_rect(dialog, scale),
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        scale,
-    );
-    draw_title_bar(
-        frame,
+    canvas.fill(dialog, PANEL_BG);
+    canvas.bevel(dialog, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
+    title_bar(
+        canvas,
         dialog,
         "Reset default",
         lit(hover, UiControl::LauncherDialogClose),
-        scale,
     );
     // The title bar has already said which default, and the buttons say
     // what the answers are. Anything more here is a paragraph nobody
     // reads standing between somebody and a decision they have made.
-    draw_panel_text(
-        frame,
+    canvas.text(
         dialog.x + SAVE_DIALOG_MARGIN,
         dialog.y + TITLE_H + SAVE_DIALOG_MARGIN,
         "Are you sure?",
         PANEL_TEXT,
         1,
-        scale,
     );
     let (yes, cancel) = launcher_confirm_button_rects(rect);
-    draw_text_button(
-        frame,
+    text_button(
+        canvas,
         yes,
         "Yes",
         true,
         lit(hover, UiControl::LauncherConfirmReset),
-        scale,
     );
-    draw_text_button(
-        frame,
+    text_button(
+        canvas,
         cancel,
         "Cancel",
         true,
         lit(hover, UiControl::LauncherCancelReset),
-        scale,
     );
 }
 
@@ -138,44 +126,35 @@ pub(in crate::video::ui) fn launcher_save_dialog_rects(
 }
 
 pub(in crate::video::ui) fn draw_launcher_save_dialog(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     if !state.save_dialog {
         return;
     }
-    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    canvas.blend(rect, SCRIM, SCRIM_ALPHA);
     let dialog = launcher_save_dialog_rect(rect);
-    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
-    draw_rect_bevel(
-        frame,
-        scale_rect(dialog, scale),
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        scale,
-    );
+    canvas.fill(dialog, PANEL_BG);
+    canvas.bevel(dialog, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     // The close gadget in its title bar is how this is dismissed. There is
     // no Cancel among the four because none of them answers a question --
     // they are four things you might do, and not doing any of them is
     // closing the window rather than choosing a fifth.
-    draw_title_bar(
-        frame,
+    title_bar(
+        canvas,
         dialog,
         "Save configuration...",
         lit(hover, UiControl::LauncherDialogClose),
-        scale,
     );
     for (control, item) in launcher_save_dialog_rects(rect) {
-        draw_text_button(
-            frame,
+        text_button(
+            canvas,
             item,
             launcher_action_label(control),
             true,
             lit(hover, control),
-            scale,
         );
     }
     // Above the row, where a dialog's own words go, and never blank: with
@@ -193,14 +172,12 @@ pub(in crate::video::ui) fn draw_launcher_save_dialog(
         .take(SAVE_DIALOG_HELP_LINES)
         .enumerate()
     {
-        draw_panel_text(
-            frame,
+        canvas.text(
             dialog.x + SAVE_DIALOG_MARGIN,
             dialog.y + TITLE_H + SAVE_DIALOG_MARGIN + i * SAVE_DIALOG_LINE_H,
             &line,
             PANEL_TEXT,
             1,
-            scale,
         );
     }
 }
@@ -221,104 +198,79 @@ pub(in crate::video::ui) fn launcher_save_dialog_hit(
 /// The metadata editor.
 #[cfg(feature = "game-library")]
 pub(in crate::video::ui) fn draw_meta_dialog(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     let Some(meta) = &state.meta else { return };
-    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    canvas.blend(rect, SCRIM, SCRIM_ALPHA);
     let dialog = meta_rect(rect);
-    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
-    draw_rect_bevel(
-        frame,
-        scale_rect(dialog, scale),
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        scale,
-    );
-    draw_title_bar(
-        frame,
+    canvas.fill(dialog, PANEL_BG);
+    canvas.bevel(dialog, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
+    title_bar(
+        canvas,
         dialog,
         "Update metadata",
         lit(hover, UiControl::MetaCancel),
-        scale,
     );
 
     // The art, drawn the way the Library page draws it, and clickable.
     let art = meta_art_rect(rect);
-    fill_rect(frame, scale_rect(art, scale), BUTTON_FACE, scale);
-    draw_rect_bevel(
-        frame,
-        scale_rect(art, scale),
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        scale,
-    );
+    canvas.fill(art, BUTTON_FACE);
+    canvas.bevel(art, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     let inner = Rect {
         x: art.x + LIBRARY_COVER_BEZEL,
         y: art.y + LIBRARY_COVER_BEZEL,
         w: art.w - 2 * LIBRARY_COVER_BEZEL,
         h: art.h - 2 * LIBRARY_COVER_BEZEL,
     };
-    fill_rect(frame, scale_rect(inner, scale), ENTRY_BG, scale);
+    canvas.fill(inner, ENTRY_BG);
     let picture = meta
         .art
         .as_deref()
         .and_then(|key| state.library.covers.get(key));
     match picture {
-        Some(picture) => draw_cover_art(frame, inner, picture, scale),
+        Some(picture) => draw_cover_art(canvas, inner, picture),
         None => {
             for (line, text) in ["Click to", "choose art"].into_iter().enumerate() {
                 let w = text.len() * font::GLYPH_W;
-                draw_panel_text(
-                    frame,
+                canvas.text(
                     inner.x + inner.w.saturating_sub(w) / 2,
                     inner.y + inner.h / 2 - 12 + line * 12,
                     text,
                     PANEL_TEXT_DIM,
                     1,
-                    scale,
                 );
             }
         }
     }
-    draw_rect_bevel(
-        frame,
-        scale_rect(inner, scale),
-        BUTTON_EDGE_DARK,
-        BUTTON_EDGE_LIGHT,
-        scale,
-    );
+    canvas.bevel(inner, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT);
     // The same green edge a tick box takes, breathing under the focus:
     // the art is answered by choosing a picture, so it is a thing to
     // press rather than a value to change.
     if let Some(edge) = tick_outline(lit(hover, UiControl::MetaArt)) {
-        draw_outline(frame, art, edge, scale);
+        outline(canvas, art, edge);
     }
 
     for field in launcher::MetaField::ALL {
         let box_rect = meta_field_rect(rect, field);
-        draw_panel_text(
-            frame,
+        canvas.text(
             art.x + art.w + 12,
             box_rect.y + 5,
             field.label(),
             PANEL_TEXT_DIM,
             1,
-            scale,
         );
-        fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
-        draw_outline(
-            frame,
+        canvas.fill(box_rect, ENTRY_BG);
+        outline(
+            canvas,
             box_rect,
             if meta.focus == field {
                 PANEL_TEXT_HILIGHT
             } else {
                 BUTTON_EDGE_DARK
             },
-            scale,
         );
         // The focused box carries the caret, and the window on the text
         // follows it: metadata is amended more often than typed fresh, so
@@ -326,7 +278,7 @@ pub(in crate::video::ui) fn draw_meta_dialog(
         let value = meta.value(field);
         if meta.focus == field {
             draw_edit_line(
-                frame,
+                canvas,
                 box_rect.x + 5,
                 box_rect.y + 5,
                 value,
@@ -334,17 +286,14 @@ pub(in crate::video::ui) fn draw_meta_dialog(
                 PANEL_TEXT,
                 ENTRY_BG,
                 box_rect.w.saturating_sub(10),
-                scale,
             );
         } else {
-            draw_panel_text(
-                frame,
+            canvas.text(
                 box_rect.x + 5,
                 box_rect.y + 5,
                 &truncate_to_width(value, box_rect.w.saturating_sub(10)),
                 PANEL_TEXT,
                 1,
-                scale,
             );
         }
     }
@@ -357,13 +306,12 @@ pub(in crate::video::ui) fn draw_meta_dialog(
     .into_iter()
     .enumerate()
     {
-        draw_text_button(
-            frame,
+        text_button(
+            canvas,
             meta_button_rects(rect)[at],
             label,
             true,
             lit(hover, control),
-            scale,
         );
     }
 }
@@ -375,34 +323,26 @@ pub(in crate::video::ui) fn draw_meta_dialog(
 /// text, so what is on screen cannot be a second copy of it.
 #[cfg(feature = "game-library")]
 pub(in crate::video::ui) fn draw_login_dialog(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     use launcher::LoginField;
     let Some(login) = &state.login else { return };
     // Everything behind it is dimmed rather than merely covered: a dialog
     // that only overlaps the page still looks like part of it.
-    fill_rect_blend(frame, scale_rect(rect, scale), SCRIM, SCRIM_ALPHA, scale);
+    canvas.blend(rect, SCRIM, SCRIM_ALPHA);
     let dialog = login_rect(rect);
-    fill_rect(frame, scale_rect(dialog, scale), PANEL_BG, scale);
-    draw_rect_bevel(
-        frame,
-        scale_rect(dialog, scale),
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        scale,
-    );
+    canvas.fill(dialog, PANEL_BG);
+    canvas.bevel(dialog, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     // Its own title bar, the same as the panel's: a window over a window
     // should look like one, close gadget included.
-    draw_title_bar(
-        frame,
+    title_bar(
+        canvas,
         dialog,
         "Log in to OpenRetro",
         lit(hover, UiControl::LoginCancel),
-        scale,
     );
     for field in [LoginField::User, LoginField::Pass] {
         let box_rect = login_field_rect(rect, field);
@@ -410,32 +350,23 @@ pub(in crate::video::ui) fn draw_login_dialog(
             LoginField::User => ("Username", login.user.clone()),
             LoginField::Pass => ("Password", "*".repeat(login.pass.chars())),
         };
-        draw_panel_text(
-            frame,
-            dialog.x + 12,
-            box_rect.y + 5,
-            label,
-            PANEL_TEXT_DIM,
-            1,
-            scale,
-        );
-        fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
-        draw_outline(
-            frame,
+        canvas.text(dialog.x + 12, box_rect.y + 5, label, PANEL_TEXT_DIM, 1);
+        canvas.fill(box_rect, ENTRY_BG);
+        outline(
+            canvas,
             box_rect,
             if login.focus == field {
                 PANEL_TEXT_HILIGHT
             } else {
                 BUTTON_EDGE_DARK
             },
-            scale,
         );
         // The focused box carries the caret, and the window on the text
         // follows it. The mask is one asterisk a character, so the caret
         // steps through a password exactly as it does through a name.
         if login.focus == field {
             draw_edit_line(
-                frame,
+                canvas,
                 box_rect.x + 5,
                 box_rect.y + 5,
                 &shown,
@@ -443,36 +374,31 @@ pub(in crate::video::ui) fn draw_login_dialog(
                 PANEL_TEXT,
                 ENTRY_BG,
                 box_rect.w.saturating_sub(10),
-                scale,
             );
         } else {
-            draw_panel_text(
-                frame,
+            canvas.text(
                 box_rect.x + 5,
                 box_rect.y + 5,
                 &truncate_to_width(&shown, box_rect.w.saturating_sub(10)),
                 PANEL_TEXT,
                 1,
-                scale,
             );
         }
     }
     let (ok, cancel) = login_button_rects(rect);
-    draw_text_button(
-        frame,
+    text_button(
+        canvas,
         ok,
         "OK",
         !login.sending,
         lit(hover, UiControl::LoginOk),
-        scale,
     );
-    draw_text_button(
-        frame,
+    text_button(
+        canvas,
         cancel,
         "Cancel",
         true,
         lit(hover, UiControl::LoginCancel),
-        scale,
     );
 }
 

@@ -19,11 +19,15 @@ use crate::config::MachineModel;
 use crate::debugger::{BreakCond, CondOp, CondOperand};
 use crate::heatmap;
 
+mod canvas;
 mod configuration;
 mod states;
+pub(in crate::video) use canvas::{outline, Canvas, FrameCanvas};
 pub(crate) use configuration::HOST_DISK_VISIBLE_ROWS;
 use configuration::*;
-pub(in crate::video) use configuration::{clip_path_to_chars, control_live, SAVE_ACTIONS};
+pub(in crate::video) use configuration::{
+    clip_path_to_chars, control_live, egui_view, SAVE_ACTIONS,
+};
 #[cfg(feature = "game-library")]
 pub(in crate::video) use configuration::{
     library_favourite_rows, library_version_max, library_visible_rows,
@@ -1145,6 +1149,8 @@ pub enum UiControl {
     /// on the box it ticks rather than on the whole row.
     LauncherHostDiskEnable(usize),
     LauncherHostDiskScroll(isize),
+    /// Move the Boot Priority page's drives up or down a row.
+    LauncherBootScroll(isize),
     /// Look at the host's storage again.
     LauncherHostDiskRefresh,
     /// Attach the ticked disks to the machine.
@@ -1264,7 +1270,6 @@ fn panel_title(panel: &Panel) -> &'static str {
 
 /// The rect the launcher panel occupies, for the parts of the window that
 /// have to measure against it.
-#[cfg(feature = "game-library")]
 pub(in crate::video) fn launcher_panel_rect(ui: &UiState) -> Option<Rect> {
     match &ui.panel {
         Some(panel @ Panel::Launcher(_)) => Some(panel_rect(panel)),
@@ -1272,9 +1277,10 @@ pub(in crate::video) fn launcher_panel_rect(ui: &UiState) -> Option<Rect> {
     }
 }
 
-/// Route the wheel to the table under the pointer, including its header
-/// and arrow gutter. Other launcher pages and dialogs do not claim it.
-#[cfg(feature = "game-library")]
+/// Route the wheel to the list under the pointer: the game table or the
+/// favourites, header and arrow gutter included, or the boot order while
+/// it is longer than its page. Other launcher pages and dialogs do not
+/// claim it.
 pub(in crate::video) fn launcher_wheel_control(ui: &UiState, pos: (i32, i32)) -> Option<UiControl> {
     if ui.menu_open {
         return None;
@@ -1282,18 +1288,25 @@ pub(in crate::video) fn launcher_wheel_control(ui: &UiState, pos: (i32, i32)) ->
     let Some(Panel::Launcher(state)) = &ui.panel else {
         return None;
     };
-    if state.tab != LauncherTab::WhdloadLibrary || state.login.is_some() || state.meta.is_some() {
+    if state.save_dialog || state.confirm_reset {
         return None;
     }
     let rect = launcher_panel_rect(ui)?;
-    let whdload = state.setup.whdload_enabled();
-    if library_table_rect(rect, whdload).contains(pos) {
-        Some(UiControl::LauncherLibraryScroll(0))
-    } else if library_favourites_rect(rect, whdload).contains(pos) {
-        Some(UiControl::LauncherLibraryFavouriteScroll(0))
-    } else {
-        None
+    if state.tab == LauncherTab::BootPriority {
+        return (state.setup.boot_order_scrolls() && boot_order_rect(rect).contains(pos))
+            .then_some(UiControl::LauncherBootScroll(0));
     }
+    #[cfg(feature = "game-library")]
+    if state.tab == LauncherTab::WhdloadLibrary && state.login.is_none() && state.meta.is_none() {
+        let whdload = state.setup.whdload_enabled();
+        if library_table_rect(rect, whdload).contains(pos) {
+            return Some(UiControl::LauncherLibraryScroll(0));
+        }
+        if library_favourites_rect(rect, whdload).contains(pos) {
+            return Some(UiControl::LauncherLibraryFavouriteScroll(0));
+        }
+    }
+    None
 }
 
 fn panel_rect(panel: &Panel) -> Rect {
@@ -1307,6 +1320,12 @@ fn panel_rect(panel: &Panel) -> Rect {
 }
 
 pub(in crate::video) const TITLE_H: usize = 22;
+
+/// Where a panel sits on the canvas.
+#[cfg(test)]
+pub(in crate::video) fn panel_bounds(panel: &Panel) -> Rect {
+    panel_rect(panel)
+}
 
 fn close_button_rect(rect: Rect) -> Rect {
     Rect {
@@ -2456,20 +2475,31 @@ fn draw_text_button(
     hover: f32,
     texture_scale: usize,
 ) {
+    text_button(
+        &mut FrameCanvas::new(frame, texture_scale),
+        rect,
+        label,
+        enabled,
+        hover,
+    );
+}
+
+/// A bevelled push button with its label centred, greyed when it cannot be
+/// pressed, lit by `hover` as `light_face` says.
+pub(in crate::video) fn text_button(
+    canvas: &mut dyn Canvas,
+    rect: Rect,
+    label: &str,
+    enabled: bool,
+    hover: f32,
+) {
     let face = if enabled {
         light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover)
     } else {
         BUTTON_FACE
     };
-    let scaled = scale_rect(rect, texture_scale);
-    fill_rect(frame, scaled, face, texture_scale);
-    draw_rect_bevel(
-        frame,
-        scaled,
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        texture_scale,
-    );
+    canvas.fill(rect, face);
+    canvas.bevel(rect, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     let color = if enabled {
         BUTTON_TEXT
     } else {
@@ -2478,12 +2508,34 @@ fn draw_text_button(
     let text_w = label.chars().count() * font::GLYPH_W;
     let x = rect.x + rect.w.saturating_sub(text_w) / 2;
     let y = rect.y + rect.h.saturating_sub(font::GLYPH_H) / 2;
-    draw_panel_text(frame, x, y, label, color, 1, texture_scale);
+    canvas.text(x, y, label, color, 1);
 }
 
 fn draw_panel_chrome(frame: &mut [u8], panel: &Panel, hover: Option<UiControl>, scale: usize) {
+    draw_panel_scrim(frame, scale);
+    panel_chrome(&mut FrameCanvas::new(frame, scale), panel, hover);
+}
+
+/// A panel's window: its face, its raised edge, and its title bar with the
+/// close gadget. The scrim behind it is the texture's.
+pub(in crate::video) fn panel_chrome(
+    canvas: &mut dyn Canvas,
+    panel: &Panel,
+    hover: Option<UiControl>,
+) {
     let rect = panel_rect(panel);
-    // Dim the display behind the window so the panel reads as modal.
+    canvas.fill(rect, PANEL_BG);
+    canvas.bevel(rect, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
+    title_bar(
+        canvas,
+        rect,
+        panel_title(panel),
+        lit(hover, UiControl::PanelClose),
+    );
+}
+
+/// Dim the display behind a panel so it reads as modal.
+fn draw_panel_scrim(frame: &mut [u8], scale: usize) {
     fill_rect_blend(
         frame,
         scale_rect(
@@ -2499,76 +2551,60 @@ fn draw_panel_chrome(frame: &mut [u8], panel: &Panel, hover: Option<UiControl>, 
         SCRIM_ALPHA,
         scale,
     );
-    let scaled = scale_rect(rect, scale);
-    fill_rect(frame, scaled, PANEL_BG, scale);
-    draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
-    draw_title_bar(
-        frame,
-        rect,
-        panel_title(panel),
-        lit(hover, UiControl::PanelClose),
-        scale,
-    );
 }
 
 /// A panel's blue title bar, with its name and its close gadget.
-fn draw_title_bar(frame: &mut [u8], rect: Rect, title: &str, close_hover: f32, scale: usize) {
+pub(in crate::video) fn title_bar(
+    canvas: &mut dyn Canvas,
+    rect: Rect,
+    title: &str,
+    close_hover: f32,
+) {
     let bar = Rect {
         x: rect.x + 1,
         y: rect.y + 1,
         w: rect.w - 2,
         h: TITLE_H - 1,
     };
-    fill_rect(frame, scale_rect(bar, scale), PANEL_TITLE_BG, scale);
-    draw_panel_text(
-        frame,
+    canvas.fill(bar, PANEL_TITLE_BG);
+    canvas.text(
         rect.x + 10,
         rect.y + (TITLE_H - 16) / 2,
         title,
         PANEL_TITLE_TEXT,
         2,
-        scale,
     );
-    draw_close_gadget(frame, rect, close_hover, scale);
+    close_gadget(canvas, rect, close_hover);
 }
 
 /// The close gadget: a classic square with an inner square.
-fn draw_close_gadget(frame: &mut [u8], rect: Rect, close_hover: f32, scale: usize) {
+fn close_gadget(canvas: &mut dyn Canvas, rect: Rect, close_hover: f32) {
     let close = close_button_rect(rect);
     // The gadget already wears the interface's blue, so the focus lifts
     // it to the paler one rather than painting it the colour it is.
     let face = light_face_to(PANEL_TITLE_BG, BUTTON_FACE_HOVER, NAV_FACE_ON, close_hover);
-    let close_scaled = scale_rect(
-        Rect {
-            x: close.x + 1,
-            y: close.y + 1,
-            w: close.w - 2,
-            h: close.h - 1,
-        },
-        scale,
-    );
-    fill_rect(frame, close_scaled, face, scale);
-    draw_rect_bevel(
-        frame,
-        close_scaled,
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        scale,
-    );
+    let inset = Rect {
+        x: close.x + 1,
+        y: close.y + 1,
+        w: close.w - 2,
+        h: close.h - 1,
+    };
+    canvas.fill(inset, face);
+    canvas.bevel(inset, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     let inner = Rect {
         x: close.x + close.w / 2 - 4,
         y: close.y + close.h / 2 - 4,
         w: 8,
         h: 8,
     };
-    fill_rect(frame, scale_rect(inner, scale), PANEL_TITLE_TEXT, scale);
+    canvas.fill(inner, PANEL_TITLE_TEXT);
     let hole = Rect {
         x: inner.x + 2,
         y: inner.y + 2,
         w: 4,
         h: 4,
     };
-    fill_rect(frame, scale_rect(hole, scale), face, scale);
+    canvas.fill(hole, face);
 }
 
 // Where the focus stands while a surface is being drawn, and how far
@@ -2589,6 +2625,26 @@ thread_local! {
     /// while this is a panel, or the other way about. The keyboard is in
     /// charge either way, so the pointer lights nothing here either.
     static NAV_ELSEWHERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether egui is drawing the configuration screen this frame
+    /// (configuration/egui_view.rs), leaving the texture only the scrim
+    /// behind it.
+    static LAUNCHER_ON_EGUI: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Whether egui is drawing the menu's columns this frame, leaving the
+    /// texture its veil.
+    static MENU_ON_EGUI: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Say whether egui draws the menu's columns in the drawing about to
+/// happen. While it does, the texture keeps the veil over the display.
+pub(in crate::video) fn set_menu_on_egui(on: bool) {
+    MENU_ON_EGUI.with(|flag| flag.set(on));
+}
+
+/// Say whether egui draws the configuration screen in the drawing about to
+/// happen. While it does, the texture keeps the scrim that dims the
+/// display behind the panel and nothing of the panel itself.
+pub(in crate::video) fn set_launcher_on_egui(on: bool) {
+    LAUNCHER_ON_EGUI.with(|flag| flag.set(on));
 }
 
 /// Say where the focus is, and how far through its breath, for the
@@ -3088,13 +3144,12 @@ fn draw_input_map(
                     "Controller 2"
                 };
                 draw_launcher_chip(
-                    frame,
+                    &mut FrameCanvas::new(frame, scale),
                     *button_rect,
                     label,
                     set == panel.mapping,
                     lit(hover, *control),
                     false,
-                    scale,
                 );
             }
             UiControl::RemapBind(i) => {
@@ -3647,7 +3702,7 @@ fn draw_console(frame: &mut [u8], rect: Rect, panel: &ConsolePanel, scale: usize
     // a multi-byte character in half and panic.)
     let prompt = format!("> {}", panel.input);
     draw_edit_line(
-        frame,
+        &mut FrameCanvas::new(frame, scale),
         entry.x + 6,
         entry.y + (CONSOLE_INPUT_H - 8) / 2,
         &prompt,
@@ -3655,7 +3710,6 @@ fn draw_console(frame: &mut [u8], rect: Rect, panel: &ConsolePanel, scale: usize
         ENTRY_TEXT,
         ENTRY_BG,
         entry.w.saturating_sub(12),
-        scale,
     );
 }
 
@@ -3983,65 +4037,7 @@ fn quarter_rgba(pix: u32) -> u32 {
 }
 
 fn draw_outline(frame: &mut [u8], rect: Rect, color: u32, scale: usize) {
-    if rect.w == 0 || rect.h == 0 {
-        return;
-    }
-    fill_rect(
-        frame,
-        scale_rect(
-            Rect {
-                x: rect.x,
-                y: rect.y,
-                w: rect.w,
-                h: 1,
-            },
-            scale,
-        ),
-        color,
-        scale,
-    );
-    fill_rect(
-        frame,
-        scale_rect(
-            Rect {
-                x: rect.x,
-                y: rect.y + rect.h.saturating_sub(1),
-                w: rect.w,
-                h: 1,
-            },
-            scale,
-        ),
-        color,
-        scale,
-    );
-    fill_rect(
-        frame,
-        scale_rect(
-            Rect {
-                x: rect.x,
-                y: rect.y,
-                w: 1,
-                h: rect.h,
-            },
-            scale,
-        ),
-        color,
-        scale,
-    );
-    fill_rect(
-        frame,
-        scale_rect(
-            Rect {
-                x: rect.x + rect.w.saturating_sub(1),
-                y: rect.y,
-                w: 1,
-                h: rect.h,
-            },
-            scale,
-        ),
-        color,
-        scale,
-    );
+    outline(&mut FrameCanvas::new(frame, scale), rect, color);
 }
 
 fn clipped_rect(rect: Rect, clip: Rect) -> Option<Rect> {
@@ -5829,6 +5825,11 @@ pub fn draw_panel_layer(
     hover: Option<UiControl>,
     data: Option<&PanelViewData>,
 ) {
+    // egui draws the panel itself over the presented texture this frame.
+    if matches!(panel, Panel::Launcher(_)) && LAUNCHER_ON_EGUI.with(std::cell::Cell::get) {
+        draw_panel_scrim(frame, texture_scale);
+        return;
+    }
     draw_panel_chrome(frame, panel, hover, texture_scale);
     let rect = panel_rect(panel);
     match (panel, data) {
@@ -5856,7 +5857,12 @@ pub fn draw_panel_layer(
             draw_input_map(frame, rect, panel_state, hover, texture_scale)
         }
         (Panel::Console(panel_state), _) => draw_console(frame, rect, panel_state, texture_scale),
-        (Panel::Launcher(state), _) => draw_launcher(frame, rect, state, hover, texture_scale),
+        (Panel::Launcher(state), _) => draw_launcher(
+            &mut FrameCanvas::new(frame, texture_scale),
+            rect,
+            state,
+            hover,
+        ),
         (Panel::DropChooser(state), _) => {
             draw_drop_chooser(frame, rect, state, hover, texture_scale)
         }
@@ -5881,7 +5887,11 @@ pub fn draw(
         scrims += 1;
     }
     if ui.menu_open {
-        draw_menu(frame, &ui.menu_rows, &ui.menu_nav, texture_scale);
+        if MENU_ON_EGUI.with(std::cell::Cell::get) {
+            draw_menu_veil(frame, texture_scale);
+        } else {
+            draw_menu(frame, &ui.menu_rows, &ui.menu_nav, texture_scale);
+        }
         scrims += 1;
     }
     scrims
@@ -5911,40 +5921,40 @@ const MENU_VEIL_ALPHA: f32 = SCRIM_ALPHA;
 
 /// A tick, drawn rather than typed: the font stops at ASCII, and a mark built
 /// from the text scale grows with it.
-fn draw_check(frame: &mut [u8], x: usize, y: usize, color: u32, px: usize, scale: usize) {
+fn draw_check(canvas: &mut dyn Canvas, x: usize, y: usize, color: u32, px: usize) {
     // Two strokes of a check: a short one down-right, a long one up-right.
-    let dot = |frame: &mut [u8], cx: usize, cy: usize| {
-        fill_rect(
-            frame,
-            scale_rect(
-                Rect {
-                    x: cx,
-                    y: cy,
-                    w: px,
-                    h: px,
-                },
-                scale,
-            ),
+    let mut dot = |cx: usize, cy: usize| {
+        canvas.fill(
+            Rect {
+                x: cx,
+                y: cy,
+                w: px,
+                h: px,
+            },
             color,
-            scale,
         );
     };
     for i in 0..3 {
-        dot(frame, x + i * px, y + (2 + i) * px);
+        dot(x + i * px, y + (2 + i) * px);
     }
     for i in 0..4 {
-        dot(frame, x + (2 + i) * px, y + (4 - i) * px);
+        dot(x + (2 + i) * px, y + (4 - i) * px);
     }
 }
 
 /// Draw the menu: a veil over everything behind, then one column per open
 /// level from the hamburger button upward.
 fn draw_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scale: usize) {
-    // The veil goes over the display, panels included: the menu takes
-    // precedence over anything it is opened on top of. The status bar
-    // below is left alight -- it is still live while the menu is up,
-    // and a dialog does not dim it either. It is painted into the
-    // presentation texture, so it never reaches a recording.
+    draw_menu_veil(frame, scale);
+    draw_menu_columns(&mut FrameCanvas::new(frame, scale), rows, nav);
+}
+
+/// The veil the menu draws over the display, panels included: the menu
+/// takes precedence over anything it is opened on top of. The status bar
+/// below is left alight -- it is still live while the menu is up, and a
+/// dialog does not dim it either. It is painted into the presentation
+/// texture, so it never reaches a recording.
+fn draw_menu_veil(frame: &mut [u8], scale: usize) {
     fill_rect_blend(
         frame,
         Rect {
@@ -5957,7 +5967,21 @@ fn draw_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scal
         MENU_VEIL_ALPHA,
         scale,
     );
+}
 
+/// The menu's veil over a panel drawn on `canvas` rather than into the
+/// texture, whose own veil it lies over.
+pub(in crate::video) fn menu_veil_over(canvas: &mut dyn Canvas, panel: &Panel) {
+    canvas.blend(panel_rect(panel), MENU_VEIL, MENU_VEIL_ALPHA);
+}
+
+/// The menu's open levels: one column each, from the hamburger button
+/// upward.
+pub(in crate::video) fn draw_menu_columns(
+    canvas: &mut dyn Canvas,
+    rows: &[menu::MenuRow],
+    nav: &menu::MenuNav,
+) {
     let px = super::menu_scale().factor();
     let levels = nav.levels(rows);
     let columns = menu_columns(&levels, nav);
@@ -5973,14 +5997,8 @@ fn draw_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scal
         };
         // The menu wears the status bar's own colour: it belongs to the
         // bar it hangs from, not to the panels it opens over.
-        fill_rect(frame, scale_rect(panel, scale), MENU_BG, scale);
-        draw_rect_bevel(
-            frame,
-            scale_rect(panel, scale),
-            BUTTON_EDGE_LIGHT,
-            BUTTON_EDGE_DARK,
-            scale,
-        );
+        canvas.fill(panel, MENU_BG);
+        canvas.bevel(panel, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
 
         // A level that marks one of its rows indents them all, so the labels
         // stay in a line whether or not they carry the tick.
@@ -6001,19 +6019,14 @@ fn draw_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scal
                 nav.open_at(depth) == Some(index)
             };
             if lit && row.enabled {
-                fill_rect(
-                    frame,
-                    scale_rect(
-                        Rect {
-                            x: rx,
-                            y: ry,
-                            w: rw,
-                            h: rh,
-                        },
-                        scale,
-                    ),
+                canvas.fill(
+                    Rect {
+                        x: rx,
+                        y: ry,
+                        w: rw,
+                        h: rh,
+                    },
                     MENU_HILIGHT_BG,
-                    scale,
                 );
             }
             let text_y = ry + rh.saturating_sub(font::GLYPH_H * px) / 2;
@@ -6029,9 +6042,9 @@ fn draw_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scal
                 PANEL_TEXT
             };
             if row.marked() {
-                draw_check(frame, rx + inset, text_y, color, px, scale);
+                draw_check(canvas, rx + inset, text_y, color, px);
             }
-            draw_panel_text(frame, rx + indent, text_y, &row.label, color, px, scale);
+            canvas.text(rx + indent, text_y, &row.label, color, px);
 
             // The value sits against the right edge, before the marker a
             // submenu ends with.
@@ -6044,11 +6057,11 @@ fn draw_menu(frame: &mut [u8], rows: &[menu::MenuRow], nav: &menu::MenuNav, scal
                 } else {
                     PANEL_TEXT_HILIGHT
                 };
-                draw_panel_text(frame, vx, text_y, value, vcolor, px, scale);
+                canvas.text(vx, text_y, value, vcolor, px);
             }
             if row.is_submenu() {
                 let mx = rx + rw.saturating_sub(inset + glyph_w);
-                draw_panel_text(frame, mx, text_y, ">", color, px, scale);
+                canvas.text(mx, text_y, ">", color, px);
             }
         }
     }

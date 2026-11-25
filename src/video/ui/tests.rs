@@ -413,7 +413,6 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
         LauncherTab::HostFs,
         LauncherTab::Whdload,
         LauncherTab::BootPriority,
-        LauncherTab::BootPriorityMore(2),
         LauncherTab::Lide,
         LauncherTab::AvVideo,
         LauncherTab::AvDisplay,
@@ -435,14 +434,11 @@ fn every_launcher_tab_row_fits_inside_the_panel() {
         for &device in &devices {
             for &mode in &modes {
                 let rows = launcher::rows(tab, device, mode, false, false);
-                // The boot order is paged: both of its pages carry the whole
-                // table, and each draws its own share of it under the column
-                // titles. A page never shows more than that many rows, so
-                // that is what has to fit -- see `BOOTPRI_PAGE_ROWS`.
-                let drawn = if matches!(
-                    tab,
-                    LauncherTab::BootPriority | LauncherTab::BootPriorityMore(_)
-                ) {
+                // The boot order scrolls: the page carries the whole table
+                // and draws as much of it as is in view under the column
+                // titles. It never shows more than that many rows, so that
+                // is what has to fit -- see `BOOTPRI_PAGE_ROWS`.
+                let drawn = if tab == LauncherTab::BootPriority {
                     rows.len().min(launcher::BOOTPRI_PAGE_ROWS + 1)
                 } else {
                     rows.len()
@@ -3816,16 +3812,14 @@ fn panels_render_into_their_rects() {
     ] {
         full.set_path(f, std::path::PathBuf::from("disk.hdf"));
     }
-    for (tab, name) in [
-        (LauncherTab::BootPriority, "launcher-boot-priority-full"),
-        (
-            LauncherTab::BootPriorityMore(2),
-            "launcher-boot-priority-page2",
-        ),
+    for (scroll, name) in [
+        (0, "launcher-boot-priority-full"),
+        (isize::MAX, "launcher-boot-priority-scrolled"),
     ] {
         let mut frame = vec![0u8; w * h * 4];
         let mut state = LauncherState::new(full.clone());
-        state.tab = tab;
+        state.tab = LauncherTab::BootPriority;
+        state.setup.scroll_boot_order(scroll);
         let ui = UiState {
             menu_open: false,
             menu_rows: Vec::new(),

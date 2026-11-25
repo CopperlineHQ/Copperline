@@ -195,6 +195,7 @@ fn reachable(control: UiControl) -> bool {
             // into one found the arrow above the first row -- which,
             // greyed at the top of its list, cannot light at all.
             | UiControl::LauncherHostDiskScroll(_)
+            | UiControl::LauncherBootScroll(_)
     ) && !library_scroll(control)
 }
 

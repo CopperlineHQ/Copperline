@@ -1193,6 +1193,10 @@ pub struct App {
     rtg_present_dims: Option<(u32, u32)>,
     render: Option<Render>,
     debugger_ui: Option<egui_debugger::DebuggerUi>,
+    /// egui over the frame: the configuration screen (egui_overlay.rs),
+    /// made the first time it draws.
+    /// the first time it draws.
+    egui_overlay: Option<egui_overlay::EguiOverlay>,
     debug_layout_active: bool,
     debug_guest_input: bool,
     debug_snapshot_dirty: std::cell::Cell<bool>,
@@ -1254,8 +1258,9 @@ pub struct App {
     native_screenshots: bool,
     /// Interactive output capture, fulfilled by the next GPU redraw.
     pending_output_screenshot: Option<PathBuf>,
-    #[cfg(feature = "game-library")]
-    library_wheel: (Option<ScrollList>, f64),
+    /// The launcher list the wheel last scrolled, and the part of a row
+    /// it has moved since (a trackpad sends fractions of one).
+    launcher_wheel: (Option<ScrollList>, f64),
     /// `--expect-screenshot` checks, armed like `auto_shot` (deadline
     /// order) and captured through the same frame path.
     auto_expect: Vec<crate::expect::ExpectShotSpec>,
@@ -2039,6 +2044,9 @@ struct Gpu {
     /// Built with the window whatever the setting, like the passes above;
     /// it draws nothing until a sheet is loaded into it.
     sticker_pass: stickers::StickerPass,
+    /// egui's paint over the passes: the configuration screen, the menu
+    /// and the status bar (see [`egui_paint`]).
+    egui: egui_paint::EguiPaint,
 }
 
 // The GPU side crosses between the main thread and the present worker.
@@ -2048,9 +2056,17 @@ const _: fn() = || {
 };
 
 /// The main-thread paint that follows the passes on a frame presented in
-/// place: the inspector's egui, which cannot cross to the worker.
-type PresentAfter<'a> =
-    &'a mut dyn FnMut(&wgpu::Device, &wgpu::Queue, &mut wgpu::CommandEncoder, &wgpu::TextureView);
+/// place: an egui paint, which cannot cross to the worker. The last
+/// argument says whether the target is an output screenshot's capture
+/// rather than the surface: the configuration screen belongs in one, as it
+/// does when it is drawn into the texture, and the inspector does not.
+type PresentAfter<'a> = &'a mut dyn FnMut(
+    &wgpu::Device,
+    &wgpu::Queue,
+    &mut wgpu::CommandEncoder,
+    &wgpu::TextureView,
+    bool,
+);
 
 /// One frame for the GPU passes: the composed texture image (None when
 /// it was composed straight into the pixels buffer) and everything the
@@ -2069,6 +2085,8 @@ struct PresentJob {
     /// The presentation buffer for a display draw that samples it on the
     /// GPU (`ScalerDraw::picture`), instead of a CPU copy into `frame`.
     picture: Option<PictureFrame>,
+    /// What egui paints over the passes this frame.
+    egui: egui_paint::EguiJob,
 }
 
 struct PictureFrame {
@@ -2132,7 +2150,11 @@ fn present_job(
         crt_shader,
         bezel_shader,
         sticker_pass,
+        egui,
     } = gpu;
+    // Its texture updates wait here until a frame is drawn: a present the
+    // surface skips runs no callback, and they must not be lost with it.
+    egui.receive(&job.egui);
     if let Some(frame) = &job.frame {
         let dst = pixels.frame_mut();
         if dst.len() != frame.len() {
@@ -2244,13 +2266,36 @@ fn present_job(
                     }
                 }
             };
+            egui.begin(&ctx.device, &ctx.queue);
             draw(encoder, target, ctx);
             if let Some(capture) = capture.as_mut() {
                 draw(encoder, &capture.view(), ctx);
+                // The configuration screen and the menu are in a screenshot,
+                // as they were when the texture drew them.
+                egui.draw(
+                    &ctx.device,
+                    &ctx.queue,
+                    encoder,
+                    &capture.view(),
+                    job.surface,
+                    &job.egui,
+                );
+                if let Some(after) = after.as_mut() {
+                    after(&ctx.device, &ctx.queue, encoder, &capture.view(), true);
+                }
                 capture.copy(encoder);
             }
+            egui.draw(
+                &ctx.device,
+                &ctx.queue,
+                encoder,
+                target,
+                job.surface,
+                &job.egui,
+            );
+            egui.end();
             if let Some(after) = after.as_mut() {
-                after(&ctx.device, &ctx.queue, encoder, target);
+                after(&ctx.device, &ctx.queue, encoder, target, false);
             }
             Ok(())
         },
@@ -2259,7 +2304,7 @@ fn present_job(
 
 enum PresentCmd {
     Lend(Box<Gpu>),
-    Frame(PresentJob),
+    Frame(Box<PresentJob>),
     Return,
 }
 
@@ -2344,6 +2389,11 @@ impl PresentWorker {
                                     {
                                         log_present_error(&e);
                                     }
+                                } else {
+                                    // Skipped for a stale surface size, but
+                                    // egui's texture updates still wait for
+                                    // the next frame drawn.
+                                    gpu.egui.receive(&job.egui);
                                 }
                             }
                             let back = PresentBack::Frame {
@@ -2451,13 +2501,13 @@ impl PresentWorker {
         let Some(tx) = self.cmd_tx.as_ref() else {
             return Err(job);
         };
-        match tx.try_send(PresentCmd::Frame(job)) {
+        match tx.try_send(PresentCmd::Frame(Box::new(job))) {
             Ok(()) => {
                 self.in_flight += 1;
                 Ok(())
             }
             Err(mpsc::TrySendError::Full(PresentCmd::Frame(job)))
-            | Err(mpsc::TrySendError::Disconnected(PresentCmd::Frame(job))) => Err(job),
+            | Err(mpsc::TrySendError::Disconnected(PresentCmd::Frame(job))) => Err(*job),
             Err(_) => unreachable!("a frame returns a frame"),
         }
     }
@@ -2757,6 +2807,7 @@ enum ScrollList {
     #[cfg(feature = "game-library")]
     Favourites,
     HostDisks,
+    BootOrder,
 }
 
 /// Whether a control is a scroll arrow, and if so which way it goes (`-1`
@@ -2768,6 +2819,7 @@ fn scroll_arrow_of(control: UiControl) -> Option<(isize, ScrollList)> {
         #[cfg(feature = "game-library")]
         UiControl::LauncherLibraryFavouriteScroll(d) => Some((d.signum(), ScrollList::Favourites)),
         UiControl::LauncherHostDiskScroll(d) => Some((d.signum(), ScrollList::HostDisks)),
+        UiControl::LauncherBootScroll(d) => Some((d.signum(), ScrollList::BootOrder)),
         _ => None,
     }
 }
@@ -2780,6 +2832,7 @@ fn scroll_arrow_for(list: ScrollList, rows: isize) -> UiControl {
         #[cfg(feature = "game-library")]
         ScrollList::Favourites => UiControl::LauncherLibraryFavouriteScroll(rows),
         ScrollList::HostDisks => UiControl::LauncherHostDiskScroll(rows),
+        ScrollList::BootOrder => UiControl::LauncherBootScroll(rows),
     }
 }
 
@@ -2976,6 +3029,7 @@ impl App {
             present_programmable: false,
             render: None,
             debugger_ui: None,
+            egui_overlay: None,
             debug_layout_active: false,
             debug_guest_input: false,
             debug_snapshot_dirty: std::cell::Cell::new(true),
@@ -3004,8 +3058,7 @@ impl App {
             pending_auto_shot: screenshot_after,
             native_screenshots: false,
             pending_output_screenshot: None,
-            #[cfg(feature = "game-library")]
-            library_wheel: (None, 0.0),
+            launcher_wheel: (None, 0.0),
             auto_expect: Vec::new(),
             pending_auto_expect: Vec::new(),
             verdict: crate::verdict::RunVerdict::default(),
@@ -4746,6 +4799,15 @@ impl Drop for App {
     /// finishes it after the exit and leaves the AVI beside it.
     fn drop(&mut self) {
         self.save_egui_preferences();
+        // The egui states go before the window. egui-winit's clipboard
+        // (smithay-clipboard on Wayland) holds the display connection by a
+        // raw pointer and serves it from a thread of its own; `run_app` has
+        // already consumed the event loop, and the fields drop in order,
+        // `render` (the window) first. Dropped after it, the clipboard's
+        // thread reached a closed connection and the process ended on
+        // SIGSEGV.
+        self.egui_overlay = None;
+        self.debugger_ui = None;
         let _ = self.finish_recording();
         // Same rule for a --coverage run: whatever ends the session writes
         // the counts collected so far.
@@ -4920,6 +4982,7 @@ impl ApplicationHandler for App {
         self.render = Some(Render {
             window,
             gpu: Some(Box::new(Gpu {
+                egui: egui_paint::EguiPaint::new(pixels.device(), pixels.surface_texture_format()),
                 pixels,
                 presenter: presenter::Presenter::new(),
                 scaler,
@@ -5007,6 +5070,9 @@ impl ApplicationHandler for App {
             }
         }
         if self.route_debug_workspace_event(&event) {
+            return;
+        }
+        if self.route_egui_overlay_event(&event) {
             return;
         }
         #[cfg(target_os = "macos")]
@@ -5703,7 +5769,6 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                #[cfg(feature = "game-library")]
                 if self.scroll_launcher_with_wheel(delta) {
                     return;
                 }
@@ -5811,6 +5876,19 @@ impl ApplicationHandler for App {
                 let (nav_target, nav_mix) = self.nav_light();
                 let nav_is_open = self.nav.open();
                 let (nav_bar_target, nav_bar_mix) = self.nav_bar_light();
+                // The configuration screen, when egui draws it, is laid out
+                // here and painted over the presented frame below.
+                let (egui_job, on_egui) = self.prepare_egui_overlay(
+                    ui::egui_view::Light {
+                        hover: ui_hover,
+                        focus: nav_target,
+                        mix: nav_mix,
+                        open: nav_is_open,
+                        elsewhere: nav_bar_target.is_some(),
+                    },
+                    &view,
+                    (nav_bar_target, nav_bar_mix, nav_target.is_some()),
+                );
                 let recording = self.recorder.is_some();
                 // The MT-32's panel reads its display live off the engine, so
                 // it is only gathered when the panel is actually up.
@@ -5827,6 +5905,7 @@ impl ApplicationHandler for App {
                 let kbd_panel = super::keyboard_panel_shown().then(|| self.keyboard_panel_view());
                 let ui_data = self.build_panel_view_data();
                 let inspector_ui = self.debugger_ui.as_mut().filter(|_| debug_layout);
+                let mut egui_job = Some(egui_job);
                 if let Some(r) = self.render.as_mut() {
                     // RTG always presents the native board texture. The CPU
                     // paints only a transparent UI layer, alpha-composited
@@ -5868,7 +5947,7 @@ impl ApplicationHandler for App {
                     let surface_size = r.surface_size;
                     // Frames present from the worker unless this one carries
                     // something only the main thread has: the RTG board's
-                    // texture upload, or the inspector's egui paint.
+                    // texture upload, or an egui paint.
                     let threaded = r.present_worker.is_some()
                         && !rtg_gpu
                         && inspector_ui.is_none()
@@ -5995,7 +6074,7 @@ impl ApplicationHandler for App {
                         if let Some(panel) = &kbd_panel {
                             kbdpanel::draw(frame, panel, keyboard_panel_top(), texture_scale);
                         }
-                        if !super::status_bar_hidden() {
+                        if !super::status_bar_hidden() && !on_egui.bar {
                             // The bar lights its focus the way the
                             // surfaces light theirs, and knows when the
                             // marker is up on one of them instead.
@@ -6004,7 +6083,7 @@ impl ApplicationHandler for App {
                                 nav_bar_mix,
                                 nav_target.is_some(),
                             );
-                            draw_status_bar(frame, &view, texture_scale);
+                            draw_status_bar(&mut ui::FrameCanvas::new(frame, texture_scale), &view);
                             statusbar::set_nav_light(None, 0.0, false);
                         }
                         // The picture loses its corners to a front's aperture
@@ -6133,8 +6212,12 @@ impl ApplicationHandler for App {
                             nav_is_open,
                             nav_bar_target.is_some(),
                         );
+                        ui::set_launcher_on_egui(on_egui.launcher);
+                        ui::set_menu_on_egui(on_egui.menu);
                         let mut scrims =
                             ui::draw(frame, texture_scale, &self.ui, ui_hover, ui_data.as_ref());
+                        ui::set_launcher_on_egui(false);
+                        ui::set_menu_on_egui(false);
                         ui::set_nav_light(None, 0.0, false, false);
                         // The drag hint sits on top of everything: the drop will
                         // land wherever the drag is released, panels or not. The
@@ -6314,6 +6397,7 @@ impl ApplicationHandler for App {
                             draws,
                             pass,
                             picture,
+                            egui: egui_job.take().unwrap_or_default(),
                         };
                         match gpu_home.as_deref_mut() {
                             Some(gpu) => {
@@ -6321,8 +6405,11 @@ impl ApplicationHandler for App {
                                     move |device: &wgpu::Device,
                                           queue: &wgpu::Queue,
                                           encoder: &mut wgpu::CommandEncoder,
-                                          target: &wgpu::TextureView| {
-                                        ui.paint_prepared(device, queue, encoder, target)
+                                          target: &wgpu::TextureView,
+                                          capture: bool| {
+                                        if !capture {
+                                            ui.paint_prepared(device, queue, encoder, target)
+                                        }
                                     }
                                 });
                                 let after = paint.as_mut().map(|paint| paint as PresentAfter<'_>);
@@ -6400,6 +6487,11 @@ impl ApplicationHandler for App {
                             None => {
                                 if let Some(worker) = r.present_worker.as_mut() {
                                     if let Err(job) = worker.submit(job) {
+                                        // egui's texture updates are owed to
+                                        // the next frame that goes.
+                                        if let Some(overlay) = self.egui_overlay.as_mut() {
+                                            overlay.unsent(job.egui);
+                                        }
                                         if let Some(frame) = job.frame {
                                             worker.recycle(
                                                 frame,
@@ -6412,6 +6504,14 @@ impl ApplicationHandler for App {
                             }
                         }
                         r.gpu = gpu_home;
+                    }
+                }
+                // A frame that never went (no buffer free for it, nothing to
+                // compose into) owes egui's texture updates to the next one:
+                // later frames draw with what they upload.
+                if let Some(job) = egui_job.take() {
+                    if let Some(overlay) = self.egui_overlay.as_mut() {
+                        overlay.unsent(job);
                     }
                 }
                 if let Some(message) = screenshot_message {
@@ -8083,6 +8183,11 @@ impl App {
                         .scroll_host_disks(delta, crate::video::ui::HOST_DISK_VISIBLE_ROWS);
                 }
             }
+            UiControl::LauncherBootScroll(delta) => {
+                if let Some(state) = self.launcher_state_mut() {
+                    state.setup.scroll_boot_order(delta);
+                }
+            }
             UiControl::LauncherHostDiskRefresh => {
                 if let Some(state) = self.launcher_state_mut() {
                     state.setup.refresh_host_disks();
@@ -8243,8 +8348,6 @@ impl App {
                     let model = state.setup.model();
                     state.setup = MachineSetup::default();
                     state.setup.select_model(model);
-                    // The defaults have no second boot page to stand on.
-                    state.tab = state.setup.settle_tab(state.tab);
                     state.setup.refresh_host_devices();
                     state.status = Some(StatusMessage::ok("Reset to defaults"));
                     // What is on the screen no longer came from the file
@@ -8324,6 +8427,8 @@ mod crt_shader;
 #[cfg(feature = "coppersynth")]
 mod csynthpanel;
 mod egui_debugger;
+mod egui_overlay;
+mod egui_paint;
 #[cfg(feature = "gdb")]
 mod gdb;
 mod host_input;
