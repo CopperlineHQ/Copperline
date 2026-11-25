@@ -18,25 +18,46 @@ where:
 import os, sys, numpy as np
 from PIL import Image
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import vamigats_ref as vref  # noqa: E402
+
+TABLE = vref.decoders()
+
 W, H = 716, 285
 Y = 2  # va row y maps to cl line-doubled row 2*(y-2)
 
 def load(png, raw):
-    ref = np.frombuffer(open(raw, 'rb').read(), dtype=np.uint8)
-    if ref.size != W*H*3:
+    """Nibble-quantised vAmiga and Copperline pictures, aligned row for row.
+
+    The dump's colour encoding and valid box come from vamigats_ref: the
+    dump is mapped back to Copperline's 8-bit guns before quantising, and
+    everything vAmiga filled with its checkerboard (outside a script's
+    cutout, below an NTSC frame) is zeroed in both pictures so it never
+    counts as a difference.
+    """
+    ref = open(raw, 'rb').read()
+    if len(ref) != W*H*3:
         return None
-    va = ref.reshape(H, W, 3).astype(np.int16)
     im = np.asarray(Image.open(png).convert('RGB'))
     if im.shape[:2] != (H*2, W):
         return None
-    cl = im[0::2].astype(np.int16)  # 285 rows (line-doubled -> take even)
-    # nibble quantize
-    van = np.minimum(15, (va + 8)//16)
-    cln = (cl + 8)//17
+    cl8 = im[0::2]  # 285 rows (line-doubled -> take even)
+    shot = [cl8[y].tobytes() for y in range(H)]
+    cl_rows, va_rows, (x1, y1, x2, y2) = vref.aligned_rows(shot, ref)
+    if not cl_rows:
+        return None
+    name, _ = vref.best_decoder(cl_rows, va_rows, TABLE)
+    inverse = np.frombuffer(TABLE[name].inverse, dtype=np.uint8)
+    va8 = inverse[np.frombuffer(ref, dtype=np.uint8).reshape(H, W, 3)]
     # align va rows Y..H-1 with cl rows 0..H-1-Y
-    va_a = van[Y:H]        # (283,W,3)
-    cl_a = cln[0:H-Y]      # (283,W,3)
-    return va_a, cl_a
+    va8, cl8 = va8[Y:H], cl8[0:H-Y]
+    inside = np.zeros((H-Y, W), dtype=bool)
+    inside[y1-Y:y2-Y, x1:x2] = True
+    va_a = (va8.astype(np.int16) + 8)//17
+    cl_a = (cl8.astype(np.int16) + 8)//17
+    va_a[~inside] = 0
+    cl_a[~inside] = 0
+    return va_a, cl_a, va8, cl8, inside
 
 def diff_mask(va_a, cl_a, sx):
     if sx == 0:
@@ -55,17 +76,14 @@ def analyze(png, raw):
     L = load(png, raw)
     if L is None:
         return None
-    va_a, cl_a = L
+    va_a, cl_a, va8, cl8, inside = L
     R = va_a.shape[0]
-    total = R * W
+    total = int(inside.sum())
     # Boot-stuck detector: CL is the AmigaDOS 1.3 CLI (the test never ran /
     # hung), while vAmiga shows the test output. These are FUNCTIONAL/boot
     # failures, not rendering bugs, and inflate the divergence numbers.
-    im = np.asarray(Image.open(png).convert('RGB'))[0::2].reshape(-1, 3)
-    va_full = (np.frombuffer(open(raw, 'rb').read(), dtype=np.uint8)
-               .reshape(-1, 3))
-    cl_blue = (np.abs(im.astype(int) - CLI_BLUE) < 24).all(1).mean()
-    va_blue = (np.abs(va_full.astype(int) - CLI_BLUE) < 24).all(1).mean()
+    cl_blue = (np.abs(cl8.astype(int) - CLI_BLUE) < 24).all(2)[inside].mean()
+    va_blue = (np.abs(va8.astype(int) - CLI_BLUE) < 24).all(2)[inside].mean()
     shifts = [-6, -4, -3, -2, -1, 0, 1, 2, 3, 4, 6]
     # per-row diff for every shift -> (nshift, R)
     perrow = np.stack([diff_mask(va_a, cl_a, sx).sum(axis=1) for sx in shifts])
