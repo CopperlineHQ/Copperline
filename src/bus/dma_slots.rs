@@ -889,9 +889,17 @@ impl Bus {
         self.blitter.busy && self.blitter_dma_enabled() && self.agnus.dmacon & DMACON_BLTPRI == 0
     }
 
+    // The A1200 and A4000 gate BLS with Alice's blitter completion signal.
+    // Use the fitted chips as the board proxy, including in custom profiles.
+    // TODO: establish how Akiko drives BLS on the CD32.
+    fn board_inhibits_bls_on_blitter_done(&self) -> bool {
+        self.aga_enabled() && (self.gayle.is_some() || self.gary.is_some())
+    }
+
     pub(super) fn blitter_yields_to_waiting_cpu(&self) -> bool {
         self.blitter_slowdown_counter_enabled()
             && self.blitter_slowdown_cpu_misses >= exp_miss_limit()
+            && !(self.board_inhibits_bls_on_blitter_done() && self.blitter.final_d_write_pending())
     }
 
     pub(super) fn cpu_can_use_current_slot(&self) -> bool {

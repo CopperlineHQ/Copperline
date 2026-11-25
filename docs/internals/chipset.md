@@ -230,6 +230,11 @@ source fetches directly without a pre-read source snapshot or D overlay (see
 the save-state struct only so older active saves still deserialize; new blits
 leave them empty.
 
+On the A1200 and A4000, Alice's blitter-completion signal inhibits the
+motherboard blitter slowdown for the final normal-mode destination write.
+A waiting CPU can still take a preceding body slot, and fixed DMA keeps
+its usual priority over the final write.
+
 ## Paula (`paula.rs`)
 
 Paula owns the interrupt system (INTENA/INTREQ, delivered through the
@@ -292,7 +297,9 @@ The rest of Paula:
 - **Serial**: SERDAT through a one-word transmit buffer and a timed shift
   register to the configured serial sink (stdout by default; see
   [peripherals](peripherals.md#serial-sink)); SERDATR reports
-  TBE/TSRE/RBF. DiagROM's diagnostic stream arrives this way.
+  TBE/TSRE/RBF. A zero SERDAT clears the waiting word and leaves an active
+  shift running. An 8-bit NUL frame includes its stop bit ($0100).
+  DiagROM's diagnostic stream arrives this way.
 - **Disk registers**: DSKLEN/DSKBYTR/DSKSYNC/DSKDAT and the disk-block
   interrupt, fed by the floppy controller below.
 - **Pots**: POTGO/POTGOR's integrating converter is H-sync-clocked. START
@@ -329,7 +336,7 @@ and live beam-timed collision paths. Denise revisions: OCS 8362,
 ECS 8373, AGA Lisa. DENISEID reads $FFFC from the 8373; Lisa drives only
 the low byte ($F8) and the motherboard supplies the high one: $00 on the
 A1200 and CD32, $FC on the A4000. The AGA decode adds 8 bitplanes,
-HAM8, the BPLCON4 BPLAM pixel-index XOR mask, and the OSPRM/ESPRM sprite
+HAM8, the BPLCON4 BPLAM palette-address XOR mask, and the OSPRM/ESPRM sprite
 palette banks. Lisa also decodes both HAM modes in every resolution; OCS
 and ECS Denise decode at most two planes in super-hires, which keeps HAM
 out of it there.
@@ -348,7 +355,14 @@ later. The two BPLCON4 fields are on different Lisa timing paths:
 the low byte that selects sprite palette bases (ESPRM/OSPRM) reaches sprite
 colour lookup on an earlier sprite palette-control path than ordinary COLORxx
 palette writes, while the high-byte BPLAM XOR continues on the normal
-bitplane/control path. AGA also widens dual
+bitplane/control path. Lisa selects the winning playfield from the raw plane
+bits, adds the PF2 palette offset when appropriate, then applies BPLAM to
+the colour address. The XOR therefore cannot change sprite priority.
+Lisa HAM6 loads all 24 bits of a base colour and retains both nibbles of
+each unmodified component. In HAM6 and HAM8 the XOR mask selects the
+operation and base palette entry. Component writes use the raw bitplanes,
+as in [WinUAE's HAM XOR fix](https://github.com/tonioni/WinUAE/commit/13d09ad85c0d029c52122c6378baf82ce75e0b26).
+AGA also widens dual
 playfield: OCS/ECS split six bitplanes into two three-bit fields (PF1 =
 planes 1/3/5, PF2 = planes 2/4/6), while Lisa extends each field to four
 bits by feeding bitplane 7 into PF1 and bitplane 8 into PF2, so a 7-8

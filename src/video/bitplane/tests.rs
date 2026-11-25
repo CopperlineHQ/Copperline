@@ -8251,17 +8251,17 @@ fn ham8_control_bits_are_the_two_lowest_planes() {
     palette.write_entry(5, true, 0x0456); // 24-bit entry 5 = 0x142536
                                           // Set: control bits (pixel bits 0-1) = 00, palette index in the
                                           // top six bits.
-    let set = ham8_rgb24(&palette, 5 << 2, 0);
+    let set = ham8_rgb24(&palette, 5 << 2, 0, 0);
     assert_eq!(set, 0x0014_2536);
     // Modify blue (01): value bits replace the top six bits of the
     // component, the low two bits hold.
-    let blue = ham8_rgb24(&palette, 0b1010_1001, set);
+    let blue = ham8_rgb24(&palette, 0b1010_1001, 0, set);
     assert_eq!(blue, 0x0014_25AA); // 0xA8 | (0x36 & 0x03)
                                    // Modify red (10).
-    let red = ham8_rgb24(&palette, 0b1111_1110, blue);
+    let red = ham8_rgb24(&palette, 0b1111_1110, 0, blue);
     assert_eq!(red, 0x00FC_25AA);
     // Modify green (11).
-    let green = ham8_rgb24(&palette, 0b0100_0111, red);
+    let green = ham8_rgb24(&palette, 0b0100_0111, 0, red);
     assert_eq!(green, 0x00FC_45AA); // 0x44 | (0x25 & 0x03)
 }
 
@@ -8401,6 +8401,76 @@ fn ham_dual_playfield_runs_the_resolved_index_through_ham() {
     );
 }
 
+#[test]
+fn lisa_bplam_preserves_playfield_priority_and_transparency() {
+    let mut palette = Palette::new();
+    palette.write_ocs(13, 0x8f00);
+    let pf = ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x6400,
+        bplcon3: 3 << 10, // PF2 starts at entry 8
+        bplcon4: 4 << 8,
+        ..ControlState::default()
+    };
+    let mut held = 0;
+    let out = denise_playfield_output(pf, &palette, 2, &mut held);
+    assert_eq!(
+        (out.color, out.color_latch, out.pf_mask),
+        (0xff0000, 0x8f00, 2)
+    );
+    assert_eq!(
+        denise_playfield_output(pf, &palette, 3, &mut held).pf_mask,
+        1
+    );
+    for mode in [0x4000, 0x6400, 0x6800, 0x0810] {
+        let control = ControlState {
+            bplcon0: mode,
+            ..pf
+        };
+        assert_eq!(
+            denise_playfield_output(control, &palette, 0, &mut held).pf_mask,
+            0
+        );
+        assert_ne!(
+            denise_playfield_output(control, &palette, 4, &mut held).pf_mask,
+            0
+        );
+    }
+}
+
+#[test]
+fn lisa_ham6_preserves_unmodified_component_bits() {
+    let mut palette = Palette::new();
+    palette.write_banked(0, 1, false, 0x8135);
+    palette.write_banked(0, 1, true, 0x0246);
+    let control = ControlState {
+        agnus_revision: AgnusRevision::AgaAlice,
+        bplcon0: 0x6800,
+        ..ControlState::default()
+    };
+    let mut held = 0;
+    for (mask, index, expected) in [
+        (0u16, 1, 0x123456),
+        (0, 0x1a, 0x1234aa),
+        (0, 0x2b, 0xbb34aa),
+        (0, 0x3c, 0xbbccaa),
+        (0x40, 1, 0x123456),    // HAM6 base entries span 0..15.
+        (0x01, 0x1a, 0x1234aa), // The raw nibble supplies blue.
+        (0x21, 0x0b, 0xbb34aa), // XOR selects modify-red.
+        (0x11, 0x10, 0x123456), // XOR selects set and palette entry 1.
+    ] {
+        let control = ControlState {
+            bplcon4: mask << 8,
+            ..control
+        };
+        assert_eq!(
+            denise_playfield_output(control, &palette, index, &mut held).color,
+            expected
+        );
+        assert_eq!(held, expected);
+    }
+}
+
 /// Plan 3.3: the Lisa resolution path. BPLAM XORs the pixel index,
 /// HAM8 modifies six bits per component, EHB halves in 8-bit space,
 /// and palette lookups read the full 24-bit banked store.
@@ -8434,6 +8504,21 @@ fn aga_playfield_output_resolves_ham8_ehb_and_bplam() {
         out.color, 0x0056_BBFC,
         "red := 010101<<2 | old low-bit pair"
     );
+
+    // XOR turns modify-red into a set of entry 1, then set into
+    // modify-blue. Only the raw planes supply the new six blue bits.
+    let masked_ham8 = ControlState {
+        bplcon4: 0x0600,
+        ..ham8
+    };
+    let out = denise_playfield_output(masked_ham8, &palette, 0x02, &mut ham);
+    assert_eq!(out.color, 0x0014_2536);
+    let masked_ham8 = ControlState {
+        bplcon4: 0xfd00,
+        ..ham8
+    };
+    let out = denise_playfield_output(masked_ham8, &palette, 0xbc, &mut ham);
+    assert_eq!(out.color, 0x0014_25be);
 
     // BPLAM XORs the index before lookup: index 0 becomes 1.
     let masked = ControlState {

@@ -83,7 +83,8 @@ enum Machine {
     Aga,
     /// A1200 profile exercising NTSC field geometry.
     AgaNtsc,
-    /// A1200 profile, PAL: the Gayle address decode.
+    /// A1200 profile with the motherboard peripherals and PAL timing: the
+    /// Gayle address decode and the Alice blitter final D write.
     A1200,
     A4000,
     A4000Buster,
@@ -770,6 +771,10 @@ probe_tests! {
     // out-of-range colour behaviour deliberately diverges from vAmiga).
     // vAmiga-5-verified exact (bijective, 0 differing pixels).
     golden_dpfprobe_aga => probe_aga("dpfprobe-aga", "dpfprobe-aga.bin", 16.0);
+    golden_dpfprobe_bplam => probe_aga("dpfprobe-bplam", "dpfprobe-bplam.bin", 16.0);
+    golden_hamprobe_aga6 => probe_aga("hamprobe-aga6", "hamprobe-aga6.bin", 16.0);
+    golden_bltprobe_final_d => Probe { name: "bltprobe-final-d", program: "bltprobe-final-d.bin", seconds: 16.0, machine: Machine::A1200 };
+    golden_serprobe_zero => probe("serprobe-zero", "serprobe-zero.bin", 16.0);
     // HAM8: the control bits are the two LOWEST planes, a modify replaces
     // the top six bits of a component and holds the low two from the
     // previous pixel, and every non-set pixel depends on the line's full

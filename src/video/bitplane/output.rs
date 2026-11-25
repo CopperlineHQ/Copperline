@@ -426,58 +426,42 @@ pub(super) fn denise_playfield_output(
     }
 }
 
-/// Lisa pixel resolution: 24-bit colours from the banked palette, BPLCON4
-/// BPLAM XOR applied to the full pixel index, HAM8 with 8 bitplanes (HAM
-/// with 5/6 planes keeps the OCS-compatible HAM6 maths on the high
-/// nibbles), and EHB halving in 8-bit component space.
+/// Lisa resolves playfield priority from the shifter bits. BPLAM acts on
+/// the resulting palette address, after the winning playfield and PF2OF.
 pub(super) fn denise_aga_playfield_output(
     control: ControlState,
     palette: &Palette,
     idx: u8,
     ham_color: &mut u32,
 ) -> DenisePlayfieldOutput {
-    let idx = idx ^ control.bplam();
-    let color_latch = palette[(idx as usize) & 0xFF];
-
-    if control.bplcon0 & 0x0800 != 0 && control.nplanes() == 8 {
-        *ham_color = ham8_rgb24(palette, idx, *ham_color);
-        return DenisePlayfieldOutput {
-            color: *ham_color,
-            color_latch,
-            pf_mask: u8::from(idx != 0) * 2,
-        };
-    }
-    if control.hold_and_modify() {
-        let previous = rgb24_to_rgb12_hi(*ham_color);
-        *ham_color = rgb12_to_rgb24(ham6_rgb12(palette, idx, previous));
-        return DenisePlayfieldOutput {
-            color: *ham_color,
-            color_latch,
-            pf_mask: u8::from(idx != 0) * 2,
-        };
-    }
-
-    if control.dual_playfield() {
-        let (pf_mask, color_idx) = dual_playfield_pixel(idx, control);
-        let color = palette.rgb24(color_idx) & 0x00FF_FFFF;
-        *ham_color = color;
-        return DenisePlayfieldOutput {
-            color,
-            color_latch: palette.get(color_idx).copied().unwrap_or(0),
-            pf_mask,
-        };
-    }
-
-    let mut color = palette.rgb24((idx as usize) & 0xFF) & 0x00FF_FFFF;
-    if control.extra_half_brite() && idx & 0x20 != 0 {
-        color = palette.rgb24((idx as usize) & 0x1F) & 0x00FF_FFFF;
-        color = (color >> 1) & 0x007F_7F7F;
-    }
+    let (pf_mask, address) = if control.dual_playfield() && !control.ham() {
+        dual_playfield_pixel(idx, control)
+    } else {
+        (u8::from(idx != 0) * 2, usize::from(idx))
+    };
+    let address = address as u8 ^ control.bplam();
+    let color = if control.ham8() {
+        ham8_rgb24(palette, idx, control.bplam(), *ham_color)
+    } else if control.hold_and_modify() {
+        // WinUAE's HAM XOR fix masks the opcode and palette address.
+        // Component writes take their data directly from the shifter.
+        let component = u32::from(idx & 0x0f) * 0x11;
+        match address & 0x30 {
+            0x00 => palette.rgb24(usize::from(address & 0x0f)) & 0x00ff_ffff,
+            0x10 => (*ham_color & 0xffff00) | component,
+            0x20 => (*ham_color & 0x00ffff) | (component << 16),
+            _ => (*ham_color & 0xff00ff) | (component << 8),
+        }
+    } else if control.extra_half_brite() && address & 0x20 != 0 {
+        (palette.rgb24(usize::from(address & 0x1f)) >> 1) & 0x007f_7f7f
+    } else {
+        palette.rgb24(usize::from(address)) & 0x00ff_ffff
+    };
     *ham_color = color;
     DenisePlayfieldOutput {
         color,
-        color_latch,
-        pf_mask: u8::from(idx != 0) * 2,
+        color_latch: palette[usize::from(address)],
+        pf_mask,
     }
 }
 
@@ -485,12 +469,13 @@ pub(super) fn denise_aga_playfield_output(
 /// planes 1-2 (pixel bits 0-1) select the operation and planes 3-8 carry a
 /// 6-bit value that replaces the top six bits of the modified component
 /// (the low two bits hold their previous value). The set operation looks
-/// up base palette entry `idx >> 2` (0-63). Hires HAM8 content is the
-/// regression example for the bit assignment.
-pub(super) fn ham8_rgb24(palette: &Palette, idx: u8, previous: u32) -> u32 {
+/// up the entry selected by the upper six bits of the XORed address.
+/// Hires HAM8 content exercises this bit assignment.
+pub(super) fn ham8_rgb24(palette: &Palette, idx: u8, bplam: u8, previous: u32) -> u32 {
+    let address = idx ^ bplam;
     let value = u32::from(idx & 0xFC);
-    match idx & 0x03 {
-        0 => palette.rgb24(usize::from(idx >> 2)) & 0x00FF_FFFF,
+    match address & 0x03 {
+        0 => palette.rgb24(usize::from(address >> 2)) & 0x00FF_FFFF,
         // 01 modifies blue, 10 modifies red, 11 modifies green.
         1 => (previous & 0x00FF_FF00) | (value | (previous & 0x03)),
         2 => (previous & 0x0000_FFFF) | ((value | ((previous >> 16) & 0x03)) << 16),
