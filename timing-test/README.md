@@ -810,6 +810,13 @@ the final encoding to true 35 ns output; cross-checked against vAmigaTS
 `bltprobe-pace` (CPU pacing bars under BLTPRI copy/fill/line blits and a
 nice-mode line blit -- the BLS-fence and blitter slot-cadence regression
 class; the whole-blit fence collapsed the fill/line bars),
+`bltprobe-fillasc` (Copper-started A->D blits of 10x2 words, each followed
+by a Copper blitter-finished WAIT, so every bar is blitter time: ascending
+and descending copies match, and ascending EFE, ascending IFE and
+descending EFE fills are equal and one colour clock per word longer -- the
+fill idle cycle follows IFE/EFE, not DESC; the DESC-gated model drew the
+ascending fills as short as the copies. Same construction as vAmigaTS
+`Agnus/Blitter/bbusy/copbbusy1f`, photographed on an A500+ and an A1200),
 `bltprobe-post` (A1200 shape: 256 chip writes from a 68020 under an
 all-channel blit, then the DMACONR polls left until the blit ends, as a
 bar and a binary word, with BLTPRI clear and set -- a posted write is a

@@ -879,10 +879,25 @@ perform a side-effecting memory read. Tests:
 
 ### Area fill
 
-Area fill is applied only when BLTCON1.DESC is set (the HRM requires
-descending mode because the fill carry propagates in descending bit order
-across each row); IFE/EFE in ascending mode is treated as ordinary minterm
-output. With USEC clear, fill adds one extra **idle cycle** (no bus
+Area fill runs whenever BLTCON1.IFE or EFE is set; DESC is not part of
+the condition. The fill circuit always works from bit 0 upwards within a
+word and passes its carry to the next word the blitter processes in the
+row, so in ascending mode the carry moves to the word on the right. The HRM
+tells software to fill in descending mode for that reason, but the hardware
+does not disable the fill: vAmigaTS `Agnus/Blitter/fill/fill2`-`fill7`
+(IFE/EFE without DESC) photographed on an A500 with ECS show filled
+ascending output, and vAmiga's blitter applies the fill on `bltconFE()`
+alone. The timing follows the same rule: the Copper-started BBUSY tests
+`Agnus/Blitter/bbusy/copbbusy1f`/`5f`/`9f`/`13f` (BLTCON1 `$0010`, EFE
+without DESC; A500+ and A1200 photos) put the ascending fill bar one
+colour clock per word past the copy bar, the fill-idle cost. Golden probe
+`bltprobe-fillasc` draws copy, descending copy, ascending EFE/IFE and
+descending EFE bars. Tests:
+`area_fill_runs_in_ascending_mode_with_carry_moving_right`,
+`area_fill_in_descending_mode_carries_to_the_left`,
+`ascending_area_fill_has_the_fill_idle_cycle_and_bzero_delay`.
+
+With USEC clear, fill adds one extra **idle cycle** (no bus
 access) per word, placed AFTER the D slot -- the trailing "-" in vAmiga's
 fill micro-programs for USE masks 1/5/9/D ("A0 -- -- A1 D0 -- A2 D1 --").
 So an A->D area fill costs **3 CCK/word** vs 2 for an A->D copy. The fill

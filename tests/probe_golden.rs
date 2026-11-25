@@ -814,6 +814,11 @@ probe_tests! {
     // CPU pacing bars under BLTPRI copy/fill/line blits (the Rampage
     // "present" flicker / BLS fence regression class).
     golden_bltprobe_pace => probe("bltprobe-pace", "bltprobe-pace.bin", 16.0);
+    // Copper-started BBUSY bars: area fill's idle cycle follows IFE/EFE
+    // alone, so ascending and descending fills take the same time and each
+    // is one colour clock per word longer than a copy (the DESC-gated fill
+    // timing regression class).
+    golden_bltprobe_fillasc => probe("bltprobe-fillasc", "bltprobe-fillasc.bin", 16.0);
     // 68020 chip writes under an all-channel BLTPRI-clear blit: a posted
     // write gets the blitter's three-miss yield (the write loop must not
     // stall for the whole blit).

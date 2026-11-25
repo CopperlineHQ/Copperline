@@ -1112,7 +1112,9 @@ impl Blitter {
         let ife = con1 & BLTCON1_IFE != 0;
         let efe = con1 & BLTCON1_EFE != 0;
         let fci = if con1 & BLTCON1_FCI != 0 { 1u16 } else { 0u16 };
-        let fill = desc && (ife || efe);
+        // Area fill runs whenever IFE or EFE is set; DESC only sets the
+        // pointer direction (see apply_fill).
+        let fill = ife || efe;
 
         // Pointer step per word. In descending mode pointers count
         // downwards by 2. Use wrapping_add with the wrapped i32 to keep
@@ -1789,7 +1791,9 @@ impl NormalBlitState {
         let use_b = con0 & BLTCON0_USE_B != 0;
         let use_c = con0 & BLTCON0_USE_C != 0;
         let use_d = con0 & BLTCON0_USE_D != 0;
-        let fill = desc && con1 & (BLTCON1_IFE | BLTCON1_EFE) != 0;
+        // The fill circuit and its idle cycle are enabled by IFE/EFE alone;
+        // DESC is not part of the condition (see apply_fill).
+        let fill = con1 & (BLTCON1_IFE | BLTCON1_EFE) != 0;
 
         Self {
             debug_watch_addrs: blitter.debug_watch_addrs.clone(),
@@ -2359,8 +2363,10 @@ fn normal_source_slots_per_word(con0: u16, con1: u16) -> u32 {
     let use_b = con0 & BLTCON0_USE_B != 0;
     let use_c = con0 & BLTCON0_USE_C != 0;
     let use_d = con0 & BLTCON0_USE_D != 0;
-    let desc = con1 & BLTCON1_DESC != 0;
-    let fill = desc && con1 & (BLTCON1_IFE | BLTCON1_EFE) != 0;
+    // IFE/EFE select the fill micro-program regardless of DESC: an
+    // ascending fill pays the same idle cycle (vAmigaTS copbbusy1f/5f/9f/13f,
+    // BLTCON1=$0010, measured on an A500+).
+    let fill = con1 & (BLTCON1_IFE | BLTCON1_EFE) != 0;
     let c_phase = use_c;
     let d_phase = use_d || !c_phase;
     let fill_idle = fill && use_d && !use_c;
@@ -2460,9 +2466,13 @@ fn line_step_y(dy: i32, bplmod: i32, cpt: &mut u32, one_dot: &mut bool) {
     *one_dot = false;
 }
 
-/// Apply area-fill (inclusive or exclusive) to a single D word in
-/// descending bit-order, carrying `fill_state` across calls within a
-/// row.
+/// Apply area-fill (inclusive or exclusive) to a single D word from bit 0
+/// upwards, carrying `fill_state` to the next word the blitter processes in
+/// the same row. The fill circuit does not look at DESC: in ascending mode
+/// it still fills each word right to left, but the carry then passes to the
+/// word on the right instead of the left, which is why the HRM tells
+/// software to fill in descending mode. vAmigaTS Agnus/Blitter/fill/fill2-7
+/// (IFE/EFE without DESC) show this ascending fill on an A500 with ECS.
 fn apply_fill(d: u16, fill_state: &mut u16, ife: bool, efe: bool) -> u16 {
     let mut out = d;
     for bit in 0..16 {
@@ -3657,54 +3667,90 @@ mod tests {
         assert_eq!(state, 0);
     }
 
-    #[test]
-    fn area_fill_requires_descending_mode_for_blit_output() {
-        let mut ram = vec![0; 64];
-        write_word(&mut ram, 0x10, 0x0022);
-
-        let mut ascending = Blitter::new();
-        ascending.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_D | 0x00F0;
-        ascending.bltcon1 = BLTCON1_IFE;
-        ascending.bltafwm = 0xFFFF;
-        ascending.bltalwm = 0xFFFF;
-        ascending.bltapt = 0x10;
-        ascending.bltdpt = 0x20;
-        ascending.execute((1u16 << 6) | 1, &mut ram);
-
-        assert_eq!(read_word(&ram, 0x20), 0x0022);
-
-        write_word(&mut ram, 0x20, 0);
-        let mut descending = Blitter::new();
-        descending.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_D | 0x00F0;
-        descending.bltcon1 = BLTCON1_DESC | BLTCON1_IFE;
-        descending.bltafwm = 0xFFFF;
-        descending.bltalwm = 0xFFFF;
-        descending.bltapt = 0x10;
-        descending.bltdpt = 0x20;
-        descending.execute((1u16 << 6) | 1, &mut ram);
-
-        assert_eq!(read_word(&ram, 0x20), 0x003E);
+    /// Run one ascending or descending IFE fill over a single two-word row
+    /// and return the destination words (left, right), on the immediate and
+    /// the scheduled engine.
+    fn two_word_fill_row(left: u16, right: u16, desc: bool) -> [(u16, u16); 2] {
+        let mut results = [(0, 0); 2];
+        for (i, scheduled) in [false, true].into_iter().enumerate() {
+            let mut ram = vec![0u8; 64];
+            write_word(&mut ram, 0x10, left);
+            write_word(&mut ram, 0x12, right);
+            let mut b = Blitter::new();
+            b.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_D | 0x00F0;
+            b.bltcon1 = BLTCON1_IFE | if desc { BLTCON1_DESC } else { 0 };
+            b.bltafwm = 0xFFFF;
+            b.bltalwm = 0xFFFF;
+            // Descending blits start at the last word of the row.
+            b.bltapt = if desc { 0x12 } else { 0x10 };
+            b.bltdpt = if desc { 0x22 } else { 0x20 };
+            let bltsize = (1u16 << 6) | 2;
+            if scheduled {
+                let source = ram.clone();
+                b.start_scheduled(bltsize, &source);
+                while b.busy {
+                    let _ = b.tick_scheduled_slot(&mut ram);
+                }
+            } else {
+                b.execute(bltsize, &mut ram);
+            }
+            results[i] = (read_word(&ram, 0x20), read_word(&ram, 0x22));
+        }
+        results
     }
 
     #[test]
-    fn scheduled_area_fill_requires_descending_mode() {
-        let mut ram = vec![0; 64];
-        write_word(&mut ram, 0x10, 0x0022);
+    fn area_fill_runs_in_ascending_mode_with_carry_moving_right() {
+        // The fill circuit is enabled by IFE/EFE alone. Each word still
+        // fills from bit 0 upwards; in ascending mode the carry passes to
+        // the next word in processing order, the one on the right.
+        for (left, right) in two_word_fill_row(0x0001, 0x0000, false) {
+            assert_eq!((left, right), (0xFFFF, 0xFFFF));
+        }
+        for (left, right) in two_word_fill_row(0x0000, 0x8000, false) {
+            assert_eq!((left, right), (0x0000, 0x8000));
+        }
+        // A single-word ascending fill matches the descending result.
+        for (left, _) in two_word_fill_row(0x0022, 0x0000, false) {
+            assert_eq!(left, 0x003E);
+        }
+    }
 
+    #[test]
+    fn area_fill_in_descending_mode_carries_to_the_left() {
+        for (left, right) in two_word_fill_row(0x0000, 0x8000, true) {
+            assert_eq!((left, right), (0xFFFF, 0x8000));
+        }
+        // Within the word the fill still runs from bit 0 upwards; only the
+        // word-to-word carry direction differs from ascending mode.
+        for (left, right) in two_word_fill_row(0x0001, 0x0000, true) {
+            assert_eq!((left, right), (0xFFFF, 0x0000));
+        }
+    }
+
+    #[test]
+    fn ascending_area_fill_has_the_fill_idle_cycle_and_bzero_delay() {
+        // The fill micro-program (and its idle cycle after D) is selected by
+        // IFE/EFE, not by DESC: an ascending A->D fill costs 3 CCK/word like
+        // a descending one, and has the fill's four-CCK BZERO propagation.
+        for con1 in [BLTCON1_EFE, BLTCON1_IFE, BLTCON1_DESC | BLTCON1_EFE] {
+            let words = normal_source_slots_per_word(BLTCON0_USE_A | BLTCON0_USE_D, con1);
+            assert_eq!(words, 3, "BLTCON1={con1:04X}");
+        }
+        assert_eq!(
+            normal_source_slots_per_word(BLTCON0_USE_A | BLTCON0_USE_D, 0),
+            2
+        );
+
+        let ram = vec![0u8; 64];
         let mut b = Blitter::new();
         b.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_D | 0x00F0;
-        b.bltcon1 = BLTCON1_IFE;
+        b.bltcon1 = BLTCON1_EFE;
         b.bltafwm = 0xFFFF;
         b.bltalwm = 0xFFFF;
-        b.bltapt = 0x10;
-        b.bltdpt = 0x20;
-        b.start_scheduled((1u16 << 6) | 1, &ram);
-        while b.busy {
-            let _ = b.tick_scheduled_slot(&mut ram);
-        }
-
-        assert_eq!(read_word(&ram, 0x20), 0x0022);
-        assert_eq!(b.scheduled_slots_remaining(), None);
+        b.start_scheduled((2u16 << 6) | 2, &ram);
+        assert_eq!(b.scheduled_slots_remaining(), Some(2 + 4 * 3 + 2));
+        assert_eq!(b.bzero_clear_delay_cck(), 4);
     }
 
     #[test]
