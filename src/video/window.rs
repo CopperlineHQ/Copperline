@@ -4794,6 +4794,15 @@ impl Drop for App {
     /// finishes it after the exit and leaves the AVI beside it.
     fn drop(&mut self) {
         self.save_egui_preferences();
+        // The egui states go before the window. egui-winit's clipboard
+        // (smithay-clipboard on Wayland) holds the display connection by a
+        // raw pointer and serves it from a thread of its own; `run_app` has
+        // already consumed the event loop, and the fields drop in order,
+        // `render` (the window) first. Dropped after it, the clipboard's
+        // thread reached a closed connection and the process ended on
+        // SIGSEGV.
+        self.egui_overlay = None;
+        self.debugger_ui = None;
         let _ = self.finish_recording();
         // Same rule for a --coverage run: whatever ends the session writes
         // the counts collected so far.
