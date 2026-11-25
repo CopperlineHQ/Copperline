@@ -2389,6 +2389,11 @@ impl PresentWorker {
                                     {
                                         log_present_error(&e);
                                     }
+                                } else {
+                                    // Skipped for a stale surface size, but
+                                    // egui's texture updates still wait for
+                                    // the next frame drawn.
+                                    gpu.egui.receive(&job.egui);
                                 }
                             }
                             let back = PresentBack::Frame {
@@ -6499,6 +6504,14 @@ impl ApplicationHandler for App {
                             }
                         }
                         r.gpu = gpu_home;
+                    }
+                }
+                // A frame that never went (no buffer free for it, nothing to
+                // compose into) owes egui's texture updates to the next one:
+                // later frames draw with what they upload.
+                if let Some(job) = egui_job.take() {
+                    if let Some(overlay) = self.egui_overlay.as_mut() {
+                        overlay.unsent(job);
                     }
                 }
                 if let Some(message) = screenshot_message {

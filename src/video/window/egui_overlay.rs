@@ -1,45 +1,63 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-//! The window's half of the configuration screen, which egui draws
-//! (src/video/ui/configuration/egui_view.rs).
+//! The window's half of the surfaces egui draws: the configuration screen
+//! and the menu (src/video/ui/configuration/egui_view.rs), and the status
+//! bar.
 //!
-//! The panel's points are canvas pixels -- the texture's logical pixels,
-//! which the hit-test, the keyboard focus and every layout function measure
-//! in -- and egui renders them at the window's own scale, so text is
-//! rasterised at the surface's resolution rather than scaled up from the
-//! texture. The paint goes over the presented frame on the main thread, the
-//! way the docked debugger's does, after the texture has drawn everything
-//! under the panel (the display, the scrim that dims it, the status bar).
+//! Their points are canvas pixels -- the texture's logical pixels, which the
+//! hit-test, the keyboard focus and every layout function measure in -- and
+//! egui renders them at the window's own scale, so text is rasterised at the
+//! surface's resolution rather than scaled up from the texture. The main
+//! thread lays them out and tessellates; the meshes go to whichever thread
+//! presents the frame (egui_paint.rs), which paints them over the passes.
 //!
 //! The window keeps the controller: clicks, held steppers, the pointer
-//! taking the focus and every rule in app_nav.rs go through the panel's own
-//! hit-test, exactly as they always have. egui takes input directly only
-//! while a value box is being typed in.
+//! taking the focus and every rule in app_nav.rs go through the surfaces'
+//! own hit-tests, exactly as they always have. egui takes input directly
+//! only while a value box is being typed in.
 
 use super::*;
 use crate::video::ui::egui_view;
 use winit::dpi::PhysicalPosition;
 
 /// Where the canvas sits on the surface: the physical position of its
-/// origin, and how many physical pixels one canvas pixel covers. Read off
-/// the same layout the cursor mapping inverts, so the two agree.
+/// origin, and how many physical pixels one canvas pixel covers across and
+/// down. Read off the same layout the cursor mapping inverts, axis by axis,
+/// so the two agree.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Placement {
     pub(super) origin: (f32, f32),
+    /// Across: the scale egui renders at.
     pub(super) scale: f32,
+    /// Down. A layout that fits each axis to a whole multiple of its own
+    /// (PAL TV integer scaling) makes this differ from `scale`, and the
+    /// meshes are stretched to it.
+    pub(super) scale_y: f32,
 }
 
 impl Placement {
     pub(super) fn of(layout: &PresentLayout) -> Option<Self> {
-        let (dx, dy, dw, _) = layout.display_dst;
-        let (sx, sy, sw, _) = layout.src_canvas;
-        if dw == 0 || sw == 0 {
+        let (dx, dy, dw, dh) = layout.display_dst;
+        let (sx, sy, sw, sh) = layout.src_canvas;
+        Self::fitting((dx, dy, dw, dh), (sx, sy, sw, sh))
+    }
+
+    /// The canvas rect `src` (canvas pixels) shown at `dst` (physical).
+    fn fitting(dst: (u32, u32, u32, u32), src: (usize, usize, usize, usize)) -> Option<Self> {
+        let (dx, dy, dw, dh) = dst;
+        let (sx, sy, sw, sh) = src;
+        if dw == 0 || dh == 0 || sw == 0 || sh == 0 {
             return None;
         }
         let scale = dw as f32 / sw as f32;
+        let scale_y = dh as f32 / sh as f32;
         Some(Self {
-            origin: (dx as f32 - sx as f32 * scale, dy as f32 - sy as f32 * scale),
+            origin: (
+                dx as f32 - sx as f32 * scale,
+                dy as f32 - sy as f32 * scale_y,
+            ),
             scale,
+            scale_y,
         })
     }
 
@@ -47,8 +65,20 @@ impl Placement {
     fn canvas(&self, phys: PhysicalPosition<f64>) -> egui::Pos2 {
         egui::pos2(
             (phys.x as f32 - self.origin.0) / self.scale,
-            (phys.y as f32 - self.origin.1) / self.scale,
+            (phys.y as f32 - self.origin.1) / self.scale_y,
         )
+    }
+
+    /// A canvas rect in the window's logical points (`pixels_per_point`
+    /// physical pixels each), for what egui-winit hands the window.
+    fn window_rect(&self, rect: egui::Rect, pixels_per_point: f32) -> egui::Rect {
+        let at = |p: egui::Pos2| {
+            egui::pos2(
+                (self.origin.0 + p.x * self.scale) / pixels_per_point,
+                (self.origin.1 + p.y * self.scale_y) / pixels_per_point,
+            )
+        };
+        egui::Rect::from_min_max(at(rect.min), at(rect.max))
     }
 }
 
@@ -72,6 +102,8 @@ struct BarKey {
     elsewhere: bool,
     placement: Placement,
     surface: (u32, u32),
+    /// The floppy counter's format: read by the bar beside the view.
+    track: crate::config::TrackDisplay,
 }
 
 pub(super) struct EguiOverlay {
@@ -88,6 +120,9 @@ pub(super) struct EguiOverlay {
     typing: egui_view::Typing,
     images: egui_view::Images,
     placement: Option<Placement>,
+    /// The last frame's focus and pointer lighting, for a frame run between
+    /// redraws.
+    light: egui_view::Light,
     pointer: Option<egui::Pos2>,
     /// Texture updates from frames the present worker turned away, owed to
     /// the next frame that goes.
@@ -118,6 +153,7 @@ impl EguiOverlay {
             typing: egui_view::Typing::default(),
             images: egui_view::Images::default(),
             placement: None,
+            light: egui_view::Light::default(),
             pointer: None,
             unsent: Default::default(),
             repaint: false,
@@ -202,22 +238,30 @@ impl EguiOverlay {
             .entry(egui::ViewportId::ROOT)
             .or_default()
             .native_pixels_per_point = Some(placement.scale);
-        let mut output = context.run_ui(input, draw);
+        let output = context.run_ui(input, draw);
         let repaint = output
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .is_some_and(|viewport| viewport.repaint_delay.is_zero());
-        // To where the surface shows the canvas, by whole physical pixels,
-        // so every edge stays on the pixel grid egui laid it on.
+        let mut jobs = context.tessellate(output.shapes, output.pixels_per_point);
+        // To where the surface shows the canvas: moved by whole physical
+        // pixels, so every edge stays on the pixel grid egui laid it on, and
+        // stretched down where the layout's vertical scale is not egui's.
         let shift = egui::vec2(
             placement.origin.0.round() / placement.scale,
             placement.origin.1.round() / placement.scale,
         );
-        for clipped in &mut output.shapes {
-            clipped.shape.translate(shift);
-            clipped.clip_rect = clipped.clip_rect.translate(shift);
+        let stretch = placement.scale_y / placement.scale;
+        let place = |p: egui::Pos2| egui::pos2(p.x + shift.x, p.y * stretch + shift.y);
+        for job in &mut jobs {
+            job.clip_rect =
+                egui::Rect::from_min_max(place(job.clip_rect.min), place(job.clip_rect.max));
+            if let egui::epaint::Primitive::Mesh(mesh) = &mut job.primitive {
+                for vertex in &mut mesh.vertices {
+                    vertex.pos = place(vertex.pos);
+                }
+            }
         }
-        let jobs = context.tessellate(output.shapes, output.pixels_per_point);
         (
             egui_paint::EguiSurfaceJob {
                 jobs: std::sync::Arc::new(jobs),
@@ -230,6 +274,39 @@ impl EguiOverlay {
         )
     }
 
+    /// Run the display canvas's frame: the configuration screen and the
+    /// menu, with the keys and pointer egui has queued since the last one.
+    fn display_job(
+        &mut self,
+        window: &Window,
+        surface: (u32, u32),
+        placement: Placement,
+        state: &UiState,
+        light: egui_view::Light,
+    ) -> egui_paint::EguiSurfaceJob {
+        self.placement = Some(placement);
+        self.light = light;
+        let input = self.input.take_egui_input(window);
+        let (typing, images) = (&mut self.typing, &mut self.images);
+        let (surface_job, mut platform, repaint) =
+            Self::surface_job(&self.display, input, placement, surface, |ui| {
+                egui_view::show_display(ui, state, light, typing, images);
+            });
+        self.images.end_frame();
+        // egui reports the text field in canvas points, and egui-winit
+        // takes them for the window's: where the canvas sits, and at what
+        // scale, is the overlay's to add, or the IME's candidates open
+        // away from the field.
+        if let Some(ime) = platform.ime.as_mut() {
+            let pixels_per_point = egui_winit::pixels_per_point(&self.display, window);
+            ime.rect = placement.window_rect(ime.rect, pixels_per_point);
+            ime.cursor_rect = placement.window_rect(ime.cursor_rect, pixels_per_point);
+        }
+        self.input.handle_platform_output(window, platform);
+        self.repaint |= repaint;
+        surface_job
+    }
+
     /// Lay out what egui draws over the frame about to be presented.
     fn prepare(
         &mut self,
@@ -240,19 +317,12 @@ impl EguiOverlay {
     ) -> egui_paint::EguiJob {
         let mut job = egui_paint::EguiJob::default();
         self.repaint = false;
-        let input = self.input.take_egui_input(window);
         if let Some((placement, state, light)) = display {
-            self.placement = Some(placement);
-            let (typing, images) = (&mut self.typing, &mut self.images);
-            let (surface_job, platform, repaint) =
-                Self::surface_job(&self.display, input, placement, surface, |ui| {
-                    egui_view::show_display(ui, state, light, typing, images);
-                });
-            self.images.end_frame();
-            self.input.handle_platform_output(window, platform);
-            self.repaint |= repaint;
+            let surface_job = self.display_job(window, surface, placement, state, light);
             job.surfaces[0] = Some(Box::new(surface_job));
         } else {
+            // Nothing takes it: input for a canvas not shown is dropped.
+            let _ = self.input.take_egui_input(window);
             self.placement = None;
         }
         if let Some(bar) = bar {
@@ -287,6 +357,7 @@ impl EguiOverlay {
             elsewhere: bar.elsewhere,
             placement: bar.placement,
             surface,
+            track: crate::video::track_display(),
         };
         if let Some((last, job)) = &self.bar_last {
             if *last == key {
@@ -323,8 +394,13 @@ impl EguiOverlay {
         job
     }
 
-    /// A frame the present worker turned away: its texture updates are owed
-    /// to the next frame that goes.
+    /// Whether the pointer is over the box being typed in.
+    fn pointer_in_typing_box(&self) -> bool {
+        self.pointer.is_some_and(|pos| self.typing.contains(pos))
+    }
+
+    /// A frame that never went -- turned away by the present worker, or
+    /// with no buffer to go in -- owes its texture updates to the next one.
     pub(super) fn unsent(&mut self, job: egui_paint::EguiJob) {
         for (owed, surface) in self.unsent.iter_mut().zip(job.surfaces) {
             if let Some(surface) = surface {
@@ -368,14 +444,21 @@ impl App {
             return false;
         };
         let typing = egui.typing.active();
+        let mut flush = false;
         let taken = match event {
             WindowEvent::CursorMoved { position, .. } => {
                 egui.pointer_moved(*position);
                 false
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                egui.pointer_button(*button, *state == ElementState::Pressed);
-                false
+                let pressed = *state == ElementState::Pressed;
+                egui.pointer_button(*button, pressed);
+                // A click in the box being typed in is the text field's: it
+                // places the caret or selects. The panel never sees it, or
+                // its hit-test would commit the box and open it again.
+                let inside = typing && egui.pointer_in_typing_box();
+                flush = typing && pressed && !inside;
+                inside
             }
             WindowEvent::CursorLeft { .. } => {
                 egui.pointer_left();
@@ -383,12 +466,44 @@ impl App {
             }
             other => egui.on_window_event(&r.window, other),
         };
+        // A click anywhere else acts on the panel straight away, and may
+        // commit the box: what egui still holds for it goes in first.
+        if flush {
+            self.flush_egui_typing();
+        }
         // While a box is typed in, everything the pointer and keys do can
         // move its caret or selection.
         if taken || typing {
             self.request_redraw();
         }
         taken
+    }
+
+    /// Run the display canvas's frame now, between redraws, so the box
+    /// being typed in holds everything egui has queued for it (the keys
+    /// since the last frame, and the click taking the keyboard from it)
+    /// before the click acts on the panel. The frame is not shown: its
+    /// texture updates go with the next one.
+    fn flush_egui_typing(&mut self) {
+        let display_src = self.display_canvas_src();
+        let rtg = self.rtg_present_dims;
+        let Some(r) = self.render.as_ref() else {
+            return;
+        };
+        let surface = r.surface_size;
+        let window = r.window.clone();
+        let Some(placement) = Placement::of(&main_ui_present_layout(r, display_src, rtg)) else {
+            return;
+        };
+        let Some(egui) = self.egui_overlay.as_mut() else {
+            return;
+        };
+        let light = egui.light;
+        let job = egui.display_job(&window, surface, placement, &self.ui, light);
+        egui.unsent(egui_paint::EguiJob {
+            surfaces: [Some(Box::new(job)), None],
+        });
+        self.settle_egui_typing();
     }
 
     /// Lay out what egui draws over the frame about to be presented, and
@@ -430,14 +545,16 @@ impl App {
         // in a sub-rect layout, the foot of the canvas otherwise.
         let board = main_present_layout(r, display_src, rtg);
         let bar_placement = match board.chrome_dst {
-            Some((x, y, w, _)) if w > 0 => {
-                let scale = w as f32 / FB_WIDTH as f32;
-                Some(Placement {
-                    origin: (x as f32, y as f32 - present_height() as f32 * scale),
-                    scale,
-                })
-            }
-            _ => Placement::of(&board),
+            Some(chrome) => Placement::fitting(
+                chrome,
+                (
+                    0,
+                    present_height(),
+                    FB_WIDTH,
+                    window_present_height() - present_height(),
+                ),
+            ),
+            None => Placement::of(&board),
         };
         let bar_on_egui = self.bar_on_egui();
         let egui = self.egui_overlay.as_mut().expect("made above");
@@ -479,9 +596,9 @@ impl App {
         )
     }
 
-    /// Hand what egui's text field holds back to the launcher, filtered as
-    /// the box would have filtered a key at a time, and act on the field
-    /// letting go of the keyboard.
+    /// Hand what egui's text field holds back to the launcher and act on
+    /// what became of it (`egui_view::settle`), drawing again only when
+    /// that changed what is shown.
     fn settle_egui_typing(&mut self) {
         let Some(egui) = self.egui_overlay.as_mut() else {
             return;
@@ -489,30 +606,9 @@ impl App {
         let Some(Panel::Launcher(state)) = self.ui.panel.as_mut() else {
             return;
         };
-        let typing = &mut egui.typing;
-        if typing.target().is_none() || typing.target() != state.editing() {
-            return;
+        if egui_view::settle(&mut egui.typing, state) {
+            self.request_redraw();
         }
-        let kept = state.edit_filtered(typing.text());
-        if kept != typing.text() {
-            typing.set_text(kept.clone());
-        }
-        // Kept in step, so anything on the panel that commits first (as a
-        // click elsewhere does) takes what is in the box now.
-        state.set_edit_buffer(kept);
-        match typing.take_release() {
-            Some(egui_view::Release::Commit) => {
-                state.edit_commit();
-                // Refused: the reason is in the status line, and the text
-                // stays in the box, with the keyboard, to be put right.
-                if state.editing().is_some() {
-                    typing.refocus();
-                }
-            }
-            Some(egui_view::Release::Cancel) => state.edit_cancel(),
-            None => {}
-        }
-        self.request_redraw();
     }
 }
 
@@ -522,6 +618,52 @@ mod tests {
     use crate::config::MachineModel;
     use crate::video::launcher::{LauncherTab, MachineSetup};
     use LauncherField as F;
+
+    /// The canvas is placed axis by axis, as the cursor mapping inverts
+    /// it: a layout that scales across and down by different whole
+    /// multiples (PAL TV integer scaling) puts each canvas pixel where the
+    /// pointer finds it, and the window rect handed to the IME lands on the
+    /// same physical pixels.
+    #[test]
+    fn placement_follows_the_cursor_mapping_on_both_axes() {
+        // A 716x570 canvas at 4x across and 3.5x down, letterboxed.
+        let layout = PresentLayout {
+            src_canvas: (0, 0, 716, 570),
+            display_dst: (488, 82, 2864, 1995),
+            filter: scaler::ScaleFilter::Nearest,
+            chrome_dst: None,
+            factors: None,
+        };
+        let placement = Placement::of(&layout).expect("a placement");
+        assert_eq!((placement.scale, placement.scale_y), (4.0, 3.5));
+        for (x, y) in [(0usize, 0usize), (300, 380), (715, 569), (357, 12)] {
+            // The middle of canvas pixel (x, y), drawn where the placement
+            // says, is where the cursor mapping finds that pixel.
+            let phys = PhysicalPosition::new(
+                f64::from(placement.origin.0 + (x as f32 + 0.5) * placement.scale),
+                f64::from(placement.origin.1 + (y as f32 + 0.5) * placement.scale_y),
+            );
+            assert_eq!(
+                layout.cursor_position(phys),
+                Some((x as i32, y as i32)),
+                "canvas pixel ({x}, {y})"
+            );
+            let back = placement.canvas(phys);
+            assert_eq!((back.x.floor() as usize, back.y.floor() as usize), (x, y));
+        }
+        // At a window scale of 2, a canvas rect reaches the window in
+        // logical points: physical pixels halved.
+        let rect = egui::Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(30.0, 40.0));
+        let window = placement.window_rect(rect, 2.0);
+        assert_eq!(
+            window.min,
+            egui::pos2((488.0 + 40.0) / 2.0, (82.0 + 70.0) / 2.0)
+        );
+        assert_eq!(
+            window.max,
+            egui::pos2((488.0 + 120.0) / 2.0, (82.0 + 140.0) / 2.0)
+        );
+    }
 
     pub(super) fn ui_state(state: LauncherState) -> UiState {
         UiState {

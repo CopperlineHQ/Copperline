@@ -64,8 +64,12 @@ pub(in crate::video) struct Typing {
     focus: bool,
     /// The box held the keyboard at the end of the last frame.
     had_focus: bool,
-    /// The box was on the page this frame.
-    drawn: bool,
+    /// The box was on the page this frame, and where: a click there is
+    /// the text field's (placing the caret), not the panel's.
+    drawn: Option<Rect>,
+    /// The field asked for the keyboard, took it or let it go this frame:
+    /// what it shows catches up on the next.
+    unsettled: bool,
     release: Option<Release>,
 }
 
@@ -92,29 +96,66 @@ impl Typing {
         self.target.is_some()
     }
 
-    pub(in crate::video) fn target(&self) -> Option<EditTarget> {
-        self.target
-    }
-
-    pub(in crate::video) fn text(&self) -> &str {
-        &self.text
-    }
-
-    /// Replace the text, as the launcher's rules for the box allow it.
-    pub(in crate::video) fn set_text(&mut self, text: String) {
-        self.text = text;
-    }
-
     /// Give the box the keyboard back: what was typed was refused, and is
     /// there to be put right.
-    pub(in crate::video) fn refocus(&mut self) {
+    fn refocus(&mut self) {
         self.focus = true;
         self.had_focus = false;
     }
 
-    pub(in crate::video) fn take_release(&mut self) -> Option<Release> {
-        self.release.take()
+    /// Whether canvas point `pos` is on the box being typed in, as drawn
+    /// this frame.
+    pub(in crate::video) fn contains(&self, pos: egui::Pos2) -> bool {
+        self.drawn
+            .is_some_and(|rect| rect.contains((pos.x.floor() as i32, pos.y.floor() as i32)))
     }
+}
+
+/// Hand what the text field holds back to the launcher -- filtered as the
+/// box would have filtered a key at a time -- and act on the field letting
+/// go of the keyboard, or on the box having left the page. Returns whether
+/// the panel needs drawing again to show what came of it; an idle field
+/// asks for nothing.
+pub(in crate::video) fn settle(typing: &mut Typing, state: &mut LauncherState) -> bool {
+    if typing.target.is_none() || typing.target != state.editing() {
+        return false;
+    }
+    let mut redraw = std::mem::take(&mut typing.unsettled);
+    let kept = state.edit_filtered(&typing.text);
+    if kept != typing.text {
+        typing.text = kept.clone();
+        redraw = true;
+    }
+    // Kept in step, so anything on the panel that commits first (as a
+    // click elsewhere does) takes what is in the box now.
+    state.set_edit_buffer(kept);
+    if typing.drawn.is_none() {
+        // The box left the page with the keyboard still in it (its row
+        // scrolled out of view): nothing can be typed into a field that is
+        // not there, so it is let go of as a click elsewhere would be. A
+        // value the launcher refuses is dropped, the refusal on the status
+        // line, since there is no box left to put it right in.
+        state.edit_commit();
+        if state.editing().is_some() {
+            state.edit_cancel();
+        }
+        typing.follow(state);
+        return true;
+    }
+    match typing.release.take() {
+        Some(Release::Commit) => {
+            state.edit_commit();
+            // Refused: the reason is in the status line, and the text stays
+            // in the box, with the keyboard, to be put right.
+            if state.editing().is_some() {
+                typing.refocus();
+            }
+        }
+        Some(Release::Cancel) => state.edit_cancel(),
+        None => return redraw,
+    }
+    typing.follow(state);
+    true
 }
 
 /// Textures for pictures drawn on the panel (cover art), by what they
@@ -350,7 +391,7 @@ impl Canvas for EguiCanvas<'_> {
         if self.typing.target != Some(target) {
             return false;
         }
-        self.typing.drawn = true;
+        self.typing.drawn = Some(box_rect);
         let left = x.saturating_sub(box_rect.x).min(i8::MAX as usize) as i8;
         let top = y.saturating_sub(box_rect.y).min(i8::MAX as usize) as i8;
         let edit = egui::TextEdit::singleline(&mut self.typing.text)
@@ -388,6 +429,12 @@ impl Canvas for EguiCanvas<'_> {
             // It never took the keyboard: ask again.
             self.typing.focus = true;
         }
+        // The keyboard asked for, taken or let go: the caret shows (or
+        // goes) on the next frame, and a request still out needs one to be
+        // granted in.
+        if asked || self.typing.focus || focused != self.typing.had_focus {
+            self.typing.unsettled = true;
+        }
         self.typing.had_focus = focused;
         true
     }
@@ -405,7 +452,7 @@ pub(in crate::video) fn show_display(
     typing: &mut Typing,
     images: &mut Images,
 ) {
-    typing.drawn = false;
+    typing.drawn = None;
     set_nav_light(light.focus, light.mix, light.open, light.elsewhere);
     let mut canvas = EguiCanvas::new(ui, typing, images);
     let launcher = state
@@ -824,9 +871,9 @@ mod tests {
         // The first frame asks for the keyboard, the next has it.
         frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
         frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
-        assert_eq!(typing.target(), Some(EditTarget::WindowPosition));
-        assert!(typing.drawn, "the box is on the page");
-        assert_eq!(typing.text(), "10, 20");
+        assert_eq!(typing.target, Some(EditTarget::WindowPosition));
+        assert!(typing.drawn.is_some(), "the box is on the page");
+        assert_eq!(typing.text, "10, 20");
         frame(
             &ctx,
             &mut ui,
@@ -834,8 +881,8 @@ mod tests {
             &mut images,
             vec![egui::Event::Text("5".into())],
         );
-        assert_eq!(typing.text(), "10, 205", "typed at the end");
-        assert_eq!(typing.take_release(), None, "and still typing");
+        assert_eq!(typing.text, "10, 205", "typed at the end");
+        assert_eq!(typing.release.take(), None, "and still typing");
 
         // The launcher letting go of the box lets go of the field.
         state(&mut ui).edit_cancel();
@@ -860,20 +907,128 @@ mod tests {
             state(&mut ui).begin_edit_window_position();
             frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
             frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
-            assert_eq!(typing.take_release(), None);
+            assert_eq!(typing.release.take(), None);
             frame(&ctx, &mut ui, &mut typing, &mut images, vec![key(pressed)]);
-            assert_eq!(typing.take_release(), Some(release), "{pressed:?}");
-            assert_eq!(typing.take_release(), None, "told once");
+            assert_eq!(typing.release.take(), Some(release), "{pressed:?}");
+            assert_eq!(typing.release.take(), None, "told once");
 
             // Asked back, the field has the keyboard again next frame and
             // reports nothing until it is let go once more.
             typing.refocus();
             frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
             frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
-            assert_eq!(typing.take_release(), None, "{pressed:?}");
+            assert_eq!(typing.release.take(), None, "{pressed:?}");
             frame(&ctx, &mut ui, &mut typing, &mut images, vec![key(pressed)]);
-            assert_eq!(typing.take_release(), Some(release), "{pressed:?}");
+            assert_eq!(typing.release.take(), Some(release), "{pressed:?}");
         }
+    }
+
+    /// Settling hands the field's outcome to the launcher and asks for a
+    /// frame only when that changes what is shown: an open field left alone
+    /// asks for none, Return closes the box, and a click lands on the box
+    /// itself only inside it.
+    #[test]
+    fn settling_draws_again_only_when_something_changed() {
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        let (mut typing, mut images) = (Typing::default(), Images::default());
+        let mut ui = launcher();
+        state(&mut ui).begin_edit_window_position();
+        state(&mut ui).set_edit_buffer("10, 20".into());
+        // The frame that asks for the keyboard needs one more to show the
+        // caret; after that an idle field asks for nothing.
+        frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
+        assert!(settle(&mut typing, state(&mut ui)), "the caret is to come");
+        frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
+        assert!(!settle(&mut typing, state(&mut ui)), "an idle field");
+        frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
+        assert!(!settle(&mut typing, state(&mut ui)), "and still idle");
+
+        // The box answers for clicks inside it and nowhere else.
+        let rect = typing.drawn.expect("the box is on the page");
+        let middle = egui::pos2((rect.x + rect.w / 2) as f32, (rect.y + rect.h / 2) as f32);
+        assert!(typing.contains(middle));
+        assert!(!typing.contains(egui::pos2(rect.x as f32 - 1.0, middle.y)));
+        assert!(!typing.contains(egui::pos2(middle.x, (rect.y + rect.h) as f32)));
+
+        // Typing reaches the launcher's buffer; Return commits it there.
+        frame(
+            &ctx,
+            &mut ui,
+            &mut typing,
+            &mut images,
+            vec![egui::Event::Text("5".into())],
+        );
+        settle(&mut typing, state(&mut ui));
+        assert_eq!(state(&mut ui).edit_buffer(), "10, 205");
+        frame(
+            &ctx,
+            &mut ui,
+            &mut typing,
+            &mut images,
+            vec![key(egui::Key::Enter)],
+        );
+        assert!(settle(&mut typing, state(&mut ui)), "the box closed");
+        assert_eq!(state(&mut ui).editing(), None);
+        assert!(!typing.active(), "and the keys are the panel's again");
+        assert_eq!(
+            state(&mut ui).row_value(launcher::LauncherField::WindowPosition),
+            "10, 205"
+        );
+    }
+
+    /// A box that leaves the page with the keyboard in it -- a boot
+    /// priority scrolled out of view -- lets go of it, as a click
+    /// elsewhere would, rather than holding every key with no field to
+    /// type them into.
+    #[test]
+    fn a_box_scrolled_out_of_view_lets_go_of_the_keyboard() {
+        use launcher::LauncherField as F;
+        let ctx = egui::Context::default();
+        configure(&ctx);
+        let (mut typing, mut images) = (Typing::default(), Images::default());
+        let mut ui = launcher();
+        let launcher_state = state(&mut ui);
+        launcher_state
+            .setup
+            .select_model(Some(crate::config::MachineModel::A1200));
+        launcher_state.setup.cycle(F::ScsiController, true);
+        launcher_state.setup.cycle(F::LideBoard, true);
+        // Ten drives: one more than the page shows.
+        for f in [
+            F::IdeMaster,
+            F::LideDrive0,
+            F::ScsiUnit0,
+            F::ScsiUnit1,
+            F::ScsiUnit2,
+            F::ScsiUnit3,
+            F::ScsiUnit4,
+            F::ScsiUnit5,
+            F::ScsiUnit6,
+        ] {
+            launcher_state
+                .setup
+                .set_path(f, std::path::PathBuf::from("disk.hdf"));
+        }
+        launcher_state.tab = LauncherTab::BootPriority;
+        assert!(launcher_state.setup.boot_order_scrolls());
+        launcher_state.begin_edit_drive_bootpri(F::IdeMasterBoot);
+        assert_eq!(
+            launcher_state.editing(),
+            Some(EditTarget::DriveBootpri(F::IdeMasterBoot))
+        );
+        frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
+        frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
+        settle(&mut typing, state(&mut ui));
+        assert!(typing.drawn.is_some(), "the box is on the page");
+
+        // The wheel takes its row out of view.
+        state(&mut ui).setup.scroll_boot_order(3);
+        frame(&ctx, &mut ui, &mut typing, &mut images, Vec::new());
+        assert!(typing.drawn.is_none(), "the box has gone");
+        assert!(settle(&mut typing, state(&mut ui)));
+        assert_eq!(state(&mut ui).editing(), None, "the edit is over");
+        assert!(!typing.active(), "and the keys are the panel's again");
     }
 
     /// The font made from the bitmap lays text out in the bitmap's own
