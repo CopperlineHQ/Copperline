@@ -43,6 +43,12 @@ impl Demon {
         self.phase = Phase::Vector(4);
     }
 
+    fn reset_triggered(&self, addr: u32, size: usize) -> bool {
+        // The CPLD decodes A23..A1. A long access at $6 puts the word at
+        // $8 on the bus during its second cycle.
+        self.reset_armed && addr < 10 && addr + size as u32 > 8
+    }
+
     fn program_access(&mut self, addr: u32) {
         if self.phase == Phase::Running && addr.wrapping_sub(BASE) >= BANK_SIZE as u32 {
             self.phase = Phase::Hidden;
@@ -124,7 +130,7 @@ impl Cartridge {
         if fetch {
             demon.program_access(addr);
         }
-        if demon.reset_armed && addr & !1 == 8 {
+        if demon.reset_triggered(addr, size) {
             self.trigger_demon(3);
         } else if demon.triggers & 2 != 0 && addr <= 0xbfe001 && 0xbfe001 - addr < size as u32 {
             self.trigger_demon(1);
@@ -144,7 +150,7 @@ impl Cartridge {
         let Some(demon) = self.demon.as_ref() else {
             return;
         };
-        if demon.reset_armed && addr & !1 == 8 {
+        if demon.reset_triggered(addr, size) {
             self.trigger_demon(3);
         } else if demon.triggers & 1 != 0 && addr <= 0xbfd100 && 0xbfd100 - addr < size as u32 {
             self.trigger_demon(2);
@@ -168,6 +174,27 @@ mod tests {
         let mut eprom = vec![0xff; ROM_SIZE];
         eprom[0x7c..0x80].copy_from_slice(&0x00a80100u32.to_be_bytes());
         Cartridge::demon2(&eprom).unwrap()
+    }
+
+    #[test]
+    fn demon2_reset_decodes_either_lane_of_any_access_touching_the_word_at_8() {
+        for (addr, size, triggers) in [
+            (4, 4, false),
+            (6, 2, false),
+            (6, 4, true),
+            (8, 1, true),
+            (9, 1, true),
+            (8, 2, true),
+            (8, 4, true),
+            (10, 2, false),
+        ] {
+            let mut c = cart();
+            c.observe_read(addr, size, false);
+            assert_eq!(c.nmi_pending(), triggers, "read {size} at {addr:#x}");
+            let mut c = cart();
+            c.observe_write(addr, size, 0);
+            assert_eq!(c.nmi_pending(), triggers, "write {size} at {addr:#x}");
+        }
     }
 
     #[test]

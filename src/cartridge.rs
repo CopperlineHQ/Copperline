@@ -198,7 +198,7 @@ impl std::error::Error for FreezeError {}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Cartridge {
     model: CartridgeModel,
-    /// The fitted cartridge’s ROM and workspace.
+    /// The fitted cartridge's ROM and workspace.
     bank: Vec<u8>,
     /// The last value written to, or read from, each custom register
     /// (`$DFF000` + offset), 512 bytes big-endian.

@@ -3372,6 +3372,10 @@ impl M68kMachine {
     /// the immediate, and the probe false-matches -- Kickstart jumps into
     /// empty space. `[cpu] jit` on these CPUs falls back to the precise
     /// loop (logged once at build).
+    ///
+    /// DeMoN II also needs the precise loop to observe its bus triggers,
+    /// shadow CPU writes to custom registers and hide its bank on an
+    /// instruction fetch outside the cartridge.
     fn jit_fast_path_ok(&self) -> bool {
         if matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010) {
             return false;

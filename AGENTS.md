@@ -137,7 +137,7 @@ repeat.
 | `--defer-disk-insert SECS DFN` | Start with DFN empty and insert its configured disk at SECS |
 | `--eject-disk-after SECS DFN` | Eject the disk in `df0`..`df3`, leaving the drive empty (as the status-bar eject button) |
 | `--insert-cd-after SECS PATH` | Swap the CD image in the machine's CD drive (CDTV/CD32/SCSI CD-ROM) |
-| `--freeze-after SECS` | Press the freezer cartridge's button (`--cartridge hrtmon`) |
+| `--freeze-after SECS` | Press the fitted freezer cartridge's button |
 | `--expect-screenshot SECS PATH [TOL]` | Compare the frame at SECS with the PNG at PATH (TOL = fraction or pixel count); mismatch writes `<stem>.actual.png` + `<stem>.diff.png`, exit status 3 at run end |
 | `--script FILE` | Same directives from a file, one per line, no leading dashes (`type SECS TEXT`, `expect-screenshot ...` included) |
 | `--record-input PATH` | Record all machine-bound input as a replayable script |

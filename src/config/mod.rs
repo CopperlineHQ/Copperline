@@ -3535,9 +3535,10 @@ pub struct ConfigOverrides {
     /// Show the MT-32's front panel (`--mt32-panel`). Same as
     /// `[serial] mt32_panel`.
     pub mt32_panel: Option<bool>,
-    /// Freezer cartridge (`--cartridge MODEL`): "none" or "hrtmon". Same
-    /// parser as `[cartridge] model`.
+    /// Freezer model (`--cartridge none|hrtmon|demon2`). Same parser as
+    /// `[cartridge] model`.
     pub cartridge: Option<String>,
+    /// Cartridge image (`--cartridge-rom PATH`). Same as `[cartridge] rom`.
     pub cartridge_rom: Option<String>,
     /// Real host disks given to the machine (`--host-disk DEVICE [ATTACH]`, or
     /// `--host-disk-read-only` for the protected form), in command-line order.

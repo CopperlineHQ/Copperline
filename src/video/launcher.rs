@@ -1375,9 +1375,9 @@ impl MachineSetup {
             F::HostSocketInterface => {
                 !matches!(self.hostsocket_net.as_ref(), Some(NetConfig::Bridge { .. }))
             }
+            F::CartridgeRom => self.cartridge.is_none(),
             // Only an MP4 recording runs ffmpeg; an AVI is written by
             // Copperline itself.
-            F::CartridgeRom => self.cartridge.is_none(),
             F::RecordingFfmpeg => self.video_format != crate::config::VideoFormat::Mp4,
             // No controller, no SCSI: the ROM and unit rows go rather than
             // stand greyed under a setting most machines leave at None. They
@@ -1546,7 +1546,6 @@ impl MachineSetup {
                 reason(self.has_cd(), "needs CDTV/CD32; on a bus, use a drive slot")
             }
             F::Cd32Nvram => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
-            F::CartridgeRom => reason(self.cartridge.is_some(), "Fit a freezer cartridge"),
             F::FmvRom => reason(self.model == Some(MachineModel::Cd32), "CD32 only"),
             F::Df0Image | F::Df0WriteProtect => reason(self.floppy_drives >= 1, "drive off"),
             F::Df1Image | F::Df1WriteProtect => reason(self.floppy_drives >= 2, "drive off"),

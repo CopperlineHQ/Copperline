@@ -5148,10 +5148,12 @@ fn the_freezer_cartridge_row_cycles_and_round_trips() {
     let mut s = MachineSetup::default();
     // No cartridge is the baseline, so nothing is written until one is
     // fitted.
+    assert!(s.row_hidden(LauncherField::CartridgeRom));
     assert_eq!(s.value_label(LauncherField::Cartridge), "None");
     assert!(s.to_raw().cartridge.model.is_none());
 
     s.cycle(LauncherField::Cartridge, true);
+    assert!(!s.row_hidden(LauncherField::CartridgeRom));
     assert_eq!(s.value_label(LauncherField::Cartridge), "HRTMon");
     let raw = s.to_raw();
     assert_eq!(raw.cartridge.model.as_deref(), Some("hrtmon"));
@@ -5165,6 +5167,7 @@ fn the_freezer_cartridge_row_cycles_and_round_trips() {
     assert_eq!(back.value_label(LauncherField::Cartridge), "HRTMon");
 
     s.cycle(LauncherField::Cartridge, true);
+    assert!(!s.row_hidden(LauncherField::CartridgeRom));
     assert_eq!(s.value_label(LauncherField::Cartridge), "DeMoN II");
     assert!(s.build_config().is_err());
     s.set_path(
@@ -5178,6 +5181,7 @@ fn the_freezer_cartridge_row_cycles_and_round_trips() {
         Some(std::path::Path::new("/roms/demon.rom"))
     );
     s.cycle(LauncherField::Cartridge, true);
+    assert!(s.row_hidden(LauncherField::CartridgeRom));
     assert_eq!(s.value_label(LauncherField::Cartridge), "None");
     assert!(s.to_raw().cartridge.model.is_none());
 

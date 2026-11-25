@@ -4014,14 +4014,16 @@ running software at any time.
   [Where bundled files are found](#bundled-assets)), built from upstream
   source (`hrtmon-rom/README.md`) under GPL-2.0-or-later. `"none"` (the
   default) leaves the slot empty.
-- `rom` replaces the bundled image with an HRTMon-compatible cartridge image
-  of your own, recognized by its `HRT!` tag at offset 0 or 4. For DeMoN II, supply the board's 256 KiB EPROM image here.
-- `model = "demon2"` fits the A500/A500+ sidecar with 1 MiB of cartridge RAM.
-  Use the DeMoN II hardware build of Action Replay 5. The cartridge boots in stealth mode with a read-only image and
-  a disconnected USB port. The monitor
-  can enter on reset, on the freeze button, or on its programmed CIA triggers.
-  The image can also be selected with `--cartridge demon2 --cartridge-rom PATH`
-  or the **Cartridge ROM** row in the launcher.
+- `model = "demon2"` fits the A500/A500+ sidecar with 1 MiB of cartridge
+  RAM. It boots in stealth mode with a read-only EPROM and a disconnected
+  USB port. The monitor can enter on reset, on the freeze button, or on
+  its programmed CIA triggers.
+- `rom` requires a fitted cartridge model. For HRTMon, it optionally
+  replaces the bundled image with a compatible one bearing the `HRT!` tag
+  at offset 0 or 4. For DeMoN II, supply the board's 256 KiB EPROM image,
+  such as the DeMoN II hardware build of Action Replay 5. Select it with
+  `--cartridge demon2 --cartridge-rom PATH` or the launcher's
+  **Cartridge ROM** row.
 
 `--cartridge hrtmon` fits the cartridge from the command line, and the
 launcher's **System -> Freezer cartridge** row sets it.
