@@ -159,6 +159,19 @@ for the earlier release notes.
   any machine, a long at an odd register address (`move.l d0,$dff181`)
   runs as a byte, a word and a byte and reaches all three registers; it
   used to run as two words and miss the third.
+- 68010: conditional branches take the 68010's own times. A Bcc that is
+  not taken costs 6 clocks with a byte displacement and 10 with a word,
+  and outside loop mode a DBcc costs 10 clocks with its condition true and
+  16 when its count expires; all four ran on the 68000's 8, 12, 12 and 14.
+  A `dbra` delay loop is two clocks longer per exit and a fall-through
+  `bne` two clocks shorter, which moves beam-timed code on a 68010 by up
+  to a colour clock per branch.
+- 68010: a MOVE from memory to an absolute long address
+  (`move.l (a0),$dff180`) writes before its second extension-word
+  prefetch, as on the 68000. The write used to come one bus cycle late.
+- 68010: a MOVE to `-(An)` prefetches before it writes and writes a long
+  low word first, as on the 68000. It used to write first, high word
+  first, and take two clocks too long.
 - ECS and AGA, tall programmable screen modes (DblPAL, DblNTSC,
   Productivity and others):
   - VPOSR and VPOSW carry vertical bits 9 and 10, so beam polls no longer

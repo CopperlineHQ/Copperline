@@ -43,7 +43,7 @@ writeback of a read-modify-write instruction. The rest arrive at the bus
 whole: MOVE.L to an absolute address, MOVE.L from memory to `(An)`,
 `d16(An)` or `d8(An,Xn)`, MOVEM.L to memory, a long stack push (BSR, JSR,
 LINK, PEA), and every long write of a 68010 or a 68020+ but the 68010's
-read-modify-write writebacks. The CPU bus
+MOVE.L to `-(An)` and its read-modify-write writebacks. The CPU bus
 splits those into the two word cycles before the address decode, so each
 cycle also selects what its own address selects. Only a 68020 or later can
 run a long at an odd address (the 68000 and 68010 take an address error

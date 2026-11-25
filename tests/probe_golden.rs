@@ -70,6 +70,9 @@ enum Machine {
     /// Fixed-clock JIT accelerator with local fast RAM.
     Jit,
     Ocs,
+    /// The OCS A500 shape with a 68010 fitted, for probes of that
+    /// processor's own bus timing.
+    Ocs68010,
     /// ECS Agnus (8372A) beside an OCS Denise, the late-A500 pairing.
     Ecs,
     /// ECS Agnus beside an ECS Denise (8373), for probes of the Denise
@@ -174,7 +177,7 @@ fn build_adf(boot: &[u8], program: &[u8]) -> Vec<u8> {
 fn probe_config(adf: &Path, machine: Machine) -> String {
     let chipset = match machine {
         Machine::Jit | Machine::A3000 => "revision = \"ECS\"\n",
-        Machine::Ocs => "revision = \"OCS\"\n",
+        Machine::Ocs | Machine::Ocs68010 => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
         Machine::EcsDenise => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"ECS\"\n",
         Machine::Aga
@@ -190,6 +193,7 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         Machine::Ocs | Machine::Ecs | Machine::EcsDenise => {
             ("68000", "chip = \"512K\"\nslow = \"512K\"\n")
         }
+        Machine::Ocs68010 => ("68010", "chip = \"512K\"\nslow = \"512K\"\n"),
         Machine::Aga | Machine::AgaNtsc | Machine::A1200 => ("68EC020", "chip = \"2M\"\n"),
     };
     let acceleration = if matches!(machine, Machine::Jit) {
@@ -429,7 +433,7 @@ fn run_probe(p: &Probe) {
             assert_eq!(band(8 + fine), (left + fine, right + fine), "both {fine}");
         }
     }
-    if name == "regprobe-longwrite" {
+    if name == "regprobe-longwrite" || name == "regprobe-longwrite-68010" {
         assert_eq!((actual.width, actual.height), (716, 570));
         // First and last bar column of a row. A colour clock is four
         // columns at this pitch.
@@ -822,6 +826,11 @@ probe_tests! {
     // it, and low word first to -(An); run_probe checks the edges against
     // a word write.
     golden_regprobe_longwrite => probe("regprobe-longwrite", "regprobe-longwrite.bin", 16.0);
+    // The same on a 68010. The band from memory to an absolute address
+    // also holds the Class 2 MOVE order (the write before the second
+    // extension-word prefetch), the predecrement band its prefetch before
+    // the write, and the delay loop the 68010's own DBcc times.
+    golden_regprobe_longwrite_68010 => Probe { name: "regprobe-longwrite-68010", program: "regprobe-longwrite.bin", seconds: 16.0, machine: Machine::Ocs68010 };
     // A request unmasked in INTENA for two instructions still reaches the
     // CPU, on the 68000 and on the 68EC020 (the wait-loop class that keeps
     // a request pending and opens a window for its handler).

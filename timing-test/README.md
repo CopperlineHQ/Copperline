@@ -637,6 +637,24 @@ capture); after it,
 `tools/vamiga-aga-compare.py` scores the render against vAmiga 4.4 and
 5.0b1 `A500_OCS_1MB` at 0 of 202,628 pixels (dy=2, dx=0).
 
+`regprobe-longwrite-68010` runs the same bootblock on a 68010 and is new
+with the 68010's own conditional branch times and Class 2 MOVE order in
+the CPU core. A 68010 leaves the `dbra` delay that ends each bar two
+clocks later than a 68000, its `move.l (a2),$dff180` writes before
+the second extension-word prefetch, and its `move.l grey(pc),-(a1)`
+prefetches before it writes and writes the low word first. With the
+68000's branch times, the absolute write after both prefetches and the
+predecrement write first and whole, the render differed from vAmiga 4.4
+`A500_OCS_1MB` with `cpu set REVISION 68010` in 624 pixels (every bar's
+right edge and both of those bands' left edges); with only the
+predecrement sequence missing, in 192. It now scores 0 of 202,628
+(dy=2, dx=0). No existing render moves.
+
+The predecrement band restores its pointer with LEA, not ADDQ.L: the
+core runs a 68010 ADDQ.L to an address register in 4 clocks where vAmiga
+takes 8, which is not addressed here and would have put that band's right
+edge two colour clocks early.
+
 The A500 timing branch also refreshes previously stale references verified
 byte-identical with binaries before and after its v1 rebase: timing-table
 rows 26, 27, 28 and 31 change from 6230/6428/3A23/131F to
