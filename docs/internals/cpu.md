@@ -2,12 +2,13 @@
 
 ## The wrapper and the bus adapter
 
-`M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core with
-locked operand bus cycles and serializable MMU translations.
+`M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core: release
+0.18.0 with the 68010's conditional branch times and MOVE bus order on
+top.
 The exact commit is also tagged
-[copperline-buster-0.17.3-1](https://github.com/CopperlineHQ/m68k-rs/tree/copperline-buster-0.17.3-1).
+[copperline-68010-0.18.0-2](https://github.com/CopperlineHQ/m68k-rs/tree/copperline-68010-0.18.0-2).
 Switch back to the published crate when a release includes
-[upstream PR #269](https://github.com/benletchford/m68k-rs/pull/269).
+[upstream PR #271](https://github.com/benletchford/m68k-rs/pull/271).
 
 The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
@@ -551,7 +552,24 @@ before its write, long register shifts/rotates use the same base-8 cycle
 total as the 68000 rather than the later barrel-shifter timing, a
 format-0 RTE is 24 clocks (the format word is read once, not re-read),
 and an interrupt dispatch is 46 clocks (12 internal before the four-word
-format-0 frame) against the 68000's 44. STOP semantics are shared with
+format-0 frame) against the 68000's 44. The conditional branches follow
+the 68010's own table (M68000UM Table 9-15, against Table 8-9 for the
+68000): a Bcc that is not taken costs 6 clocks with a byte displacement
+and 10 with a word (8 and 12 on the 68000), and outside loop mode a DBcc
+costs 10 with its condition true (12) and 16 when its count expires (14).
+The manual gives totals only; the internal clocks sit where Moira puts
+them, two before the first bus cycle on every path and the expired
+DBcc's extra two between its discarded read and the refill. A taken
+branch is 10 clocks on both processors. A MOVE from memory to an
+absolute long address keeps the 68000's Class 2 order: the write follows
+the first extension-word prefetch, and the second extension-word
+prefetch and the final prefetch follow the write. A MOVE to `-(An)`
+keeps the 68000's sequence too: the final prefetch comes before the
+write, a long writes its low word first, and the address computation
+costs no clocks of its own. Moira is the reference for both orders on
+the 68010; neither is measured on 68010 silicon. The golden probe
+`regprobe-longwrite-68010` holds all three against the beam and matches
+vAmiga 4.4's 68010 pixel for pixel. STOP semantics are shared with
 the 68000: the SR operand is loaded verbatim (a single-stepped STOP
 observes S and T exactly as written; the SingleStepTests 68000 fixtures
 pin this), and an S-clear SR stops only momentarily -- at the next

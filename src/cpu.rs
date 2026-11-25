@@ -5061,10 +5061,21 @@ impl CpuBus {
             }
         }
         if let Some(off) = self.custom_reg_page_offset(addr) {
-            if size == 4 && self.bus.register_port_narrower_than_chip_ram() {
-                // Two word cycles on the registers' 16-bit port. Each is
-                // decoded and sampled on its own, so the second word comes
-                // one cycle later and from whatever its address selects.
+            if size == 4 {
+                // The registers are a 16-bit port on every board, so a long
+                // access is two word cycles. Each is decoded and sampled on
+                // its own, so the second word comes one cycle later and
+                // from whatever its address selects.
+                if addr & 1 != 0 {
+                    // Only a 68020 or later runs a long at an odd address
+                    // (the 68000 and 68010 take an address error first).
+                    // Its bus sizing moves it through a 16-bit port as a
+                    // byte, a word and a byte (MC68020UM 5.2.2).
+                    let first = self.read_bus_cycle(addr, 1, kind);
+                    let middle = self.read_bus_cycle(addr.wrapping_add(1), 2, kind);
+                    let last = self.read_bus_cycle(addr.wrapping_add(3), 1, kind);
+                    return ((first & 0xff) << 24) | ((middle & 0xffff) << 8) | (last & 0xff);
+                }
                 let hi = self.read_bus_cycle(addr, 2, kind);
                 let lo = self.read_bus_cycle(addr.wrapping_add(2), 2, kind);
                 return (hi << 16) | (lo & 0xffff);
@@ -5590,14 +5601,21 @@ impl CpuBus {
             }
             return;
         }
-        if size == 4
-            && self.bus.register_port_narrower_than_chip_ram()
-            && self.custom_reg_page_offset(addr).is_some()
-        {
-            // Two word cycles on the registers' 16-bit port: each word is
-            // decoded and lands on its own cycle. Each cycle settles the
-            // translation-cache exclusions for what it reaches.
+        if size == 4 && self.custom_reg_page_offset(addr).is_some() {
+            // The registers are a 16-bit port on every board, so a long
+            // write is two word cycles: each word is decoded and lands on
+            // its own cycle, the first one whole cycle before the second.
+            // Each cycle settles the translation-cache exclusions for what
+            // it reaches.
             self.jit_cache_exclusions_current = exclusions_were_current;
+            if addr & 1 != 0 {
+                // A 68020 or later at an odd address: a byte, a word and a
+                // byte (MC68020UM 5.2.2).
+                self.write_bus_cycle(addr, 1, value >> 24);
+                self.write_bus_cycle(addr.wrapping_add(1), 2, (value >> 8) & 0xffff);
+                self.write_bus_cycle(addr.wrapping_add(3), 1, value & 0xff);
+                return;
+            }
             self.write_bus_cycle(addr, 2, value >> 16);
             self.write_bus_cycle(addr.wrapping_add(2), 2, value & 0xffff);
             return;
@@ -9727,6 +9745,127 @@ mod tests {
         assert_eq!(positions.len(), 2);
         assert_ne!(positions[0], positions[1]);
         assert_eq!(positions, landed(&words));
+    }
+
+    #[test]
+    fn long_register_access_is_two_word_cycles_on_a_68000_board() {
+        // The registers are a 16-bit port on the OCS and ECS boards too.
+        // The 68000 core runs some long writes as word cycles itself
+        // (MOVE.L from a register to d16(An), for one) and hands the rest
+        // to the bus whole (MOVE.L to an absolute address, MOVE.L from
+        // memory, MOVEM.L, every 68010 MOVE.L): those are the same two
+        // cycles.
+        let machine = || {
+            let mut machine = test_bus(reset_rom(0, 0));
+            machine.set_cpu_bus_arbitration_enabled(true);
+            assert!(!machine.cpu_short_bus_cycle());
+            // Clear of the refresh, disk, audio and sprite slots.
+            machine.advance_chipset(0x40);
+            cpu_bus(machine)
+        };
+        let landed = |b: &CpuBus| {
+            b.bus
+                .current_render_events()
+                .iter()
+                .map(|event| (event.vpos, event.hpos, event.offset, event.value))
+                .collect::<Vec<_>>()
+        };
+
+        // A long write lands each word on its own cycle, where a word
+        // write of that register lands it: the first word two colour
+        // clocks before the second.
+        let mut long = machine();
+        let mut words = machine();
+        long.write_long(0xdff180, 0x0123_0456);
+        words.write_word(0xdff180, 0x0123);
+        words.write_word(0xdff182, 0x0456);
+        assert_eq!(long.bus.emulated_cck(), words.bus.emulated_cck());
+        let positions = landed(&long);
+        assert_eq!(positions.len(), 2);
+        assert_eq!((positions[0].2, positions[0].3), (0x180, 0x0123));
+        assert_eq!((positions[1].2, positions[1].3), (0x182, 0x0456));
+        assert_eq!(positions[0].0, positions[1].0);
+        assert_eq!(positions[0].1 + 2, positions[1].1);
+        assert_eq!(positions, landed(&words));
+
+        // The same for a pair in Agnus's two-cycle class.
+        let mut long = machine();
+        let mut words = machine();
+        long.write_long(0xdff0e0, 0x0001_2340);
+        words.write_word(0xdff0e0, 0x0001);
+        words.write_word(0xdff0e2, 0x2340);
+        let positions = landed(&long);
+        assert_eq!(positions.len(), 2);
+        assert_eq!(positions[0].1 + 2, positions[1].1);
+        assert_eq!(positions, landed(&words));
+
+        // A long read is two word reads in what it samples and in how
+        // long it takes, through the registers with a sample point of
+        // their own (CLXDAT, INTREQR) as well.
+        for addr in [0xdff004, 0xdff00c, 0xdff00e, 0xdff01c, 0xdff01e] {
+            let mut long = machine();
+            let mut words = machine();
+            let value = long.read_long(addr);
+            let hi = words.read_word(addr);
+            let lo = words.read_word(addr + 2);
+            assert_eq!(value, (u32::from(hi) << 16) | u32::from(lo), "{addr:x}");
+            assert_eq!(
+                long.bus.emulated_cck(),
+                words.bus.emulated_cck(),
+                "{addr:x}"
+            );
+        }
+    }
+
+    #[test]
+    fn odd_long_register_access_is_a_byte_a_word_and_a_byte() {
+        // A 68020 or later may run a long at an odd address, and its bus
+        // sizing moves it through the 16-bit register port as a byte, a
+        // word and a byte (MC68020UM 5.2.2). The long reaches the three
+        // registers those cycles address, as the three accesses made one
+        // by one do.
+        let machine = || {
+            let mut machine = test_bus(reset_rom(0, 0));
+            machine.set_cpu_bus_arbitration_enabled(true);
+            machine.advance_chipset(0x40);
+            cpu_bus(machine)
+        };
+        let landed = |b: &CpuBus| {
+            b.bus
+                .current_render_events()
+                .iter()
+                .map(|event| (event.vpos, event.hpos, event.offset, event.value))
+                .collect::<Vec<_>>()
+        };
+        let mut long = machine();
+        let mut parts = machine();
+        long.write_long(0xdff181, 0x1234_5678);
+        parts.write_byte(0xdff181, 0x12);
+        parts.write_word(0xdff182, 0x3456);
+        parts.write_byte(0xdff184, 0x78);
+        assert_eq!(long.bus.emulated_cck(), parts.bus.emulated_cck());
+        let positions = landed(&long);
+        assert_eq!(
+            positions.iter().map(|p| p.2).collect::<Vec<_>>(),
+            [0x180, 0x182, 0x184]
+        );
+        assert_eq!(positions[1].3, 0x3456);
+        assert_eq!(positions, landed(&parts));
+
+        for addr in [0xdff003, 0xdff005, 0xdff01d] {
+            let mut long = machine();
+            let mut parts = machine();
+            let value = long.read_long(addr);
+            let first = u32::from(parts.read_byte(addr));
+            let middle = u32::from(parts.read_word(addr + 1));
+            let last = u32::from(parts.read_byte(addr + 3));
+            assert_eq!(value, (first << 24) | (middle << 8) | last, "{addr:x}");
+            assert_eq!(
+                long.bus.emulated_cck(),
+                parts.bus.emulated_cck(),
+                "{addr:x}"
+            );
+        }
     }
 
     #[test]

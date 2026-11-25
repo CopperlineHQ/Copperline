@@ -29,6 +29,31 @@ the A1200's one-grant longword are unchanged. Test:
 `long_read_returns_its_first_word_when_that_word_cycle_completes`; golden
 probe `posprobe-long` (vAmiga-verified).
 
+A long write is two word cycles in the same way, on every board and
+whichever instruction makes it. Each word reaches its register when its own
+cycle ends, where a word write of that register starting at the same
+position lands it, so the first word lands two colour clocks before the
+second: COLOR00 of a long write to `$DFF180` changes two colour clocks
+before COLOR01, and BPLxPTH before BPLxPTL. A predecrement destination is
+the exception: MOVE.L to `-(An)` writes its low word first, so there the
+second register of the pair changes first. The 68000 core runs some long
+writes as two word cycles itself: MOVE.L from a register or an immediate to
+`(An)`, `d16(An)` and `d8(An,Xn)`, MOVE.L to `(An)+` and `-(An)`, and the
+writeback of a read-modify-write instruction. The rest arrive at the bus
+whole: MOVE.L to an absolute address, MOVE.L from memory to `(An)`,
+`d16(An)` or `d8(An,Xn)`, MOVEM.L to memory, a long stack push (BSR, JSR,
+LINK, PEA), and every long write of a 68010 or a 68020+ but the 68010's
+MOVE.L to `-(An)` and its read-modify-write writebacks. The CPU bus
+splits those into the two word cycles before the address decode, so each
+cycle also selects what its own address selects. Only a 68020 or later can
+run a long at an odd address (the 68000 and 68010 take an address error
+first); its bus sizing moves that long through the 16-bit port as a byte, a
+word and a byte (MC68020UM 5.2.2), and the split does the same, for reads
+and writes. Tests: `long_register_access_is_two_word_cycles_on_a_68000_board`,
+`aga_long_register_access_is_two_separately_decoded_word_cycles`,
+`odd_long_register_access_is_a_byte_a_word_and_a_byte`; golden
+probe `regprobe-longwrite` (vAmiga-verified).
+
 Live collision scans use the absolute pixel-comparator conversion
 `x = 4 * H - 2 * DIW_HSTART_FB0`, matching the window and sprite coordinates.
 The render-write anchor is a different domain and must not advance the
@@ -194,9 +219,10 @@ each word where a word write of that register would. Tests:
 `aga_long_register_access_is_two_separately_decoded_word_cycles`; golden
 probe `busprobe-reglong`.
 
-On the 16-bit boards a long register read already samples each word on its
-own cycle, but a long write still applies both words after its second
-cycle, so its first word lands one cycle late.
+The 16-bit boards run a long register access as the same two word cycles
+(see "Custom-register read sampling"). A 68020 or faster on one of them,
+the A3000's 68030 or an accelerator, pays the register data wait once per
+word cycle, as beside Alice.
 
 ### Buster and Super Buster
 

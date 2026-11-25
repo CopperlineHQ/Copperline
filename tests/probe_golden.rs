@@ -70,6 +70,9 @@ enum Machine {
     /// Fixed-clock JIT accelerator with local fast RAM.
     Jit,
     Ocs,
+    /// The OCS A500 shape with a 68010 fitted, for probes of that
+    /// processor's own bus timing.
+    Ocs68010,
     /// ECS Agnus (8372A) beside an OCS Denise, the late-A500 pairing.
     Ecs,
     /// ECS Agnus beside an ECS Denise (8373), for probes of the Denise
@@ -174,7 +177,7 @@ fn build_adf(boot: &[u8], program: &[u8]) -> Vec<u8> {
 fn probe_config(adf: &Path, machine: Machine) -> String {
     let chipset = match machine {
         Machine::Jit | Machine::A3000 => "revision = \"ECS\"\n",
-        Machine::Ocs => "revision = \"OCS\"\n",
+        Machine::Ocs | Machine::Ocs68010 => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
         Machine::EcsDenise => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"ECS\"\n",
         Machine::Aga
@@ -190,6 +193,7 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         Machine::Ocs | Machine::Ecs | Machine::EcsDenise => {
             ("68000", "chip = \"512K\"\nslow = \"512K\"\n")
         }
+        Machine::Ocs68010 => ("68010", "chip = \"512K\"\nslow = \"512K\"\n"),
         Machine::Aga | Machine::AgaNtsc | Machine::A1200 => ("68EC020", "chip = \"2M\"\n"),
     };
     let acceleration = if matches!(machine, Machine::Jit) {
@@ -428,6 +432,35 @@ fn run_probe(p: &Probe) {
             assert_eq!(band(4 + fine), (left, right + fine), "stop fine {fine}");
             assert_eq!(band(8 + fine), (left + fine, right + fine), "both {fine}");
         }
+    }
+    if name == "regprobe-longwrite" || name == "regprobe-longwrite-68010" {
+        assert_eq!((actual.width, actual.height), (716, 570));
+        // First and last bar column of a row. A colour clock is four
+        // columns at this pitch.
+        let edges = |y: usize| {
+            let row = &actual.data[y * 716 * 4..(y + 1) * 716 * 4];
+            let lit = |x: usize| row[x * 4..x * 4 + 3] != [0x11, 0x11, 0x33];
+            let left = (0..716).find(|&x| lit(x)).expect("bar starts");
+            let right = (0..716).rfind(|&x| lit(x)).expect("bar ends");
+            (left, right)
+        };
+        // Two rows per beam line and twelve lines per band, from line
+        // $50; row 0 is beam line $1C.
+        let band = |index: usize| edges(2 * (0x50 - 0x1c + 12 * index + 6));
+        let (left, right) = band(0);
+        // The first word of a long lands with the word write: by MOVE.L
+        // to d16(An) and to an absolute address, from a register and from
+        // memory, and by MOVEM.L.
+        for first_word in 1..6 {
+            assert_eq!(band(first_word), (left, right), "band {}", first_word + 1);
+        }
+        // The second word lands two colour clocks later, and the second
+        // of two word writes six.
+        assert_eq!(band(6), (left + 8, right), "second word of a long");
+        assert_eq!(band(7), (left + 24, right), "second word write");
+        // A predecrement long writes its low word first, so its high word
+        // is the one that lands two colour clocks later.
+        assert_eq!(band(8), (left + 8, right), "high word to -(An)");
     }
     if matches!(p.machine, Machine::AgaNtsc) {
         // Require the source probe's visible 4:4:2:1 sprite staircase even
@@ -788,6 +821,16 @@ probe_tests! {
     // CPU byte writes to a custom register latch the mirrored word (the
     // COLOR00 byte-write regression class).
     golden_regprobe_bytemirror => probe("regprobe-bytemirror", "regprobe-bytemirror.bin", 16.0);
+    // A 68000 long write to a custom register pair lands each word on its
+    // own bus cycle, two colour clocks apart, whichever instruction makes
+    // it, and low word first to -(An); run_probe checks the edges against
+    // a word write.
+    golden_regprobe_longwrite => probe("regprobe-longwrite", "regprobe-longwrite.bin", 16.0);
+    // The same on a 68010. The band from memory to an absolute address
+    // also holds the Class 2 MOVE order (the write before the second
+    // extension-word prefetch), the predecrement band its prefetch before
+    // the write, and the delay loop the 68010's own DBcc times.
+    golden_regprobe_longwrite_68010 => Probe { name: "regprobe-longwrite-68010", program: "regprobe-longwrite.bin", seconds: 16.0, machine: Machine::Ocs68010 };
     // A request unmasked in INTENA for two instructions still reaches the
     // CPU, on the 68000 and on the 68EC020 (the wait-loop class that keeps
     // a request pending and opens a window for its handler).

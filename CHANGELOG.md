@@ -158,6 +158,32 @@ for the earlier release notes.
 - A1200, A4000, CD32: a long access to the custom registers takes two bus
   cycles, each word read or written on its own. They are a 16-bit port;
   only chip RAM is 32 bits wide.
+- OCS and ECS machines: a long write to the custom registers lands each
+  word on its own bus cycle. With MOVE.L to an absolute address
+  (`move.l d0,$dff180`), MOVE.L from memory (`move.l (a0)+,$e0(a6)`),
+  MOVEM.L, and any long write on a 68010 or an accelerated CPU, both words
+  used to land together after the second cycle, so the first register of
+  the pair (COLOR00 of a write to `$DFF180`, the high half of a bitplane
+  or Copper pointer) changed two colour clocks late. MOVE.L from a
+  register or an immediate to `(An)` or `d16(An)` was already right. On a
+  68020 or faster in an ECS machine, a long register read now waits for
+  its data once per word, as on the AGA machines. On a 68020 or faster in
+  any machine, a long at an odd register address (`move.l d0,$dff181`)
+  runs as a byte, a word and a byte and reaches all three registers; it
+  used to run as two words and miss the third.
+- 68010: conditional branches take the 68010's own times. A Bcc that is
+  not taken costs 6 clocks with a byte displacement and 10 with a word,
+  and outside loop mode a DBcc costs 10 clocks with its condition true and
+  16 when its count expires; all four ran on the 68000's 8, 12, 12 and 14.
+  A `dbra` delay loop is two clocks longer per exit and a fall-through
+  `bne` two clocks shorter, which moves beam-timed code on a 68010 by up
+  to a colour clock per branch.
+- 68010: a MOVE from memory to an absolute long address
+  (`move.l (a0),$dff180`) writes before its second extension-word
+  prefetch, as on the 68000. The write used to come one bus cycle late.
+- 68010: a MOVE to `-(An)` prefetches before it writes and writes a long
+  low word first, as on the 68000. It used to write first, high word
+  first, and take two clocks too long.
 - ECS and AGA, tall programmable screen modes (DblPAL, DblNTSC,
   Productivity and others):
   - VPOSR and VPOSW carry vertical bits 9 and 10, so beam polls no longer
