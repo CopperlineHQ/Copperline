@@ -10920,7 +10920,7 @@ impl Bus {
                 self.mem.extended_rom.len() as u32,
             ));
         }
-        if let Some(cartridge) = self.cartridge.as_ref() {
+        if let Some(cartridge) = self.cartridge.as_ref().filter(|c| c.decodes(c.base())) {
             regions.push((cartridge.base(), cartridge.size() as u32));
         }
         regions.sort_by_key(|(base, _)| *base);
@@ -10988,9 +10988,13 @@ impl Bus {
             }
         }
         // The freezer cartridge's bank.
-        if let Some(off) = self.cartridge.as_ref().and_then(|c| c.offset(addr, 2)) {
-            let bank = self.cartridge.as_ref().map_or(&[][..], |c| c.bank());
-            return ((bank[off] as u16) << 8) | bank[off + 1] as u16;
+        if let Some(cart) = self.cartridge.as_ref() {
+            if let Some(off) = cart.offset(addr, 2) {
+                return u16::from_be_bytes([
+                    cart.read_byte(off, self.data_bus),
+                    cart.read_byte(off + 1, self.data_bus),
+                ]);
+            }
         }
         0
     }

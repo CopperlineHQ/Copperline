@@ -434,7 +434,7 @@ slow = "512K"
 # source in hrtmon-rom/), and add rom = "..." to fit a custom HRTMon image
 # instead. Enter 'x' in the monitor to resume execution.
 # [cartridge]
-# model = "hrtmon"
+# model = "hrtmon"   # "demon2" selects the DeMoN II and requires a 256 KiB rom
 # rom = "/roms/hrtmon.rom"
 
 

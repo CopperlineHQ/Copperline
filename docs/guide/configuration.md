@@ -135,7 +135,8 @@ range checks as the equivalent TOML fields:
 | `--jit` / `--no-jit` | `[cpu] jit` | experimental fast batch/trace-JIT CPU execution (68020+; not cycle-exact) |
 | `--cpu-speed MODE` | `[cpu] speed` | `fixed` (default) or `fastest`: the JIT clock adapts to the host while paced (needs `--jit`; not reproducible) |
 | `--clipboard` / `--no-clipboard` | `[clipboard] share` | share the host clipboard with the guest's `clipboard.device`; fits an extra autoconfig board, so it is opt-in (default: off) |
-| `--cartridge MODEL` | `[cartridge] model` | `none` (default) or `hrtmon`, the bundled HRTMon freezer cartridge |
+| `--cartridge MODEL` | `[cartridge] model` | `none` (default), `hrtmon` or `demon2` |
+| `--cartridge-rom PATH` | `[cartridge] rom` | EPROM image for DeMoN II, or a replacement HRTMon image |
 | `--chip SIZE` | `[memory] chip` | `512K`, `1M`, `2M`, ... |
 | `--fast SIZE` | `[memory] fast` | `0`, `1M`, `4M`, `8M`, ... |
 | `--slow SIZE` | `[memory] slow` | `0`, up to `512K` |
@@ -4000,7 +4001,7 @@ back to the native screen. On a single-window emulator you usually want
 
 ```toml
 [cartridge]
-model = "hrtmon"                # "none" (the default) or "hrtmon"
+model = "hrtmon"                # "none" (default), "hrtmon" or "demon2"
 # rom = "/roms/hrtmon.rom"      # an HRTMon cartridge image of your own
 ```
 
@@ -4013,14 +4014,21 @@ running software at any time.
   [Where bundled files are found](#bundled-assets)), built from upstream
   source (`hrtmon-rom/README.md`) under GPL-2.0-or-later. `"none"` (the
   default) leaves the slot empty.
-- `rom` replaces the bundled image with an HRTMon-compatible cartridge image
-  of your own, recognized by its `HRT!` tag at offset 0 or 4. It applies
-  only with `model = "hrtmon"`; setting it without a model is an error.
+- `model = "demon2"` fits the A500/A500+ sidecar with 1 MiB of cartridge
+  RAM. It boots in stealth mode with a read-only EPROM and a disconnected
+  USB port. The monitor can enter on reset, on the freeze button, or on
+  its programmed CIA triggers.
+- `rom` requires a fitted cartridge model. For HRTMon, it optionally
+  replaces the bundled image with a compatible one bearing the `HRT!` tag
+  at offset 0 or 4. For DeMoN II, supply the board's 256 KiB EPROM image,
+  such as the DeMoN II hardware build of Action Replay 5. Select it with
+  `--cartridge demon2 --cartridge-rom PATH` or the launcher's
+  **Cartridge ROM** row.
 
 `--cartridge hrtmon` fits the cartridge from the command line, and the
 launcher's **System -> Freezer cartridge** row sets it.
 
-The cartridge maps a 1 MiB bank at `$A10000` and keeps live snapshots of the
+HRTMon maps a 1 MiB bank at `$A10000` and keeps live snapshots of the
 write-only custom and CIA registers. A freeze -- the menu's
 **Freeze (HRTMon)** item, `Cmd+Shift+B` / `Alt+Shift+B`, headless
 `--freeze-after SECS`, or the control protocol's `cartridge.freeze` method --

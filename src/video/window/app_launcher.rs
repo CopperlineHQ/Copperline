@@ -178,6 +178,7 @@ impl App {
                 LauncherField::Rom
                 | LauncherField::ExtendedRom
                 | LauncherField::FmvRom
+                | LauncherField::CartridgeRom
                 | LauncherField::ScsiRom
                 | LauncherField::ScsiRomOdd
                 | LauncherField::LideRom
@@ -287,6 +288,7 @@ impl App {
             }
             LauncherField::Rom
             | LauncherField::ExtendedRom
+            | LauncherField::CartridgeRom
             | LauncherField::ScsiRom
             | LauncherField::ScsiRomOdd => crate::paths::roms_dir(),
             LauncherField::Df0Image
@@ -329,6 +331,7 @@ impl App {
             LauncherField::Rom
             | LauncherField::ExtendedRom
             | LauncherField::FmvRom
+            | LauncherField::CartridgeRom
             | LauncherField::ScsiRom
             | LauncherField::ScsiRomOdd
             | LauncherField::LideRom

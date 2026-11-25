@@ -2,10 +2,11 @@
 
 //! Freezer cartridge: an Action Replay-style system monitor that lives in
 //! its own memory bank and is entered by a level-7 (non-maskable)
-//! interrupt when the user presses the cartridge's button. One model is
-//! fitted so far: HRTMon in its UAE cartridge build (`hrtmon-rom/`).
+//! interrupt when the user presses the cartridge's button. The DeMoN II
+//! sidecar is implemented in `demon`. HRTMon uses the UAE cartridge
+//! build (`hrtmon-rom/`).
 //!
-//! The model follows the cartridge as the monitor's own source expects it
+//! The HRTMon model follows the cartridge as the monitor's own source expects it
 //! (`HRTmonV2.s` with `UAE`, `CARTRIDGE` and `SAVE_CUSTOM` set), which is
 //! also how WinUAE hosts it:
 //!
@@ -33,10 +34,12 @@
 //!   (`mon_install` through `init_code`). It leaves through the header's
 //!   RTE when the user types `x`; the host does nothing on exit.
 //!
-//! Nothing here models Amiga hardware: a real Action Replay sits on the
-//! expansion bus and snoops the chip-register writes itself. The bank,
+//! DeMoN II snoops the CPU expansion bus directly. The bank,
 //! the shadows and the pending interrupt are machine state (save-state
 //! version 75) so run-ahead and rewind restore them with the guest.
+
+mod demon;
+use demon::Demon;
 
 use crate::memory::Memory;
 use crate::zorro_device::dma_write_byte;
@@ -95,6 +98,7 @@ const CFG_COLOR1_VALUE: u16 = 0x0FFF;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CartridgeModel {
     Hrtmon,
+    Demon2,
 }
 
 impl CartridgeModel {
@@ -102,6 +106,7 @@ impl CartridgeModel {
     pub fn label(self) -> &'static str {
         match self {
             CartridgeModel::Hrtmon => "hrtmon",
+            CartridgeModel::Demon2 => "demon2",
         }
     }
 
@@ -109,6 +114,7 @@ impl CartridgeModel {
     pub fn display_name(self) -> &'static str {
         match self {
             CartridgeModel::Hrtmon => "HRTMon",
+            CartridgeModel::Demon2 => "DeMoN II",
         }
     }
 }
@@ -140,11 +146,16 @@ pub enum ImageError {
     NotHrtmon,
     /// Larger than the loader accepts.
     TooLarge(usize),
+    DemonRomSize(usize),
 }
 
 impl std::fmt::Display for ImageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            ImageError::DemonRomSize(len) => write!(
+                f,
+                "DeMoN II requires a 256 KiB EPROM image, got {len} bytes"
+            ),
             ImageError::NotHrtmon => {
                 write!(f, "not an HRTMon image (no HRT! tag at offset 0 or 4)")
             }
@@ -171,12 +182,7 @@ pub enum FreezeError {
 impl std::fmt::Display for FreezeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FreezeError::NotFitted => {
-                write!(
-                    f,
-                    "no freezer cartridge fitted ([cartridge] model = \"hrtmon\")"
-                )
-            }
+            FreezeError::NotFitted => write!(f, "no freezer cartridge fitted"),
             FreezeError::VectorNotWritable(addr) => write!(
                 f,
                 "the level-7 vector at {addr:#010X} (VBR + $7C) is not in writable RAM"
@@ -192,7 +198,7 @@ impl std::error::Error for FreezeError {}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Cartridge {
     model: CartridgeModel,
-    /// The 1 MiB bank at [`HRTMON_BASE`].
+    /// The fitted cartridge's ROM and workspace.
     bank: Vec<u8>,
     /// The last value written to, or read from, each custom register
     /// (`$DFF000` + offset), 512 bytes big-endian.
@@ -205,6 +211,8 @@ pub struct Cartridge {
     nmi_pending: bool,
     /// Freezes delivered since power-on.
     freezes: u64,
+    #[serde(default)]
+    demon: Option<Demon>,
 }
 
 impl Cartridge {
@@ -229,6 +237,7 @@ impl Cartridge {
             ciab_shadow: [0; 16],
             nmi_pending: false,
             freezes: 0,
+            demon: None,
         })
     }
 
@@ -238,7 +247,10 @@ impl Cartridge {
 
     /// The bank's base address.
     pub fn base(&self) -> u32 {
-        HRTMON_BASE
+        match self.model {
+            CartridgeModel::Hrtmon => HRTMON_BASE,
+            CartridgeModel::Demon2 => demon::BASE,
+        }
     }
 
     /// The bank's size in bytes.
@@ -250,6 +262,7 @@ impl Cartridge {
     #[inline]
     pub fn decodes(&self, addr: u32) -> bool {
         addr.wrapping_sub(self.base()) < self.bank.len() as u32
+            && self.demon.as_ref().is_none_or(Demon::visible)
     }
 
     /// Byte offset into the bank of a `size`-byte access at `addr`, when
@@ -260,6 +273,26 @@ impl Cartridge {
         (self.decodes(addr) && off + size <= self.bank.len()).then_some(off)
     }
 
+    pub(crate) fn read_byte(&self, off: usize, floating: u16) -> u8 {
+        self.demon
+            .as_ref()
+            .map_or_else(|| self.bank[off], |d| d.read(&self.bank, off, floating))
+    }
+
+    pub(crate) fn ram_writable(&self, off: usize) -> bool {
+        self.demon.is_none() || Demon::writable(off)
+    }
+
+    pub(crate) fn write_byte(&mut self, off: usize, value: u8) {
+        if self.ram_writable(off) {
+            self.bank[off] = value;
+        } else if off == 1 {
+            if let Some(demon) = &mut self.demon {
+                demon.set_mode(value);
+            }
+        }
+    }
+
     pub fn bank(&self) -> &[u8] {
         &self.bank
     }
@@ -268,16 +301,17 @@ impl Cartridge {
         &mut self.bank
     }
 
-    /// Whether the monitor is active: bit 0 of `entered`, which it sets on
-    /// entry and clears on exit.
+    /// Whether the monitor is active, from its header or the board visibility latch.
     pub fn entered(&self) -> bool {
-        self.bank[CFG_ENTERED] & 1 != 0
+        self.demon
+            .as_ref()
+            .map_or_else(|| self.bank[CFG_ENTERED] & 1 != 0, Demon::visible)
     }
 
     /// The monitor's version and revision words, when the image carries
     /// the `NEWHRT` config-block tag.
     pub fn version(&self) -> Option<(u16, u16)> {
-        (&self.bank[CFG_ID..CFG_ID + 6] == CFG_ID_TAG).then(|| {
+        (self.demon.is_none() && &self.bank[CFG_ID..CFG_ID + 6] == CFG_ID_TAG).then(|| {
             let word = |at: usize| u16::from_be_bytes([self.bank[at], self.bank[at + 1]]);
             (word(CFG_VERSION), word(CFG_REVISION))
         })
@@ -286,7 +320,11 @@ impl Cartridge {
     /// The address the level-7 vector is pointed at: the `bra.w monitor`
     /// in the cartridge header.
     pub fn entry(&self) -> u32 {
-        self.base() + HRTMON_ENTRY_OFFSET
+        if self.demon.is_some() {
+            Demon::eprom_read(&self.bank, 0x7c, 4)
+        } else {
+            self.base() + HRTMON_ENTRY_OFFSET
+        }
     }
 
     pub fn nmi_pending(&self) -> bool {
@@ -302,6 +340,9 @@ impl Cartridge {
     /// machine, exactly the fields WinUAE's `hrtmon_configure` writes and
     /// no others (the `whd_*` fields belong to WHDLoad).
     pub fn configure(&mut self, traits: MachineTraits) {
+        if self.demon.is_some() {
+            return;
+        }
         let bank = &mut self.bank;
         bank[CFG_MON_SIZE..CFG_MON_SIZE + 4].copy_from_slice(&CFG_MON_SIZE_VALUE.to_be_bytes());
         bank[CFG_COLOR0..CFG_COLOR0 + 2].copy_from_slice(&CFG_COLOR0_VALUE.to_be_bytes());
@@ -323,6 +364,9 @@ impl Cartridge {
     /// freeze still pending is dropped with the interrupt state the reset
     /// clears.
     pub fn reset(&mut self, traits: MachineTraits) {
+        if let Some(demon) = &mut self.demon {
+            *demon = Demon::reset();
+        }
         self.configure(traits);
         self.nmi_pending = false;
     }
@@ -330,6 +374,9 @@ impl Cartridge {
     /// A custom-register write landed (CPU or Copper): keep its value.
     #[inline]
     pub fn note_custom_write(&mut self, off: u16, value: u16) {
+        if self.demon.is_some() {
+            return;
+        }
         let at = usize::from(off & 0x1FE);
         self.custom_shadow[at..at + 2].copy_from_slice(&value.to_be_bytes());
     }
@@ -357,6 +404,10 @@ impl Cartridge {
     /// when the vector slot is not writable RAM.
     pub fn freeze(&mut self, mem: &mut Memory, vbr: u32) -> Result<u32, FreezeError> {
         let vector = vbr.wrapping_add(0x7C);
+        if self.demon.is_some() {
+            self.trigger_demon(0);
+            return Ok(Demon::eprom_read(&self.bank, vector, 4));
+        }
         let entry = self.entry();
         for (i, byte) in entry.to_be_bytes().into_iter().enumerate() {
             if !dma_write_byte(mem, vector.wrapping_add(i as u32), byte) {
@@ -378,6 +429,11 @@ impl Cartridge {
     /// consumed, so the monitor is entered exactly once per freeze (the
     /// 68000 recognises level 7 on its transition, not its level).
     pub fn take_nmi(&mut self) -> bool {
+        if self.nmi_pending {
+            if let Some(demon) = &mut self.demon {
+                demon.acknowledge();
+            }
+        }
         std::mem::take(&mut self.nmi_pending)
     }
 

@@ -1059,6 +1059,21 @@ argument queue and partial-word latch. See
 The freezer cartridge models an Action Replay-style system monitor mapped in
 memory and entered through a level-7 NMI (see
 [Configuration](../guide/configuration.md#freezer-cartridge)).
+
+DeMoN II decodes a 256 KiB EPROM at $A80000 and 1 MiB of SRAM at
+$AC0000. The board snoops CPU writes to $DFFxxx into $AFFxxx even in
+stealth mode. A trigger exposes the bank and raises IPL7. The CPLD drives
+the EPROM during vector reads and hides the bank on the first external
+program fetch after entry. The 68000/68010 core uses ordinary bus reads for
+prefetch, so Copperline also checks the instruction address before its
+operands access the bus. The low two bits at $A80001 report the cause
+and arm the CIA triggers on writes.
+
+The default jumpers enable stealth mode. The supplied image is read-only,
+and the USB FIFO reports an unplugged host. An accelerated CPU uses the
+precise execution path while this cartridge is fitted.
+See the [board CPLD](https://github.com/gerbilbyte/DeMoN2/blob/b6bcdb21d9550fc0ef6109e72d9445ffbda231a2/Quartus/DeMoN.v).
+
 The bundled implementation is HRTMon 2.39 assembled for the UAE cartridge
 target (`hrtmon-rom/`, installed as `assets/hrtmon/hrtmon.rom`).
 

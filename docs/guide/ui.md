@@ -65,7 +65,7 @@ The app shortcut modifier is `Cmd` on macOS and `Alt` on Linux/Windows.
 | `Cmd+D` | `Alt+D` | Swap the first drive with a queued playlist to its next disk |
 | `Cmd+G` | `Alt+G` | Capture / release the host mouse (clicking the display also captures) |
 | `Cmd+B` | `Alt+B` | Toggle the [Debug layout](../debugger/window) |
-| `Cmd+Shift+B` | `Alt+Shift+B` | Press the freezer cartridge's button: enter the HRTMon monitor (`[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)) |
+| `Cmd+Shift+B` | `Alt+Shift+B` | Press the freezer cartridge's button: enter its monitor (`[cartridge] model`, see [Configuration](configuration.md#freezer-cartridge)) |
 | `Cmd+K` | `Alt+K` | Toggle the [Console](../debugger/console) in Debug layout |
 | `Cmd+J` | `Alt+J` | Toggle joystick input mode: gamepad / keyboard (also the status-bar icon) |
 | `Cmd+M` | `Alt+M` | Turn the monitor bezel off, or back on to the chosen front (*Video Settings -> Monitor Bezel* picks it; `[display] bezel` sets the start-up value) |
@@ -441,8 +441,8 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   The analyzer inspects captured chip-bus activity and registered resources;
   the [Console](../debugger/console) provides the command line (`Cmd+K` / `Alt+K`
   opens it directly).
-- **Freeze (HRTMon)** (also `Cmd+Shift+B` / `Alt+Shift+B`): presses the
-  freezer cartridge's button, so the machine runs on into the HRTMon
+- **Freeze (HRTMon)** or **Freeze (DeMoN II)** (also `Cmd+Shift+B` / `Alt+Shift+B`): presses the
+  freezer cartridge's button, so the machine runs on into the cartridge
   monitor on its own screen; the monitor's `x` command returns to the
   program. Greyed out unless a cartridge is fitted (`[cartridge] model`,
   or the configuration screen's *Freezer cartridge* row); see

@@ -486,6 +486,14 @@ impl MachineSetup {
             }
             F::WhdloadWhdPackage | F::WhdloadSkickPackage => self.path_label(field, "(none)"),
             // Path/drive fields: the file name, or a placeholder.
+            F::CartridgeRom => self.path_label(
+                field,
+                match self.cartridge {
+                    Some(crate::cartridge::CartridgeModel::Hrtmon) => "(bundled HRTMon)",
+                    Some(crate::cartridge::CartridgeModel::Demon2) => "(choose a 256 KiB image)",
+                    None => "(none)",
+                },
+            ),
             F::Rom => self.path_label(field, "(bundled AROS)"),
             F::FmvRom if !self.fmv_fitted => "(no FMV module)".to_string(),
             F::FmvRom => self.path_label(field, "(bundled open FMV ROM)"),
@@ -719,12 +727,11 @@ impl MachineSetup {
             F::Mt32Lcd => {
                 self.mt32_lcd = cycle_slice(&Mt32Lcd::MENU_ORDER, self.mt32_lcd, forward);
             }
-            // Two states cycle the same either way round.
             F::Cartridge => {
-                self.cartridge = match self.cartridge {
-                    None => Some(crate::cartridge::CartridgeModel::Hrtmon),
-                    Some(_) => None,
-                }
+                use crate::cartridge::CartridgeModel::{Demon2, Hrtmon};
+                self.cartridge =
+                    cycle_slice(&[None, Some(Hrtmon), Some(Demon2)], self.cartridge, forward);
+                self.cartridge_rom = None;
             }
             F::PixelAspect => {
                 self.pixel_aspect = cycle_slice(&PIXEL_ASPECTS, self.pixel_aspect, forward)

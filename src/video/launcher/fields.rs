@@ -607,10 +607,10 @@ pub enum LauncherField {
     /// The MacroSystem Toccata sound board: fitted or not (`[toccata]
     /// enabled`). No other options exist (see docs/internals/toccata.md).
     Toccata,
-    /// The freezer cartridge (`[cartridge] model`): none, or the bundled
-    /// HRTMon monitor. An image of the user's own (`rom`) is carried
-    /// across the round trip but has no row.
+    /// Freezer cartridge fitted to the machine.
     Cartridge,
+    /// Image fitted to the selected cartridge.
+    CartridgeRom,
     /// The MHI virtual MPEG audio decoder board: fitted or not (`[mhi]
     /// enabled`). No other options exist (see docs/internals/mhi.md). Present
     /// only in an `mhi` build, the only build that can fit the board.
@@ -905,7 +905,7 @@ pub(super) fn cartridge_label(model: Option<crate::cartridge::CartridgeModel>) -
     model.map_or("None", |m| m.display_name())
 }
 
-pub(super) const SYSTEM_ROWS: [Row; 8] = [
+pub(super) const SYSTEM_ROWS: [Row; 9] = [
     row(F::Chipset, "Chipset", Cycle),
     row(F::Agnus, "Agnus", Cycle),
     row(F::Denise, "Denise", Cycle),
@@ -914,6 +914,7 @@ pub(super) const SYSTEM_ROWS: [Row; 8] = [
     row(F::Identify, "Identify board", Cycle),
     row(F::Rtg, "RTG card", Cycle),
     row(F::Cartridge, "Freezer cartridge", Cycle),
+    row(F::CartridgeRom, "Cartridge ROM", PathRow),
 ];
 pub(super) const CPU_ROWS: [Row; 7] = [
     row(F::Cpu, "CPU", Cycle),

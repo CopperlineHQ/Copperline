@@ -5005,9 +5005,10 @@ fn build_machine_inner(
         let image = std::fs::read(path)
             .with_context(|| format!("reading cartridge image {}", path.display()))?;
         let cartridge = match model {
-            crate::cartridge::CartridgeModel::Hrtmon => crate::cartridge::Cartridge::hrtmon(&image)
-                .with_context(|| format!("cartridge image {}", path.display()))?,
-        };
+            crate::cartridge::CartridgeModel::Hrtmon => crate::cartridge::Cartridge::hrtmon(&image),
+            crate::cartridge::CartridgeModel::Demon2 => crate::cartridge::Cartridge::demon2(&image),
+        }
+        .with_context(|| format!("cartridge image {}", path.display()))?;
         let version = cartridge
             .version()
             .map_or_else(String::new, |(v, r)| format!(" {v}.{r:02}"));

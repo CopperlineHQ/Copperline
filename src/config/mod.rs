@@ -1727,9 +1727,10 @@ impl CartridgeConfig {
     pub fn parse_model(value: &str) -> Result<Option<crate::cartridge::CartridgeModel>> {
         match value.trim().to_ascii_lowercase().as_str() {
             "none" | "" => Ok(None),
+            "demon2" => Ok(Some(crate::cartridge::CartridgeModel::Demon2)),
             "hrtmon" => Ok(Some(crate::cartridge::CartridgeModel::Hrtmon)),
             other => Err(anyhow!(
-                "unknown cartridge model {other:?} (expected \"none\" or \"hrtmon\")"
+                "unknown cartridge model {other:?} (expected \"none\", \"hrtmon\" or \"demon2\")"
             )),
         }
     }
@@ -3534,9 +3535,11 @@ pub struct ConfigOverrides {
     /// Show the MT-32's front panel (`--mt32-panel`). Same as
     /// `[serial] mt32_panel`.
     pub mt32_panel: Option<bool>,
-    /// Freezer cartridge (`--cartridge MODEL`): "none" or "hrtmon". Same
-    /// parser as `[cartridge] model`.
+    /// Freezer model (`--cartridge none|hrtmon|demon2`). Same parser as
+    /// `[cartridge] model`.
     pub cartridge: Option<String>,
+    /// Cartridge image (`--cartridge-rom PATH`). Same as `[cartridge] rom`.
+    pub cartridge_rom: Option<String>,
     /// Real host disks given to the machine (`--host-disk DEVICE [ATTACH]`, or
     /// `--host-disk-read-only` for the protected form), in command-line order.
     pub host_disks: Vec<HostDiskArg>,
@@ -3950,6 +3953,9 @@ impl ConfigOverrides {
         }
         if let Some(panel) = self.mt32_panel {
             raw.serial.mt32_panel = Some(panel);
+        }
+        if let Some(rom) = &self.cartridge_rom {
+            raw.cartridge.rom = Some(rom.clone());
         }
         if let Some(model) = &self.cartridge {
             raw.cartridge.model = Some(model.clone());
