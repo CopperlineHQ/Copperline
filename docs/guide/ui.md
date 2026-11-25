@@ -126,6 +126,13 @@ cannot be pressed are skipped.
 Lists -- the games, the favourites, the host's disks -- are walked with
 up and down, which move the list's own selection and scroll it. Right
 steps to the tick beside a row and then out of the list; left leaves it.
+The Boot Priority drives scroll the same way: stepping past the last
+drive in view brings the next one in.
+
+While a text box is open for typing it takes the editing keys a host text
+field does: the arrows and Home/End move the caret, Shift selects, and the
+host's copy, cut and paste shortcuts work. Return or Tab keeps what was
+typed, `Esc` throws it away.
 
 Stepping down off the foot of a surface reaches the status bar, and up
 returns. Left out of a settings page returns to the category button that
@@ -1049,13 +1056,14 @@ The layout is:
   the reason ("No drive", "CD-ROM", "Host Disk"). SCSI, Lide, SF2000 SD and
   Copperline HD units appear only when media is attached, so the list shows
   only real boot sources. Drives are listed in order: IDE bays, SCSI
-  units, Lide drives, the SF2000 SD card, and Copperline HD units. A page
-  holds nine drives; if the list is longer, **Next Page >** walks forward
-  through as many pages as the drives need, and every page's **< Back**
-  returns to the first. Newly added drives are assigned cascading default
-  priorities (0 for the first hard drive, followed by -35, -40, -45) to
-  avoid boot conflicts. A drive already carrying a priority in the config
-  keeps it, and one that just names a device with no `bootpri` stays at 0.
+  units, Lide drives, the SF2000 SD card, and Copperline HD units. The
+  page shows nine drives at a time, under column titles that stay put; a
+  longer list scrolls, with the arrows at its right, the mouse wheel over
+  it, or by stepping past the last drive in view. Newly added drives are
+  assigned cascading default priorities (0 for the first hard drive,
+  followed by -35, -40, -45) to avoid boot conflicts. A drive already
+  carrying a priority in the config keeps it, and one that just names a
+  device with no `bootpri` stays at 0.
   See [](configuration.md) for how the priority ranks against Kickstart's
   DF0: boot node at 5.
 - **Action bar** (bottom). **Load...** reads a `.toml` config through a file

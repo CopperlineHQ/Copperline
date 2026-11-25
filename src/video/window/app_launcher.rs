@@ -5,7 +5,6 @@
 use super::*;
 
 impl App {
-    #[cfg(feature = "game-library")]
     pub(super) fn scroll_launcher_with_wheel(&mut self, delta: MouseScrollDelta) -> bool {
         let target = self
             .cursor_pos
@@ -13,8 +12,8 @@ impl App {
             .and_then(|pos| crate::video::ui::launcher_wheel_control(&self.ui, pos))
             .and_then(scroll_arrow_of)
             .map(|(_, list)| list);
-        if self.library_wheel.0 != target {
-            self.library_wheel = (target, 0.0);
+        if self.launcher_wheel.0 != target {
+            self.launcher_wheel = (target, 0.0);
         }
         let Some(list) = target else {
             return false;
@@ -24,9 +23,9 @@ impl App {
             MouseScrollDelta::PixelDelta(pos) => -pos.y / 14.0,
         };
         if rows.is_finite() {
-            self.library_wheel.1 += rows;
-            let whole = self.library_wheel.1.trunc() as isize;
-            self.library_wheel.1 -= whole as f64;
+            self.launcher_wheel.1 += rows;
+            let whole = self.launcher_wheel.1.trunc() as isize;
+            self.launcher_wheel.1 -= whole as f64;
             if whole != 0 {
                 self.activate_ui_control_with_event_loop(scroll_arrow_for(list, whole), None);
                 self.request_redraw();
@@ -780,6 +779,7 @@ impl App {
             #[cfg(feature = "game-library")]
             ScrollList::Favourites => &mut state.library.favourite_scroll_rate,
             ScrollList::HostDisks => state.setup.host_disk_scroll_rate(),
+            ScrollList::BootOrder => state.setup.boot_scroll_rate(),
         })
     }
 
@@ -1242,9 +1242,6 @@ impl App {
                     // launcher showing the loaded setup and the error.
                     run_at_once = setup.auto_launch();
                     state.setup = setup;
-                    // The page being looked at may not exist under the
-                    // loaded machine (the second boot page, emptied).
-                    state.tab = state.setup.settle_tab(state.tab);
                     // Re-read host device lists so the loaded setup's pickers
                     // are populated, not stuck on "Default"/"None".
                     state.setup.refresh_host_devices();

@@ -9,12 +9,12 @@ use super::{
     bar_layout, cap_texture_scale, center_present_frame_for_visible_start,
     center_present_frame_horizontally, control_at, copperline_icon_image, copperline_logo_image,
     copy_present_frame, copy_tv_aperture_to_window, copy_window_present_frame,
-    cursor_position_in_texture, draw_seven_segment_digit, draw_status_bar, fdd_counter_readout,
-    fdd_track_counter_rect, fdd_track_digit_rect, host_shortcut_modifier_pressed,
-    host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel, key_event_is_focus_gain_replay,
-    keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
-    parse_amiga_key, pause_button_rect, plan_present_scaling_for, power_button_rect,
-    present_height, presentation_pixels_equal, presentation_source_y_offset,
+    cursor_position_in_texture, draw_seven_segment_digit, draw_status_bar_into,
+    fdd_counter_readout, fdd_track_counter_rect, fdd_track_digit_rect,
+    host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel,
+    key_event_is_focus_gain_replay, keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv,
+    paint_test_screen, parse_amiga_key, pause_button_rect, plan_present_scaling_for,
+    power_button_rect, present_height, presentation_pixels_equal, presentation_source_y_offset,
     raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
     rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
     short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
@@ -1215,6 +1215,143 @@ fn the_host_disk_list_scrolls_under_the_focus() {
         Some(0),
         "and the list came back with it"
     );
+}
+
+/// A boot order longer than its page scrolls -- under the focus, from its
+/// arrows and from the wheel -- and the column the focus walks down is
+/// kept as the list moves.
+#[test]
+fn the_boot_order_scrolls_under_the_focus_its_arrows_and_the_wheel() {
+    use crate::config::MachineModel;
+    use crate::video::launcher::{LauncherField as F, LauncherTab, BOOTPRI_PAGE_ROWS};
+    use crate::video::nav::{Dir, NavTarget};
+    use crate::video::ui::panel_control_at;
+    use winit::event::MouseScrollDelta;
+
+    let mut app = test_app();
+    app.open_launcher();
+    let state = app.launcher_state_mut().expect("the launcher is open");
+    state.setup.select_model(Some(MachineModel::A1200));
+    state.setup.cycle(F::LideBoard, true);
+    state.setup.cycle(F::ScsiController, true);
+    // Every bay filled but the IDE slave, which is listed all the same --
+    // greyed, with nothing on its row to stand on.
+    for f in [
+        F::IdeMaster,
+        F::ScsiUnit0,
+        F::ScsiUnit1,
+        F::ScsiUnit2,
+        F::ScsiUnit3,
+        F::ScsiUnit4,
+        F::ScsiUnit5,
+        F::ScsiUnit6,
+        F::LideDrive0,
+        F::LideDrive1,
+        F::LideDrive2,
+        F::LideDrive3,
+    ] {
+        state
+            .setup
+            .set_path(f, std::path::PathBuf::from("disk.hdf"));
+    }
+    state.tab = LauncherTab::BootPriority;
+    let drives = state.setup.boot_priority_row_count();
+    assert!(drives > BOOTPRI_PAGE_ROWS);
+    let scroll = |app: &super::App| app.launcher_state().map(|s| s.setup.boot_scroll());
+
+    // Off the last drive in view: the list moves, not the focus out of it,
+    // and the focus stays on the priority it was walking down.
+    app.nav.show(Some(NavTarget::Ui(UiControl::LauncherCycle {
+        field: F::ScsiUnit6Boot,
+        forward: false,
+    })));
+    app.nav_move(Dir::Down, None);
+    assert_eq!(
+        app.nav.focus(),
+        Some(NavTarget::Ui(UiControl::LauncherCycle {
+            field: F::LideDrive0Boot,
+            forward: false,
+        })),
+        "the next drive down"
+    );
+    assert_eq!(scroll(&app), Some(1), "and the list scrolled to show it");
+    // Back up past the top of the window, the same in reverse: the empty
+    // slave bay is stepped over, and the master above it scrolled in.
+    for _ in 0..8 {
+        app.nav_move(Dir::Up, None);
+    }
+    assert_eq!(
+        app.nav.focus(),
+        Some(NavTarget::Ui(UiControl::LauncherCycle {
+            field: F::IdeMasterBoot,
+            forward: false,
+        })),
+    );
+    assert_eq!(scroll(&app), Some(0), "and the list came back with it");
+    // With only empty bays above, the walk leaves the list for Back and
+    // the list shows its top as it goes.
+    app.launcher_state_mut()
+        .unwrap()
+        .setup
+        .clear_path(F::IdeMaster);
+    app.activate_ui_control_with_event_loop(UiControl::LauncherBootScroll(1), None);
+    app.nav.show(Some(NavTarget::Ui(UiControl::LauncherCycle {
+        field: F::ScsiUnit0Boot,
+        forward: false,
+    })));
+    app.nav_move(Dir::Up, None);
+    assert_eq!(
+        app.nav.focus(),
+        Some(NavTarget::Ui(UiControl::LauncherNavTab(
+            LauncherTab::Storage
+        ))),
+    );
+    assert_eq!(scroll(&app), Some(0));
+
+    // The arrows: the pointer finds both, and each moves the list a drive.
+    let find = |app: &super::App, control| {
+        let panel = app.ui.panel.as_ref().expect("the launcher is open");
+        (0..present_height() as i32).find_map(|y| {
+            (0..FB_WIDTH as i32)
+                .find(|&x| panel_control_at(panel, (x, y)) == Some(control))
+                .map(|x| (x, y))
+        })
+    };
+    let down = UiControl::LauncherBootScroll(1);
+    let up = UiControl::LauncherBootScroll(-1);
+    assert!(find(&app, down).is_some(), "a down arrow to press");
+    assert!(find(&app, up).is_some(), "and an up one");
+    app.activate_ui_control_with_event_loop(down, None);
+    assert_eq!(scroll(&app), Some(1));
+    app.activate_ui_control_with_event_loop(up, None);
+    app.activate_ui_control_with_event_loop(up, None);
+    assert_eq!(scroll(&app), Some(0), "the top is as far as it goes");
+
+    // The wheel over the drives scrolls them, three rows a notch, as far
+    // as the end of the list.
+    let wheel = (0..present_height() as i32)
+        .find_map(|y| {
+            (0..FB_WIDTH as i32).find_map(|x| {
+                (crate::video::ui::launcher_wheel_control(&app.ui, (x, y))
+                    == Some(UiControl::LauncherBootScroll(0)))
+                .then_some((x, y))
+            })
+        })
+        .expect("the drives take the wheel");
+    app.cursor_pos = Some(wheel);
+    assert!(app.scroll_launcher_with_wheel(MouseScrollDelta::LineDelta(0.0, -1.0)));
+    assert_eq!(scroll(&app), Some(3));
+    app.scroll_launcher_with_wheel(MouseScrollDelta::LineDelta(0.0, -10.0));
+    assert_eq!(scroll(&app), Some(drives - BOOTPRI_PAGE_ROWS));
+
+    // A boot order that fits its page has no arrows and leaves the wheel.
+    let state = app.launcher_state_mut().unwrap();
+    for f in [F::LideDrive0, F::LideDrive1, F::LideDrive2, F::LideDrive3] {
+        state.setup.clear_path(f);
+    }
+    assert!(!state.setup.boot_order_scrolls());
+    assert_eq!(find(&app, down), None);
+    assert!(!app.scroll_launcher_with_wheel(MouseScrollDelta::LineDelta(0.0, -1.0)));
 }
 
 #[test]
@@ -2925,7 +3062,7 @@ fn joystick_toggle_is_hit_tested_and_draws_each_mode() {
         let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
         let mut v = view(FrontPanelStatus::default(), true, false);
         v.joystick_input_mode = mode;
-        draw_status_bar(&mut frame, &v, scale);
+        draw_status_bar_into(&mut frame, &v, scale);
         let lit = (toggle.y..toggle.y + toggle.h).any(|y| {
             (toggle.x..toggle.x + toggle.w)
                 .any(|x| pixel(&frame, x, y, scale) == BUTTON_GLYPH.to_le_bytes())
@@ -3428,7 +3565,7 @@ fn status_bar_draws_hdd_led_only_on_ide_machines() {
     let hdd = led_row_rect(2, 3);
 
     // No IDE port: the HDD row stays status-bar background.
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(FrontPanelStatus::default(), true, false),
         scale,
@@ -3438,7 +3575,7 @@ fn status_bar_draws_hdd_led_only_on_ide_machines() {
         STATUS_BG.to_le_bytes()
     );
 
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {
@@ -3455,7 +3592,7 @@ fn status_bar_draws_hdd_led_only_on_ide_machines() {
         HDD_LED_OFF.to_le_bytes()
     );
 
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {
@@ -3477,7 +3614,7 @@ fn status_bar_draws_hdd_led_only_on_ide_machines() {
 fn status_bar_draws_power_and_fdd_led_states() {
     let scale = 1;
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {
@@ -3521,7 +3658,7 @@ fn status_bar_draws_power_and_fdd_led_states() {
         TRACK_SEGMENT_ON.to_le_bytes()
     );
 
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {
@@ -3551,7 +3688,7 @@ fn power_led_is_bright_dim_or_off_by_the_led_line() {
     let center = |frame: &[u8]| pixel(frame, power.x + power.w / 2, power.y + power.h / 2, scale);
     let render = |led_engaged: bool, powered: bool| {
         let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-        draw_status_bar(
+        draw_status_bar_into(
             &mut frame,
             &view(
                 FrontPanelStatus {
@@ -3582,7 +3719,7 @@ fn power_led_is_bright_dim_or_off_by_the_led_line() {
 fn status_bar_extinguishes_power_led_when_host_power_is_off() {
     let scale = 1;
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {
@@ -3632,7 +3769,7 @@ fn status_bar_power_button_glyph_tracks_power_state() {
 
     for (powered_on, expected) in [(true, POWER_GLYPH_ON), (false, POWER_GLYPH_OFF)] {
         let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-        draw_status_bar(
+        draw_status_bar_into(
             &mut frame,
             &view(
                 FrontPanelStatus {
@@ -3760,7 +3897,7 @@ fn status_bar_pause_button_glyph_tracks_pause_state() {
 
     // Paused: a play triangle fills the centre column.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {
@@ -3782,7 +3919,7 @@ fn status_bar_pause_button_glyph_tracks_pause_state() {
     // Running: the gap between the two pause bars leaves the centre
     // column on the button face.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {
@@ -3806,7 +3943,7 @@ fn status_bar_pause_button_glyph_tracks_pause_state() {
 fn status_bar_draws_disk_image_button_next_to_track_counter() {
     let scale = 1;
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {
@@ -3865,7 +4002,7 @@ fn status_bar_greys_swap_and_eject_on_a_bridged_drive() {
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
     let mut v = view(FrontPanelStatus::default(), true, false);
     v.media = bar;
-    draw_status_bar(&mut frame, &v, scale);
+    draw_status_bar_into(&mut frame, &v, scale);
     assert_eq!(
         pixel(&frame, swap.x + 5, swap.y + 8, scale),
         BUTTON_GLYPH_DISABLED.to_le_bytes(),
@@ -3891,7 +4028,7 @@ fn status_bar_draws_swap_and_eject_buttons_with_enable_states() {
     // Single disk, inserted: swap is dim, eject is live.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
     let mut v = view(FrontPanelStatus::default(), true, false);
-    draw_status_bar(&mut frame, &v, scale);
+    draw_status_bar_into(&mut frame, &v, scale);
     assert_eq!(
         pixel(&frame, swap.x + 5, swap.y + 8, scale),
         BUTTON_GLYPH_DISABLED.to_le_bytes()
@@ -3906,7 +4043,7 @@ fn status_bar_draws_swap_and_eject_buttons_with_enable_states() {
     bar.drives[0].inserted = false;
     v.media = bar;
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(&mut frame, &v, scale);
+    draw_status_bar_into(&mut frame, &v, scale);
     assert_eq!(
         pixel(&frame, swap.x + 5, swap.y + 8, scale),
         BUTTON_GLYPH.to_le_bytes()
@@ -3941,7 +4078,7 @@ fn status_bar_draws_cd_buttons_only_on_cd_machines() {
         hover: None,
         control_connected: false,
     };
-    draw_status_bar(&mut frame, &v, scale);
+    draw_status_bar_into(&mut frame, &v, scale);
     // The disc body below the hub.
     assert_eq!(
         pixel(&frame, cd_load.x + 11, cd_load.y + 17, scale),
@@ -3993,7 +4130,7 @@ fn status_bar_adapts_track_counters_to_connected_drives() {
         false,
     );
     v.media = cd_only_media;
-    draw_status_bar(&mut frame, &v, scale);
+    draw_status_bar_into(&mut frame, &v, scale);
 
     let counter = cd_only.cd.unwrap();
     let hundreds = track_counter_digit_rect(counter, 0);
@@ -4016,7 +4153,7 @@ fn status_bar_adapts_track_counters_to_connected_drives() {
     // background rather than an orphaned FDD "---" display.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
     v.media = media(0, None);
-    draw_status_bar(&mut frame, &v, scale);
+    draw_status_bar_into(&mut frame, &v, scale);
     let bay = fdd_track_counter_rect();
     assert_eq!(
         pixel(&frame, bay.x + 1, bay.y + 1, scale),
@@ -4073,7 +4210,7 @@ fn status_bar_cylinder_mode_lights_the_point_after_the_cylinder() {
 
     crate::video::set_track_display(TrackDisplay::Track);
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(&mut frame, &view(status, true, false), scale);
+    draw_status_bar_into(&mut frame, &view(status, true, false), scale);
     assert_ne!(
         pixel(&frame, point.0, point.1, scale),
         TRACK_SEGMENT_ON.to_le_bytes(),
@@ -4082,7 +4219,7 @@ fn status_bar_cylinder_mode_lights_the_point_after_the_cylinder() {
 
     crate::video::set_track_display(TrackDisplay::Cylinder);
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(&mut frame, &view(status, true, false), scale);
+    draw_status_bar_into(&mut frame, &view(status, true, false), scale);
     crate::video::set_track_display(TrackDisplay::Track);
     assert_eq!(
         pixel(&frame, point.0, point.1, scale),
@@ -4146,7 +4283,7 @@ fn status_bar_draws_cd_led_on_cd_machines() {
         false,
     );
     v.media = media(1, Some(true));
-    draw_status_bar(&mut frame, &v, scale);
+    draw_status_bar_into(&mut frame, &v, scale);
     let cd = led_row_rect(2, 3);
     assert_eq!(
         pixel(&frame, cd.x + cd.w / 2, cd.y + cd.h / 2, scale),
@@ -4166,7 +4303,7 @@ fn status_bar_draws_cd_led_on_cd_machines() {
         false,
     );
     v.media = media(1, Some(true));
-    draw_status_bar(&mut frame, &v, scale);
+    draw_status_bar_into(&mut frame, &v, scale);
     let cd = led_row_rect(3, 4);
     assert!(cd.y + cd.h <= super::status_bar_top() + super::STATUS_BAR_HEIGHT);
     assert_eq!(
@@ -4177,7 +4314,7 @@ fn status_bar_draws_cd_led_on_cd_machines() {
     // No CD drive: the CD row is absent and that area stays bar
     // background.
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(FrontPanelStatus::default(), true, false),
         scale,
@@ -4264,7 +4401,7 @@ fn control_at_maps_media_and_screenshot_buttons() {
 fn status_bar_draws_volume_control_and_maps_pointer_position() {
     let scale = 1;
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {
@@ -4401,7 +4538,7 @@ fn status_bar_draws_at_hidpi_texture_scale() {
     let scale = 2;
     let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
 
-    draw_status_bar(
+    draw_status_bar_into(
         &mut frame,
         &view(
             FrontPanelStatus {

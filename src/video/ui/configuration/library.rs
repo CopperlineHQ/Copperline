@@ -6,11 +6,10 @@ use super::*;
 
 #[cfg(feature = "game-library")]
 pub(in crate::video::ui) fn draw_library_page(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     let entries = state.library.games.entries();
     let whdload_entry = state.setup.whdload_enabled();
@@ -35,33 +34,23 @@ pub(in crate::video::ui) fn draw_library_page(
             } else {
                 0.0
             };
-            draw_az_button(frame, at, launcher::az_label(bucket), live, hovered, scale);
+            draw_az_button(canvas, at, launcher::az_label(bucket), live, hovered);
         }
     }
 
-    draw_panel_text(
-        frame,
+    canvas.text(
         games.x,
         games.y.saturating_sub(14),
         "Games:",
         PANEL_TEXT_DIM,
         1,
-        scale,
     );
-    draw_library_box(frame, games, scale);
+    draw_library_box(canvas, games);
     for (at, title) in [
         (LIBRARY_COL_NAME, "Game"),
         (library_col_favourite(rect, whdload_entry), "Favourite"),
     ] {
-        draw_panel_text(
-            frame,
-            games.x + 4 + at,
-            games.y + 5,
-            title,
-            PANEL_TEXT_DIM,
-            1,
-            scale,
-        );
+        canvas.text(games.x + 4 + at, games.y + 5, title, PANEL_TEXT_DIM, 1);
     }
 
     if entries.is_empty() {
@@ -87,14 +76,12 @@ pub(in crate::video::ui) fn draw_library_page(
             if text.is_empty() {
                 continue;
             }
-            draw_panel_text(
-                frame,
+            canvas.text(
                 games.x + 8,
                 games.y + LIBRARY_HEADER_H + 6 + line * 14,
                 &text,
                 PANEL_TEXT_DIM,
                 1,
-                scale,
             );
         }
     }
@@ -107,11 +94,11 @@ pub(in crate::video::ui) fn draw_library_page(
         let chosen = state.library.focus == launcher::LibraryFocus::Games
             && state.library.scroll + drawn == state.library.selected;
         if chosen {
-            fill_rect(frame, scale_rect(row, scale), MENU_HILIGHT_BG, scale);
+            canvas.fill(row, MENU_HILIGHT_BG);
         } else if let Some(face) =
             row_light(ENTRY_BG, lit(hover, UiControl::LauncherLibraryPick(drawn)))
         {
-            fill_rect(frame, scale_rect(row, scale), face, scale);
+            canvas.fill(row, face);
         }
         let colour = if chosen {
             MENU_HILIGHT_TEXT
@@ -120,8 +107,7 @@ pub(in crate::video::ui) fn draw_library_page(
         };
         // Clipped at the Favourite column, so a long title stops rather
         // than running under the tick.
-        draw_panel_text(
-            frame,
+        canvas.text(
             row.x + 4 + LIBRARY_COL_NAME,
             row.y + 3,
             &truncate_to_width(
@@ -130,19 +116,17 @@ pub(in crate::video::ui) fn draw_library_page(
             ),
             colour,
             1,
-            scale,
         );
         let tick = library_favourite_box(rect, whdload_entry, drawn);
         draw_tick_box(
-            frame,
+            canvas,
             tick.x,
             tick.y,
             state.library.db.is_favourite(&entry.relative),
             TICK_GREEN,
-            scale,
         );
         if let Some(edge) = tick_outline(lit(hover, UiControl::LauncherLibraryFavourite(drawn))) {
-            draw_outline(frame, tick, edge, scale);
+            outline(canvas, tick, edge);
         }
     }
 
@@ -154,27 +138,25 @@ pub(in crate::video::ui) fn draw_library_page(
                 true => state.library.scroll > 0,
                 false => state.library.scroll + visible < entries.len(),
             };
-            draw_scroll_arrow(frame, at, up, live, lit(hover, control), scale);
+            draw_scroll_arrow(canvas, at, up, live, lit(hover, control));
         }
     }
 
     // The favourites, which are the same games under a shorter heading.
     let favourites = library_favourites_rect(rect, whdload_entry);
-    draw_panel_text(
-        frame,
+    canvas.text(
         favourites.x,
         favourites.y.saturating_sub(14),
         "Favourites:",
         PANEL_TEXT_DIM,
         1,
-        scale,
     );
-    draw_library_box(frame, favourites, scale);
+    draw_library_box(canvas, favourites);
     for (x, title) in [
         (favourites.x + 4 + LIBRARY_COL_NAME, "Game"),
         (library_remove_heading_x(rect, whdload_entry), "Remove"),
     ] {
-        draw_panel_text(frame, x, favourites.y + 5, title, PANEL_TEXT_DIM, 1, scale);
+        canvas.text(x, favourites.y + 5, title, PANEL_TEXT_DIM, 1);
     }
     // From the database rather than from the library, so a favourite whose
     // package has been deleted is still listed -- and can still be taken
@@ -192,12 +174,12 @@ pub(in crate::video::ui) fn draw_library_page(
         let chosen = state.library.focus == launcher::LibraryFocus::Favourites
             && state.library.favourite_scroll + drawn == state.library.favourite_selected;
         if chosen {
-            fill_rect(frame, scale_rect(row, scale), MENU_HILIGHT_BG, scale);
+            canvas.fill(row, MENU_HILIGHT_BG);
         } else if let Some(face) = row_light(
             ENTRY_BG,
             lit(hover, UiControl::LauncherLibraryFavouritePick(drawn)),
         ) {
-            fill_rect(frame, scale_rect(row, scale), face, scale);
+            canvas.fill(row, face);
         }
         // One no longer in the library is dimmed: still listed, still
         // removable, but there is nothing to launch.
@@ -207,8 +189,7 @@ pub(in crate::video::ui) fn draw_library_page(
             (false, true) => PANEL_TEXT,
             (false, false) => PANEL_TEXT_DIM,
         };
-        draw_panel_text(
-            frame,
+        canvas.text(
             row.x + 4 + LIBRARY_COL_NAME,
             row.y + 3,
             &truncate_to_width(
@@ -217,14 +198,13 @@ pub(in crate::video::ui) fn draw_library_page(
             ),
             colour,
             1,
-            scale,
         );
         let tick = library_remove_box(rect, whdload_entry, drawn);
-        draw_tick_box(frame, tick.x, tick.y, false, TICK_GREEN, scale);
+        draw_tick_box(canvas, tick.x, tick.y, false, TICK_GREEN);
         if let Some(edge) =
             tick_outline(lit(hover, UiControl::LauncherLibraryFavouriteRemove(drawn)))
         {
-            draw_outline(frame, tick, edge, scale);
+            outline(canvas, tick, edge);
         }
     }
 
@@ -236,11 +216,11 @@ pub(in crate::video::ui) fn draw_library_page(
                 true => state.library.favourite_scroll > 0,
                 false => state.library.favourite_scroll + favourite_rows < starred,
             };
-            draw_scroll_arrow(frame, at, up, live, lit(hover, control), scale);
+            draw_scroll_arrow(canvas, at, up, live, lit(hover, control));
         }
     }
 
-    draw_library_cover(frame, rect, state, scale);
+    draw_library_cover(canvas, rect, state);
 
     // The two buttons that say when work happens, in the gap between the
     // lists. A third slot is left beside them: the row is sized for three
@@ -264,47 +244,34 @@ pub(in crate::video::ui) fn draw_library_page(
     .into_iter()
     .enumerate()
     {
-        draw_text_button(
-            frame,
-            buttons[at],
-            label,
-            enabled,
-            lit(hover, control),
-            scale,
-        );
+        text_button(canvas, buttons[at], label, enabled, lit(hover, control));
     }
 }
 
 /// A list box, sunk into the panel like an entry field so it reads as
 /// something to look into rather than a raised control.
 #[cfg(feature = "game-library")]
-pub(in crate::video::ui) fn draw_library_box(frame: &mut [u8], at: Rect, scale: usize) {
-    fill_rect(frame, scale_rect(at, scale), ENTRY_BG, scale);
-    draw_outline(frame, at, BUTTON_EDGE_LIGHT, scale);
-    draw_rect_bevel(
-        frame,
-        scale_rect(
-            Rect {
-                x: at.x + 1,
-                y: at.y + 1,
-                w: at.w.saturating_sub(2),
-                h: at.h.saturating_sub(2),
-            },
-            scale,
-        ),
+pub(in crate::video::ui) fn draw_library_box(canvas: &mut dyn Canvas, at: Rect) {
+    canvas.fill(at, ENTRY_BG);
+    outline(canvas, at, BUTTON_EDGE_LIGHT);
+    canvas.bevel(
+        Rect {
+            x: at.x + 1,
+            y: at.y + 1,
+            w: at.w.saturating_sub(2),
+            h: at.h.saturating_sub(2),
+        },
         BUTTON_EDGE_DARK,
         BUTTON_EDGE_LIGHT,
-        scale,
     );
 }
 
 /// The cover art box, and what the database says under it.
 #[cfg(feature = "game-library")]
 pub(in crate::video::ui) fn draw_library_cover(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
-    scale: usize,
 ) {
     let whdload_entry = state.setup.whdload_enabled();
     // The frame is the size the layout reserves, whatever shape the picture
@@ -325,25 +292,13 @@ pub(in crate::video::ui) fn draw_library_cover(
     // The mount: a button-faced border raised out of the panel, with the
     // picture recessed into it. Two bevels facing opposite ways is what
     // makes the frame read as having thickness.
-    fill_rect(frame, scale_rect(frame_rect, scale), BUTTON_FACE, scale);
-    draw_rect_bevel(
-        frame,
-        scale_rect(frame_rect, scale),
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        scale,
-    );
-    fill_rect(frame, scale_rect(box_rect, scale), ENTRY_BG, scale);
+    canvas.fill(frame_rect, BUTTON_FACE);
+    canvas.bevel(frame_rect, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
+    canvas.fill(box_rect, ENTRY_BG);
     if let Some(art) = art {
-        draw_cover_art(frame, box_rect, art, scale);
+        draw_cover_art(canvas, box_rect, art);
     }
-    draw_rect_bevel(
-        frame,
-        scale_rect(box_rect, scale),
-        BUTTON_EDGE_DARK,
-        BUTTON_EDGE_LIGHT,
-        scale,
-    );
+    canvas.bevel(box_rect, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT);
 
     let Some(entry) = entry else {
         return;
@@ -358,14 +313,12 @@ pub(in crate::video::ui) fn draw_library_cover(
     {
         for (line, text) in missing.iter().copied().enumerate() {
             let w = text.chars().count() * font::GLYPH_W;
-            draw_panel_text(
-                frame,
+            canvas.text(
                 box_rect.x + box_rect.w.saturating_sub(w) / 2,
                 box_rect.y + box_rect.h / 2 - 8 * missing.len() + line * 12,
                 text,
                 PANEL_TEXT_DIM,
                 1,
-                scale,
             );
         }
     }
@@ -390,7 +343,7 @@ pub(in crate::video::ui) fn draw_library_cover(
         if *y + 24 > floor {
             return;
         }
-        draw_panel_text(frame, widest.x, *y, label, PANEL_TEXT_DIM, 1, scale);
+        canvas.text(widest.x, *y, label, PANEL_TEXT_DIM, 1);
         *y += 12;
         let mut lines = wrap_to_width(value, widest.w);
         let over = lines.len() > LIBRARY_FIELD_LINES;
@@ -413,7 +366,7 @@ pub(in crate::video::ui) fn draw_library_cover(
                 }
                 false => line,
             };
-            draw_panel_text(frame, widest.x, *y, &line, PANEL_TEXT, 1, scale);
+            canvas.text(widest.x, *y, &line, PANEL_TEXT, 1);
             *y += 12;
         }
         *y += 4;
@@ -447,7 +400,7 @@ pub(in crate::video::ui) fn draw_library_cover(
         .filter(|v| !v.is_empty())
         .or_else(|| (entry.duplicated && game.is_some()).then_some(entry.file_name.as_str()));
     if let Some(version) = version.filter(|_| y + 24 <= floor) {
-        draw_panel_text(frame, widest.x, y, "Version", PANEL_TEXT_DIM, 1, scale);
+        canvas.text(widest.x, y, "Version", PANEL_TEXT_DIM, 1);
         y += 12;
         // Two lines, because a package name is longer than the column and
         // both ends of it matter: `CannonFodder2_v1.11_0104.lha` says
@@ -461,7 +414,7 @@ pub(in crate::video::ui) fn draw_library_cover(
             if y + 12 > floor {
                 break;
             }
-            draw_panel_text(frame, widest.x, y, &line, PANEL_TEXT, 1, scale);
+            canvas.text(widest.x, y, &line, PANEL_TEXT, 1);
             y += 12;
         }
     }
@@ -474,40 +427,16 @@ pub(in crate::video::ui) fn draw_library_cover(
 /// undone by the magnification above it anyway.
 #[cfg(feature = "game-library")]
 pub(in crate::video::ui) fn draw_cover_art(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     into: Rect,
     art: &crate::gamelib::cover::Image,
-    scale: usize,
 ) {
     let Some(at) = fit_within(art.width, art.height, into) else {
         return;
     };
-    for y in 0..at.h {
-        let from_y = y * art.height / at.h;
-        for x in 0..at.w {
-            let from = (from_y * art.width + x * art.width / at.w) * 4;
-            let Some(px) = art.pixels.get(from..from + 4) else {
-                continue;
-            };
-            // Drawn opaque: cover art has no transparency worth honouring,
-            // and one that does reads better over the box's own fill.
-            let colour = rgba(px[0] as u32, px[1] as u32, px[2] as u32);
-            fill_rect(
-                frame,
-                scale_rect(
-                    Rect {
-                        x: at.x + x,
-                        y: at.y + y,
-                        w: 1,
-                        h: 1,
-                    },
-                    scale,
-                ),
-                colour,
-                scale,
-            );
-        }
-    }
+    // Drawn opaque: cover art has no transparency worth honouring, and one
+    // that does reads better over the box's own fill.
+    canvas.image(at, &art.pixels, art.width, art.height);
 }
 
 /// The largest rectangle of `w` by `h`'s shape that fits inside `into`,

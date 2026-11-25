@@ -190,6 +190,8 @@ impl MachineSetup {
             host_disk_selected: Vec::new(),
             host_disk_scroll: 0,
             host_disk_scroll_rate: ScrollRate::default(),
+            boot_scroll: 0,
+            boot_scroll_rate: ScrollRate::default(),
             host_disks_attached: raw_host_disks(raw),
             ide_master: cfg.ide.master.as_ref().map(|d| d.path.clone()),
             ide_master_name: cfg.ide.master.as_ref().and_then(|d| d.volume_name.clone()),

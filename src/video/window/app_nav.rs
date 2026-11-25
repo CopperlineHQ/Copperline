@@ -252,7 +252,10 @@ impl App {
             return true;
         }
         if !dir.horizontal() {
-            if let Some(next) = self.nav_host_disk_scroll(dir) {
+            if let Some(next) = self
+                .nav_host_disk_scroll(dir)
+                .or_else(|| self.nav_boot_order_scroll(dir))
+            {
                 self.nav_show(Some(next));
                 self.request_redraw();
                 return true;
@@ -903,6 +906,84 @@ impl App {
         } else {
             UiControl::LauncherHostDiskSelect(next)
         }))
+    }
+
+    /// Scroll the boot order under the focus, where the step would leave
+    /// the drives in view while there are more of them past the edge --
+    /// as the host-disk list does, and for the same reason: only the drives
+    /// in view are places to stand.
+    fn nav_boot_order_scroll(
+        &mut self,
+        dir: crate::video::nav::Dir,
+    ) -> Option<crate::video::nav::NavTarget> {
+        use crate::video::launcher::{LauncherTab, BOOTPRI_PAGE_ROWS};
+        use crate::video::nav::{Dir, NavTarget};
+        let NavTarget::Ui(control) = self.nav.focus()? else {
+            return None;
+        };
+        let field = Self::boot_row_of(control)?;
+        let state = self.launcher_state()?;
+        if state.tab != LauncherTab::BootPriority {
+            return None;
+        }
+        let setup = &state.setup;
+        let rank = setup.boot_rank(field)?;
+        // The next drive that way with anything on its row to stand on:
+        // a bay with no image in it shows only its name.
+        let next = match dir {
+            Dir::Down => setup
+                .boot_drives()
+                .skip(rank + 1)
+                .find(|&f| state.row_applies(f)),
+            Dir::Up => setup
+                .boot_drives()
+                .take(rank)
+                .filter(|&f| state.row_applies(f))
+                .last(),
+            _ => return None,
+        };
+        let Some(next) = next else {
+            // Nothing further that way to stand on, though there may be
+            // drives past the edge all the same (an empty bay, a CD): the
+            // list shows its end as the focus walks out of it.
+            let end = if dir == Dir::Up {
+                isize::MIN
+            } else {
+                isize::MAX
+            };
+            self.launcher_state_mut()?.setup.scroll_boot_order(end);
+            return None;
+        };
+        let scroll = setup.boot_scroll();
+        if (scroll..scroll + BOOTPRI_PAGE_ROWS).contains(&setup.boot_rank(next)?) {
+            // In view already: the walk finds it as it finds any row.
+            return None;
+        }
+        // The priority is inert on a drive kept out of the boot vote, and
+        // only its Bootable box answers.
+        let boot_off = setup.drive_boot_off(next);
+        self.launcher_state_mut()?.setup.reveal_boot_drive(next);
+        Some(NavTarget::Ui(match control {
+            _ if boot_off => UiControl::LauncherDriveBootToggle(next),
+            UiControl::LauncherCycle { forward, .. } => UiControl::LauncherCycle {
+                field: next,
+                forward,
+            },
+            UiControl::LauncherDriveBootpriEdit(_) => UiControl::LauncherDriveBootpriEdit(next),
+            _ => UiControl::LauncherDriveBootToggle(next),
+        }))
+    }
+
+    /// Which drive of the boot order a control belongs to.
+    fn boot_row_of(control: UiControl) -> Option<crate::video::launcher::LauncherField> {
+        match control {
+            UiControl::LauncherCycle { field, .. }
+            | UiControl::LauncherDriveBootpriEdit(field)
+            | UiControl::LauncherDriveBootToggle(field) => {
+                crate::video::launcher::field_is_bootpri(field).then_some(field)
+            }
+            _ => None,
+        }
     }
 
     /// Which row of the host-disk list a control belongs to.

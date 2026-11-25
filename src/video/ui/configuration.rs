@@ -4,6 +4,7 @@
 
 use super::*;
 mod dialogs;
+pub(in crate::video) mod egui_view;
 #[cfg(feature = "game-library")]
 mod library;
 mod rows;
@@ -383,35 +384,25 @@ pub(in crate::video::ui) const SERIAL_PORT_DIGITS: usize = 5;
 /// greyed default while untouched.
 #[allow(clippy::too_many_arguments)]
 pub(in crate::video::ui) fn draw_serial_half_box(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     box_rect: Rect,
     state: &LauncherState,
     control: UiControl,
     typing: bool,
     value: Option<String>,
     placeholder: &str,
-    scale: usize,
 ) {
-    draw_rect_bevel(
-        frame,
-        scale_rect(box_rect, scale),
-        BUTTON_EDGE_DARK,
-        BUTTON_EDGE_LIGHT,
-        scale,
-    );
-    light_edit_box(frame, box_rect, control, typing, scale);
+    canvas.bevel(box_rect, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT);
+    light_edit_box(canvas, box_rect, control, typing);
     let avail = box_rect.w.saturating_sub(8);
     if typing {
-        draw_edit_line(
-            frame,
+        typed_text(
+            canvas,
+            state,
+            box_rect,
             box_rect.x + 4,
             box_rect.y + 6,
-            state.edit_buffer(),
-            state.edit_caret().at(),
-            PANEL_TEXT_HILIGHT,
-            PANEL_BG,
             avail,
-            scale,
         );
         return;
     }
@@ -420,15 +411,7 @@ pub(in crate::video::ui) fn draw_serial_half_box(
         None => (placeholder.to_string(), PANEL_TEXT_DIM),
     };
     let shown = truncate_to_width(&text, avail);
-    draw_panel_text(
-        frame,
-        box_rect.x + 4,
-        box_rect.y + 6,
-        &shown,
-        color,
-        1,
-        scale,
-    );
+    canvas.text(box_rect.x + 4, box_rect.y + 6, &shown, color, 1);
 }
 
 /// Light a text box the focus is standing on.
@@ -440,11 +423,10 @@ pub(in crate::video::ui) fn draw_serial_half_box(
 /// Only the focus lights these -- the pointer has never coloured them,
 /// and a box that changed under the mouse would read as a button.
 pub(in crate::video::ui) fn light_edit_box(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     box_rect: Rect,
     control: UiControl,
     editing: bool,
-    scale: usize,
 ) {
     let light = lit(None, control);
     if light == 0.0 || editing {
@@ -456,12 +438,7 @@ pub(in crate::video::ui) fn light_edit_box(
         w: box_rect.w.saturating_sub(2),
         h: box_rect.h.saturating_sub(2),
     };
-    fill_rect(
-        frame,
-        scale_rect(inner, scale),
-        light_face(PANEL_BG, NAV_FACE, light),
-        scale,
-    );
+    canvas.fill(inner, light_face(PANEL_BG, NAV_FACE, light));
 }
 
 /// Draw a free-text/number value box: what the setting holds, or what is
@@ -469,40 +446,29 @@ pub(in crate::video::ui) fn light_edit_box(
 /// Create Image pages and by the Serial section's TCP address boxes, so it
 /// reads the value through `row_value` rather than from either store.
 pub(in crate::video::ui) fn draw_launcher_value_box(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     box_rect: Rect,
     state: &LauncherState,
     field: LauncherField,
     disabled: bool,
     centred: bool,
-    scale: usize,
 ) {
-    draw_rect_bevel(
-        frame,
-        scale_rect(box_rect, scale),
-        BUTTON_EDGE_DARK,
-        BUTTON_EDGE_LIGHT,
-        scale,
-    );
+    canvas.bevel(box_rect, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT);
     light_edit_box(
-        frame,
+        canvas,
         box_rect,
         value_box_control(field),
         state.typing_in_value_box(field),
-        scale,
     );
     let avail = box_rect.w.saturating_sub(8);
     if state.typing_in_value_box(field) {
-        draw_edit_line(
-            frame,
+        typed_text(
+            canvas,
+            state,
+            box_rect,
             box_rect.x + 4,
             box_rect.y + 6,
-            state.edit_buffer(),
-            state.edit_caret().at(),
-            PANEL_TEXT_HILIGHT,
-            PANEL_BG,
             avail,
-            scale,
         );
         return;
     }
@@ -521,7 +487,7 @@ pub(in crate::video::ui) fn draw_launcher_value_box(
     } else {
         box_rect.x + 4
     };
-    draw_panel_text(frame, x, box_rect.y + 6, &shown, color, 1, scale);
+    canvas.text(x, box_rect.y + 6, &shown, color, 1);
 }
 
 /// Gap between one tick box's label and the next box along.
@@ -558,37 +524,33 @@ pub(in crate::video::ui) fn launcher_tick_strip(
 
 /// Draw one entry of a tick strip: the box, then its word.
 pub(in crate::video::ui) fn draw_launcher_tick_choice(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     at: Rect,
     label: &str,
     set: bool,
     disabled: bool,
     hot: f32,
-    scale: usize,
 ) {
     let colour = if disabled { PANEL_TEXT_DIM } else { TICK_GREEN };
-    draw_tick_box(frame, at.x, at.y, set, colour, scale);
+    draw_tick_box(canvas, at.x, at.y, set, colour);
     if !disabled {
         if let Some(edge) = tick_outline(hot) {
-            draw_outline(
-                frame,
+            outline(
+                canvas,
                 Rect {
                     w: LAUNCH_TICK_BOX,
                     ..at
                 },
                 edge,
-                scale,
             );
         }
     }
-    draw_panel_text(
-        frame,
+    canvas.text(
         at.x + LAUNCH_TICK_BOX + LAUNCH_TICK_LABEL_GAP,
         at.y + 1,
         label,
         if disabled { PANEL_TEXT_DIM } else { PANEL_TEXT },
         1,
-        scale,
     );
 }
 
@@ -963,21 +925,14 @@ pub(in crate::video::ui) const META_ART: (usize, usize) = (112, 140);
 /// does not answer.
 #[cfg(feature = "game-library")]
 pub(in crate::video::ui) fn draw_az_button(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     label: &str,
     live: bool,
     hovered: f32,
-    scale: usize,
 ) {
-    let scaled = scale_rect(rect, scale);
-    fill_rect(
-        frame,
-        scaled,
-        light_face(BUTTON_FACE, MENU_HILIGHT_BG, hovered),
-        scale,
-    );
-    draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
+    canvas.fill(rect, light_face(BUTTON_FACE, MENU_HILIGHT_BG, hovered));
+    canvas.bevel(rect, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     let resting = if live {
         BUTTON_TEXT
     } else {
@@ -987,7 +942,7 @@ pub(in crate::video::ui) fn draw_az_button(
     let text_w = label.chars().count() * font::GLYPH_W;
     let x = rect.x + rect.w.saturating_sub(text_w) / 2;
     let y = rect.y + rect.h.saturating_sub(font::GLYPH_H) / 2;
-    draw_panel_text(frame, x, y, label, colour, 1, scale);
+    canvas.text(x, y, label, colour, 1);
 }
 
 /// The A-Z shortcut buttons, from just after the "Games:" label to the
@@ -1128,16 +1083,14 @@ pub(in crate::video::ui) fn host_disk_arrow_rects(rect: Rect) -> [(UiControl, Re
 /// arrow in it, and a "^" is a caret, which reads as punctuation next to a
 /// list rather than as a direction.
 pub(in crate::video::ui) fn draw_scroll_arrow(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     arrow: Rect,
     up: bool,
     live: bool,
     hovered: f32,
-    scale: usize,
 ) {
-    let scaled = scale_rect(arrow, scale);
-    fill_rect(frame, scaled, BUTTON_FACE, scale);
-    draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
+    canvas.fill(arrow, BUTTON_FACE);
+    canvas.bevel(arrow, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     let colour = if live {
         light_face(BUTTON_TEXT, PANEL_TEXT_HILIGHT, hovered)
     } else {
@@ -1152,19 +1105,14 @@ pub(in crate::video::ui) fn draw_scroll_arrow(
             true => arrow.y + 4 + step,
             false => arrow.y + 4 + (2 - step),
         };
-        fill_rect(
-            frame,
-            scale_rect(
-                Rect {
-                    x: arrow.x + HOST_DISK_ARROW / 2 - width / 2 - 1,
-                    y,
-                    w: width,
-                    h: 1,
-                },
-                scale,
-            ),
+        canvas.fill(
+            Rect {
+                x: arrow.x + HOST_DISK_ARROW / 2 - width / 2 - 1,
+                y,
+                w: width,
+                h: 1,
+            },
             colour,
-            scale,
         );
     }
 }
@@ -1353,17 +1301,54 @@ pub(in crate::video::ui) fn launcher_nav_block_h(tab: launcher::LauncherTab) -> 
     LAUNCH_NAV_BLOCK_H + (rows - 1) * (LAUNCH_MODEL_H + LAUNCH_MODEL_GAP)
 }
 
-/// The Boot Priority page's paging button, when it has one: any page short
-/// of the last offers the next, and only while there is a next to offer.
-/// Every page's Back button already returns to the first, so paging only
-/// ever needs to go forward.
-pub(in crate::video::ui) fn boot_page_button(
-    state: &LauncherState,
-) -> Option<(&'static str, launcher::LauncherTab)> {
-    state
-        .setup
-        .boot_priority_next_page(state.tab)
-        .map(|next| ("Next Page >", next))
+/// The boot order's scroll arrows, at the right of the pane: up beside the
+/// first drive the page shows, down beside the last. The column titles
+/// stay where they are above the drives while the list moves under them.
+pub(in crate::video::ui) fn boot_order_arrow_rects(rect: Rect) -> [(UiControl, Rect); 2] {
+    let offset = launcher_nav_block_h(LauncherTab::BootPriority);
+    let x = rect.x + rect.w - LAUNCH_MARGIN - HOST_DISK_ARROW;
+    // Row 0 is the column titles; the drives are the rows after it.
+    let beside = |row: usize| Rect {
+        x,
+        y: launcher_row_y(rect, row) + offset + 2 + (LAUNCH_CONTROL_H - HOST_DISK_ARROW) / 2,
+        w: HOST_DISK_ARROW,
+        h: HOST_DISK_ARROW,
+    };
+    [
+        (UiControl::LauncherBootScroll(-1), beside(1)),
+        (
+            UiControl::LauncherBootScroll(1),
+            beside(launcher::BOOTPRI_PAGE_ROWS),
+        ),
+    ]
+}
+
+/// The drives' part of the Boot Priority page, from the first drive row to
+/// the last, across the pane: where the wheel scrolls the boot order.
+pub(in crate::video::ui) fn boot_order_rect(rect: Rect) -> Rect {
+    let offset = launcher_nav_block_h(LauncherTab::BootPriority);
+    let x = launcher_pane_x(rect);
+    let y = launcher_row_y(rect, 1) + offset;
+    Rect {
+        x,
+        y,
+        w: (rect.x + rect.w).saturating_sub(x),
+        h: launcher::BOOTPRI_PAGE_ROWS * LAUNCH_ROW_H,
+    }
+}
+
+/// Whether the boot order has drives to show above (`up`) or below the
+/// ones in view.
+pub(in crate::video::ui) fn boot_order_arrow_live(
+    setup: &launcher::MachineSetup,
+    up: bool,
+) -> bool {
+    let scroll = setup.boot_scroll();
+    if up {
+        scroll > 0
+    } else {
+        scroll + launcher::BOOTPRI_PAGE_ROWS < setup.boot_priority_row_count()
+    }
 }
 
 /// The Status column's clickable area (the "Bootable" label plus its tick box),
@@ -2027,6 +2012,13 @@ pub(in crate::video::ui) fn launcher_control_at(
     }
     // The top nav row: a page's sibling links (the Storage and A/V sub-pages),
     // or a Back button.
+    if state.tab == LauncherTab::BootPriority && state.setup.boot_order_scrolls() {
+        for (control, arrow) in boot_order_arrow_rects(rect) {
+            if arrow.contains(pos) {
+                return Some(control);
+            }
+        }
+    }
     if state.tab == LauncherTab::HostDisk {
         let disks = state.setup.host_disks().len();
         if disks > HOST_DISK_VISIBLE_ROWS {
@@ -2077,12 +2069,6 @@ pub(in crate::video::ui) fn launcher_control_at(
             return Some(UiControl::LauncherNavTab(target));
         }
     }
-    // The boot order's paging button, drawn in the slot after Back.
-    if let Some((_, target)) = boot_page_button(state) {
-        if launcher_nav_button_rect(rect, slot).contains(pos) {
-            return Some(UiControl::LauncherNavTab(target));
-        }
-    }
     for (control, button_rect) in launcher_action_rects(rect) {
         if button_rect.contains(pos) {
             return Some(control);
@@ -2095,11 +2081,10 @@ pub(in crate::video::ui) fn launcher_control_at(
 /// The Library page: the games found, which are favourites, and what the
 /// database says about the one picked.
 pub(in crate::video::ui) fn draw_host_disk_page(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     let setup = &state.setup;
     let table = host_disk_table_rect(rect);
@@ -2109,23 +2094,17 @@ pub(in crate::video::ui) fn draw_host_disk_page(
     // first and goes all the way round: the inset shading alone is nearly the
     // panel's own colour, so on its own only the lit edges show and the box
     // looks bevelled on two sides rather than recessed.
-    let scaled = scale_rect(table, scale);
-    fill_rect(frame, scaled, ENTRY_BG, scale);
-    draw_outline(frame, table, BUTTON_EDGE_LIGHT, scale);
-    draw_rect_bevel(
-        frame,
-        scale_rect(
-            Rect {
-                x: table.x + 1,
-                y: table.y + 1,
-                w: table.w.saturating_sub(2),
-                h: table.h.saturating_sub(2),
-            },
-            scale,
-        ),
+    canvas.fill(table, ENTRY_BG);
+    outline(canvas, table, BUTTON_EDGE_LIGHT);
+    canvas.bevel(
+        Rect {
+            x: table.x + 1,
+            y: table.y + 1,
+            w: table.w.saturating_sub(2),
+            h: table.h.saturating_sub(2),
+        },
         BUTTON_EDGE_DARK,
         ENTRY_BG,
-        scale,
     );
 
     // Column headings, then a rule under them.
@@ -2138,42 +2117,27 @@ pub(in crate::video::ui) fn draw_host_disk_page(
         (HOST_DISK_COL_WRITABLE, "R/W"),
         (HOST_DISK_COL_TICK, "Enable"),
     ] {
-        draw_panel_text(
-            frame,
-            table.x + offset,
-            head_y,
-            title,
-            PANEL_TEXT_DIM,
-            1,
-            scale,
-        );
+        canvas.text(table.x + offset, head_y, title, PANEL_TEXT_DIM, 1);
     }
-    fill_rect(
-        frame,
-        scale_rect(
-            Rect {
-                x: table.x + 2,
-                y: table.y + HOST_DISK_HEADER_H - 2,
-                w: table.w.saturating_sub(4),
-                h: 1,
-            },
-            scale,
-        ),
+    canvas.fill(
+        Rect {
+            x: table.x + 2,
+            y: table.y + HOST_DISK_HEADER_H - 2,
+            w: table.w.saturating_sub(4),
+            h: 1,
+        },
         BUTTON_EDGE_DARK,
-        scale,
     );
 
     let disks = setup.host_disks();
     let scroll = setup.host_disk_scroll().min(disks.len());
     if disks.is_empty() {
-        draw_panel_text(
-            frame,
+        canvas.text(
             table.x + HOST_DISK_COL_DISK,
             table.y + HOST_DISK_HEADER_H + 4,
             "No supported disks found on the host system.",
             PANEL_TEXT_DIM,
             1,
-            scale,
         );
     }
     for (slot, disk) in disks
@@ -2194,12 +2158,7 @@ pub(in crate::video::ui) fn draw_host_disk_page(
         if ticked || setup.host_disk_is_attached(&disk.id) || light != 0.0 {
             // The pointer's own highlight here is the same face a disk
             // in use keeps, so only the focus changes the colour.
-            fill_rect(
-                frame,
-                scale_rect(row, scale),
-                light_face(BUTTON_FACE, BUTTON_FACE, light),
-                scale,
-            );
+            canvas.fill(row, light_face(BUTTON_FACE, BUTTON_FACE, light));
         }
         let text_y = row.y + (HOST_DISK_ROW_H - font::GLYPH_H) / 2;
         // A disk the host has mounted is not dimmed: mounting takes it from
@@ -2223,7 +2182,7 @@ pub(in crate::video::ui) fn draw_host_disk_page(
             ),
         ] {
             let text = truncate_to_width(&text, next - offset - 8);
-            draw_panel_text(frame, row.x + offset, text_y, &text, PANEL_TEXT, 1, scale);
+            canvas.text(row.x + offset, text_y, &text, PANEL_TEXT, 1);
         }
         // Two ticks, the same kind of answer either way: may the guest write
         // to this disk, and is it going to the machine at all. Writing is on
@@ -2249,9 +2208,9 @@ pub(in crate::video::ui) fn draw_host_disk_page(
                 w: TICK_BOX,
                 h: TICK_BOX,
             };
-            draw_tick_box(frame, at.x, at.y, set, colour, scale);
+            draw_tick_box(canvas, at.x, at.y, set, colour);
             if let Some(edge) = tick_outline(lit(hover, control)) {
-                draw_outline(frame, at, edge, scale);
+                outline(canvas, at, edge);
             }
         }
         // The attach column is blank until the disk is ticked, so the
@@ -2260,20 +2219,16 @@ pub(in crate::video::ui) fn draw_host_disk_page(
         let attach_light = lit(hover, UiControl::LauncherHostDiskAttach(i));
         if attach_light != 0.0 {
             let cell = host_disk_attach_cell(rect, slot);
-            fill_rect(
-                frame,
-                scale_rect(cell, scale),
+            canvas.fill(
+                cell,
                 light_face(BUTTON_FACE, BUTTON_FACE_HOVER, attach_light),
-                scale,
             );
-            draw_panel_text(
-                frame,
+            canvas.text(
                 cell.x,
                 text_y,
                 &disk.attach.map(|a| a.label()).unwrap_or_default(),
                 PANEL_TEXT,
                 1,
-                scale,
             );
         }
     }
@@ -2288,7 +2243,7 @@ pub(in crate::video::ui) fn draw_host_disk_page(
             } else {
                 scroll + HOST_DISK_VISIBLE_ROWS < disks.len()
             };
-            draw_scroll_arrow(frame, arrow, up, live, lit(hover, control), scale);
+            draw_scroll_arrow(canvas, arrow, up, live, lit(hover, control));
         }
     }
 
@@ -2299,13 +2254,12 @@ pub(in crate::video::ui) fn draw_host_disk_page(
             _ => "Refresh",
         };
         let enabled = host_disk_button_live(setup, control);
-        draw_text_button(
-            frame,
+        text_button(
+            canvas,
             button,
             label,
             enabled,
             if enabled { lit(hover, control) } else { 0.0 },
-            scale,
         );
     }
 
@@ -2323,8 +2277,7 @@ pub(in crate::video::ui) fn draw_host_disk_page(
         .filter(|d| setup.host_disk_is_selected(&d.id))
         .collect();
     let warn_privilege = chosen.is_empty() && crate::blockdev::attaching_needs_privilege();
-    draw_panel_text(
-        frame,
+    canvas.text(
         table.x,
         summary_top,
         if warn_privilege {
@@ -2338,28 +2291,23 @@ pub(in crate::video::ui) fn draw_host_disk_page(
             PANEL_TEXT_DIM
         },
         1,
-        scale,
     );
     if chosen.is_empty() {
         if warn_privilege {
-            draw_panel_text(
-                frame,
+            canvas.text(
                 table.x + 8,
                 summary_top + 16,
                 "Attaching a host drive requires elevated privileges.",
                 PANEL_TEXT_ACCENT,
                 1,
-                scale,
             );
         } else {
-            draw_panel_text(
-                frame,
+            canvas.text(
                 table.x + 8,
                 summary_top + 16,
                 "Select a disk to attach it to the machine",
                 PANEL_TEXT,
                 1,
-                scale,
             );
         }
     }
@@ -2401,7 +2349,7 @@ pub(in crate::video::ui) fn draw_host_disk_page(
             if y + HOST_DISK_ROW_H > bottom {
                 return;
             }
-            draw_panel_text(frame, table.x + 8, y, line, PANEL_TEXT, 1, scale);
+            canvas.text(table.x + 8, y, line, PANEL_TEXT, 1);
             y += HOST_DISK_ROW_H;
         }
     }
@@ -2413,12 +2361,11 @@ pub(in crate::video::ui) fn draw_host_disk_page(
 pub(in crate::video::ui) const TICK_BOX: usize = 10;
 
 pub(in crate::video::ui) fn draw_tick_box(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     x: usize,
     y: usize,
     set: bool,
     colour: u32,
-    scale: usize,
 ) {
     let outer = Rect {
         x,
@@ -2426,8 +2373,8 @@ pub(in crate::video::ui) fn draw_tick_box(
         w: TICK_BOX,
         h: TICK_BOX,
     };
-    fill_rect(frame, scale_rect(outer, scale), ENTRY_BG, scale);
-    draw_outline(frame, outer, BUTTON_EDGE_LIGHT, scale);
+    canvas.fill(outer, ENTRY_BG);
+    outline(canvas, outer, BUTTON_EDGE_LIGHT);
     if set {
         let inner = Rect {
             x: x + 2,
@@ -2435,7 +2382,7 @@ pub(in crate::video::ui) fn draw_tick_box(
             w: 6,
             h: 6,
         };
-        fill_rect(frame, scale_rect(inner, scale), colour, scale);
+        canvas.fill(inner, colour);
     }
 }
 
@@ -2482,8 +2429,36 @@ pub(in crate::video::ui) fn edit_window(len: usize, caret: usize, cells: usize) 
 /// that has been scrolled past, and the caret cell is left free at the
 /// right so a caret past the last character has somewhere to sit.
 #[allow(clippy::too_many_arguments)]
+/// The text being typed into a value box, and where it is going: egui's
+/// own text field, where the canvas types in its boxes, and the edit line
+/// with its caret otherwise.
+pub(in crate::video::ui) fn typed_text(
+    canvas: &mut dyn Canvas,
+    state: &LauncherState,
+    box_rect: Rect,
+    x: usize,
+    y: usize,
+    avail: usize,
+) {
+    if let Some(target) = state.editing() {
+        if canvas.typing_box(box_rect, x, y, avail, PANEL_TEXT_HILIGHT, target) {
+            return;
+        }
+    }
+    draw_edit_line(
+        canvas,
+        x,
+        y,
+        state.edit_buffer(),
+        state.edit_caret().at(),
+        PANEL_TEXT_HILIGHT,
+        PANEL_BG,
+        avail,
+    );
+}
+
 pub(in crate::video::ui) fn draw_edit_line(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     x: usize,
     y: usize,
     text: &str,
@@ -2491,7 +2466,6 @@ pub(in crate::video::ui) fn draw_edit_line(
     color: u32,
     bg: u32,
     avail_px: usize,
-    scale: usize,
 ) {
     let chars: Vec<char> = text.chars().collect();
     // One cell is the caret's, so a full box still shows where typing goes.
@@ -2506,7 +2480,7 @@ pub(in crate::video::ui) fn draw_edit_line(
         shown[..3].fill('.');
     }
     let shown: String = shown.into_iter().collect();
-    draw_panel_text(frame, x, y, &shown, color, 1, scale);
+    canvas.text(x, y, &shown, color, 1);
     // Half a cell wide: enough to be seen against the text at any scale,
     // narrow enough to leave most of the character it stands on legible.
     // It blinks, so it is also read as a caret rather than as a mark in
@@ -2521,7 +2495,7 @@ pub(in crate::video::ui) fn draw_edit_line(
         w: (font::GLYPH_W / 2).max(1),
         h: font::GLYPH_H,
     };
-    fill_rect(frame, scale_rect(block, scale), color, scale);
+    canvas.fill(block, color);
     let _ = bg;
 }
 
@@ -2584,22 +2558,20 @@ pub(in crate::video) fn clip_path_to_chars(text: &str, max_chars: usize) -> Stri
 /// A model-selector / tab button: a flat bevel that fills with the title-bar
 /// blue when active/selected. Tabs label left, model buttons centred.
 pub(in crate::video::ui) fn draw_launcher_chip(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     label: &str,
     active: bool,
     hover: f32,
     align_left: bool,
-    scale: usize,
 ) {
     let face = if active {
         light_face_to(PANEL_TITLE_BG, PANEL_TITLE_BG, NAV_FACE_ON, hover)
     } else {
         light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover)
     };
-    let scaled = scale_rect(rect, scale);
-    fill_rect(frame, scaled, face, scale);
-    draw_rect_bevel(frame, scaled, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK, scale);
+    canvas.fill(rect, face);
+    canvas.bevel(rect, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     let color = if active {
         PANEL_TITLE_TEXT
     } else {
@@ -2612,37 +2584,33 @@ pub(in crate::video::ui) fn draw_launcher_chip(
         rect.x + rect.w.saturating_sub(text_w) / 2
     };
     let y = rect.y + rect.h.saturating_sub(font::GLYPH_H) / 2;
-    draw_panel_text(frame, x, y, label, color, 1, scale);
+    canvas.text(x, y, label, color, 1);
 }
 
 pub(in crate::video::ui) fn draw_launcher_zorro(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     let setup = &state.setup;
     let pane_x = launcher_pane_x(rect);
     // Add button pinned to the top of the pane; the board list (or the empty
     // note) sits below it.
-    draw_text_button(
-        frame,
+    text_button(
+        canvas,
         launcher_zorro_add_rect(rect),
         "Add board...",
         true,
         lit(hover, UiControl::LauncherZorroAdd),
-        scale,
     );
     if setup.zorro_boards().is_empty() {
-        draw_panel_text(
-            frame,
+        canvas.text(
             pane_x,
             launcher_row_y(rect, 0) + LAUNCH_NAV_BLOCK_H + 8,
             "No extra Zorro boards configured.",
             PANEL_TEXT_DIM,
             1,
-            scale,
         );
     }
     for (row, item) in launcher_zorro_layout(setup) {
@@ -2652,18 +2620,17 @@ pub(in crate::video::ui) fn draw_launcher_zorro(
                 let board = &setup.zorro_boards()[i];
                 let remove = launcher_zorro_remove_rect(rect, row);
                 let name = truncate_to_width(&board.name(), remove.x.saturating_sub(pane_x + 8));
-                draw_panel_text(frame, pane_x, row_y + 8, &name, PANEL_TEXT, 1, scale);
-                draw_text_button(
-                    frame,
+                canvas.text(pane_x, row_y + 8, &name, PANEL_TEXT, 1);
+                text_button(
+                    canvas,
                     remove,
                     "Remove",
                     true,
                     lit(hover, UiControl::LauncherZorroRemove(i)),
-                    scale,
                 );
             }
             ZorroItem::Option { board, opt } => {
-                draw_launcher_board_option(frame, rect, state, board, opt, row_y, hover, scale);
+                draw_launcher_board_option(canvas, rect, state, board, opt, row_y, hover);
             }
         }
     }
@@ -2672,14 +2639,13 @@ pub(in crate::video::ui) fn draw_launcher_zorro(
 /// Draw one plugin config-option row (indented under its board): a label plus
 /// the widget its kind calls for.
 pub(in crate::video::ui) fn draw_launcher_board_option(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     board: usize,
     opt: usize,
     row_y: usize,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     use crate::zorro::ConfigOptionKind as K;
     let setup = &state.setup;
@@ -2690,25 +2656,24 @@ pub(in crate::video::ui) fn draw_launcher_board_option(
         &option.label,
         launcher_control_x(rect).saturating_sub(label_x + 6),
     );
-    draw_panel_text(frame, label_x, row_y + 8, &label, PANEL_TEXT, 1, scale);
+    canvas.text(label_x, row_y + 8, &label, PANEL_TEXT, 1);
 
     let value = setup.zorro_boards()[board].value(opt);
     match &option.kind {
         K::Bool => {
             let on = value.trim().eq_ignore_ascii_case("true");
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 launcher_toggle_rect(rect, row_y),
                 if on { "On" } else { "Off" },
                 true,
                 lit(hover, UiControl::LauncherBoardToggle { board, opt }),
-                scale,
             );
         }
         K::Enum(_) | K::Int => {
             let (prev, val, next) = launcher_cycle_rects(rect, row_y);
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 prev,
                 "<",
                 true,
@@ -2720,20 +2685,11 @@ pub(in crate::video::ui) fn draw_launcher_board_option(
                         forward: false,
                     },
                 ),
-                scale,
             );
             let shown = truncate_to_width(&value, val.w.saturating_sub(8));
-            draw_panel_text(
-                frame,
-                val.x + 6,
-                row_y + 8,
-                &shown,
-                PANEL_TEXT_HILIGHT,
-                1,
-                scale,
-            );
-            draw_text_button(
-                frame,
+            canvas.text(val.x + 6, row_y + 8, &shown, PANEL_TEXT_HILIGHT, 1);
+            text_button(
+                canvas,
                 next,
                 ">",
                 true,
@@ -2745,7 +2701,6 @@ pub(in crate::video::ui) fn draw_launcher_board_option(
                         forward: true,
                     },
                 ),
-                scale,
             );
         }
         K::File => {
@@ -2760,80 +2715,59 @@ pub(in crate::video::ui) fn draw_launcher_board_option(
             };
             let avail = browse.x.saturating_sub(launcher_control_x(rect) + 6);
             let shown = truncate_to_width(&shown, avail);
-            draw_panel_text(
-                frame,
-                launcher_control_x(rect),
-                row_y + 8,
-                &shown,
-                PANEL_TEXT,
-                1,
-                scale,
-            );
-            draw_text_button(
-                frame,
+            canvas.text(launcher_control_x(rect), row_y + 8, &shown, PANEL_TEXT, 1);
+            text_button(
+                canvas,
                 browse,
                 "Browse",
                 true,
                 lit(hover, UiControl::LauncherBoardBrowse { board, opt }),
-                scale,
             );
-            draw_text_button(
-                frame,
+            text_button(
+                canvas,
                 clear,
                 "Clear",
                 !value.is_empty(),
                 lit(hover, UiControl::LauncherBoardClear { board, opt }),
-                scale,
             );
         }
         K::String => {
             let editing = state.editing() == Some(EditTarget::BoardOption { board, opt });
             let vbox = launcher_board_value_rect(rect, row_y);
-            draw_rect_bevel(
-                frame,
-                scale_rect(vbox, scale),
-                BUTTON_EDGE_DARK,
-                BUTTON_EDGE_LIGHT,
-                scale,
-            );
+            canvas.bevel(vbox, BUTTON_EDGE_DARK, BUTTON_EDGE_LIGHT);
             light_edit_box(
-                frame,
+                canvas,
                 vbox,
                 UiControl::LauncherBoardEdit { board, opt },
                 editing,
-                scale,
             );
             if editing {
-                draw_edit_line(
-                    frame,
+                typed_text(
+                    canvas,
+                    state,
+                    vbox,
                     vbox.x + 4,
                     row_y + 8,
-                    state.edit_buffer(),
-                    state.edit_caret().at(),
-                    PANEL_TEXT_HILIGHT,
-                    PANEL_BG,
                     vbox.w.saturating_sub(8),
-                    scale,
                 );
             } else {
                 let shown = truncate_to_width(&value, vbox.w.saturating_sub(8));
-                draw_panel_text(frame, vbox.x + 4, row_y + 8, &shown, PANEL_TEXT, 1, scale);
+                canvas.text(vbox.x + 4, row_y + 8, &shown, PANEL_TEXT, 1);
             }
         }
     }
 }
 
 /// A thin divider line.
-pub(in crate::video::ui) fn draw_launcher_divider(frame: &mut [u8], rect: Rect, scale: usize) {
-    fill_rect(frame, scale_rect(rect, scale), BUTTON_EDGE_DARK, scale);
+pub(in crate::video::ui) fn draw_launcher_divider(canvas: &mut dyn Canvas, rect: Rect) {
+    canvas.fill(rect, BUTTON_EDGE_DARK);
 }
 
 pub(in crate::video::ui) fn draw_launcher(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     state: &LauncherState,
     hover: Option<UiControl>,
-    scale: usize,
 ) {
     let setup = &state.setup;
     // Machine selector grid. The A500 highlights when no profile is chosen
@@ -2841,50 +2775,46 @@ pub(in crate::video::ui) fn draw_launcher(
     let selected_model = setup.selected_model();
     for (i, &model) in launcher::MODELS.iter().enumerate() {
         draw_launcher_chip(
-            frame,
+            canvas,
             launcher_model_rect(rect, i),
             launcher::model_label(model),
             selected_model == model,
             lit(hover, UiControl::LauncherModel(model)),
             false,
-            scale,
         );
     }
     // Divider under the machine grid; vertical divider between the tab column
     // and the settings pane.
     let content_top = launcher_content_top(rect);
     draw_launcher_divider(
-        frame,
+        canvas,
         Rect {
             x: rect.x + LAUNCH_MARGIN,
             y: content_top - 6,
             w: rect.w - 2 * LAUNCH_MARGIN,
             h: 1,
         },
-        scale,
     );
     draw_launcher_divider(
-        frame,
+        canvas,
         Rect {
             x: rect.x + LAUNCH_MARGIN + LAUNCH_SIDEBAR_W + 5,
             y: content_top,
             w: 1,
             h: launcher_status_y(rect).saturating_sub(content_top + 4),
         },
-        scale,
     );
     // Vertical category-tab column.
     let whdload_entry = state.setup.whdload_enabled();
     let strip = launcher::tabs(whdload_entry);
     for (i, &tab) in strip.iter().enumerate() {
         draw_launcher_chip(
-            frame,
+            canvas,
             launcher_tab_rect(rect, i),
             tab.label(),
             state.tab.strip_tab() == tab,
             lit(hover, UiControl::LauncherTab(tab)),
             true,
-            scale,
         );
     }
     // Active tab content in the settings pane, shifted down past the top nav
@@ -2895,7 +2825,7 @@ pub(in crate::video::ui) fn draw_launcher(
         0
     };
     if state.tab == LauncherTab::Zorro {
-        draw_launcher_zorro(frame, rect, state, hover, scale);
+        draw_launcher_zorro(canvas, rect, state, hover);
     } else {
         for (i, r) in state
             .rows()
@@ -2903,7 +2833,7 @@ pub(in crate::video::ui) fn draw_launcher(
             .filter(|r| state.setup.row_on_page(state.tab, r.field))
             .enumerate()
         {
-            draw_launcher_row(frame, rect, state, r, i, row_offset, hover, scale);
+            draw_launcher_row(canvas, rect, state, r, i, row_offset, hover);
         }
     }
     // Nav row at the top of the pane: a Back button when this is a sub-page,
@@ -2914,45 +2844,40 @@ pub(in crate::video::ui) fn draw_launcher(
     let options = state.tab.nav_options();
     let mut slot = 0;
     if let Some(parent) = back_parent {
-        draw_text_button(
-            frame,
+        text_button(
+            canvas,
             launcher_back_button_rect(rect),
             "< Back",
             true,
             lit(hover, UiControl::LauncherNavTab(parent)),
-            scale,
         );
         slot = 1;
     }
     for (i, &(label, target)) in options.iter().enumerate() {
         draw_launcher_chip(
-            frame,
+            canvas,
             launcher_nav_button_rect(rect, slot + i),
             label,
             target == state.tab,
             lit(hover, UiControl::LauncherNavTab(target)),
             false,
-            scale,
         );
     }
-    // The rest of the boot order, when there is more of it than one page
-    // holds. Next to Back, in the slot a sibling link would have taken.
-    if let Some((label, target)) = boot_page_button(state) {
-        draw_text_button(
-            frame,
-            launcher_nav_button_rect(rect, slot),
-            label,
-            true,
-            lit(hover, UiControl::LauncherNavTab(target)),
-            scale,
-        );
+    // The boot order's arrows, when it is longer than the page: each greys
+    // at its end of the list, so the pair says where the window is.
+    if state.tab == LauncherTab::BootPriority && state.setup.boot_order_scrolls() {
+        for (control, arrow) in boot_order_arrow_rects(rect) {
+            let up = control == UiControl::LauncherBootScroll(-1);
+            let live = boot_order_arrow_live(&state.setup, up);
+            draw_scroll_arrow(canvas, arrow, up, live, lit(hover, control));
+        }
     }
     #[cfg(feature = "game-library")]
     if state.tab == LauncherTab::WhdloadLibrary {
-        draw_library_page(frame, rect, state, hover, scale);
+        draw_library_page(canvas, rect, state, hover);
     }
     if state.tab == LauncherTab::HostDisk {
-        draw_host_disk_page(frame, rect, state, hover, scale);
+        draw_host_disk_page(canvas, rect, state, hover);
     }
     if state.tab == LauncherTab::Netplay {
         // One blank row below the page's rows, whichever layout is shown.
@@ -2977,15 +2902,7 @@ pub(in crate::video::ui) fn draw_launcher(
         .iter()
         .enumerate()
         {
-            draw_panel_text(
-                frame,
-                launcher_pane_x(rect),
-                top + i * 14,
-                line,
-                PANEL_TEXT_DIM,
-                1,
-                scale,
-            );
+            canvas.text(launcher_pane_x(rect), top + i * 14, line, PANEL_TEXT_DIM, 1);
         }
     }
     // The Input tab spells out what the chosen wiring means: which host
@@ -3003,24 +2920,20 @@ pub(in crate::video::ui) fn draw_launcher(
             .len()
                 + 1,
         ) + row_offset;
-        draw_panel_text(
-            frame,
+        canvas.text(
             launcher_pane_x(rect),
             summary_top,
             "With these settings:",
             PANEL_TEXT_DIM,
             1,
-            scale,
         );
         for (i, line) in setup.input_routing_summary().iter().enumerate() {
-            draw_panel_text(
-                frame,
+            canvas.text(
                 launcher_pane_x(rect) + 8,
                 summary_top + 16 + i * 14,
                 line,
                 PANEL_TEXT,
                 1,
-                scale,
             );
         }
     }
@@ -3041,17 +2954,8 @@ pub(in crate::video::ui) fn draw_launcher(
                 + 1,
         ) + row_offset
             + 14;
-        draw_panel_text(
-            frame,
-            launcher_pane_x(rect),
-            note_top,
-            "Info:",
-            PANEL_TEXT_DIM,
-            1,
-            scale,
-        );
-        draw_panel_text(
-            frame,
+        canvas.text(launcher_pane_x(rect), note_top, "Info:", PANEL_TEXT_DIM, 1);
+        canvas.text(
             launcher_pane_x(rect) + 2 * font::GLYPH_W,
             note_top + 16,
             &{
@@ -3063,29 +2967,18 @@ pub(in crate::video::ui) fn draw_launcher(
             },
             PANEL_TEXT,
             1,
-            scale,
         );
     }
     // The Boot Priority page spells out the valid priority range below the
-    // rows, under a dimmed "Info:" heading.
-    // The first page only: a page holds nine drives at most, so the note
-    // always has its room under them, and the second page needs no second
-    // copy of it.
+    // rows, under a dimmed "Info:" heading. The page shows nine drives at
+    // most and scrolls the rest, so the note always has its room under them.
     if state.tab == LauncherTab::BootPriority && state.setup.has_boot_priority_rows() {
         // Below a full page of drives, whether or not this machine has one:
         // the note keeps the same place on the page however many rows are
         // drawn above it, rather than riding up and down with the count.
         let below_a_full_page = launcher::BOOTPRI_PAGE_ROWS + 2;
         let help_top = (launcher_row_y(rect, below_a_full_page) + row_offset).saturating_sub(10);
-        draw_panel_text(
-            frame,
-            launcher_pane_x(rect),
-            help_top,
-            "Info:",
-            PANEL_TEXT_DIM,
-            1,
-            scale,
-        );
+        canvas.text(launcher_pane_x(rect), help_top, "Info:", PANEL_TEXT_DIM, 1);
         for (i, line) in [
             "Valid boot priorities are any value between 127 (highest) and",
             "-128 (disabled).",
@@ -3093,14 +2986,12 @@ pub(in crate::video::ui) fn draw_launcher(
         .iter()
         .enumerate()
         {
-            draw_panel_text(
-                frame,
+            canvas.text(
                 launcher_pane_x(rect) + 8,
                 help_top + 16 + i * 14,
                 line,
                 PANEL_TEXT,
                 1,
-                scale,
             );
         }
     }
@@ -3120,14 +3011,12 @@ pub(in crate::video::ui) fn draw_launcher(
             .len()
                 + 1,
         ) + row_offset;
-        draw_panel_text(
-            frame,
+        canvas.text(
             launcher_pane_x(rect),
             note_top,
             "Warning: host networking is non-deterministic.",
             PANEL_TEXT_ACCENT,
             1,
-            scale,
         );
         for (i, line) in [
             "Inbound traffic follows the host clock, so input recordings",
@@ -3136,14 +3025,12 @@ pub(in crate::video::ui) fn draw_launcher(
         .iter()
         .enumerate()
         {
-            draw_panel_text(
-                frame,
+            canvas.text(
                 launcher_pane_x(rect) + 8,
                 note_top + 16 + i * 14,
                 line,
                 PANEL_TEXT,
                 1,
-                scale,
             );
         }
     }
@@ -3161,15 +3048,7 @@ pub(in crate::video::ui) fn draw_launcher(
         // the window either side of it -- so it is clipped here, with the log
         // holding the whole of what went wrong.
         let text = truncate_to_width(&status.text, rect.w.saturating_sub(20));
-        draw_panel_text(
-            frame,
-            rect.x + 10,
-            launcher_status_y(rect),
-            &text,
-            color,
-            1,
-            scale,
-        );
+        canvas.text(rect.x + 10, launcher_status_y(rect), &text, color, 1);
     }
     // Action bar. While the Save dialog is up, every position outside
     // its three buttons answers as the Save control (a stray click puts
@@ -3182,25 +3061,24 @@ pub(in crate::video::ui) fn draw_launcher(
         } else {
             lit(hover, control)
         };
-        draw_text_button(
-            frame,
+        text_button(
+            canvas,
             button_rect,
             launcher_action_label(control),
             true,
             light,
-            scale,
         );
     }
-    draw_launcher_save_dialog(frame, rect, state, hover, scale);
-    draw_launcher_confirm(frame, rect, state, hover, scale);
+    draw_launcher_save_dialog(canvas, rect, state, hover);
+    draw_launcher_confirm(canvas, rect, state, hover);
     // Over everything, because it is the only thing being answered while
     // it is up.
     #[cfg(feature = "game-library")]
     if state.login.is_some() {
-        draw_login_dialog(frame, rect, state, hover, scale);
+        draw_login_dialog(canvas, rect, state, hover);
     }
     #[cfg(feature = "game-library")]
     if state.meta.is_some() {
-        draw_meta_dialog(frame, rect, state, hover, scale);
+        draw_meta_dialog(canvas, rect, state, hover);
     }
 }

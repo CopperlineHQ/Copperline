@@ -673,6 +673,12 @@ pub struct MachineSetup {
     host_disk_scroll: usize,
     /// How fast a held scroll over that table is running.
     host_disk_scroll_rate: ScrollRate,
+    /// First drive shown on the Boot Priority page. A machine fitted with
+    /// every board lists more drives than the page holds, and the list
+    /// scrolls under its column titles rather than running onto pages.
+    boot_scroll: usize,
+    /// How fast a held scroll over that list is running.
+    boot_scroll_rate: ScrollRate,
     /// Why the last tick was refused. Read once by the caller, which puts it
     /// on the status line with every other warning; cleared by the next tick,
     /// because the situation it describes is the one being changed.
@@ -2549,91 +2555,89 @@ impl MachineSetup {
     /// Drives listed on the Boot Priority page: the two IDE bays, which stand
     /// their ground empty, plus every SCSI unit and Lide slot carrying a disk.
     pub fn boot_priority_row_count(&self) -> usize {
-        BOOTPRI_ROWS
-            .iter()
-            .filter(|r| !self.row_hidden(r.field))
-            .count()
+        self.boot_drives().count()
     }
 
-    /// Whether the boot order runs onto a second page -- which is also
-    /// whether the first one shows its "Next Page >" button.
-    pub fn boot_priority_has_second_page(&self) -> bool {
+    /// The drives the boot order lists, top to bottom.
+    pub fn boot_drives(&self) -> impl Iterator<Item = LauncherField> + '_ {
+        BOOTPRI_ROWS
+            .iter()
+            .map(|r| r.field)
+            .filter(|&field| !self.row_hidden(field))
+    }
+
+    /// Whether the boot order is longer than the page shows at once, and
+    /// scrolls.
+    pub fn boot_order_scrolls(&self) -> bool {
         self.boot_priority_row_count() > BOOTPRI_PAGE_ROWS
     }
 
-    /// How many Boot Priority pages the listed drives need, at least one.
-    /// However many board families are fitted, the table pages rather than
-    /// piling up on (or falling off the end of) a fixed two.
-    pub fn boot_priority_page_count(&self) -> usize {
-        self.boot_priority_row_count()
-            .div_ceil(BOOTPRI_PAGE_ROWS)
-            .max(1)
+    /// The first drive the Boot Priority page shows: where it was scrolled
+    /// to, held inside the list as drives come and go.
+    pub fn boot_scroll(&self) -> usize {
+        self.boot_scroll.min(
+            self.boot_priority_row_count()
+                .saturating_sub(BOOTPRI_PAGE_ROWS),
+        )
     }
 
-    /// The 1-based page number a Boot Priority tab stands for, or `None` for
-    /// any other tab.
-    fn boot_priority_page_number(tab: LauncherTab) -> Option<usize> {
-        Some(match tab {
-            LauncherTab::BootPriority => 1,
-            LauncherTab::BootPriorityMore(n) => usize::from(n),
-            _ => return None,
-        })
+    /// Scroll the boot order by `delta` drives, stopping at either end.
+    pub fn scroll_boot_order(&mut self, delta: isize) {
+        let last_start = self
+            .boot_priority_row_count()
+            .saturating_sub(BOOTPRI_PAGE_ROWS);
+        let at = (self.boot_scroll() as isize).saturating_add(delta);
+        self.boot_scroll = at.clamp(0, last_start as isize) as usize;
     }
 
-    /// The tab for a 1-based Boot Priority page number.
-    fn boot_priority_tab(page: usize) -> LauncherTab {
-        if page <= 1 {
-            LauncherTab::BootPriority
-        } else {
-            LauncherTab::BootPriorityMore(page as u8)
-        }
+    /// How fast a held scroll over the boot order is running.
+    pub fn boot_scroll_rate(&mut self) -> &mut ScrollRate {
+        &mut self.boot_scroll_rate
     }
 
-    /// The tab a Boot Priority page's "Next Page >" button goes to, or
-    /// `None` when `tab` is not a Boot Priority page or is already the last
-    /// one. Every page's own Back button already returns to the first, so
-    /// paging only ever needs to go forward.
-    pub fn boot_priority_next_page(&self, tab: LauncherTab) -> Option<LauncherTab> {
-        let page = Self::boot_priority_page_number(tab)?;
-        (page < self.boot_priority_page_count()).then(|| Self::boot_priority_tab(page + 1))
-    }
-
-    /// The page a session should stand on after this setup replaced the one
-    /// it was looking at (Load..., Defaults): the same page, unless that
-    /// page no longer exists -- a boot page with nothing left on it falls
-    /// back to the first rather than standing empty.
-    pub fn settle_tab(&self, tab: LauncherTab) -> LauncherTab {
-        match Self::boot_priority_page_number(tab) {
-            Some(page) if page > self.boot_priority_page_count() => LauncherTab::BootPriority,
-            _ => tab,
-        }
-    }
-
-    /// Which Boot Priority page a drive's row falls on, or `None` for a row
-    /// that is not one of them (the column titles, and every other page's
-    /// rows). Paged by position among the drives actually listed, not by
-    /// position in the table, so a machine with a Lide board but no SCSI
-    /// keeps its four Lide drives on the first page.
+    /// Where a drive's row stands among the drives the page lists, or
+    /// `None` for a row that is not one of them (the column titles, and
+    /// every other page's rows). Counted among the drives actually listed,
+    /// not by position in the table.
     ///
     /// Only meaningful for a row that is listed: asked about a hidden one
-    /// it answers with the page of the rank the row *would* take. Callers
-    /// go through [`Self::row_on_page`], which checks `row_hidden` first.
-    pub fn boot_page_of(&self, field: LauncherField) -> Option<LauncherTab> {
+    /// it answers with the rank the row *would* take.
+    pub fn boot_rank(&self, field: LauncherField) -> Option<usize> {
         if !BOOTPRI_ROWS.iter().any(|r| r.field == field) {
             return None;
         }
-        let rank = BOOTPRI_ROWS
-            .iter()
-            .take_while(|r| r.field != field)
-            .filter(|r| !self.row_hidden(r.field))
-            .count();
-        Some(Self::boot_priority_tab(rank / BOOTPRI_PAGE_ROWS + 1))
+        Some(
+            BOOTPRI_ROWS
+                .iter()
+                .take_while(|r| r.field != field)
+                .filter(|r| !self.row_hidden(r.field))
+                .count(),
+        )
+    }
+
+    /// Scroll the boot order just far enough to show `field`'s drive.
+    pub fn reveal_boot_drive(&mut self, field: LauncherField) {
+        let Some(rank) = self.boot_rank(field) else {
+            return;
+        };
+        let scroll = self.boot_scroll();
+        if rank < scroll {
+            self.boot_scroll = rank;
+        } else if rank >= scroll + BOOTPRI_PAGE_ROWS {
+            self.boot_scroll = rank + 1 - BOOTPRI_PAGE_ROWS;
+        }
     }
 
     /// Whether a row is drawn on `tab`: present on this machine, and -- for
-    /// the paged boot order -- belonging to this page rather than another.
+    /// the boot order -- among the drives scrolled into view.
     pub fn row_on_page(&self, tab: LauncherTab, field: LauncherField) -> bool {
-        !self.row_hidden(field) && self.boot_page_of(field).is_none_or(|page| page == tab)
+        if self.row_hidden(field) {
+            return false;
+        }
+        let scroll = self.boot_scroll();
+        self.boot_rank(field).is_none_or(|rank| {
+            tab == LauncherTab::BootPriority && (scroll..scroll + BOOTPRI_PAGE_ROWS).contains(&rank)
+        })
     }
 
     /// Whether a drive's Bootable box is cleared -- the config's -128 sentinel,
@@ -5579,6 +5583,14 @@ impl LauncherState {
 
     pub fn edit_push(&mut self, c: char) {
         let Some(target) = self.editing else { return };
+        if self.edit_accepts(target, &self.edit_buffer, self.edit_caret.at(), c) {
+            self.edit_caret.insert(&mut self.edit_buffer, c);
+        }
+    }
+
+    /// Whether `c` may go into `buffer` at `at` while `target` is typed in:
+    /// each box's own idea of what belongs in it.
+    fn edit_accepts(&self, target: EditTarget, buffer: &str, at: usize, c: char) -> bool {
         if let EditTarget::Netplay(field) = target {
             let limit = if field == F::NetplayCode && self.netplay.internet {
                 4096
@@ -5589,78 +5601,83 @@ impl LauncherState {
             } else {
                 64
             };
-            if c.is_ascii() && !c.is_control() && self.edit_buffer.len() < limit {
-                self.edit_caret.insert(&mut self.edit_buffer, c);
-            }
-            return;
+            return c.is_ascii() && !c.is_control() && buffer.len() < limit;
         }
         // The size is a whole number of MB or GB: digits only, and no more
         // than the box accepts.
         if let EditTarget::NewImageText(field) = target {
             if let Some(limit) = workshop_digit_limit(field) {
                 // A boot priority is the one signed figure here.
-                let minus_ok = field == F::NewHardBootPri
-                    && c == '-'
-                    && self.edit_caret.at() == 0
-                    && !self.edit_buffer.starts_with('-');
-                if (!c.is_ascii_digit() && !minus_ok) || self.edit_buffer.len() >= limit {
-                    return;
-                }
-                self.edit_caret.insert(&mut self.edit_buffer, c);
-                return;
+                let minus_ok =
+                    field == F::NewHardBootPri && c == '-' && at == 0 && !buffer.starts_with('-');
+                return (c.is_ascii_digit() || minus_ok) && buffer.len() < limit;
             }
             if let Some(limit) = workshop_text_limit(field) {
                 // A drive identity is read back by tools that expect the
                 // plain printable ASCII a SCSI INQUIRY carries, so nothing
                 // else gets in -- and never more than the field holds.
-                if !c.is_ascii_graphic() && c != ' ' {
-                    return;
-                }
-                if self.edit_buffer.chars().count() >= limit {
-                    return;
-                }
-                self.edit_caret.insert(&mut self.edit_buffer, c);
-                return;
+                return (c.is_ascii_graphic() || c == ' ') && buffer.chars().count() < limit;
             }
         }
         // A host is a run of printable characters with no spaces in it: a
         // name or a numeric literal. Colons are in there for a bare IPv6
         // literal, so nothing narrower than "graphic" would do.
         if let EditTarget::SerialHost(_) = target {
-            if !c.is_ascii_graphic() || self.edit_buffer.chars().count() >= SERIAL_HOST_MAX {
-                return;
+            if !c.is_ascii_graphic() || buffer.chars().count() >= SERIAL_HOST_MAX {
+                return false;
             }
         }
         // A port is digits, and no more of them than 65535 is wide.
         if let EditTarget::SerialPort(_) = target {
-            if !c.is_ascii_digit() || self.edit_buffer.chars().count() >= SERIAL_PORT_MAX {
-                return;
+            if !c.is_ascii_digit() || buffer.chars().count() >= SERIAL_PORT_MAX {
+                return false;
             }
         }
         // A fixed fill is a 16-bit word. The parser accepts decimal too, so
         // admit decimal digits and the hexadecimal prefix/digits while keeping
         // the buffer no wider than `0xFFFF`.
         if target == EditTarget::RamPattern
-            && (self.edit_buffer.chars().count() >= 6
-                || !(c.is_ascii_hexdigit() || matches!(c, 'x' | 'X')))
+            && (buffer.chars().count() >= 6 || !(c.is_ascii_hexdigit() || matches!(c, 'x' | 'X')))
         {
-            return;
+            return false;
         }
         if target == EditTarget::WindowPosition
-            && (self.edit_buffer.len() >= 26
-                || !(c.is_ascii_digit() || matches!(c, '-' | ',' | ' ')))
+            && (buffer.len() >= 26 || !(c.is_ascii_digit() || matches!(c, '-' | ',' | ' ')))
         {
-            return;
+            return false;
         }
         // A boot priority is a signed integer: digits, and a leading minus.
         if let EditTarget::DriveBootpri(_) = target {
-            let minus_ok =
-                c == '-' && self.edit_caret.at() == 0 && !self.edit_buffer.starts_with('-');
+            let minus_ok = c == '-' && at == 0 && !buffer.starts_with('-');
             if !(c.is_ascii_digit() || minus_ok) {
-                return;
+                return false;
             }
         }
-        self.edit_caret.insert(&mut self.edit_buffer, c);
+        true
+    }
+
+    /// `text` as the box being typed in would have taken it a key at a
+    /// time: what it does not accept is left out. For a front end with a
+    /// text field of its own, whose paste and IME bypass `edit_push`.
+    pub fn edit_filtered(&self, text: &str) -> String {
+        let Some(target) = self.editing else {
+            return String::new();
+        };
+        let mut kept = String::new();
+        for c in text.chars() {
+            if self.edit_accepts(target, &kept, kept.chars().count(), c) {
+                kept.push(c);
+            }
+        }
+        kept
+    }
+
+    /// Replace what is being typed, the caret after it.
+    pub fn set_edit_buffer(&mut self, text: String) {
+        if self.editing.is_some() {
+            self.edit_buffer = text;
+            self.edit_caret = Caret::end_of(&self.edit_buffer);
+        }
     }
 
     pub fn edit_backspace(&mut self) {

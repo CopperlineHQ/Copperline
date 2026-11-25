@@ -553,8 +553,9 @@ thread.
 
 The render worker paints CPU buffers only. The main thread composes the
 newest completed presentation buffer into the texture image (the TV
-aperture or full-overscan copy, the tint, the status bar, panels and
-overlays) and hands that image to a second worker, `copperline-present`,
+aperture or full-overscan copy, the tint, panels and overlays; the status
+bar, menu and configuration screen are egui's, painted by the worker over
+the passes) and hands that image to a second worker, `copperline-present`,
 which owns the GPU side of the window (the `pixels` surface and the
 scaler, CRT, bezel and sticker passes: `Gpu` in `window.rs`). The worker
 uploads the image, draws the passes and presents, so the main thread's
@@ -1518,7 +1519,9 @@ instead of exposing stale or out-of-bounds VRAM.
 `ui.rs` lays out, hit-tests and draws the pop-up menu (whose rows and
 actions are defined in `menu.rs`) and the smaller overlay panels (About,
 Shortcuts, Calibration); the status bar is drawn by `window/statusbar.rs`.
-Both use the 8x8 `font.rs` glyphs. The software inspector drawing helpers
+Both use the 8x8 `font.rs` glyphs. The menu, the status bar and the
+configuration screen are drawn on a `Canvas`, which egui puts on screen
+(see below); the overlay panels are still drawn into the texture. The software inspector drawing helpers
 in `ui.rs` remain available for tests and rendering comparisons.
 `COPPERLINE_UI_PREVIEW=1 cargo test panels_render_into_their_rects`
 renders the software panels into `target/ui-preview-*.png`.
@@ -1540,6 +1543,59 @@ continues at its usual cadence, composing the cached UI between inspector update
 Textures retired by egui remain alive while the cached frame can still use
 them. They are released when that frame is replaced, before uploading the
 next frame's texture updates.
+
+The interface's own surfaces -- the configuration screen (the launcher),
+the pop-up menu and the status bar -- are drawn by egui over the presented
+frame. Each has one drawing function written against the `Canvas` trait
+(`ui/canvas.rs`), whose points are canvas pixels. `FrameCanvas` draws it
+into an RGBA frame: the panels still drawn into the texture use it for the
+pieces they share, and the tests and the `COPPERLINE_UI_PREVIEW` previews
+draw every surface with it. `EguiCanvas` (`ui/configuration/egui_view.rs`)
+lays the same calls down as egui shapes at the window's own resolution.
+Detail finer than a canvas pixel (the status bar's glyphs and LEDs) is laid
+out in device pixels on a whole-number grid, `Canvas::device_scale`: the
+texture's supersampling factor, or egui's pixels per point rounded, so the
+bar stays sharp at fractional scale factors rather than being filtered.
+Text is drawn in a TrueType font built at runtime from the 8x8 bitmap, whose
+outlines are the bitmap's pixels as squares; at a whole multiple of 8 px it
+renders the bitmap exactly.
+
+Hit-testing and keyboard navigation are the surfaces' own and unchanged:
+`launcher_control_at`, `menu_hit`, the status bar's control map and the
+probed `nav::map` answer for what egui draws as they did for the texture.
+What egui adds is typing. While a value box is being typed in
+(`LauncherState::editing`), egui's text field stands in for the edit line,
+with its caret, selection, clipboard and IME. The launcher still chooses
+the box and decides what the typing means: each frame the text is filtered
+through `LauncherState::edit_filtered`, Return, Tab or a click elsewhere
+commits it through `edit_commit` (a refused value keeps the keyboard, to be
+put right), and Escape cancels. The WHDLoad sign-in and metadata dialogs
+keep their own caret editing, so the password never leaves its zeroizing
+buffer for an egui string.
+
+`window/egui_overlay.rs` runs two egui contexts on the main thread: the
+display canvas (configuration screen and menu, placed by
+`main_ui_present_layout`) and the chrome band (status bar, placed where
+`main_present_layout` puts the chrome). It tessellates them, caching the
+status bar's meshes while nothing it shows changes, and the meshes and
+texture updates travel in the frame's `PresentJob` as an `EguiJob`, so the
+present worker paints them (`window/egui_paint.rs`) after the scaler, CRT
+and bezel passes, without reclaiming the GPU to the main thread. Texture
+updates are applied inside the render callback: a present skipped for a
+covered window holds them for the next, and the updates of a job the
+worker refuses are carried into the next job. egui renders into an
+`Rgba8Unorm` layer, where its blending works on the encoded colours as the
+texture's does, and the layer is composited onto the sRGB surface through
+an sRGB view of itself. The texture keeps what dims the display behind
+these surfaces: the scrim behind the configuration screen and the menu's
+veil, which egui adds over the configuration screen itself.
+
+GPU tests hold the two canvases together
+(`cargo test --release --lib -- --ignored egui_draws`): every
+configuration page and dialog, the menu and the status bar in each of its
+states draw on egui as they do into the texture, exactly, or within a level
+or three where egui's anti-aliasing quantizes stacked translucency
+differently.
 
 Headless, browser, and libretro builds omit the desktop frontend and egui.
 `egui_debugger/analyzer.rs` supplies the four analyzer views (Beam, Blits,
@@ -1838,8 +1894,9 @@ keeps the whole presentation buffer rather than the TV aperture crop. At
 finish the AVI's video rate/scale is patched from the exact
 frames-to-audio-samples ratio, so a nominal "50 fps" label never drifts
 against PAL's true field rate and warp-speed captures play back at normal
-speed. The REC badge, status bar, OSD, and menus are drawn into the
-presentation texture after capture, so they never appear in the file.
+speed. The REC badge and OSD are drawn into the presentation texture after
+capture, and the status bar and menus are painted over it on the GPU, so
+none of them appear in the file.
 
 An [MP4 recording](../guide/ui.md#recording-mp4) (`recorder/mp4.rs`) is
 the same AVI, captured beside the target as `<name>.recording.avi` and

@@ -6148,11 +6148,11 @@ fn lide_drives_take_their_place_after_ide_and_scsi_in_the_boot_order() {
     assert_eq!(s.boot_priority_row_count(), 3);
 }
 
-/// The boot order runs onto a second page only when it outgrows the first,
-/// and a drive's page follows its position among the drives actually listed
-/// -- not its position in the table.
+/// The boot order scrolls only when it outgrows the page, a drive's place in
+/// the list is its position among the drives actually listed -- not its
+/// position in the table -- and every drive can be scrolled into view.
 #[test]
-fn a_long_boot_order_pages_and_a_short_one_does_not() {
+fn a_long_boot_order_scrolls_and_a_short_one_does_not() {
     use LauncherField as F;
     let mut s = MachineSetup::default();
     s.select_model(Some(MachineModel::A1200));
@@ -6161,20 +6161,17 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
         s.set_path(f, PathBuf::from("lide.hdf"));
     }
 
-    // Two IDE bays and four Lide drives: six rows, one page, and the note
-    // still has room under them. No SCSI in between, so every Lide drive
-    // stays on the first page -- paging counts drives listed, not table
-    // positions.
+    // Two IDE bays and four Lide drives: six rows, all in view. No SCSI in
+    // between, so the last Lide drive ranks sixth -- drives listed, not
+    // table positions.
     assert_eq!(s.boot_priority_row_count(), 6);
-    assert!(!s.boot_priority_has_second_page());
-    assert_eq!(
-        s.boot_page_of(F::LideDrive3Boot),
-        Some(LauncherTab::BootPriority)
-    );
+    assert!(!s.boot_order_scrolls());
+    assert_eq!(s.boot_rank(F::LideDrive3Boot), Some(5));
+    assert_eq!(s.boot_rank(F::SectionHeader), None);
+    s.scroll_boot_order(3);
+    assert_eq!(s.boot_scroll(), 0, "a list that fits has nowhere to go");
 
-    // Fill the SCSI chain as well and the order outgrows one page. The
-    // first nine drives stay; the rest move over, and the note goes to
-    // make room for them.
+    // Fill the SCSI chain as well and the order outgrows the page.
     s.cycle(F::ScsiController, true);
     for f in [
         F::ScsiUnit0,
@@ -6188,39 +6185,59 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
         s.set_path(f, PathBuf::from("scsi.hdf"));
     }
     assert_eq!(s.boot_priority_row_count(), 13);
-    assert!(s.boot_priority_has_second_page());
+    assert!(s.boot_order_scrolls());
+    let on_page = |s: &MachineSetup| -> Vec<F> {
+        rows(
+            LauncherTab::BootPriority,
+            Default::default(),
+            Default::default(),
+            false,
+            false,
+        )
+        .iter()
+        .map(|r| r.field)
+        .filter(|&f| f != F::SectionHeader && s.row_on_page(LauncherTab::BootPriority, f))
+        .collect()
+    };
+    // At the top, the two IDE bays and seven SCSI units fill the page.
+    let top = on_page(&s);
+    assert_eq!(top.len(), BOOTPRI_PAGE_ROWS);
+    assert_eq!(top.first(), Some(&F::IdeMasterBoot));
+    assert_eq!(top.last(), Some(&F::ScsiUnit6Boot));
+    // The column titles stay whatever the list is scrolled to.
+    s.scroll_boot_order(1);
+    assert!(s.row_on_page(LauncherTab::BootPriority, F::SectionHeader));
+    // A row down, the first drive goes and the next comes in.
+    let one_down = on_page(&s);
+    assert_eq!(one_down.first(), Some(&F::IdeSlaveBoot));
+    assert_eq!(one_down.last(), Some(&F::LideDrive0Boot));
+    // Scrolling stops at the end of the list, the page still full.
+    s.scroll_boot_order(100);
+    assert_eq!(s.boot_scroll(), 13 - BOOTPRI_PAGE_ROWS);
+    let bottom = on_page(&s);
+    assert_eq!(bottom.len(), BOOTPRI_PAGE_ROWS);
+    assert_eq!(bottom.last(), Some(&F::LideDrive3Boot));
+    s.scroll_boot_order(-100);
+    assert_eq!(s.boot_scroll(), 0);
 
-    // Two IDE bays and seven SCSI units fill the first page exactly; all
-    // four Lide drives fall onto the second.
-    for f in [F::IdeMasterBoot, F::IdeSlaveBoot, F::ScsiUnit6Boot] {
-        assert_eq!(s.boot_page_of(f), Some(LauncherTab::BootPriority), "{f:?}");
-    }
-    for f in [
-        F::LideDrive0Boot,
-        F::LideDrive1Boot,
-        F::LideDrive2Boot,
-        F::LideDrive3Boot,
-    ] {
-        assert_eq!(
-            s.boot_page_of(f),
-            Some(LauncherTab::BootPriorityMore(2)),
-            "{f:?}"
-        );
-    }
-    // Neither page draws more rows than one holds.
-    for tab in [LauncherTab::BootPriority, LauncherTab::BootPriorityMore(2)] {
-        let drawn = rows(tab, Default::default(), Default::default(), false, false)
-            .iter()
-            .filter(|r| s.row_on_page(tab, r.field))
-            .count();
-        assert!(drawn <= BOOTPRI_PAGE_ROWS + 1, "{tab:?} draws {drawn}");
-    }
-    assert_eq!(s.boot_priority_page_count(), 2);
+    // Revealing a drive scrolls just far enough to show it, either way.
+    // The second Lide drive is the eleventh drive listed.
+    s.reveal_boot_drive(F::LideDrive1Boot);
+    assert_eq!(s.boot_scroll(), 10 + 1 - BOOTPRI_PAGE_ROWS);
+    assert!(s.row_on_page(LauncherTab::BootPriority, F::LideDrive1Boot));
+    s.reveal_boot_drive(F::LideDrive0Boot);
+    assert_eq!(
+        s.boot_scroll(),
+        10 + 1 - BOOTPRI_PAGE_ROWS,
+        "already in view"
+    );
+    s.reveal_boot_drive(F::IdeMasterBoot);
+    assert_eq!(s.boot_scroll(), 0);
 
-    // Fill every copperhf unit too: 20 rows, and the pagination grows a
-    // third page rather than silently stranding the overflow -- the exact
-    // capacity bug the fixed two-page implementation had when copperhf's
-    // seven rows first landed.
+    // Fill every copperhf unit and the SF2000 SD card too: every slot the
+    // table has, and each of them can still be brought into view -- the
+    // capacity bug a fixed number of pages had when copperhf's seven rows
+    // first landed cannot come back.
     for f in [
         F::CopperhfUnit0,
         F::CopperhfUnit1,
@@ -6232,71 +6249,36 @@ fn a_long_boot_order_pages_and_a_short_one_does_not() {
     ] {
         s.set_path(f, PathBuf::from("copperhf.hdf"));
     }
-    // ...and the SF2000 SD card, one more row on the third page.
     s.set_path(F::Sf2000SdCard, PathBuf::from("sf2000sd.img"));
-    assert_eq!(s.boot_priority_row_count(), 21);
-    assert_eq!(s.boot_priority_page_count(), 3);
-
-    // With every slot filled, each page draws exactly its share -- the same
-    // filter the draw path uses, not a re-stated cap -- and every listed
-    // row is reachable on exactly one page.
-    let pages = [
-        LauncherTab::BootPriority,
-        LauncherTab::BootPriorityMore(2),
-        LauncherTab::BootPriorityMore(3),
-    ];
-    let per_page: Vec<usize> = pages
-        .iter()
-        .map(|&tab| {
-            BOOTPRI_ROWS
-                .iter()
-                .filter(|r| s.row_on_page(tab, r.field))
-                .count()
-        })
-        .collect();
-    assert_eq!(per_page, vec![BOOTPRI_PAGE_ROWS, BOOTPRI_PAGE_ROWS, 3]);
+    assert_eq!(s.boot_priority_row_count(), BOOTPRI_ROWS.len());
     for row in BOOTPRI_ROWS.iter() {
-        let on = pages
-            .iter()
-            .filter(|&&tab| s.row_on_page(tab, row.field))
-            .count();
-        assert_eq!(on, 1, "{:?} reachable on exactly one page", row.field);
+        s.reveal_boot_drive(row.field);
+        assert!(
+            s.row_on_page(LauncherTab::BootPriority, row.field),
+            "{:?} can be scrolled into view",
+            row.field
+        );
+        assert_eq!(on_page(&s).len(), BOOTPRI_PAGE_ROWS);
     }
 
-    // "Next Page >" walks forward through every page and stops at the last.
-    assert_eq!(
-        s.boot_priority_next_page(LauncherTab::BootPriority),
-        Some(LauncherTab::BootPriorityMore(2))
-    );
-    assert_eq!(
-        s.boot_priority_next_page(LauncherTab::BootPriorityMore(2)),
-        Some(LauncherTab::BootPriorityMore(3))
-    );
-    assert_eq!(
-        s.boot_priority_next_page(LauncherTab::BootPriorityMore(3)),
-        None
-    );
+    // A setup swapped in under the panel (Load..., Defaults) with fewer
+    // drives holds the scroll inside its own list.
+    s.scroll_boot_order(100);
+    for f in [
+        F::CopperhfUnit0,
+        F::CopperhfUnit1,
+        F::CopperhfUnit2,
+        F::CopperhfUnit3,
+        F::CopperhfUnit4,
+        F::CopperhfUnit5,
+        F::CopperhfUnit6,
+    ] {
+        s.clear_path(f);
+    }
+    assert_eq!(s.boot_priority_row_count(), 14);
+    assert_eq!(s.boot_scroll(), 14 - BOOTPRI_PAGE_ROWS);
+    assert_eq!(on_page(&s).len(), BOOTPRI_PAGE_ROWS);
 
-    // A setup swapped in under the panel (Load..., Defaults) may not have
-    // the page the session was standing on; a vanished page settles back to
-    // the first.
-    assert_eq!(
-        s.settle_tab(LauncherTab::BootPriorityMore(3)),
-        LauncherTab::BootPriorityMore(3),
-        "a full machine keeps its third page"
-    );
-    let empty = MachineSetup::default();
-    assert_eq!(
-        empty.settle_tab(LauncherTab::BootPriorityMore(2)),
-        LauncherTab::BootPriority
-    );
-    assert_eq!(empty.settle_tab(LauncherTab::Lide), LauncherTab::Lide);
-
-    // Back on a later page returns to the first, not to Storage.
-    assert_eq!(
-        LauncherTab::BootPriorityMore(2).parent_tab(),
-        Some(LauncherTab::BootPriority)
-    );
     assert_eq!(
         LauncherTab::BootPriority.parent_tab(),
         Some(LauncherTab::Storage)

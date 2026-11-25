@@ -56,184 +56,212 @@ fn lit(hover: Option<BarControl>, control: BarControl) -> f32 {
     }
 }
 
-use crate::video::ui::light_face;
+use crate::video::ui::{light_face, Canvas, FrameCanvas};
+
+// The bar draws in device pixels -- the texture's own, or egui's whole-pixel
+// grid -- because its glyphs have detail finer than a canvas pixel. These
+// are the texture primitives it was written with, on the canvas.
+
+fn dfill(canvas: &mut dyn Canvas, r: Rect, colour: u32) {
+    canvas.fill_device(r.x, r.y, r.w, r.h, colour);
+}
+
+fn dput(canvas: &mut dyn Canvas, x: usize, y: usize, colour: u32) {
+    canvas.fill_device(x, y, 1, 1, colour);
+}
+
+fn dhline(canvas: &mut dyn Canvas, y: usize, x0: usize, x1: usize, colour: u32) {
+    if x1 > x0 {
+        canvas.fill_device(x0, y, x1 - x0, 1, colour);
+    }
+}
+
+fn dvline(canvas: &mut dyn Canvas, x: usize, y0: usize, y1: usize, colour: u32) {
+    if y1 > y0 {
+        canvas.fill_device(x, y0, 1, y1 - y0, colour);
+    }
+}
+
+/// `draw_rect_bevel` on the canvas: an inset a device pixel wide for each
+/// device pixel of a canvas pixel, the later spans winning the corners.
+fn dbevel(canvas: &mut dyn Canvas, r: Rect, light: u32, dark: u32) {
+    let s = canvas.device_scale();
+    if r.w == 0 || r.h == 0 {
+        return;
+    }
+    for inset in 0..s {
+        dhline(canvas, r.y + inset, r.x, r.x + r.w, light);
+        dvline(canvas, r.x + inset, r.y, r.y + r.h, light);
+        dhline(canvas, r.y + r.h - 1 - inset, r.x, r.x + r.w, dark);
+        dvline(canvas, r.x + r.w - 1 - inset, r.y, r.y + r.h, dark);
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
-pub(super) fn draw_status_bar(frame: &mut [u8], view: &StatusBarView, texture_scale: usize) {
+pub(super) fn draw_status_bar(canvas: &mut dyn Canvas, view: &StatusBarView) {
+    let texture_scale = canvas.device_scale();
     let status = view.status;
     let layout = bar_layout(&view.media);
     let hover = view.hover;
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         scale_rect(status_bar_rect(), texture_scale),
         STATUS_BG,
-        texture_scale,
     );
-    draw_hline(
-        frame,
+    dhline(
+        canvas,
         status_bar_top() * texture_scale,
+        0,
+        texture_width(texture_scale),
         STATUS_TOP,
-        texture_scale,
     );
-    draw_hline(
-        frame,
+    dhline(
+        canvas,
         window_present_height() * texture_scale - 1,
+        0,
+        texture_width(texture_scale),
         STATUS_BOTTOM,
-        texture_scale,
     );
     let rows = led_rows(&status, view.powered_on);
     for (row, spec) in rows.iter().enumerate() {
-        draw_text(
-            frame,
+        bar_text(
+            canvas,
             STATUS_LABEL_X * texture_scale,
             (status_bar_top() + led_row_label_y(row, rows.len())) * texture_scale,
             spec.label,
             STATUS_TEXT,
-            texture_scale,
         );
-        draw_led(
-            frame,
+        led(
+            canvas,
             scale_rect(led_row_rect(row, rows.len()), texture_scale),
             spec.on,
             spec.on_color,
             spec.off_color,
             spec.highlight_on,
             spec.highlight_off,
-            texture_scale,
         );
     }
     let counters = track_counter_layout(&view.media);
     if let Some(counter) = counters.fdd {
         draw_track_counter(
-            frame,
+            canvas,
             counter,
             fdd_counter_readout(status.fdd_track, crate::video::track_display()),
             TrackPalette::Fdd,
-            texture_scale,
         );
     }
     if let Some(counter) = counters.cd {
         draw_track_counter(
-            frame,
+            canvas,
             counter,
             track_number_readout(status.cd_track),
             TrackPalette::Cd,
-            texture_scale,
         );
     }
     for idx in 0..4 {
         let drive = view.media.drives[idx];
         if let Some(rect) = layout.drive_load[idx] {
             draw_disk_button(
-                frame,
+                canvas,
                 scale_rect(rect, texture_scale),
                 idx,
                 lit(hover, BarControl::DriveLoad(idx)),
-                texture_scale,
             );
         }
         if let Some(rect) = layout.drive_swap[idx] {
             draw_swap_button(
-                frame,
+                canvas,
                 scale_rect(rect, texture_scale),
                 drive.multi && !drive.bridged,
                 lit(hover, BarControl::DriveSwap(idx)),
-                texture_scale,
             );
         }
         if let Some(rect) = layout.drive_eject[idx] {
             draw_eject_button(
-                frame,
-                scale_rect(rect, texture_scale),
-                // Greyed on a bridged drive: the disk is in a real drive and
+                canvas,
+                scale_rect(rect, texture_scale), // Greyed on a bridged drive: the disk is in a real drive and
                 // comes out by hand, not from here.
                 drive.inserted && !drive.bridged,
                 lit(hover, BarControl::DriveEject(idx)),
-                texture_scale,
             );
         }
     }
     if let Some(rect) = layout.cd_load {
         draw_cd_button(
-            frame,
+            canvas,
             scale_rect(rect, texture_scale),
             lit(hover, BarControl::CdLoad),
-            texture_scale,
         );
     }
     if let Some(rect) = layout.cd_eject {
         draw_eject_button(
-            frame,
+            canvas,
             scale_rect(rect, texture_scale),
             view.media.cd == Some(true),
             lit(hover, BarControl::CdEject),
-            texture_scale,
         );
     }
     draw_joystick_button(
-        frame,
+        canvas,
         scale_rect(joystick_toggle_rect(), texture_scale),
         view.joystick_input_mode,
         lit(hover, BarControl::Joystick),
-        texture_scale,
     );
     draw_keyboard_button(
-        frame,
+        canvas,
         scale_rect(keyboard_toggle_rect(), texture_scale),
         view.keyboard_panel_shown,
         lit(hover, BarControl::Keyboard),
-        texture_scale,
     );
     if view.control_connected {
         // A remote control-protocol client is attached; tag the bar so a
         // machine that pauses or steps "by itself" is explicable.
-        draw_text(
-            frame,
+        bar_text(
+            canvas,
             (KBD_TOGGLE_X.saturating_sub(44)) * texture_scale,
             (status_bar_top() + STATUS_CONTROL_Y + 2) * texture_scale,
             "CCP",
             STATUS_TEXT,
-            texture_scale,
         );
     }
     draw_volume_control(
-        frame,
+        canvas,
         status.output_volume_percent,
         lit(hover, BarControl::Volume),
-        texture_scale,
     );
     draw_menu_button(
-        frame,
+        canvas,
         scale_rect(menu_button_rect(), texture_scale),
         lit(hover, BarControl::Menu),
-        texture_scale,
     );
     draw_shot_button(
-        frame,
+        canvas,
         scale_rect(shot_button_rect(), texture_scale),
         lit(hover, BarControl::Screenshot),
-        texture_scale,
     );
     draw_pause_button(
-        frame,
+        canvas,
         scale_rect(pause_button_rect(), texture_scale),
         view.paused,
         lit(hover, BarControl::Pause),
-        texture_scale,
     );
     draw_power_button(
-        frame,
+        canvas,
         scale_rect(power_button_rect(), texture_scale),
         view.powered_on,
         lit(hover, BarControl::Power),
-        texture_scale,
     );
     draw_reboot_button(
-        frame,
+        canvas,
         scale_rect(reboot_button_rect(), texture_scale),
         lit(hover, BarControl::Reboot),
-        texture_scale,
     );
+}
+
+/// The bar drawn into a frame at `texture_scale`, as the tests read it.
+#[cfg(test)]
+pub(super) fn draw_status_bar_into(frame: &mut [u8], view: &StatusBarView, texture_scale: usize) {
+    draw_status_bar(&mut FrameCanvas::new(frame, texture_scale), view);
 }
 
 /// Per-drive status feeding the media controls in the status bar.
@@ -260,6 +288,7 @@ pub(in crate::video) struct MediaBar {
 }
 
 /// Everything draw_status_bar needs for one frame.
+#[derive(Clone, PartialEq)]
 pub(super) struct StatusBarView {
     pub(super) status: FrontPanelStatus,
     pub(super) powered_on: bool,
@@ -781,18 +810,18 @@ pub(super) fn fdd_counter_readout(
 }
 
 fn draw_track_counter(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     counter: TrackCounterSpec,
     readout: CounterReadout,
     palette: TrackPalette,
-    texture_scale: usize,
 ) {
+    let texture_scale = canvas.device_scale();
     let rect = scale_rect(counter.rect, texture_scale);
-    fill_rect(frame, rect, LED_BEZEL_DARK, texture_scale);
-    draw_rect_bevel(frame, rect, LED_BEZEL_LIGHT, STATUS_BOTTOM, texture_scale);
+    dfill(canvas, rect, LED_BEZEL_DARK);
+    dbevel(canvas, rect, LED_BEZEL_LIGHT, STATUS_BOTTOM);
     let inset = 2 * texture_scale;
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: rect.x + inset,
             y: rect.y + inset,
@@ -800,14 +829,13 @@ fn draw_track_counter(
             h: rect.h.saturating_sub(inset * 2),
         },
         TRACK_DISPLAY_BG,
-        texture_scale,
     );
 
     for (idx, ch) in readout.glyphs.into_iter().enumerate() {
         let rect = scale_rect(track_counter_digit_rect(counter, idx), texture_scale);
-        draw_seven_segment_digit(frame, rect, ch as char, palette.colors(), texture_scale);
+        seven_segment_digit(canvas, rect, ch as char, palette.colors());
         if readout.point_after == Some(idx) {
-            draw_seven_segment_point(frame, rect, palette.colors(), texture_scale);
+            draw_seven_segment_point(canvas, rect, palette.colors());
         }
     }
 }
@@ -815,12 +843,8 @@ fn draw_track_counter(
 /// A lit decimal point in the gap after a seven-segment digit, sitting on
 /// the digit's baseline like the bottom segment. Drawn only where a mode
 /// asks for one, so the plain track readout keeps its look.
-fn draw_seven_segment_point(
-    frame: &mut [u8],
-    digit: Rect,
-    colors: (u32, u32, u32),
-    texture_scale: usize,
-) {
+fn draw_seven_segment_point(canvas: &mut dyn Canvas, digit: Rect, colors: (u32, u32, u32)) {
+    let texture_scale = canvas.device_scale();
     let thickness = 2 * texture_scale;
     let point = Rect {
         x: digit.x + digit.w + texture_scale,
@@ -829,33 +853,28 @@ fn draw_seven_segment_point(
         h: thickness,
     };
     let (segment_on, _, segment_highlight) = colors;
-    fill_rect(frame, point, segment_on, texture_scale);
-    draw_hline_span(
-        frame,
+    dfill(canvas, point, segment_on);
+    dhline(
+        canvas,
         point.y,
         point.x,
         point.x + point.w,
         segment_highlight,
-        texture_scale,
     );
 }
 
-pub(super) fn draw_volume_control(
-    frame: &mut [u8],
-    percent: u8,
-    hovered: f32,
-    texture_scale: usize,
-) {
+pub(super) fn draw_volume_control(canvas: &mut dyn Canvas, percent: u8, hovered: f32) {
+    let texture_scale = canvas.device_scale();
     let percent = percent.min(100);
-    draw_speaker_glyph(frame, texture_scale);
+    draw_speaker_glyph(canvas);
 
     let rect = scale_rect(volume_slider_track_rect(), texture_scale);
     // The slider lights under the pointer as the buttons beside it do:
     // it is as clickable as they are, and looked as though it were not.
     // What lights is the track itself -- the rectangle the hand takes
     // hold of -- and not the speaker beside it.
-    fill_rect(frame, rect, LED_BEZEL_DARK, texture_scale);
-    draw_rect_bevel(frame, rect, LED_BEZEL_LIGHT, STATUS_BOTTOM, texture_scale);
+    dfill(canvas, rect, LED_BEZEL_DARK);
+    dbevel(canvas, rect, LED_BEZEL_LIGHT, STATUS_BOTTOM);
 
     let inset = 2 * texture_scale;
     let inner = Rect {
@@ -864,7 +883,7 @@ pub(super) fn draw_volume_control(
         w: rect.w.saturating_sub(inset * 2),
         h: rect.h.saturating_sub(inset * 2),
     };
-    fill_rect(frame, inner, TRACK_DISPLAY_BG, texture_scale);
+    dfill(canvas, inner, TRACK_DISPLAY_BG);
 
     let fill_w = inner.w * usize::from(percent) / 100;
     if fill_w != 0 {
@@ -874,14 +893,13 @@ pub(super) fn draw_volume_control(
             w: fill_w,
             h: inner.h,
         };
-        fill_rect(frame, filled, VOLUME_FILL, texture_scale);
-        draw_hline_span(
-            frame,
+        dfill(canvas, filled, VOLUME_FILL);
+        dhline(
+            canvas,
             filled.y,
             filled.x,
             filled.x + filled.w,
             VOLUME_FILL_HIGHLIGHT,
-            texture_scale,
         );
     }
 
@@ -889,59 +907,30 @@ pub(super) fn draw_volume_control(
     // and the track it runs in keeps its own colours. Standing open for
     // changing it holds the blue steady instead of breathing.
     let knob = scale_rect(volume_slider_knob_rect(percent), texture_scale);
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         knob,
         light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hovered),
-        texture_scale,
     );
-    draw_rect_bevel(
-        frame,
-        knob,
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        texture_scale,
-    );
+    dbevel(canvas, knob, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
 }
 
-pub(super) fn draw_button_base(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
+pub(super) fn draw_button_base(canvas: &mut dyn Canvas, rect: Rect, hover: f32) {
     let face = light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover);
-    fill_rect(frame, rect, face, texture_scale);
-    draw_rect_bevel(
-        frame,
-        rect,
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        texture_scale,
-    );
+    dfill(canvas, rect, face);
+    dbevel(canvas, rect, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
 }
 
-pub(super) fn draw_disk_button(
-    frame: &mut [u8],
-    rect: Rect,
-    drive_idx: usize,
-    hover: f32,
-    texture_scale: usize,
-) {
-    draw_button_base(frame, rect, hover, texture_scale);
-    draw_disk_glyph(frame, rect, drive_idx, texture_scale);
+pub(super) fn draw_disk_button(canvas: &mut dyn Canvas, rect: Rect, drive_idx: usize, hover: f32) {
+    draw_button_base(canvas, rect, hover);
+    draw_disk_glyph(canvas, rect, drive_idx);
 }
 
 /// Swap button: two opposed horizontal arrows (cycle to the next queued
 /// disk). Drawn dim when there is nothing to swap to.
-pub(super) fn draw_swap_button(
-    frame: &mut [u8],
-    rect: Rect,
-    enabled: bool,
-    hover: f32,
-    texture_scale: usize,
-) {
-    draw_button_base(
-        frame,
-        rect,
-        if enabled { hover } else { 0.0 },
-        texture_scale,
-    );
+pub(super) fn draw_swap_button(canvas: &mut dyn Canvas, rect: Rect, enabled: bool, hover: f32) {
+    let texture_scale = canvas.device_scale();
+    draw_button_base(canvas, rect, if enabled { hover } else { 0.0 });
     let color = if enabled {
         BUTTON_GLYPH
     } else {
@@ -956,8 +945,8 @@ pub(super) fn draw_swap_button(
     let fs = s as f32;
     let uy = |v: i32| (rect.y as i32 + (v + dy) * s as i32) as usize;
     // Top arrow pointing right.
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: rect.x + 2 * s,
             y: uy(7),
@@ -965,21 +954,19 @@ pub(super) fn draw_swap_button(
             h: 2 * s,
         },
         color,
-        texture_scale,
     );
-    fill_triangle(
-        frame,
+    triangle(
+        canvas,
         [
             (fx + 10.0 * fs, fy + 5.0 * fs),
             (fx + 10.0 * fs, fy + 11.0 * fs),
             (fx + 13.5 * fs, fy + 8.0 * fs),
         ],
         color,
-        texture_scale,
     );
     // Bottom arrow pointing left.
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: rect.x + 6 * s,
             y: uy(13),
@@ -987,17 +974,15 @@ pub(super) fn draw_swap_button(
             h: 2 * s,
         },
         color,
-        texture_scale,
     );
-    fill_triangle(
-        frame,
+    triangle(
+        canvas,
         [
             (fx + 6.0 * fs, fy + 11.0 * fs),
             (fx + 6.0 * fs, fy + 17.0 * fs),
             (fx + 2.5 * fs, fy + 14.0 * fs),
         ],
         color,
-        texture_scale,
     );
 }
 
@@ -1008,19 +993,9 @@ pub(super) fn glyph_dy(rect: Rect, texture_scale: usize) -> i32 {
 }
 
 /// Eject button: up triangle over a bar. Drawn dim when no media is in.
-pub(super) fn draw_eject_button(
-    frame: &mut [u8],
-    rect: Rect,
-    enabled: bool,
-    hover: f32,
-    texture_scale: usize,
-) {
-    draw_button_base(
-        frame,
-        rect,
-        if enabled { hover } else { 0.0 },
-        texture_scale,
-    );
+pub(super) fn draw_eject_button(canvas: &mut dyn Canvas, rect: Rect, enabled: bool, hover: f32) {
+    let texture_scale = canvas.device_scale();
+    draw_button_base(canvas, rect, if enabled { hover } else { 0.0 });
     let color = if enabled {
         BUTTON_GLYPH
     } else {
@@ -1031,18 +1006,17 @@ pub(super) fn draw_eject_button(
     let fx = rect.x as f32;
     let fy = rect.y as f32 + dy as f32 * s as f32;
     let fs = s as f32;
-    fill_triangle(
-        frame,
+    triangle(
+        canvas,
         [
             (fx + 8.0 * fs, fy + 5.0 * fs),
             (fx + 2.5 * fs, fy + 12.0 * fs),
             (fx + 13.5 * fs, fy + 12.0 * fs),
         ],
         color,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: rect.x + 3 * s,
             y: (rect.y as i32 + (14 + dy) * s as i32) as usize,
@@ -1050,13 +1024,13 @@ pub(super) fn draw_eject_button(
             h: 2 * s,
         },
         color,
-        texture_scale,
     );
 }
 
 /// CD load/swap button: a compact disc.
-pub(super) fn draw_cd_button(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
-    draw_button_base(frame, rect, hover, texture_scale);
+pub(super) fn draw_cd_button(canvas: &mut dyn Canvas, rect: Rect, hover: f32) {
+    let texture_scale = canvas.device_scale();
+    draw_button_base(canvas, rect, hover);
     let s = texture_scale;
     // Disc centre and radii in unscaled button-local pixels.
     let cx = (rect.x + 11 * s) as f32;
@@ -1081,18 +1055,19 @@ pub(super) fn draw_cd_button(frame: &mut [u8], rect: Rect, hover: f32, texture_s
             } else {
                 continue;
             };
-            put_pixel(frame, px, py, color, texture_scale);
+            dput(canvas, px, py, color);
         }
     }
 }
 
 /// Menu button: three stacked bars (opens the pop-up menu).
-pub(super) fn draw_menu_button(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
-    draw_button_base(frame, rect, hover, texture_scale);
+pub(super) fn draw_menu_button(canvas: &mut dyn Canvas, rect: Rect, hover: f32) {
+    let texture_scale = canvas.device_scale();
+    draw_button_base(canvas, rect, hover);
     let s = texture_scale;
     for row in 0..3 {
-        fill_rect(
-            frame,
+        dfill(
+            canvas,
             Rect {
                 x: rect.x + 4 * s,
                 y: rect.y + (6 + row * 4) * s,
@@ -1100,18 +1075,18 @@ pub(super) fn draw_menu_button(frame: &mut [u8], rect: Rect, hover: f32, texture
                 h: 2 * s,
             },
             BUTTON_GLYPH,
-            texture_scale,
         );
     }
 }
 
 /// Screenshot button: a small camera.
-pub(super) fn draw_shot_button(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
-    draw_button_base(frame, rect, hover, texture_scale);
+pub(super) fn draw_shot_button(canvas: &mut dyn Canvas, rect: Rect, hover: f32) {
+    let texture_scale = canvas.device_scale();
+    draw_button_base(canvas, rect, hover);
     let s = texture_scale;
     // Viewfinder bump, then the body, then the lens.
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: rect.x + 8 * s,
             y: rect.y + 5 * s,
@@ -1119,10 +1094,9 @@ pub(super) fn draw_shot_button(frame: &mut [u8], rect: Rect, hover: f32, texture
             h: 3 * s,
         },
         CAMERA_BODY,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: rect.x + 3 * s,
             y: rect.y + 7 * s,
@@ -1130,7 +1104,6 @@ pub(super) fn draw_shot_button(frame: &mut [u8], rect: Rect, hover: f32, texture
             h: 10 * s,
         },
         CAMERA_BODY,
-        texture_scale,
     );
     let cx = (rect.x + 11 * s) as f32;
     let cy = (rect.y + 12 * s) as f32;
@@ -1147,20 +1120,21 @@ pub(super) fn draw_shot_button(frame: &mut [u8], rect: Rect, hover: f32, texture
             } else {
                 continue;
             };
-            put_pixel(frame, px, py, color, texture_scale);
+            dput(canvas, px, py, color);
         }
     }
 }
 
 /// Speaker glyph labelling the volume slider: a driver box, a cone, and
 /// two sound arcs.
-pub(super) fn draw_speaker_glyph(frame: &mut [u8], texture_scale: usize) {
+pub(super) fn draw_speaker_glyph(canvas: &mut dyn Canvas) {
+    let texture_scale = canvas.device_scale();
     let s = texture_scale;
     let x = VOLUME_GLYPH_X * s;
     let y = (status_bar_top() + STATUS_CONTROL_Y) * s;
     let fs = s as f32;
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: x + s,
             y: y + 9 * s,
@@ -1168,42 +1142,28 @@ pub(super) fn draw_speaker_glyph(frame: &mut [u8], texture_scale: usize) {
             h: 5 * s,
         },
         STATUS_TEXT,
-        texture_scale,
     );
-    fill_triangle(
-        frame,
+    triangle(
+        canvas,
         [
             (x as f32 + 4.0 * fs, y as f32 + 11.5 * fs),
             (x as f32 + 8.0 * fs, y as f32 + 5.5 * fs),
             (x as f32 + 8.0 * fs, y as f32 + 17.5 * fs),
         ],
         STATUS_TEXT,
-        texture_scale,
     );
-    draw_vline_span(
-        frame,
-        x + 10 * s,
-        y + 9 * s,
-        y + 14 * s,
-        STATUS_TEXT,
-        texture_scale,
-    );
-    draw_vline_span(
-        frame,
+    dvline(canvas, x + 10 * s, y + 9 * s, y + 14 * s, STATUS_TEXT);
+    dvline(
+        canvas,
         x + (VOLUME_GLYPH_W - 1) * s,
         y + 6 * s,
         y + 17 * s,
         STATUS_TEXT,
-        texture_scale,
     );
 }
 
-pub(super) fn draw_disk_glyph(
-    frame: &mut [u8],
-    rect: Rect,
-    drive_idx: usize,
-    texture_scale: usize,
-) {
+pub(super) fn draw_disk_glyph(canvas: &mut dyn Canvas, rect: Rect, drive_idx: usize) {
+    let texture_scale = canvas.device_scale();
     let s = texture_scale;
     // Centre the 16px disk body vertically (full-height buttons give the
     // original 3px margin; stacked buttons less).
@@ -1214,9 +1174,9 @@ pub(super) fn draw_disk_glyph(
         w: 16 * s,
         h: 16 * s,
     };
-    fill_rect(frame, body, DISK_BODY_SHADOW, texture_scale);
-    fill_rect(
-        frame,
+    dfill(canvas, body, DISK_BODY_SHADOW);
+    dfill(
+        canvas,
         Rect {
             x: body.x + s,
             y: body.y + s,
@@ -1224,10 +1184,9 @@ pub(super) fn draw_disk_glyph(
             h: body.h.saturating_sub(2 * s),
         },
         DISK_BODY,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: body.x + s,
             y: body.y + s,
@@ -1235,10 +1194,9 @@ pub(super) fn draw_disk_glyph(
             h: s,
         },
         DISK_BODY_HIGHLIGHT,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: body.x + s,
             y: body.y + s,
@@ -1246,10 +1204,9 @@ pub(super) fn draw_disk_glyph(
             h: body.h.saturating_sub(2 * s),
         },
         DISK_BODY_HIGHLIGHT,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: body.x + 5 * s,
             y: body.y + 2 * s,
@@ -1257,10 +1214,9 @@ pub(super) fn draw_disk_glyph(
             h: 5 * s,
         },
         DISK_SHUTTER,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: body.x + 6 * s,
             y: body.y + 3 * s,
@@ -1268,10 +1224,9 @@ pub(super) fn draw_disk_glyph(
             h: s,
         },
         DISK_LABEL,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: body.x + 5 * s,
             y: body.y + 6 * s,
@@ -1279,10 +1234,9 @@ pub(super) fn draw_disk_glyph(
             h: s,
         },
         DISK_SHUTTER_DARK,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: body.x + 3 * s,
             y: body.y + 9 * s,
@@ -1290,10 +1244,9 @@ pub(super) fn draw_disk_glyph(
             h: 6 * s,
         },
         DISK_LABEL,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: body.x + 4 * s,
             y: body.y + 11 * s,
@@ -1301,10 +1254,9 @@ pub(super) fn draw_disk_glyph(
             h: s,
         },
         DISK_LABEL_LINE,
-        texture_scale,
     );
-    fill_rect(
-        frame,
+    dfill(
+        canvas,
         Rect {
             x: body.x + 4 * s,
             y: body.y + 13 * s,
@@ -1312,28 +1264,20 @@ pub(super) fn draw_disk_glyph(
             h: s,
         },
         DISK_LABEL_LINE,
-        texture_scale,
     );
     // The drive number, written on the right of the disk label.
     draw_tiny_digit(
-        frame,
+        canvas,
         body.x + 9 * s,
         body.y + 9 * s,
         drive_idx as u8,
         DISK_BODY_SHADOW,
-        texture_scale,
     );
 }
 
 /// 3x5 pixel digits 0-3 for the drive number on the disk-button label.
-pub(super) fn draw_tiny_digit(
-    frame: &mut [u8],
-    x: usize,
-    y: usize,
-    digit: u8,
-    color: u32,
-    texture_scale: usize,
-) {
+pub(super) fn draw_tiny_digit(canvas: &mut dyn Canvas, x: usize, y: usize, digit: u8, color: u32) {
+    let texture_scale = canvas.device_scale();
     const GLYPHS: [[u8; 5]; 4] = [
         [0b111, 0b101, 0b101, 0b101, 0b111],
         [0b010, 0b110, 0b010, 0b010, 0b111],
@@ -1347,8 +1291,8 @@ pub(super) fn draw_tiny_digit(
     for (row, bits) in rows.iter().enumerate() {
         for col in 0..3 {
             if bits & (0b100 >> col) != 0 {
-                fill_rect(
-                    frame,
+                dfill(
+                    canvas,
                     Rect {
                         x: x + col * s,
                         y: y + row * s,
@@ -1356,20 +1300,19 @@ pub(super) fn draw_tiny_digit(
                         h: s,
                     },
                     color,
-                    texture_scale,
                 );
             }
         }
     }
 }
 
-pub(super) fn draw_seven_segment_digit(
-    frame: &mut [u8],
+pub(super) fn seven_segment_digit(
+    canvas: &mut dyn Canvas,
     rect: Rect,
     ch: char,
     colors: (u32, u32, u32),
-    texture_scale: usize,
 ) {
+    let texture_scale = canvas.device_scale();
     const SEG_A: u8 = 1 << 0;
     const SEG_B: u8 = 1 << 1;
     const SEG_C: u8 = 1 << 2;
@@ -1469,37 +1412,51 @@ pub(super) fn draw_seven_segment_digit(
 
     for (segment, segment_rect) in segments {
         let lit = mask & segment != 0;
-        fill_rect(
-            frame,
+        dfill(
+            canvas,
             segment_rect,
             if lit { segment_on } else { segment_off },
-            texture_scale,
         );
         if lit {
-            draw_hline_span(
-                frame,
+            dhline(
+                canvas,
                 segment_rect.y,
                 segment_rect.x,
                 segment_rect.x + segment_rect.w,
                 segment_highlight,
-                texture_scale,
             );
         }
     }
 }
 
-pub(super) fn draw_led(
+#[cfg(test)]
+pub(super) fn draw_seven_segment_digit(
     frame: &mut [u8],
+    rect: Rect,
+    ch: char,
+    colors: (u32, u32, u32),
+    texture_scale: usize,
+) {
+    seven_segment_digit(
+        &mut FrameCanvas::new(frame, texture_scale),
+        rect,
+        ch,
+        colors,
+    );
+}
+
+pub(super) fn led(
+    canvas: &mut dyn Canvas,
     rect: Rect,
     on: bool,
     on_color: u32,
     off_color: u32,
     on_highlight: u32,
     off_highlight: u32,
-    texture_scale: usize,
 ) {
-    fill_rect(frame, rect, LED_BEZEL_DARK, texture_scale);
-    draw_rect_bevel(frame, rect, LED_BEZEL_LIGHT, STATUS_BOTTOM, texture_scale);
+    let texture_scale = canvas.device_scale();
+    dfill(canvas, rect, LED_BEZEL_DARK);
+    dbevel(canvas, rect, LED_BEZEL_LIGHT, STATUS_BOTTOM);
     let inset = 2 * texture_scale;
     let inner = Rect {
         x: rect.x + inset,
@@ -1507,63 +1464,37 @@ pub(super) fn draw_led(
         w: rect.w.saturating_sub(inset * 2),
         h: rect.h.saturating_sub(inset * 2),
     };
-    fill_rect(
-        frame,
-        inner,
-        if on { on_color } else { off_color },
-        texture_scale,
-    );
+    dfill(canvas, inner, if on { on_color } else { off_color });
     for dy in 0..texture_scale {
-        draw_hline_span(
-            frame,
+        dhline(
+            canvas,
             inner.y + dy,
             inner.x,
             inner.x + inner.w,
             if on { on_highlight } else { off_highlight },
-            texture_scale,
         );
     }
 }
 
-pub(super) fn draw_reboot_button(frame: &mut [u8], rect: Rect, hover: f32, texture_scale: usize) {
-    fill_rect(
-        frame,
+pub(super) fn draw_reboot_button(canvas: &mut dyn Canvas, rect: Rect, hover: f32) {
+    dfill(
+        canvas,
         rect,
         light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover),
-        texture_scale,
     );
-    draw_rect_bevel(
-        frame,
-        rect,
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        texture_scale,
-    );
+    dbevel(canvas, rect, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     let cx = rect.x + rect.w / 2;
     let cy = rect.y + rect.h / 2;
-    draw_reset_glyph(frame, cx, cy, texture_scale);
+    draw_reset_glyph(canvas, cx, cy);
 }
 
-pub(super) fn draw_power_button(
-    frame: &mut [u8],
-    rect: Rect,
-    powered_on: bool,
-    hover: f32,
-    texture_scale: usize,
-) {
-    fill_rect(
-        frame,
+pub(super) fn draw_power_button(canvas: &mut dyn Canvas, rect: Rect, powered_on: bool, hover: f32) {
+    dfill(
+        canvas,
         rect,
         light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover),
-        texture_scale,
     );
-    draw_rect_bevel(
-        frame,
-        rect,
-        BUTTON_EDGE_LIGHT,
-        BUTTON_EDGE_DARK,
-        texture_scale,
-    );
+    dbevel(canvas, rect, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
     let cx = rect.x + rect.w / 2;
     let cy = rect.y + rect.h / 2;
     let color = if powered_on {
@@ -1571,21 +1502,14 @@ pub(super) fn draw_power_button(
     } else {
         POWER_GLYPH_OFF
     };
-    draw_power_glyph(frame, cx, cy, color, texture_scale);
+    draw_power_glyph(canvas, cx, cy, color);
 }
 
-pub(super) fn draw_pause_button(
-    frame: &mut [u8],
-    rect: Rect,
-    paused: bool,
-    hover: f32,
-    texture_scale: usize,
-) {
-    fill_rect(
-        frame,
+pub(super) fn draw_pause_button(canvas: &mut dyn Canvas, rect: Rect, paused: bool, hover: f32) {
+    dfill(
+        canvas,
         rect,
         light_face(BUTTON_FACE, BUTTON_FACE_HOVER, hover),
-        texture_scale,
     );
     // Paused, the moulding turns over -- the MT-32 panel's pressed
     // effect: the light that caught its top and left falls onto the
@@ -1596,15 +1520,15 @@ pub(super) fn draw_pause_button(
     } else {
         (BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK)
     };
-    draw_rect_bevel(frame, rect, near, far, texture_scale);
+    dbevel(canvas, rect, near, far);
     let cx = rect.x + rect.w / 2;
     let cy = rect.y + rect.h / 2;
     // Show the action the button performs: a play triangle while paused
     // (click to resume), the twin pause bars while running.
     if paused {
-        draw_play_glyph(frame, cx, cy, BUTTON_GLYPH, texture_scale);
+        draw_play_glyph(canvas, cx, cy, BUTTON_GLYPH);
     } else {
-        draw_pause_glyph(frame, cx, cy, BUTTON_GLYPH, texture_scale);
+        draw_pause_glyph(canvas, cx, cy, BUTTON_GLYPH);
     }
 }
 
@@ -1615,26 +1539,26 @@ pub(super) fn draw_pause_button(
 /// active source is always visible rather than hidden behind a key
 /// combination.
 pub(super) fn draw_joystick_button(
-    frame: &mut [u8],
+    canvas: &mut dyn Canvas,
     rect: Rect,
     mode: JoystickInputMode,
     hover: f32,
-    texture_scale: usize,
 ) {
-    draw_button_base(frame, rect, hover, texture_scale);
+    draw_button_base(canvas, rect, hover);
     match mode {
-        JoystickInputMode::Gamepad => draw_gamepad_glyph(frame, rect, texture_scale),
-        JoystickInputMode::Keyboard => draw_keyboard_glyph(frame, rect, texture_scale),
+        JoystickInputMode::Gamepad => draw_gamepad_glyph(canvas, rect),
+        JoystickInputMode::Keyboard => draw_keyboard_glyph(canvas, rect),
     }
 }
 
 /// A small gamepad: a rounded green body with a recessed d-pad on the left and
 /// two action buttons on the right.
-pub(super) fn draw_gamepad_glyph(frame: &mut [u8], rect: Rect, texture_scale: usize) {
+pub(super) fn draw_gamepad_glyph(canvas: &mut dyn Canvas, rect: Rect) {
+    let texture_scale = canvas.device_scale();
     let s = texture_scale;
     let mut cell = |x: usize, y: usize, w: usize, h: usize, color: u32| {
-        fill_rect(
-            frame,
+        dfill(
+            canvas,
             Rect {
                 x: rect.x + x * s,
                 y: rect.y + y * s,
@@ -1642,7 +1566,6 @@ pub(super) fn draw_gamepad_glyph(frame: &mut [u8], rect: Rect, texture_scale: us
                 h: h * s,
             },
             color,
-            texture_scale,
         );
     };
     // Body and the two grip bumps.
@@ -1660,34 +1583,29 @@ pub(super) fn draw_gamepad_glyph(frame: &mut [u8], rect: Rect, texture_scale: us
 /// The on-screen keyboard's toggle: the same little keyboard the joystick
 /// toggle wears in its key-mapping mode, lit while the strip is up and dark
 /// while it is away, so the button says which it is without a caption.
-pub(super) fn draw_keyboard_button(
-    frame: &mut [u8],
-    rect: Rect,
-    shown: bool,
-    hover: f32,
-    texture_scale: usize,
-) {
-    draw_button_base(frame, rect, hover, texture_scale);
+pub(super) fn draw_keyboard_button(canvas: &mut dyn Canvas, rect: Rect, shown: bool, hover: f32) {
+    draw_button_base(canvas, rect, hover);
     let keys = if shown {
         BUTTON_GLYPH
     } else {
         BUTTON_GLYPH_DISABLED
     };
-    draw_keyboard_glyph_in(frame, rect, keys, texture_scale);
+    draw_keyboard_glyph_in(canvas, rect, keys);
 }
 
 /// A small keyboard: a recessed dark case holding two rows of green keys and a
 /// space bar.
-pub(super) fn draw_keyboard_glyph(frame: &mut [u8], rect: Rect, texture_scale: usize) {
-    draw_keyboard_glyph_in(frame, rect, BUTTON_GLYPH, texture_scale);
+pub(super) fn draw_keyboard_glyph(canvas: &mut dyn Canvas, rect: Rect) {
+    draw_keyboard_glyph_in(canvas, rect, BUTTON_GLYPH);
 }
 
 /// The same keyboard with its keys in a chosen colour.
-fn draw_keyboard_glyph_in(frame: &mut [u8], rect: Rect, keys: u32, texture_scale: usize) {
+fn draw_keyboard_glyph_in(canvas: &mut dyn Canvas, rect: Rect, keys: u32) {
+    let texture_scale = canvas.device_scale();
     let s = texture_scale;
     let mut cell = |x: usize, y: usize, w: usize, h: usize, color: u32| {
-        fill_rect(
-            frame,
+        dfill(
+            canvas,
             Rect {
                 x: rect.x + x * s,
                 y: rect.y + y * s,
@@ -1695,7 +1613,6 @@ fn draw_keyboard_glyph_in(frame: &mut [u8], rect: Rect, keys: u32, texture_scale
                 h: h * s,
             },
             color,
-            texture_scale,
         );
     };
     // Case.
@@ -1710,13 +1627,8 @@ fn draw_keyboard_glyph_in(frame: &mut [u8], rect: Rect, keys: u32, texture_scale
 }
 
 /// The pause symbol: two short vertical bars flanking the centre.
-pub(super) fn draw_pause_glyph(
-    frame: &mut [u8],
-    cx: usize,
-    cy: usize,
-    color: u32,
-    texture_scale: usize,
-) {
+pub(super) fn draw_pause_glyph(canvas: &mut dyn Canvas, cx: usize, cy: usize, color: u32) {
+    let texture_scale = canvas.device_scale();
     let bar_w = 2 * texture_scale;
     let bar_h = 11 * texture_scale;
     let gap = 3 * texture_scale;
@@ -1724,8 +1636,8 @@ pub(super) fn draw_pause_glyph(
     let left = cx.saturating_sub(gap / 2 + bar_w);
     let right = cx + gap / 2;
     for x in [left, right] {
-        fill_rect(
-            frame,
+        dfill(
+            canvas,
             Rect {
                 x,
                 y: top,
@@ -1733,59 +1645,46 @@ pub(super) fn draw_pause_glyph(
                 h: bar_h,
             },
             color,
-            texture_scale,
         );
     }
 }
 
 /// The play symbol: a right-pointing filled triangle.
-pub(super) fn draw_play_glyph(
-    frame: &mut [u8],
-    cx: usize,
-    cy: usize,
-    color: u32,
-    texture_scale: usize,
-) {
+pub(super) fn draw_play_glyph(canvas: &mut dyn Canvas, cx: usize, cy: usize, color: u32) {
+    let texture_scale = canvas.device_scale();
     let s = texture_scale as f32;
     let half_h = 6.0 * s;
     let width = 11.0 * s;
     let left = cx as f32 - width / 2.0 + 1.0;
     let cyf = cy as f32 + 0.5;
-    fill_triangle(
-        frame,
+    triangle(
+        canvas,
         [
             (left, cyf - half_h),
             (left, cyf + half_h),
             (left + width, cyf),
         ],
         color,
-        texture_scale,
     );
 }
 
 /// The IEC power symbol: a near-closed ring broken at the top, with a
 /// vertical bar dropping through the gap toward the centre.
-pub(super) fn draw_power_glyph(
-    frame: &mut [u8],
-    cx: usize,
-    cy: usize,
-    color: u32,
-    texture_scale: usize,
-) {
-    draw_power_glyph_sized(frame, cx, cy, 5.5, color, texture_scale);
+pub(super) fn draw_power_glyph(canvas: &mut dyn Canvas, cx: usize, cy: usize, color: u32) {
+    power_glyph_sized(canvas, cx, cy, 5.5, color);
 }
 
 /// The same mark at a chosen radius, for panels with less room than the
 /// status bar. `radius` is in unscaled pixels; the stroke follows it so the
 /// ring keeps its proportions.
-pub(super) fn draw_power_glyph_sized(
-    frame: &mut [u8],
+pub(super) fn power_glyph_sized(
+    canvas: &mut dyn Canvas,
     cx: usize,
     cy: usize,
     radius_px: f32,
     color: u32,
-    texture_scale: usize,
 ) {
+    let texture_scale = canvas.device_scale();
     let scale = texture_scale as f32;
     let ccx = cx as f32 + 0.5;
     let ccy = cy as f32 + 0.5 + 0.5 * scale;
@@ -1803,35 +1702,43 @@ pub(super) fn draw_power_glyph_sized(
     for step in 1..=steps {
         let t = start + (end - start) * step as f32 / steps as f32;
         let next = (ccx + radius * t.cos(), ccy + radius * t.sin());
-        draw_thick_line(
-            frame,
-            prev.0,
-            prev.1,
-            next.0,
-            next.1,
-            stroke,
-            color,
-            texture_scale,
-        );
+        thick_line(canvas, prev.0, prev.1, next.0, next.1, stroke, color);
         prev = next;
     }
 
     // Vertical bar from above the ring down to its centre.
-    draw_thick_line(
-        frame,
+    thick_line(
+        canvas,
         ccx,
         ccy - radius - 1.5 * scale,
         ccx,
         ccy - 0.5 * scale,
         stroke,
         color,
-        texture_scale,
+    );
+}
+
+pub(super) fn draw_power_glyph_sized(
+    frame: &mut [u8],
+    cx: usize,
+    cy: usize,
+    radius_px: f32,
+    color: u32,
+    texture_scale: usize,
+) {
+    power_glyph_sized(
+        &mut FrameCanvas::new(frame, texture_scale),
+        cx,
+        cy,
+        radius_px,
+        color,
     );
 }
 
 /// The reboot symbol: a near-full ring broken at the upper left with a bold
 /// arrowhead pointing counter-clockwise.
-pub(super) fn draw_reset_glyph(frame: &mut [u8], cx: usize, cy: usize, texture_scale: usize) {
+pub(super) fn draw_reset_glyph(canvas: &mut dyn Canvas, cx: usize, cy: usize) {
+    let texture_scale = canvas.device_scale();
     let scale = texture_scale as f32;
     let ccx = cx as f32 + 0.5;
     let ccy = cy as f32 + 0.5;
@@ -1849,16 +1756,7 @@ pub(super) fn draw_reset_glyph(frame: &mut [u8], cx: usize, cy: usize, texture_s
     for step in 1..=steps {
         let a = ang(step as f32 / steps as f32);
         let next = (ccx + radius * a.cos(), ccy + radius * a.sin());
-        draw_thick_line(
-            frame,
-            prev.0,
-            prev.1,
-            next.0,
-            next.1,
-            stroke,
-            RESET_GLYPH,
-            texture_scale,
-        );
+        thick_line(canvas, prev.0, prev.1, next.0, next.1, stroke, RESET_GLYPH);
         prev = next;
     }
 
@@ -1879,19 +1777,19 @@ pub(super) fn draw_reset_glyph(frame: &mut [u8], cx: usize, cy: usize, texture_s
         (ex - half_w * nx, ey - half_w * ny),
         (ex + len * tx, ey + len * ty),
     ];
-    fill_triangle(frame, arrow, RESET_GLYPH, texture_scale);
+    triangle(canvas, arrow, RESET_GLYPH);
 }
 
-pub(super) fn draw_thick_line(
-    frame: &mut [u8],
+pub(super) fn thick_line(
+    canvas: &mut dyn Canvas,
     x0: f32,
     y0: f32,
     x1: f32,
     y1: f32,
     radius: f32,
     color: u32,
-    texture_scale: usize,
 ) {
+    let texture_scale = canvas.device_scale();
     let min_x = (x0.min(x1) - radius - 1.0).floor().max(0.0) as usize;
     let max_x = (x0.max(x1) + radius + 1.0)
         .ceil()
@@ -1919,18 +1817,14 @@ pub(super) fn draw_thick_line(
             let dist = (dist_x * dist_x + dist_y * dist_y).sqrt();
             let coverage = (radius + 0.5 - dist).clamp(0.0, 1.0);
             if coverage > 0.0 {
-                blend_pixel(frame, x, y, color, coverage, texture_scale);
+                canvas.blend_device(x, y, color, coverage);
             }
         }
     }
 }
 
-pub(super) fn fill_triangle(
-    frame: &mut [u8],
-    p: [(f32, f32); 3],
-    color: u32,
-    texture_scale: usize,
-) {
+pub(super) fn triangle(canvas: &mut dyn Canvas, p: [(f32, f32); 3], color: u32) {
+    let texture_scale = canvas.device_scale();
     let min_x = p
         .iter()
         .map(|(x, _)| *x)
@@ -1979,7 +1873,7 @@ pub(super) fn fill_triangle(
                 }
             }
             if hits > 0 {
-                blend_pixel(frame, x, y, color, hits as f32 / 9.0, texture_scale);
+                canvas.blend_device(x, y, color, hits as f32 / 9.0);
             }
         }
     }
@@ -2440,18 +2334,12 @@ pub(in crate::video) fn fill_rect_blend(
     }
 }
 
-pub(super) fn draw_text(
-    frame: &mut [u8],
-    x: usize,
-    y: usize,
-    text: &str,
-    color: u32,
-    texture_scale: usize,
-) {
+pub(super) fn bar_text(canvas: &mut dyn Canvas, x: usize, y: usize, text: &str, color: u32) {
+    let texture_scale = canvas.device_scale();
     let mut cursor = x;
     for ch in text.chars() {
         if let Some(rows) = glyph(ch) {
-            draw_glyph(frame, cursor, y, rows, color, texture_scale);
+            bar_glyph(canvas, cursor, y, rows, color);
             cursor += 12 * texture_scale;
         } else {
             cursor += 6 * texture_scale;
@@ -2459,14 +2347,8 @@ pub(super) fn draw_text(
     }
 }
 
-pub(super) fn draw_glyph(
-    frame: &mut [u8],
-    x: usize,
-    y: usize,
-    rows: [u8; 5],
-    color: u32,
-    texture_scale: usize,
-) {
+pub(super) fn bar_glyph(canvas: &mut dyn Canvas, x: usize, y: usize, rows: [u8; 5], color: u32) {
+    let texture_scale = canvas.device_scale();
     let block = 2 * texture_scale;
     for (row_idx, row) in rows.iter().enumerate() {
         for col in 0..5 {
@@ -2475,8 +2357,8 @@ pub(super) fn draw_glyph(
             }
             let px = x + col * block;
             let py = y + row_idx * block;
-            fill_rect(
-                frame,
+            dfill(
+                canvas,
                 Rect {
                     x: px,
                     y: py,
@@ -2484,7 +2366,6 @@ pub(super) fn draw_glyph(
                     h: block,
                 },
                 color,
-                texture_scale,
             );
         }
     }
@@ -2549,17 +2430,6 @@ pub(in crate::video) fn draw_rect_bevel(
     }
 }
 
-pub(super) fn draw_hline(frame: &mut [u8], y: usize, color: u32, texture_scale: usize) {
-    draw_hline_span(
-        frame,
-        y,
-        0,
-        texture_width(texture_scale),
-        color,
-        texture_scale,
-    );
-}
-
 pub(super) fn draw_hline_span(
     frame: &mut [u8],
     y: usize,
@@ -2610,7 +2480,7 @@ pub(super) fn put_pixel(frame: &mut [u8], x: usize, y: usize, color: u32, textur
     frame[off..off + 4].copy_from_slice(&color.to_le_bytes());
 }
 
-pub(super) fn blend_pixel(
+pub(in crate::video) fn blend_pixel(
     frame: &mut [u8],
     x: usize,
     y: usize,
