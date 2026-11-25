@@ -1852,9 +1852,6 @@ enum CpuBusSamplePhase {
     Start,
     /// After the granted slot, before the cycle's trailing colour clock.
     End,
-    /// After the trailing colour clock: the 68000 has finished this word's
-    /// bus cycle, which is where a word-sized access returns its data.
-    Complete,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -5313,18 +5310,6 @@ impl Bus {
         matches!(self.agnus.revision(), AgnusRevision::AgaAlice)
     }
 
-    /// Whether the custom registers are a narrower CPU port than chip RAM.
-    /// Beside Alice chip RAM is 32 bits wide and the registers 16, so the
-    /// CPU bus runs a long register access as two separate word cycles.
-    ///
-    /// TODO: the 16-bit boards still hand a long register access to
-    /// `custom_read`/`custom_write` whole. Reads sample each word on its
-    /// own cycle there, but a long write applies both words after its
-    /// second cycle.
-    pub(crate) fn register_port_narrower_than_chip_ram(&self) -> bool {
-        self.aga_enabled()
-    }
-
     pub fn reset_custom_chips_from_cpu_reset(&mut self) {
         // The CPU RESET instruction asserts the external reset line without
         // resetting the CPU core or clearing RAM. Reuse the warm device reset
@@ -7625,7 +7610,8 @@ impl Bus {
                 // a register write's Denise/Agnus-effective position is
                 // referenced from this slot (see `record_render_write`),
                 // not from the beam position after the bus cycle's tail.
-                // A long-word access stores its second (low-word) slot.
+                // A long access arrives as two word cycles, each applied
+                // before the next is granted, so each word has its own slot.
                 self.cpu_custom_access_slot = Some(grant_slot);
             }
             if self.wave_on {
@@ -7656,7 +7642,6 @@ impl Bus {
                 sample(self, slot, slot_stride, CpuBusSamplePhase::End);
                 let (cck, tick) = self.advance_one_chip_bus_quantum(None);
                 self.record_slice_bus_advance(cck, tick);
-                sample(self, slot, slot_stride, CpuBusSamplePhase::Complete);
             }
             if trace_cpu_bus {
                 self.diag_cpu_bus_access(
@@ -10386,33 +10371,33 @@ impl Bus {
     // -----------------------------------------------------------------
 
     pub fn custom_read(&mut self, addr: u64, size: usize) -> u64 {
+        if size == 4 {
+            // The registers are a 16-bit port: a long is two word cycles,
+            // each granted, sampled and returned on its own. The CPU bus
+            // splits a long before the address decode, so only a caller
+            // that names the register bank directly arrives here.
+            let hi = self.custom_read(addr, 2);
+            let lo = self.custom_read(addr.wrapping_add(2), 2);
+            return (hi << 16) | lo;
+        }
         let off = (addr & 0xFFF) as u16;
-        let mut sampled_words = [None; 2];
+        let word_off = off & 0xFFE;
+        let mut sampled_word = None;
         self.grant_cpu_bus_access_sampled_phased(
             Some(custom_register_cpu_addr(addr)),
             size,
             CpuBusAccessKind::Custom,
-            |bus, slot, stride, phase| {
-                let word_off = off.wrapping_add((slot as usize * stride) as u16) & 0xFFE;
+            |bus, _slot, _stride, phase| {
                 let sample_phase = if word_off == 0x00E {
                     CpuBusSamplePhase::Start
                 } else {
                     CpuBusSamplePhase::End
                 };
-                if matches!(word_off, 0x00E | 0x01E) {
-                    if phase == sample_phase {
-                        // CLXDAT samples/clears before the word's trailing
-                        // clocks; INTREQR retains its end-of-slot sampling.
-                        bus.flush_timed_devices();
-                        sampled_words[slot as usize] = Some(bus.read_custom_word(word_off));
-                    }
-                } else if size == 4 && slot == 0 && phase == CpuBusSamplePhase::Complete {
-                    // A 68000 long read is two word cycles on the chips'
-                    // 16-bit bus. The first word is returned when its own
-                    // cycle completes, one whole cycle before the second,
-                    // exactly where a word read of that register returns.
+                if matches!(word_off, 0x00E | 0x01E) && phase == sample_phase {
+                    // CLXDAT samples/clears before the word's trailing
+                    // clocks; INTREQR retains its end-of-slot sampling.
                     bus.flush_timed_devices();
-                    sampled_words[0] = Some(bus.read_custom_word(word_off));
+                    sampled_word = Some(bus.read_custom_word(word_off));
                 }
             },
         );
@@ -10434,47 +10419,23 @@ impl Bus {
         if self.regcheck.is_some() {
             self.note_cpu_custom_access(addr, off, size, true);
         }
-        self.poll_stats.tick_read_custom(off & 0xFFE);
-        let value = match size {
-            1 => {
-                let val = sampled_words[0].unwrap_or_else(|| self.read_custom_word(off & 0xFFE));
-                trace!("custom R8  off={:03X} val_word={:04X}", off, val);
-                if diag_cpu_read_matches(off & 0xFFE, size) {
-                    self.diag_cpu_read(off & 0xFFE, size, val as u64);
-                }
-                if addr & 1 == 0 {
-                    (val >> 8) as u64
-                } else {
-                    (val & 0xFF) as u64
-                }
+        self.poll_stats.tick_read_custom(word_off);
+        let val = sampled_word.unwrap_or_else(|| self.read_custom_word(word_off));
+        if diag_cpu_read_matches(word_off, size) {
+            self.diag_cpu_read(word_off, size, val as u64);
+        }
+        let value = if size == 1 {
+            trace!("custom R8  off={:03X} val_word={:04X}", off, val);
+            if addr & 1 == 0 {
+                (val >> 8) as u64
+            } else {
+                (val & 0xFF) as u64
             }
-            4 => {
-                // MOVE.L from $DFFxxx reads two consecutive register
-                // words: high word at addr, low word at addr+2. Each
-                // register is 16 bits wide on the custom chip bus.
-                let hi = sampled_words[0].unwrap_or_else(|| self.read_custom_word(off));
-                let lo_off = off.wrapping_add(2);
-                let lo = sampled_words[1].unwrap_or_else(|| self.read_custom_word(lo_off));
-                let v = ((hi as u64) << 16) | (lo as u64);
-                trace!("custom R32 off={:03X} val={:08X}", off, v);
-                if diag_cpu_read_matches(off, size) {
-                    self.diag_cpu_read(off, size, hi as u64);
-                }
-                if diag_cpu_read_matches(off.wrapping_add(2), size) {
-                    self.diag_cpu_read(off.wrapping_add(2), size, lo as u64);
-                }
-                v
-            }
-            _ => {
-                let val = sampled_words[0].unwrap_or_else(|| self.read_custom_word(off));
-                trace!("custom R16 off={:03X} val={:04X}", off, val);
-                if diag_cpu_read_matches(off, size) {
-                    self.diag_cpu_read(off, size, val as u64);
-                }
-                val as u64
-            }
+        } else {
+            trace!("custom R16 off={:03X} val={:04X}", off, val);
+            val as u64
         };
-        self.update_last_cpu_trace_data(value, size.min(4) as u8);
+        self.update_last_cpu_trace_data(value, size as u8);
         value
     }
 
@@ -10532,6 +10493,16 @@ impl Bus {
     /// should preempt the slice so the freshly-asserted IRQ can be
     /// delivered before agnus has a chance to OR in VERTB.
     pub fn custom_write(&mut self, addr: u64, size: usize, val: u64) -> bool {
+        if size == 4 {
+            // The registers are a 16-bit port: a long is two word cycles,
+            // and each word reaches its register when its own cycle ends,
+            // the first a whole cycle before the second. The CPU bus splits
+            // a long before the address decode, so only a caller that names
+            // the register bank directly arrives here.
+            let p1 = self.custom_write(addr, 2, (val >> 16) & 0xFFFF);
+            let p2 = self.custom_write(addr.wrapping_add(2), 2, val & 0xFFFF);
+            return p1 || p2;
+        }
         self.grant_cpu_bus_access_at(
             Some(custom_register_cpu_addr(addr)),
             size,
@@ -10546,7 +10517,7 @@ impl Bus {
         if self.regcheck.is_some() {
             self.note_cpu_custom_access(addr, off, size, false);
         }
-        self.update_last_cpu_trace_data(val, size.min(4) as u8);
+        self.update_last_cpu_trace_data(val, size as u8);
         match size {
             1 => {
                 // A 68000 byte write drives the byte onto BOTH halves of
@@ -10565,22 +10536,6 @@ impl Bus {
                     self.diag_cpu_write(off & 0xFFE, word);
                 }
                 self.write_custom_word_from(off & 0xFFE, word, BeamWriteSource::Cpu)
-            }
-            4 => {
-                // MOVE.L to $DFFxxx writes two consecutive register
-                // words. DiagROM relies on this for `move.l #copper,
-                // COP1LCH` setting both halves of the pointer in one
-                // instruction.
-                let hi = ((val >> 16) & 0xFFFF) as u16;
-                let lo = (val & 0xFFFF) as u16;
-                trace!("custom W32 off={:03X} val={:08X}", off, val);
-                if diag_cpu_writes_on() {
-                    self.diag_cpu_write(off, hi);
-                    self.diag_cpu_write(off.wrapping_add(2), lo);
-                }
-                let p1 = self.write_custom_word_from(off, hi, BeamWriteSource::Cpu);
-                let p2 = self.write_custom_word_from(off.wrapping_add(2), lo, BeamWriteSource::Cpu);
-                p1 || p2
             }
             _ => {
                 let word = (val & 0xFFFF) as u16;
