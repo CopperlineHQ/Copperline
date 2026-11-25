@@ -351,7 +351,12 @@ border-sprite and palette-bank fields are Lisa's, and writing them on the
 8373 leaves its fixed behaviour in place. BPLCON3 latches every write on
 both chips; ECSENA gates the border, genlock and blank features where
 they are used, so software can write the register first and enable it
-later. The two BPLCON4 fields are on different Lisa timing paths:
+later. BRDRBLNK blanks everything Denise treats as border, which is not
+only the area outside the DIW comparator window: the stretch between
+DIWSTRT and the rasterline's first BPL1DAT load, and the whole of a line
+with no BPL1DAT load, are border too (see video.md, the display gate). A
+BRDRBLNK toggle takes effect mid-line at the colour-output position of
+the write. The two BPLCON4 fields are on different Lisa timing paths:
 the low byte that selects sprite palette bases (ESPRM/OSPRM) reaches sprite
 colour lookup on an earlier sprite palette-control path than ordinary COLORxx
 palette writes, while the high-byte BPLAM XOR continues on the normal

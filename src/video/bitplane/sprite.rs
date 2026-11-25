@@ -1816,7 +1816,23 @@ pub(super) fn sprite_nominal_base_framebuffer_x(
         )
 }
 
+/// The display-gate column of row `y` in the render's framebuffer
+/// coordinates (see [`super::display_gate_x_by_line`]). A row past the end
+/// of the table is treated as enabled from the line start.
 pub(super) fn sprite_display_enable_x_for_y(
+    display_gate_x_by_y: &[Option<usize>],
+    y: usize,
+) -> Option<usize> {
+    if y < display_gate_x_by_y.len() {
+        display_gate_x_by_y[y]
+    } else {
+        Some(0)
+    }
+}
+
+/// The bus-recorded first-BPL1DAT column of row `y`, moved into the render's
+/// framebuffer coordinates.
+pub(super) fn bus_display_enable_x_for_y(
     sprite_display_enable_x_by_y: &[Option<usize>],
     y: usize,
 ) -> Option<usize> {
@@ -1856,10 +1872,14 @@ pub(super) fn sprite_pixel_inside_display_window(
     if x < enable_x {
         return false;
     }
-    // OCS/ECS Denise clips normal sprites to the horizontal display window.
-    // Bitplane DMA opens that gate at DIW's left edge even when DDFSTRT delays
-    // the first playfield word; a manual BPL1DAT write can still open it on a
-    // scanline where the vertical bitplane window is closed.
+    // Denise clips normal sprites with the same two-part gate that opens the
+    // playfield: the horizontal DIW flip-flop AND the line's first BPL1DAT
+    // load. `enable_x` is that load's column, so between DIWSTRT and the
+    // first fetched word of a late-DDF line a sprite stays hidden (vAmigaTS
+    // Denise/Sprites/clip/diwclip A500 OCS-Denise, A500+ and A1200 photos:
+    // the bar's left edge holds at the first data pixel until DIWSTRT passes
+    // it). A manual BPL1DAT write opens it too, also on a scanline where the
+    // vertical bitplane window is closed.
     let (x_start, x_stop) = control.display_window_x();
     x >= x_start && x < x_stop
 }

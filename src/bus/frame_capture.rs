@@ -1800,6 +1800,11 @@ impl Bus {
         self.record_sprite_display_enable_x(fb_y, x);
     }
 
+    /// Bitplane DMA's BPL1DAT load, recorded at the DIW left edge. This is
+    /// the coarse gate the live collision detector uses; the renderer
+    /// replaces it with the load's own column (the first BPL1DAT fetch) for
+    /// the picture and the drawn sprites. TODO: record that column here too
+    /// so live sprite collisions follow the same gate.
     pub(super) fn record_sprite_display_enable_for_bitplane_dma(&mut self, vpos: u32) {
         let Some(fb_y) = visible_framebuffer_y(
             vpos,

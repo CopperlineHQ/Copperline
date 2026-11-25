@@ -10386,3 +10386,230 @@ fn cd32_fmv_maps_the_active_line_to_both_tv_capture_edges() {
         right
     );
 }
+
+/// Render state for the display-gate tests: ECSENA + BRDRBLNK on an ECS
+/// Denise, COLOR00 red, DIW $81..$1C1 over 64 lines.
+fn display_gate_state() -> RenderState {
+    let mut state = RenderState {
+        bplcon0: BPLCON0_ECSENA,
+        bplcon3: BPLCON3_BRDRBLNK,
+        diwstrt: ((PAL_VISIBLE_LINE0 as u16) << 8) | 0x0081,
+        diwstop: (((PAL_VISIBLE_LINE0 + 64) as u16) << 8) | 0x00C1,
+        ddfstrt: 0x0038,
+        ddfstop: 0x00D0,
+        dmacon: DMACON_DMAEN | DMACON_BPLEN,
+        ..blank_state()
+    };
+    state.palette.write_ocs(0, 0x0F00);
+    state
+}
+
+fn render_display_gate(state: &RenderState, gate: Option<usize>) -> Vec<u32> {
+    let base_palettes = [state.palette; FB_HEIGHT];
+    let palette_segments = vec![Vec::new(); FB_HEIGHT];
+    let base_controls = [ControlState::from_render_state(state); FB_HEIGHT];
+    let control_segments = vec![Vec::new(); FB_HEIGHT];
+    let h_window_rows = compute_h_window_rows(&base_controls, &control_segments, PAL_VISIBLE_LINE0);
+    let mut fb = vec![0; FB_PIXELS];
+    fill_background_with_visible_line0(
+        &mut fb,
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &h_window_rows,
+        PAL_VISIBLE_LINE0,
+    );
+    let mut subpixels = SpriteSubpixelState::default();
+    subpixels.prepare(&fb, FB_PIXELS, 1);
+    let gates = vec![gate; FB_HEIGHT];
+    enforce_display_gate_border(
+        &mut fb,
+        &mut subpixels,
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &h_window_rows,
+        &gates,
+        PAL_VISIBLE_LINE0,
+        FB_HEIGHT,
+    );
+    fb
+}
+
+#[test]
+fn rasterline_without_bpl1dat_load_is_border_across_full_width() {
+    let state = display_gate_state();
+    let fb = render_display_gate(&state, None);
+    let blank = rgb12_to_rgba8_alpha(0, false);
+    let window_x = ControlState::from_render_state(&state).display_window_x();
+    for x in [0, window_x.0, (window_x.0 + window_x.1) / 2, window_x.1 - 1] {
+        assert_eq!(fb[x], blank, "x {x} of a BPU=0 line must be blanked border");
+    }
+}
+
+#[test]
+fn display_window_opens_at_first_bpl1dat_load_not_at_diwstrt() {
+    let state = display_gate_state();
+    let (window_start, window_stop) = ControlState::from_render_state(&state).display_window_x();
+    let gate_x = window_start + 96;
+    let fb = render_display_gate(&state, Some(gate_x));
+    let blank = rgb12_to_rgba8_alpha(0, false);
+    assert_eq!(fb[window_start], blank);
+    assert_eq!(fb[gate_x - 1], blank);
+    // From the load on the window is open: COLOR00 shows until DIWSTOP.
+    assert_eq!(fb[gate_x], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[window_stop - 1], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[window_stop], blank);
+}
+
+#[test]
+fn ocs_denise_gate_border_keeps_color00() {
+    // OCS Denise has no BPLCON3, so the latched register is zero there and
+    // the gated stretch shows COLOR00 exactly like the open window.
+    let mut state = display_gate_state();
+    state.bplcon3 = 0;
+    let fb = render_display_gate(&state, None);
+    let window_start = ControlState::from_render_state(&state).display_window_x().0;
+    assert_eq!(fb[window_start + 8], rgb12_to_rgba8(0x0F00));
+    assert_eq!(fb[0], rgb12_to_rgba8(0x0F00));
+}
+
+#[test]
+fn late_ddfstrt_gate_sits_at_first_fetched_sample() {
+    // DDFSTRT $50 lo-res with DIWSTRT $81: the first word is fetched three
+    // fetch units after the standard $38, so the first sample (and the
+    // display gate) is 48 lo-res pixels, 96 framebuffer columns, right of
+    // the window edge.
+    let mut state = display_gate_state();
+    state.bplcon0 |= 0x1000;
+    let gate_for = |state: &RenderState| {
+        let control = ControlState::from_render_state(state);
+        let window_start = control.display_window_x().0;
+        let bpl1dat = bpl1dat_first_fetch_hpos(
+            control,
+            line_fetch_plan_for_word(control, &[], 0, 1).word_fetch_hpos,
+        );
+        (
+            window_start,
+            dma_painted_start_x(control, window_start, 0),
+            dma_display_gate_x(dma_painted_start_x(control, window_start, 0), bpl1dat),
+        )
+    };
+    state.ddfstrt = 0x0050;
+    let (window_start, painted, gate) = gate_for(&state);
+    assert_eq!(painted, window_start + 96);
+    assert_eq!(gate, window_start + 96);
+    // Standard DDF: the data and the gate both start at the window edge.
+    state.ddfstrt = 0x0038;
+    let (window_start, painted, gate) = gate_for(&state);
+    assert_eq!((painted, gate), (window_start, window_start));
+}
+
+#[test]
+fn off_grid_lores_ddfstrt_opens_gate_at_bpl1dat_write_before_reload_slot() {
+    // ECS DDFSTRT $3C lo-res: BPL1DAT is written at $43, four colour clocks
+    // after the standard slot, but the picture waits for the $40 reload
+    // grid. The gate opens at the write, 16 framebuffer columns after the
+    // standard edge and 16 before the picture.
+    let mut state = display_gate_state();
+    state.agnus_revision = AgnusRevision::Ecs8372Rev4;
+    state.bplcon0 |= 0x1000;
+    state.ddfstrt = 0x003C;
+    let control = ControlState::from_render_state(&state);
+    let window_start = control.display_window_x().0;
+    let painted = dma_painted_start_x(control, window_start, 0);
+    let bpl1dat = bpl1dat_first_fetch_hpos(
+        control,
+        line_fetch_plan_for_word(control, &[], 0, 1).word_fetch_hpos,
+    );
+    assert_eq!(bpl1dat, Some(0x43));
+    assert_eq!(painted, window_start + 32);
+    assert_eq!(dma_display_gate_x(painted, bpl1dat), window_start + 16);
+    // Hi-res DDFSTRT $3C is on its 4-cck grid: BPL1DAT at $3F, gate and
+    // picture both at the window edge.
+    state.bplcon0 |= 0x8000;
+    let control = ControlState::from_render_state(&state);
+    let painted = dma_painted_start_x(control, window_start, 0);
+    let bpl1dat = bpl1dat_first_fetch_hpos(
+        control,
+        line_fetch_plan_for_word(control, &[], 0, 1).word_fetch_hpos,
+    );
+    assert_eq!(bpl1dat, Some(0x3F));
+    assert_eq!(dma_display_gate_x(painted, bpl1dat), painted);
+}
+
+#[test]
+fn display_gate_prefers_dma_data_column_and_earlier_manual_bpl1dat() {
+    let bus = vec![Some(62), Some(62), Some(40), None];
+    let dma = vec![Some(158), Some(158), None, None];
+    let manual_write = |line| ManualBplSegment {
+        line,
+        hpos: (copper_wait_hpos_fb0() + MANUAL_BPL1DAT_GATE_EVENT_LAG_CCK + 10) as u32,
+        x: 300,
+        planes: [0; 8],
+        palette: blank_state().palette,
+    };
+    let manual = [manual_write(1), manual_write(3)];
+    let mut gates = Vec::new();
+    display_gate_x_by_line_into(&mut gates, &dma, &manual, &bus, 4);
+    // A DMA line opens at its first fetched sample, not at the bus's DIW
+    // column; an earlier manual write on a DMA line opens it there; a line
+    // without DMA keeps the bus-recorded manual column; a manual write the
+    // bus did not record opens it at the write event's column.
+    assert_eq!(gates, vec![Some(158), Some(40), Some(40), Some(40)]);
+    // No load at all: no gate, the line is border.
+    display_gate_x_by_line_into(&mut gates, &dma, &[], &bus, 4);
+    assert_eq!(gates[3], None);
+    // The window is open wherever a manual word is shown, even when its
+    // serialiser load sits left of the recorded write column.
+    let early_load = [ManualBplSegment {
+        x: 24,
+        ..manual_write(2)
+    }];
+    display_gate_x_by_line_into(&mut gates, &dma, &early_load, &bus, 4);
+    assert_eq!(gates[2], Some(24));
+}
+
+#[test]
+fn brdrblnk_write_lands_at_colour_output_position() {
+    for aga in [false, true] {
+        let mut state = RenderState {
+            bplcon0: BPLCON0_ECSENA,
+            ..blank_state()
+        };
+        if aga {
+            state.agnus_revision = AgnusRevision::AgaAlice;
+        }
+        let mut base_palettes = [state.palette; FB_HEIGHT];
+        let mut palette_segments = vec![Vec::new(); FB_HEIGHT];
+        let mut base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+        let mut control_segments = vec![Vec::new(); FB_HEIGHT];
+        let mut manual_bpl_segments = Vec::new();
+        let hpos = (COLOR_WRITE_HPOS_FB0 + 40) as u32;
+        let value = BPLCON3_PF2OF_DEFAULT | BPLCON3_BRDRBLNK;
+        let events = [beam_event(0x50, hpos, 0x0106, value)];
+
+        apply_render_events(
+            &mut state,
+            &events,
+            &mut base_palettes,
+            &mut palette_segments,
+            &mut base_controls,
+            &mut control_segments,
+            &mut manual_bpl_segments,
+        );
+
+        let line = (0x50 - 0x2C) as usize;
+        // The blank edge lands where a COLOR00 write in the same slot would
+        // on OCS/ECS -- without Lisa's one-pixel palette delay on AGA.
+        let blank_x = color_write_framebuffer_x(hpos, false);
+        let row = &control_segments[line];
+        let control = |x| control_at_x(base_controls[line], row, x);
+        assert!(!control(blank_x - 1).border_blank_enabled(), "aga {aga}");
+        assert!(control(blank_x).border_blank_enabled(), "aga {aga}");
+        // The rest of BPLCON3 keeps the register timeline.
+        assert_eq!(control(blank_x).bplcon3, value, "aga {aga}");
+    }
+}
