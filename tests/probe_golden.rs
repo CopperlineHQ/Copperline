@@ -819,6 +819,11 @@ probe_tests! {
     // is one colour clock per word longer than a copy (the DESC-gated fill
     // timing regression class).
     golden_bltprobe_fillasc => probe("bltprobe-fillasc", "bltprobe-fillasc.bin", 16.0);
+    // Line-mode BZERO with a zero texture: the extra evaluation after a
+    // texture-counter wrap follows only a step to a new row, so X-major
+    // lines that never change row keep BZERO set (the vAmigaTS line/zero1
+    // regression class) while a Y-major line clears it.
+    golden_bltprobe_linezero => probe("bltprobe-linezero", "bltprobe-linezero.bin", 16.0);
     // 68020 chip writes under an all-channel BLTPRI-clear blit: a posted
     // write gets the blitter's three-miss yield (the write loop must not
     // stall for the whole blit).

@@ -1321,10 +1321,13 @@ impl Blitter {
 
         for pixel in 0..npixels {
             // Measured register-texture case: a BSH wrap after a prior pixel
-            // causes the extra inter-pixel BZERO evaluation. Prior A/C holds
-            // and effective B=$FFFF fit captured USEB-off cases. The
-            // B-DMA wrap effect remains unresolved.
-            if pixel != 0 && !use_b && bsh == 15 {
+            // causes the extra inter-pixel BZERO evaluation, but only when
+            // that pixel's step moved the line to a new row (the Y step
+            // that also clears the SING dot latch). See
+            // `line_bzero_wrap_needs_a_row_step`. Prior A/C holds and
+            // effective B=$FFFF fit captured USEB-off cases. The B-DMA wrap
+            // effect remains unresolved.
+            if pixel != 0 && !use_b && bsh == 15 && !one_dot {
                 if let Some(previous_a) = previous_a_hold {
                     if minterm(lf, previous_a, 0xFFFF, previous_c_hold) != 0 {
                         self.bzero = false;
@@ -1639,10 +1642,17 @@ impl LineBlitState {
             }
             LineBlitPhase::L2 => {
                 // Measured register-texture case: a BSH wrap on the preceding
-                // pixel triggers this inter-pixel check. Previous A/C holds
+                // pixel triggers this inter-pixel check when that pixel's
+                // step moved to a new row (Y step; `one_dot` is the SING
+                // latch the Y step clears). A line whose steps are all in X
+                // keeps BZERO (vAmigaTS Agnus/Blitter/line/zero1, A500 ECS
+                // photo), while every One ROM wrap capture steps in Y each
+                // pixel. TODO: no hardware capture yet separates the Y step
+                // from the initial SIGN state or octant; an X-major One ROM
+                // length map (SUD set, SIGN clear) would. Previous A/C holds
                 // and effective B=$FFFF fit captured USEB-off cases; the
                 // B-DMA wrap effect remains unresolved.
-                if !self.use_b && self.bsh == 15 {
+                if !self.use_b && self.bsh == 15 && !self.one_dot {
                     if let Some(previous_a) = self.previous_a_hold {
                         if minterm(self.lf, previous_a, 0xFFFF, self.cur_c) != 0 {
                             self.deferred_bzero_clear = true;
@@ -4150,6 +4160,67 @@ mod tests {
             initial_fifteen.bzero,
             "initial BSH=15 has no preceding wrap pixel"
         );
+    }
+
+    #[test]
+    fn line_bzero_wrap_needs_a_row_step() {
+        // The register-texture wrap clear follows a pixel whose step moved
+        // the line to a new row. An X-major line (SUD set) whose error term
+        // stays negative never takes a Y step, so a zero texture keeps
+        // BZERO set however often BSH wraps (vAmigaTS line/zero1, photographed
+        // on an A500 with ECS: BLTCON1 $51/$53, A=$8000, LF=$CA, B=0). The
+        // same blit with SUD clear steps in Y on every pixel and clears it,
+        // as the One ROM wrap captures do.
+        for (con1, use_c, expected_bzero) in [
+            (BLTCON1_SIGN | BLTCON1_SUD | BLTCON1_LINE, true, true),
+            (BLTCON1_SIGN | BLTCON1_SUD | BLTCON1_LINE, false, true),
+            (
+                BLTCON1_SIGN | BLTCON1_SUD | BLTCON1_SING | BLTCON1_LINE,
+                true,
+                true,
+            ),
+            (BLTCON1_SIGN | BLTCON1_LINE, true, false),
+            (BLTCON1_LINE, true, false),
+        ] {
+            let make = || {
+                let mut b = Blitter::new();
+                b.bltcon0 =
+                    BLTCON0_USE_A | if use_c { BLTCON0_USE_C } else { 0 } | BLTCON0_USE_D | 0x00CA;
+                b.bltcon1 = con1;
+                b.bltafwm = 0xFFFF;
+                b.bltalwm = 0xFFFF;
+                b.bltadat = 0x8000;
+                b.bltbdat = 0;
+                b.bltcpt = 0x0100;
+                b.bltdpt = 0x0100;
+                b.bltcmod = 40;
+                b.bltdmod = 40;
+                b.bltamod = -200;
+                b.bltbmod = 0;
+                b.bltapt = (-100i16) as u16 as u32;
+                b
+            };
+            let bltsize = (88u16 << 6) | 2;
+            let mut sync_ram = vec![0u8; 8192];
+            let mut sync = make();
+            sync.execute(bltsize, &mut sync_ram);
+            assert_eq!(
+                sync.bzero, expected_bzero,
+                "sync BLTCON1={con1:04X} USEC={use_c}"
+            );
+
+            let mut scheduled_ram = vec![0u8; 8192];
+            let mut scheduled = make();
+            let source = scheduled_ram.clone();
+            scheduled.start_scheduled(bltsize, &source);
+            while scheduled.busy {
+                scheduled.tick_scheduled_slot(&mut scheduled_ram);
+            }
+            assert_eq!(
+                scheduled.bzero, expected_bzero,
+                "scheduled BLTCON1={con1:04X} USEC={use_c}"
+            );
+        }
     }
 
     #[test]

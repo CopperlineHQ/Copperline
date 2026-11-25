@@ -817,6 +817,12 @@ descending EFE fills are equal and one colour clock per word longer -- the
 fill idle cycle follows IFE/EFE, not DESC; the DESC-gated model drew the
 ascending fills as short as the copies. Same construction as vAmigaTS
 `Agnus/Blitter/bbusy/copbbusy1f`, photographed on an A500+ and an A1200),
+`bltprobe-linezero` (four 88-pixel line blits with a zero texture over a
+cleared plane, each drawing a full bar when DMACONR BZERO stays set and a
+one-word bar when it clears: three X-major lines that never change row,
+with USEC, without USEC and with SING, keep it set as vAmigaTS
+`Agnus/Blitter/line/zero1` shows on an A500; a Y-major line clears it after
+the first texture-counter wrap, as in the One ROM A500 captures),
 `bltprobe-post` (A1200 shape: 256 chip writes from a 68020 under an
 all-channel blit, then the DMACONR polls left until the blit ends, as a
 bar and a binary word, with BLTPRI clear and set -- a posted write is a

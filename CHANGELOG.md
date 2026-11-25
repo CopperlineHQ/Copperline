@@ -102,6 +102,12 @@ for the earlier release notes.
   finish a third sooner than on an Amiga, so software that waits on the
   blitter saw it free too early.
 
+- A line blit that only steps sideways (an X-major line whose error term
+  stays negative) with an all-zero texture now leaves DMACONR's BZERO set,
+  as on an A500. The extra BZERO check that follows a texture-counter wrap
+  only happens after a step to a new row; such lines used to report a
+  non-zero result they never drew.
+
 - A save state preserves the 68040/68060 MMU translation cache. Resuming
   keeps the resident page mappings and the bus clocks a table walk would
   consume on a miss.

@@ -712,7 +712,17 @@ find repeatable exceptions at effective A bits 13 and 11, despite matching
 destination data and direct-A flag controls.
 L2 evaluates those old holds before fetching the next C word, and L3
 exposes the queued clear. A blit starting at BSH=15 has no preceding pixel
-and does not trigger this check. Save states preserve the prior A hold and
+and does not trigger this check. The evaluation also needs the preceding
+pixel's step to have moved the line to a new row (a Y step, the same event
+that clears the SING dot latch). Every One ROM wrap capture draws a
+Y-major line that steps in Y on every pixel, while vAmigaTS
+`Agnus/Blitter/line/zero1`, photographed on an A500 with ECS, draws an
+X-major line (SUD set) whose error term stays negative, so it never steps
+in Y: a zero texture there leaves BZERO set through 88 pixels and many
+BSH wraps, with and without USEC and SING. The captures available do not
+separate the Y step from the octant or the initial SIGN state; an X-major
+One ROM length map would. Golden probe `bltprobe-linezero`; test:
+`line_bzero_wrap_needs_a_row_step`. Save states preserve the prior A hold and
 pending clear. The wrap-stage input/reduction exceptions, B-DMA and other
 non-wrap effects remain unresolved; see the
 [One ROM measurement report](a500-line-bzero-2026-10-15.md).
