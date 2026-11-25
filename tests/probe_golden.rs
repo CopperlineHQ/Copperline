@@ -74,6 +74,8 @@ enum Machine {
     /// A1200 shape (68EC020, AGA, 2M chip) for probes of AGA-only
     /// behaviour (FMODE wide fetches, extended BPLCON1 scroll).
     Aga,
+    /// A1200 with the motherboard peripherals and PAL timing.
+    A1200,
     /// A1200 profile exercising NTSC field geometry.
     AgaNtsc,
 }
@@ -166,25 +168,27 @@ fn probe_config(adf: &Path, machine: Machine) -> String {
         Machine::Jit => "revision = \"ECS\"\n",
         Machine::Ocs => "revision = \"OCS\"\n",
         Machine::Ecs => "revision = \"ECS\"\nagnus = \"8372A\"\ndenise = \"OCS\"\n",
-        Machine::Aga | Machine::AgaNtsc => "revision = \"AGA\"\n",
+        Machine::Aga | Machine::A1200 | Machine::AgaNtsc => "revision = \"AGA\"\n",
     };
     let (cpu, memory) = match machine {
         Machine::Jit => ("68040", "chip = \"2M\"\nfast = \"8M\"\n"),
         Machine::Ocs | Machine::Ecs => ("68000", "chip = \"512K\"\nslow = \"512K\"\n"),
-        Machine::Aga | Machine::AgaNtsc => ("68EC020", "chip = \"2M\"\n"),
+        Machine::Aga | Machine::A1200 | Machine::AgaNtsc => ("68EC020", "chip = \"2M\"\n"),
     };
     let acceleration = if matches!(machine, Machine::Jit) {
         "jit = true\nclock_mhz = 25\n"
     } else {
         ""
     };
-    let (profile, video) = if matches!(machine, Machine::AgaNtsc) {
-        (
-            "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n",
-            "NTSC",
-        )
+    let profile = if matches!(machine, Machine::A1200 | Machine::AgaNtsc) {
+        "[machine]\nprofile = \"A1200\"\n[floppy]\ndrives = 1\n"
     } else {
-        ("", "PAL")
+        ""
+    };
+    let video = if matches!(machine, Machine::AgaNtsc) {
+        "NTSC"
+    } else {
+        "PAL"
     };
     format!(
         "rom = \"<bundled-aros>\"\n\
@@ -520,6 +524,10 @@ probe_tests! {
     // out-of-range colour behaviour deliberately diverges from vAmiga).
     // vAmiga-5-verified exact (bijective, 0 differing pixels).
     golden_dpfprobe_aga => probe_aga("dpfprobe-aga", "dpfprobe-aga.bin", 16.0);
+    golden_dpfprobe_bplam => probe_aga("dpfprobe-bplam", "dpfprobe-bplam.bin", 16.0);
+    golden_hamprobe_aga6 => probe_aga("hamprobe-aga6", "hamprobe-aga6.bin", 16.0);
+    golden_bltprobe_final_d => Probe { name: "bltprobe-final-d", program: "bltprobe-final-d.bin", seconds: 16.0, machine: Machine::A1200 };
+    golden_serprobe_zero => probe("serprobe-zero", "serprobe-zero.bin", 16.0);
     // HAM8: the control bits are the two LOWEST planes, a modify replaces
     // the top six bits of a component and holds the low two from the
     // previous pixel, and every non-set pixel depends on the line's full

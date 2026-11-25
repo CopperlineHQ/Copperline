@@ -12626,6 +12626,60 @@ fn blithog_clear_bls_count_yields_blitter_priority_slot_to_cpu() {
 }
 
 #[test]
+fn alice_final_d_precedes_a_waiting_cpu_on_gayle_and_fat_gary_boards() {
+    for (alice, gayle, gary, protected) in [
+        (true, true, false, true),
+        (true, false, true, true),
+        (true, false, false, false), // Model fallback for CD32. Its BLS timing is unverified.
+        (false, true, false, false),
+    ] {
+        let mut bus = empty_bus();
+        if alice {
+            bus.set_agnus_revision(AgnusRevision::AgaAlice);
+        }
+        if gayle {
+            bus.attach_gayle(crate::gayle::Gayle::new(0xd0));
+        }
+        if gary {
+            bus.attach_gary(crate::gary::Gary::new());
+        }
+        bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;
+        bus.agnus.hpos = 0x20;
+        bus.blitter.bltcon0 = 0x09f0; // A -> D
+        bus.blitter.bltafwm = 0xffff;
+        bus.blitter.bltalwm = 0xffff;
+        bus.blitter.bltapt = 0x10;
+        bus.blitter.bltdpt = 0x20;
+        write_chip_word(&mut bus, 0x10, 0xabcd);
+        bus.blitter.start_scheduled(65, &bus.mem.chip_ram);
+        bus.blitter_slowdown_cpu_misses = BLITTER_SLOWDOWN_CPU_MISS_LIMIT;
+        for _ in 0..8 {
+            if bus.blitter.final_d_write_pending() {
+                break;
+            }
+            assert!(bus.blitter_yields_to_waiting_cpu());
+            bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram);
+        }
+        assert!(bus.blitter.final_d_write_pending());
+        assert!(!bus.blitter.bbusy);
+        assert_eq!(
+            bus.scheduled_dma_owner(true),
+            if protected {
+                ChipBusOwner::Blitter
+            } else {
+                ChipBusOwner::Idle
+            }
+        );
+        assert_eq!(
+            bus.scheduled_dma_owner_after_fixed(true, Some(ChipBusOwner::Bitplane)),
+            ChipBusOwner::Bitplane
+        );
+        bus.blitter.tick_scheduled_slot(&mut bus.mem.chip_ram);
+        assert_eq!(&bus.mem.chip_ram[0x20..0x22], &[0xab, 0xcd]);
+    }
+}
+
+#[test]
 fn fixed_dma_misses_feed_bls_during_normal_blitter_idle_slots() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BLTEN;

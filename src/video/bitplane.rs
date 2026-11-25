@@ -1191,7 +1191,8 @@ impl ControlState {
         self.fetch_period().max(8)
     }
 
-    /// AGA BPLCON4 BPLAM: XOR mask applied to the bitplane pixel index.
+    /// AGA BPLCON4 mask applied to the resolved playfield colour address.
+    /// In HAM it selects the operation and base colour.
     fn bplam(&self) -> u8 {
         (self.bplcon4 >> 8) as u8
     }
@@ -6745,7 +6746,7 @@ fn render_planned_playfield_line_impl(
     emulated_seconds: f64,
     emulated_frames: u64,
 ) {
-    let mut ham_color = rgb12_to_rgb24(color_rgb12(palette[0]));
+    let mut ham_color = palette.rgb24(0) & 0x00ff_ffff;
     let mut next_ham_native_x = 0usize;
     // The last native sample the sub-pixel scroll path resolved in HAM, kept
     // so the two 35 ns halves that share it advance the hold colour once.
@@ -6862,7 +6863,7 @@ fn render_planned_playfield_line_impl(
         let out_w = FB_WIDTH * canvas_scale;
         let line_visible =
             plan.captured_open || pixel_control.display_window_contains_line(plan.y, visible_line0);
-        let background_rgb24 = rgb12_to_rgb24(color_rgb12(palette[0]));
+        let background_rgb24 = palette.rgb24(0) & 0x00ff_ffff;
         let nplanes = sample_control.nplanes().min(plan.plane_words.len());
         let delays = std::array::from_fn(|plane| sample_control.sample_delay_for_plane(plane));
         // AGA sub-pixel scroll: BPLCON1's bits below one native pixel delay
@@ -7626,7 +7627,7 @@ fn manual_bpl_ham_seed_color(
     control_segments: &[Vec<ControlSegment>],
 ) -> u32 {
     if seg.line >= base_controls.len() {
-        return rgb12_to_rgb24(color_rgb12(seg.palette[0]));
+        return seg.palette.rgb24(0) & 0x00ff_ffff;
     }
     let sample_x = seg.x.clamp(0, FB_WIDTH.saturating_sub(1) as i32) as usize;
     let control = control_at_x(
@@ -7635,12 +7636,11 @@ fn manual_bpl_ham_seed_color(
         sample_x,
     );
     if !control.ham() {
-        return rgb12_to_rgb24(color_rgb12(seg.palette[0]));
+        return seg.palette.rgb24(0) & 0x00ff_ffff;
     }
     if seg.x <= 0 {
-        return rgb12_to_rgb24(color_rgb12(
-            palette_at_x(base_palettes[seg.line], &palette_segments[seg.line], 0)[0],
-        ));
+        return palette_at_x(base_palettes[seg.line], &palette_segments[seg.line], 0).rgb24(0)
+            & 0x00ff_ffff;
     }
     let previous_x = (seg.x - 1).min(FB_WIDTH.saturating_sub(1) as i32) as usize;
     let out_w = FB_WIDTH * active_canvas_scale();
@@ -7734,7 +7734,7 @@ fn draw_manual_bpl_word(
         });
         if !visible_sample {
             if !source_control.shres() {
-                *ham_color = rgb12_to_rgb24(color_rgb12(source_palette[0]));
+                *ham_color = source_palette.rgb24(0) & 0x00ff_ffff;
                 *ham_select = 0;
             }
             x_cursor += pixel_repeat as i32;
