@@ -753,7 +753,12 @@ probe_tests! {
     // ignores it and keeps six planes extra-half-brite.
     golden_ehbprobe_kill => probe("ehbprobe-kill", "ehbprobe-kill.bin", 16.0);
     golden_ehbprobe_kill_ecs_denise => Probe { name: "ehbprobe-kill-ecs-denise", program: "ehbprobe-kill.bin", seconds: 16.0, machine: Machine::EcsDenise };
-    golden_dblpal_hires_lace => probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
+    // ECS Denise pairs super-hires pixels across each lo-res-wide group
+    // into one colour register and splits its nibbles over the pair; an
+    // OCS Denise beside the same Agnus keeps the per-pixel lookup.
+    golden_shresprobe_pair => Probe { name: "shresprobe-pair", program: "shresprobe-pair.bin", seconds: 16.0, machine: Machine::EcsDenise };
+    golden_shresprobe_pair_ocs_denise => probe_ecs("shresprobe-pair-ocs-denise", "shresprobe-pair.bin", 16.0);
+    golden_dblpal_hires_lace =>probe_aga("dblpal-hires-lace", "dblpal-hires-lace.bin", 16.0);
     // Alice wide-fetch addressing: FMODE 10 duplicates the first word and
     // supplied low address bits alias phases inside 32-bit fetches.
     golden_aga_vamigats_fetch => probe_aga("agafetch-mode", "agafetch-mode.bin", 16.0);
