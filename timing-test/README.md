@@ -909,7 +909,13 @@ $123456/$1234AA reference. vAmiga agrees on the base and held components
 and produces $A0 for the modified blue. The second reference band shows
 that difference directly. [Minimig](https://github.com/MiSTer-devel/Minimig-AGA_MiSTer/blob/575b8e72d96ed9ecad51006d34b3a4483e61d439/rtl/denise_hamgenerator.v)
 and [WinUAE](https://github.com/tonioni/WinUAE/blob/ee784914c8d61bb503d137e358b22fcc4758a294/drawing.cpp#L4415-L4424)
-both replicate the modified nibble.
+both replicate the modified nibble. The final two HAM bands set BPLAM to
+$40 and $04. All three HAM bands should match the first indexed pair.
+The $40 band tests the 16-entry HAM6 base palette. The $04 band selects
+the same base colour from entry 5 and tests that blue still comes from
+the raw planes. The masked bands follow [WinUAE's explicit HAM XOR fix](https://github.com/tonioni/WinUAE/commit/13d09ad85c0d029c52122c6378baf82ce75e0b26).
+Minimig instead uses all eight masked address bits for a base colour and
+the masked data nibble for a modify.
 
 `bltprobe-final-d` polls the last destination word across 32 blit widths
 on a PAL A1200 with seven bitplanes active and BLTPRI clear. Each row
@@ -920,8 +926,9 @@ profile lacks the 68020 bus timing needed to compare these counts.
 
 `serprobe-zero` displays Paula's TSRE at two times after each write.
 The upper band stays red for a framed NUL ($0100). The lower band stays
-green for an empty transmit buffer ($0000). The independent A500 run and
-[vAmiga’s transmit-buffer logic](https://github.com/dirkwhoffmann/vAmiga/blob/8ee181c8a4ac420f04402c82de20977b312027c5/Core/Components/Paula/UART/UART.cpp#L104-L140)
+green for an empty transmit buffer ($0000). A headless vAmiga 5 capture
+using its A500 profile and
+[vAmiga's transmit-buffer logic](https://github.com/dirkwhoffmann/vAmiga/blob/8ee181c8a4ac420f04402c82de20977b312027c5/Core/Components/Paula/UART/UART.cpp#L104-L140)
 agree on both bands.
 
 `hamprobe-ham8` (HAM8's control bits are the two LOWEST planes and a

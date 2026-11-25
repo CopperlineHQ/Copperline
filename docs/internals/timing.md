@@ -717,7 +717,10 @@ connections are visible on [A1200 rev 1 sheet 2](https://amigawiki.de/dnl/schema
 and the [A4000 rev B Alice sheet](https://amigawiki.de/dnl/schematics/A4000_Rb.pdf).
 [WinUAE's CPU bus cycle](https://github.com/tonioni/WinUAE/blob/ee784914c8d61bb503d137e358b22fcc4758a294/custom.cpp#L12843-L12850)
 describes the seven-plane case. [Minimig's arbiter](https://github.com/MiSTer-devel/Minimig-AGA_MiSTer/blob/575b8e72d96ed9ecad51006d34b3a4483e61d439/rtl/agnus.v#L208)
-also gives the pending write priority.
+also gives the pending write priority. Copperline identifies these boards
+by Alice with Gayle or Fat Gary, including custom chipset configurations.
+The [CD32 Akiko pinout](https://amiga.net.au/files/Tech_Amiga/Commodore_AmigaCD32_Engineering_Change_Release_1993-07-20_ocr.pdf)
+lists BLS as an output on pin 87. Its final-write timing remains unverified.
 
 With BLTPRI set, the blitter wins only a slot where its current micro-cycle
 requests a bus access. Idle startup and pipeline cycles remain available to

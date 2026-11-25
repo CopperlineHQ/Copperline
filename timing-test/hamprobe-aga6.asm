@@ -1,6 +1,7 @@
 ; AGA HAM6 precision. The first control stripe pair uses normal indexed
 ; colours $123456 and $1234AA; the next uses $123456 and $1234A0.
-; The lower half uses HAM codes $01 (set entry 1) and $1A (modify blue).
+; The lower bands use HAM codes $01 (set) and $1A (modify blue) with
+; BPLAM $00, $40 and $04. Entries 1 and 5 have the same base colour.
 ; Compare the lower stripes against the controls in the same video capture.
         lea $dff000,a6
         move.w #$7fff,$09a(a6)
@@ -31,4 +32,6 @@ list:
         dc.w $100,$6201,$10c,$0011
         dc.w $6001,$fffe,$106,$0e00,$1b4,$240,$106,$0c00
         dc.w $8001,$fffe,$100,$6a01
+        dc.w $a001,$fffe,$10c,$4011
+        dc.w $c001,$fffe,$18a,$135,$106,$0e00,$18a,$246,$106,$0c00,$10c,$0411
         dc.w $ffff,$fffe

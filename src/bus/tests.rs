@@ -12630,7 +12630,7 @@ fn alice_final_d_precedes_a_waiting_cpu_on_gayle_and_fat_gary_boards() {
     for (alice, gayle, gary, protected) in [
         (true, true, false, true),
         (true, false, true, true),
-        (true, false, false, false),
+        (true, false, false, false), // Model fallback for CD32. Its BLS timing is unverified.
         (false, true, false, false),
     ] {
         let mut bus = empty_bus();

@@ -1191,7 +1191,8 @@ impl ControlState {
         self.fetch_period().max(8)
     }
 
-    /// AGA BPLCON4 BPLAM: XOR mask applied to the bitplane pixel index.
+    /// AGA BPLCON4 mask applied to the resolved playfield colour address.
+    /// In HAM it selects the operation and base colour.
     fn bplam(&self) -> u8 {
         (self.bplcon4 >> 8) as u8
     }

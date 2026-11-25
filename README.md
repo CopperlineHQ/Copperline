@@ -218,8 +218,8 @@ Run the optimized native suite, including probe goldens and save-state checks:
 cargo test --profile ci --locked
 ```
 
-The [bootable chipset probes](timing-test/README.md) exercise Lisa palette
-selection, Paula serial framing and A1200 CPU/blitter arbitration.
+The [bootable chipset probes](timing-test/README.md) exercise the custom
+chips and compare their video output with reference images.
 
 Slow tests are reported as ignored in debug builds. Select asset-backed tests
 explicitly once their required files are installed, for example:
