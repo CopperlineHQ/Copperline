@@ -226,8 +226,8 @@ const Y1: usize = 10;
 const WD: usize = 12;
 const DIGITS: usize = 13;
 
-/// How a chip counts: the form of its hour digits and where its leap year
-/// comes from.
+/// How a chip counts: the form of its hour and year digits and where its
+/// leap year comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ChipRules {
     /// 24-hour mode selected.
@@ -237,6 +237,37 @@ struct ChipRules {
     /// The leap year follows the chip's leap-year counter (RP5C01) and not
     /// the year digits (MSM6242: years divisible by four).
     leap_counter: bool,
+    /// The year digits count years since 1900 (MSM6242) rather than the
+    /// year within its century (RP5C01). See [`ChipRules::year_digits`].
+    years_since_1900: bool,
+}
+
+impl ChipRules {
+    /// The largest year since 1900 the four-bit ten-years digit can hold:
+    /// 15 tens and 9 ones, the year 2059.
+    const MAX_YEARS_SINCE_1900: u16 = 159;
+
+    /// The value a calendar year loads into the two year digits.
+    ///
+    /// The Amiga's MSM6242 year digits count years since 1900: AROS's
+    /// battclock.resource writes them that way, and Kickstart 1.3's
+    /// `SetClock` only accepts that form -- it reads digits below 78 as
+    /// 1978, so the year within the century (26 for 2026) loads Workbench
+    /// 1.3 with the wrong year. The ten-years digit is four bits wide, so
+    /// it holds 2000-2059 as 100-159 (12 and 6 for 2026). Readers that
+    /// window two digits (Kickstart 2.0+, Linux) read those values too.
+    /// (Kickstart itself, 1.3 and 3.1 alike, stops at 2046-01-19, where its
+    /// signed count of seconds since 1978 overflows.) A year the digit
+    /// cannot hold, and every year on the RP5C01, loads as the year within
+    /// its century instead.
+    fn year_digits(self, year: u16) -> u8 {
+        match year.checked_sub(1900) {
+            Some(since) if self.years_since_1900 && since <= Self::MAX_YEARS_SINCE_1900 => {
+                since as u8
+            }
+            _ => (year % 100) as u8,
+        }
+    }
 }
 
 /// The calendar counters as the chip holds them: one BCD digit each, not
@@ -259,7 +290,7 @@ impl Counters {
         counters.set_hour(time.hour, rules);
         counters.set_pair(D1, time.day);
         counters.set_pair(MO1, time.month);
-        counters.set_pair(Y1, (time.year % 100) as u8);
+        counters.set_pair(Y1, rules.year_digits(time.year));
         counters.digits[WD] = time.weekday;
         counters
     }
@@ -347,12 +378,18 @@ impl Counters {
             return self.set_pair(MO1, month);
         }
         self.set_pair(MO1, 1);
-        self.set_pair(Y1, (self.pair(Y1) + 1) % 100);
+        // The ten-years digit wraps from 9 to 0. Above 9 -- the
+        // years-since-1900 form from 2000 on -- it counts on through its
+        // four bits and wraps from 15 to 0. The data sheets specify only
+        // years 00-99, so the count above 9 is a modelling assumption.
+        let year = self.pair(Y1) + 1;
+        self.set_pair(Y1, if year == 100 || year >= 160 { 0 } else { year });
         self.leap = (self.leap + 1) & 0x3;
     }
 
-    /// The counters as a date, for status reporting. The two year digits
-    /// take the AmigaOS century window (78-99 are 19xx).
+    /// The counters as a date, for status reporting. The year digits read
+    /// as AmigaOS reads them: 78 and above count from 1900 (78-159 are
+    /// 1978-2059), and below 78 from 2000.
     fn to_datetime(self, rules: ChipRules) -> RtcDateTime {
         let year = u16::from(self.pair(Y1));
         RtcDateTime {
@@ -669,6 +706,7 @@ impl Msm6242Rtc {
             twenty_four: self.control_f & Self::CF_24H != 0,
             pm_bit: 1 << 2,
             leap_counter: false,
+            years_since_1900: true,
         }
     }
 
@@ -892,6 +930,7 @@ impl Rp5c01Rtc {
             twenty_four: self.bank1[Self::REG_1224] & 1 != 0,
             pm_bit: 1 << 1,
             leap_counter: true,
+            years_since_1900: false,
         }
     }
 
@@ -1324,8 +1363,9 @@ mod tests {
         assert_eq!(read_reg(&mut rtc, 0x7), 0);
         assert_eq!(read_reg(&mut rtc, 0x8), 1);
         assert_eq!(read_reg(&mut rtc, 0x9), 0);
+        // 2000 is year 100 since 1900.
         assert_eq!(read_reg(&mut rtc, 0xA), 0);
-        assert_eq!(read_reg(&mut rtc, 0xB), 0);
+        assert_eq!(read_reg(&mut rtc, 0xB), 10);
         assert_eq!(read_reg(&mut rtc, 0xC), 0);
         assert_eq!(
             read_reg(&mut rtc, 0xF) & Msm6242Rtc::CF_24H,
@@ -1371,7 +1411,7 @@ mod tests {
         assert_eq!(read_reg(&mut rtc, 0x8), 3); // month ones
         assert_eq!(read_reg(&mut rtc, 0x9), 0); // month tens
         assert_eq!(read_reg(&mut rtc, 0xA), 5); // year ones
-        assert_eq!(read_reg(&mut rtc, 0xB), 0); // year tens
+        assert_eq!(read_reg(&mut rtc, 0xB), 10); // year tens (105 since 1900)
         assert_eq!(read_reg(&mut rtc, 0xC), 5); // Friday
 
         // 31 emulated seconds later the clock reads :00 of the next minute.
@@ -1456,6 +1496,60 @@ mod tests {
         assert_eq!(msm_digits(&mut rtc, 5.0), digits(0, 0, 0, 0, 1, 3, 23, 4));
         msm_set_and_start(&mut rtc, digits(59, 59, 2, 3, 31, 12, 99, 6), 0x4, 6.0);
         assert_eq!(msm_digits(&mut rtc, 7.0), digits(0, 0, 0, 0, 1, 1, 0, 0));
+    }
+
+    /// Kickstart 1.3's `SetClock` reads year digits below 78 as 1978
+    /// (issue #985). The MSM6242 loads years since 1900 instead -- 2026 is
+    /// 126, ten-years digit 12 -- while the RP5C01 keeps the year within
+    /// its century.
+    #[test]
+    fn msm6242_loads_years_since_1900_and_rp5c01_the_year_within_its_century() {
+        let seed = parse_rtc_time("2026-11-26 06:36:57").unwrap();
+        let mut msm = seeded_msm(seed);
+        assert_eq!((read_reg(&mut msm, 0xB), read_reg(&mut msm, 0xA)), (12, 6));
+        let mut rp = seeded_rp5c01(seed);
+        assert_eq!((rp_read(&mut rp, 0xC), rp_read(&mut rp, 0xB)), (2, 6));
+
+        // The twentieth century reads the same either way.
+        let mut msm = seeded_msm(parse_rtc_time("1999-12-31 12:00").unwrap());
+        assert_eq!((read_reg(&mut msm, 0xB), read_reg(&mut msm, 0xA)), (9, 9));
+
+        // 2059 is the last year the four-bit ten-years digit holds; 2060
+        // falls back to the year within its century.
+        let mut msm = seeded_msm(parse_rtc_time("2059-06-01 12:00").unwrap());
+        assert_eq!((read_reg(&mut msm, 0xB), read_reg(&mut msm, 0xA)), (15, 9));
+        let mut msm = seeded_msm(parse_rtc_time("2060-06-01 12:00").unwrap());
+        assert_eq!((read_reg(&mut msm, 0xB), read_reg(&mut msm, 0xA)), (6, 0));
+    }
+
+    /// Counters the guest has taken over report the year they hold: a
+    /// stopped MSM6242 holding 126 reads back as 2026.
+    #[test]
+    fn msm6242_detached_counters_report_years_since_1900() {
+        let seed = parse_rtc_time("2026-11-26 06:36:57").unwrap();
+        let mut rtc = Rtc::new(RtcChip::Msm6242);
+        rtc.set_seed(Some(seed), false);
+        let stop = Msm6242Rtc::CF_24H | Msm6242Rtc::CF_STOP;
+        rtc.write(0xF * 4, 4, u64::from(stop), 0.0);
+        assert_eq!(rtc.current_display(10.0), "2026-11-26T06:36:57");
+        assert_eq!(rtc.current_unix(10.0), seed);
+    }
+
+    /// Above 9 the ten-years digit counts on (2029 to 2030 is 129 to 130),
+    /// and it wraps to 00 after 99 and after 159, the most its four bits
+    /// hold. The leap year still follows the year digits.
+    #[test]
+    fn msm6242_year_carry_counts_through_the_four_bit_ten_years_digit() {
+        let mut rtc = seeded_msm(VECTOR_UNIX);
+        msm_set_and_start(&mut rtc, digits(59, 59, 2, 3, 31, 12, 129, 1), 0x4, 0.0);
+        assert_eq!(msm_digits(&mut rtc, 1.0), digits(0, 0, 0, 0, 1, 1, 130, 2));
+        msm_set_and_start(&mut rtc, digits(59, 59, 2, 3, 31, 12, 159, 1), 0x4, 2.0);
+        assert_eq!(msm_digits(&mut rtc, 3.0), digits(0, 0, 0, 0, 1, 1, 0, 2));
+        // 2028 (128) is a leap year, 2026 (126) is not.
+        msm_set_and_start(&mut rtc, digits(59, 59, 2, 3, 28, 2, 128, 1), 0x4, 4.0);
+        assert_eq!(msm_digits(&mut rtc, 5.0), digits(0, 0, 0, 0, 29, 2, 128, 2));
+        msm_set_and_start(&mut rtc, digits(59, 59, 2, 3, 28, 2, 126, 6), 0x4, 6.0);
+        assert_eq!(msm_digits(&mut rtc, 7.0), digits(0, 0, 0, 0, 1, 3, 126, 0));
     }
 
     #[test]
