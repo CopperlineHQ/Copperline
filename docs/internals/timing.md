@@ -890,7 +890,9 @@ perform a side-effecting memory read. Tests:
 ### Area fill
 
 Area fill runs whenever BLTCON1.IFE or EFE is set; DESC is not part of
-the condition. The fill circuit always works from bit 0 upwards within a
+the condition. EFE selects the exclusive circuit even when IFE is set
+with it (vAmigaTS `Agnus/Blitter/fill` fill6/fill7 against fill4/fill5,
+A500 photos). The fill circuit always works from bit 0 upwards within a
 word and passes its carry to the next word the blitter processes in the
 row, so in ascending mode the carry moves to the word on the right. The HRM
 tells software to fill in descending mode for that reason, but the hardware

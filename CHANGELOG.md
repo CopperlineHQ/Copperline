@@ -100,7 +100,8 @@ for the earlier release notes.
   whether or not DESC is set; DESC only decides which way the carry moves
   from word to word. Ascending fills used to come out as plain copies and
   finish a third sooner than on an Amiga, so software that waits on the
-  blitter saw it free too early.
+  blitter saw it free too early. With both bits set the fill is exclusive,
+  as on an A500; it used to be inclusive.
 
 - A line blit that only steps sideways (an X-major line whose error term
   stays negative) with an all-zero texture now leaves DMACONR's BZERO set,

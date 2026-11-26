@@ -2488,10 +2488,14 @@ fn apply_fill(d: u16, fill_state: &mut u16, ife: bool, efe: bool) -> u16 {
     for bit in 0..16 {
         let mask = 1 << bit;
         if *fill_state != 0 {
-            if ife {
-                out |= mask;
-            } else if efe {
+            // EFE selects the exclusive circuit whether or not IFE is set
+            // with it (vAmigaTS Agnus/Blitter/fill: fill6 and fill7, both
+            // bits, are photographed on an A500 with the output of the
+            // EFE-only fill4 and fill5).
+            if efe {
                 out ^= mask;
+            } else if ife {
+                out |= mask;
             }
         }
         if d & mask != 0 {
@@ -3664,6 +3668,45 @@ mod tests {
         let mut state: u16 = 0;
         let out = apply_fill(0x0022, &mut state, false, true);
         assert_eq!(out, 0x001E);
+    }
+
+    /// With both fill bits set the exclusive circuit is used: the output is
+    /// the EFE-only one, not the inclusive one.
+    #[test]
+    fn area_fill_is_exclusive_when_both_fill_bits_are_set() {
+        for input in [0x0022, 0x2418, 0x8001] {
+            let (mut both, mut exclusive, mut inclusive) = (0, 0, 0);
+            let out = apply_fill(input, &mut both, true, true);
+            assert_eq!(out, apply_fill(input, &mut exclusive, false, true));
+            assert_ne!(out, apply_fill(input, &mut inclusive, true, false));
+            assert_eq!(both, exclusive);
+        }
+        // Both engines, with BLTCON1 = IFE | EFE: an ascending and a
+        // descending one-word fill of $0022 give the exclusive $001E.
+        for desc in [false, true] {
+            for scheduled in [false, true] {
+                let mut ram = vec![0u8; 64];
+                write_word(&mut ram, 0x10, 0x0022);
+                let mut b = Blitter::new();
+                b.bltcon0 = BLTCON0_USE_A | BLTCON0_USE_D | 0x00F0;
+                b.bltcon1 = BLTCON1_IFE | BLTCON1_EFE | if desc { BLTCON1_DESC } else { 0 };
+                b.bltafwm = 0xFFFF;
+                b.bltalwm = 0xFFFF;
+                b.bltapt = 0x10;
+                b.bltdpt = 0x20;
+                let bltsize = (1u16 << 6) | 1;
+                if scheduled {
+                    let source = ram.clone();
+                    b.start_scheduled(bltsize, &source);
+                    while b.busy {
+                        let _ = b.tick_scheduled_slot(&mut ram);
+                    }
+                } else {
+                    b.execute(bltsize, &mut ram);
+                }
+                assert_eq!(read_word(&ram, 0x20), 0x001E, "desc {desc}");
+            }
+        }
     }
 
     #[test]
