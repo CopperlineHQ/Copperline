@@ -87,8 +87,21 @@ struct Layout {
     workspace: bool,
     guest_input: bool,
     display_rect: Option<egui::Rect>,
+    /// Where each resizable pane was laid out in the last frame.
+    panes: PaneRects,
     /// Per-inspector tab state, indexed by `ToolPanelKind`.
     tools: [ToolTabState; 3],
+}
+
+/// The outer rects of the panes a divider resizes, as laid out in the last
+/// frame that showed them. The divider is the edge facing the rest of the
+/// window: the right edge of a left pane, the top edge of a bottom one.
+/// Each pane's saved size is read from here.
+#[derive(Clone, Copy, Debug, Default)]
+struct PaneRects {
+    display: Option<egui::Rect>,
+    registers: Option<egui::Rect>,
+    memory: Option<egui::Rect>,
 }
 
 impl DebuggerUi {
@@ -299,15 +312,6 @@ fn run_content_frame(
         }
         layout.last_tool = Some(selected);
     });
-    for (id, dimension) in [("debugger_registers", 0), ("debugger_cpu_memory", 1)] {
-        if let Some(state) = egui::containers::panel::PanelState::load(context, egui::Id::new(id)) {
-            if dimension == 0 {
-                layout.preferences.register_width = state.size().x;
-            } else {
-                layout.preferences.memory_height = state.size().y;
-            }
-        }
-    }
     // Input can be consumed on the first of several layout passes. Keep its
     // edits and commands, but dispatch each command only once per UI frame.
     let mut unique = Vec::new();
@@ -427,7 +431,7 @@ fn mode_segment(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response 
     let rect = ui.allocate_space(size).1;
     let response = ui.interact(
         rect,
-        egui::Id::new(("mode_segment", label)),
+        egui::Id::unique(("mode_segment", label)),
         egui::Sense::click(),
     );
     if active {
@@ -437,9 +441,7 @@ fn mode_segment(ui: &mut egui::Ui, label: &str, active: bool) -> egui::Response 
             .rect_filled(rect, 0, Color32::from_rgb(58, 98, 186));
     }
     ui.put(rect, egui::Label::new(text).selectable(false));
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, active, label)
-    });
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, active, label));
     response
 }
 
@@ -480,9 +482,7 @@ fn tool_tab(
             open.then(|| ui.allocate_space(egui::vec2(14.0, 14.0)).1)
         });
     let body = ui.interact(tab.response.rect, tool_tab_id(kind), egui::Sense::click());
-    body.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
-    });
+    body.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, label));
     let close = tab
         .inner
         .map(|rect| close_box(ui, rect, ink, tool_tab_close_id(kind), label));
@@ -498,11 +498,11 @@ fn tool_tab(
 
 /// Stable ids for the tab and its close box, so both are addressable.
 fn tool_tab_id(kind: ToolPanelKind) -> egui::Id {
-    egui::Id::new(("tool_tab", kind as usize))
+    egui::Id::unique(("tool_tab", kind as usize))
 }
 
 fn tool_tab_close_id(kind: ToolPanelKind) -> egui::Id {
-    egui::Id::new(("tool_tab_close", kind as usize))
+    egui::Id::unique(("tool_tab_close", kind as usize))
 }
 
 /// Whether an open inspector's capture is armed on the machine in front of
@@ -550,9 +550,7 @@ fn sub_tab(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
         rect,
         egui::Label::new(if selected { text.strong() } else { text }).selectable(false),
     );
-    response.widget_info(|| {
-        egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, selected, label)
-    });
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, selected, label));
     if selected {
         let y = rect.bottom() - 2.0;
         ui.painter().line_segment(
@@ -581,7 +579,7 @@ fn close_box(
     // The cross is painted, not typed, so it carries no text of its own:
     // name the inspector it closes for anything reading the controls.
     response.widget_info(|| {
-        egui::WidgetInfo::labeled(egui::WidgetType::Button, true, format!("Close {inspector}"))
+        egui::WidgetInfo::labeled(egui::Role::Button, true, format!("Close {inspector}"))
     });
     if response.hovered() {
         ui.painter()
@@ -670,7 +668,7 @@ impl Layout {
                 ui.label("Address / command");
                 let entry = ui.add(
                     egui::TextEdit::singleline(&mut panel.entry)
-                        .id(egui::Id::new("debugger_entry"))
+                        .id(egui::Id::unique("debugger_entry"))
                         .font(egui::TextStyle::Monospace)
                         .char_limit(512)
                         .desired_width(280.0),
@@ -785,7 +783,7 @@ impl Layout {
         cpu: &ui::CpuView,
         actions: &mut Vec<Action>,
     ) {
-        egui::Panel::left("debugger_registers")
+        let registers = egui::Panel::left("debugger_registers")
             .resizable(true)
             .default_size(self.preferences.register_width)
             .size_range(180.0..=480.0)
@@ -817,7 +815,7 @@ impl Layout {
                                 {
                                     panel.entry = format!("{name} {value:08X}");
                                     ui.memory_mut(|m| {
-                                        m.request_focus(egui::Id::new("debugger_entry"))
+                                        m.request_focus(egui::Id::unique("debugger_entry"))
                                     });
                                 }
                                 ui.end_row();
@@ -834,7 +832,9 @@ impl Layout {
                         }
                     });
             });
-        egui::Panel::bottom("debugger_cpu_memory")
+        self.panes.registers = Some(registers.response.rect);
+        self.preferences.register_width = registers.response.rect.width();
+        let memory = egui::Panel::bottom("debugger_cpu_memory")
             .resizable(true)
             .default_size(self.preferences.memory_height)
             .size_range(100.0..=480.0)
@@ -860,6 +860,8 @@ impl Layout {
                         lines(ui, &cpu.memory);
                     });
             });
+        self.panes.memory = Some(memory.response.rect);
+        self.preferences.memory_height = memory.response.rect.height();
         egui::CentralPanel::default().show(root, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.heading("Disassembly");
@@ -1190,7 +1192,7 @@ fn color(rgba: u32) -> Color32 {
 
 /// Widget id of one Memory tab byte cell, so tests can click it.
 pub(super) fn memory_cell_id(addr: u32, column: ui::MemColumn) -> egui::Id {
-    egui::Id::new(("debugger_memory_cell", addr, column))
+    egui::Id::unique(("debugger_memory_cell", addr, column))
 }
 
 const MEMORY_EDIT_HINT: &str =
@@ -1654,7 +1656,7 @@ impl PreparedFrame {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         context: &egui::Context,
-        output: egui::FullOutput,
+        mut output: egui::FullOutput,
         screen: egui_wgpu::ScreenDescriptor,
     ) {
         // A texture retired by egui can still appear in that frame's meshes.
@@ -1665,13 +1667,19 @@ impl PreparedFrame {
                 renderer.free_texture(&id);
             }
         }
-        for (id, delta) in &output.textures_delta.set {
-            renderer.update_texture(device, queue, *id, delta);
+        // Every update is taken out of the frame here, so none is lost with
+        // it (egui asserts as much). Each texture's deltas apply in the order
+        // egui produced them.
+        let mut textures = std::mem::take(&mut output.textures_delta);
+        for (id, deltas) in textures.set.drain() {
+            for delta in &deltas {
+                renderer.update_texture(device, queue, id, delta);
+            }
         }
         *slot = Some(Self {
             jobs: context.tessellate(output.shapes, output.pixels_per_point),
             screen,
-            free_after_replacement: output.textures_delta.free,
+            free_after_replacement: textures.free.drain().collect(),
         });
     }
 }

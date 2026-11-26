@@ -15,6 +15,34 @@ fn input(size: [f32; 2], events: Vec<egui::Event>) -> egui::RawInput {
     }
 }
 
+/// Run one frame for a test that looks at its layout, shapes or actions
+/// and never draws it. egui asserts that a frame's texture updates are not
+/// dropped unapplied; with nothing here to upload them to, they go
+/// explicitly. Tests that draw through `Offscreen` call `run_frame`.
+fn layout_frame(
+    context: &egui::Context,
+    layout: &mut Layout,
+    input: egui::RawInput,
+    panel: &mut ui::DebuggerPanel,
+    view: &ui::DebuggerView,
+) -> (egui::FullOutput, Vec<Action>) {
+    let (mut output, actions) = run_frame(context, layout, input, panel, view);
+    output.textures_delta.clear();
+    (output, actions)
+}
+
+/// [`layout_frame`] for any inspector's content.
+fn layout_content_frame(
+    context: &egui::Context,
+    layout: &mut Layout,
+    input: egui::RawInput,
+    content: Content<'_>,
+) -> (egui::FullOutput, Vec<Action>) {
+    let (mut output, actions) = run_content_frame(context, layout, input, content);
+    output.textures_delta.clear();
+    (output, actions)
+}
+
 fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
     egui::Event::Key {
         key,
@@ -38,7 +66,7 @@ fn all_tabs_and_bitmap_inspection_leave_the_machine_byte_identical() {
         panel.tab = tab;
         for size in [[600.0, 600.0], [1100.0, 760.0], [1600.0, 1000.0]] {
             let view = app.build_debugger_view_with_clipping(&panel, false);
-            let (output, actions) = run_frame(
+            let (output, actions) = layout_frame(
                 &context,
                 &mut layout,
                 input(size, vec![]),
@@ -113,7 +141,7 @@ fn audio_rows_and_mute_targets_stay_fixed_as_status_lines_change() {
             // Let scrolling/tessellation settle, then compare actual paint
             // geometry rather than a duplicate of the row-size calculation.
             for pass in 0..3 {
-                let (output, actions) = run_frame(
+                let (output, actions) = layout_frame(
                     &context,
                     &mut layout,
                     input(size, vec![]),
@@ -156,7 +184,7 @@ fn audio_rows_and_mute_targets_stay_fixed_as_status_lines_change() {
         for (index, pos) in mute_positions.into_iter().enumerate() {
             let mut clicked = Vec::new();
             for pressed in [true, false] {
-                let (_, actions) = run_frame(
+                let (_, actions) = layout_frame(
                     &context,
                     &mut layout,
                     input(
@@ -189,22 +217,22 @@ fn text_editing_and_clipboard_shortcuts_do_not_step_the_machine() {
     let mut layout = Layout::default();
     let mut panel = ui::DebuggerPanel::new();
     let view = app.build_debugger_view_with_clipping(&panel, false);
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input([1100.0, 760.0], vec![]),
         &mut panel,
         &view,
     );
-    context.memory_mut(|m| m.request_focus(egui::Id::new("debugger_entry")));
-    let _ = run_frame(
+    context.memory_mut(|m| m.request_focus(egui::Id::unique("debugger_entry")));
+    let _ = layout_frame(
         &context,
         &mut layout,
         input([1100.0, 760.0], vec![]),
         &mut panel,
         &view,
     );
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(
@@ -224,13 +252,15 @@ fn text_editing_and_clipboard_shortcuts_do_not_step_the_machine() {
         panel.find_pattern().is_none(),
         "non-ASCII input must be rejected without slicing inside UTF-8"
     );
-    context.memory_mut(|m| m.surrender_focus(egui::Id::new("debugger_entry")));
-    let mut clipboard = input(
+    context.memory_mut(|m| m.surrender_focus(egui::Id::unique("debugger_entry")));
+    let clipboard = input(
         [1100.0, 760.0],
-        vec![key(egui::Key::C, egui::Modifiers::COMMAND)],
+        vec![
+            egui::Event::ModifiersChanged(egui::Modifiers::COMMAND),
+            key(egui::Key::C, egui::Modifiers::COMMAND),
+        ],
     );
-    clipboard.modifiers = egui::Modifiers::COMMAND;
-    let (_, actions) = run_frame(&context, &mut layout, clipboard, &mut panel, &view);
+    let (_, actions) = layout_frame(&context, &mut layout, clipboard, &mut panel, &view);
     assert!(actions.is_empty(), "copy must not Copper-step");
 }
 
@@ -243,7 +273,7 @@ fn step_shortcut_dispatches_once_through_the_existing_debugger() {
     let mut panel = app.debugger_panel.clone().unwrap();
     let view = app.build_debugger_view_with_clipping(&panel, false);
     let before = app.emu.retired_instructions();
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(
@@ -343,7 +373,7 @@ fn click_at(
             modifiers: egui::Modifiers::NONE,
         }],
     ] {
-        let (_, actions) = run_frame(context, layout, input(size, events), panel, view);
+        let (_, actions) = layout_frame(context, layout, input(size, events), panel, view);
         last = actions;
     }
     last
@@ -376,7 +406,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
     assert!(memory.writable.iter().all(|w| *w), "chip RAM is editable");
     let original = memory.bytes[3];
     let retired = app.emu.retired_instructions();
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input(size, vec![]),
@@ -400,7 +430,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
         panel.mem_cursor,
         Some(ui::MemCursor::new(0x60003, ui::MemColumn::Hex))
     );
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(
@@ -416,7 +446,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
         Some(0xC0 | (original & 0x0F))
     );
     assert!(!panel.mem_cursor.unwrap().high_nibble);
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(
@@ -439,7 +469,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
         "staged edits do not touch memory"
     );
     // Enter commits through the App, and the bus reads the byte back.
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(size, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]),
@@ -466,7 +496,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
     // ASCII column: one typed character replaces the byte, and clicking
     // anywhere outside the dump commits, as leaving a field does.
     let view = app.build_debugger_view_with_clipping(&panel, false);
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input(size, vec![]),
@@ -482,7 +512,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
         memory_cell_id(0x60005, ui::MemColumn::Ascii),
     );
     assert!(actions.is_empty());
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(
@@ -520,7 +550,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
 
     // Esc drops the staged edit without closing the workspace.
     let view = app.build_debugger_view_with_clipping(&panel, false);
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input(size, vec![]),
@@ -535,7 +565,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
         size,
         memory_cell_id(0x60008, ui::MemColumn::Hex),
     );
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(size, vec![text("1")]),
@@ -544,7 +574,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
     );
     assert!(actions.is_empty());
     assert_eq!(panel.mem_pending.len(), 1);
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(size, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]),
@@ -555,7 +585,7 @@ fn memory_tab_edits_bytes_in_place_through_the_bus() {
     assert!(panel.mem_cursor.is_none());
     assert!(panel.mem_pending.is_empty());
     let before = app.emu.machine_state_bytes().unwrap();
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input(size, vec![]),
@@ -581,7 +611,7 @@ fn memory_edit_cursor_keys_follow_the_page_and_refuse_rom() {
     let mut layout = Layout::default();
     let mut panel = app.debugger_panel.clone().unwrap();
     let view = app.build_debugger_view_with_clipping(&panel, false);
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input(size, vec![]),
@@ -599,7 +629,7 @@ fn memory_edit_cursor_keys_follow_the_page_and_refuse_rom() {
         size,
         memory_cell_id(0x60000, ui::MemColumn::Hex),
     );
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(size, vec![key(egui::Key::ArrowUp, egui::Modifiers::NONE)]),
@@ -610,7 +640,7 @@ fn memory_edit_cursor_keys_follow_the_page_and_refuse_rom() {
     assert_eq!(panel.mem_cursor.unwrap().addr, 0x5FFF0);
     // Within the page the arrows only move the cursor.
     panel.mem_cursor = Some(ui::MemCursor::new(0x60010, ui::MemColumn::Hex));
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(
@@ -627,7 +657,7 @@ fn memory_edit_cursor_keys_follow_the_page_and_refuse_rom() {
     assert_eq!(panel.mem_cursor.unwrap().addr, 0x60021);
     // Right past the last byte scrolls one row; Page Down a whole page.
     panel.mem_cursor = Some(ui::MemCursor::new(0x600FF, ui::MemColumn::Ascii));
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(
@@ -640,7 +670,7 @@ fn memory_edit_cursor_keys_follow_the_page_and_refuse_rom() {
     assert_eq!(actions, vec![Action::MemoryScroll(1)]);
     assert_eq!(panel.mem_cursor.unwrap().addr, 0x60100);
     panel.mem_cursor = Some(ui::MemCursor::new(0x60040, ui::MemColumn::Hex));
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(size, vec![key(egui::Key::PageDown, egui::Modifiers::NONE)]),
@@ -661,7 +691,7 @@ fn memory_edit_cursor_keys_follow_the_page_and_refuse_rom() {
     let view = app.build_debugger_view_with_clipping(&panel, false);
     let memory = view.memory.as_ref().unwrap();
     assert!(memory.writable.iter().all(|w| !*w));
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input(size, vec![]),
@@ -677,7 +707,7 @@ fn memory_edit_cursor_keys_follow_the_page_and_refuse_rom() {
         Some("$F80004 is read-only (ROM or a device window); not editable")
     );
     // With no cursor the ordinary shortcuts are back.
-    let (_, actions) = run_frame(
+    let (_, actions) = layout_frame(
         &context,
         &mut layout,
         input(size, vec![key(egui::Key::PageDown, egui::Modifiers::NONE)]),
@@ -762,7 +792,7 @@ fn dragging_workspace_and_cpu_dividers_preserves_the_new_pane_sizes() {
     let mut panel = ui::DebuggerPanel::new();
     let view = app.build_debugger_view_with_clipping(&panel, false);
     for _ in 0..3 {
-        let _ = run_frame(
+        let _ = layout_frame(
             &context,
             &mut layout,
             input([1600.0, 900.0], vec![]),
@@ -770,13 +800,28 @@ fn dragging_workspace_and_cpu_dividers_preserves_the_new_pane_sizes() {
             &view,
         );
     }
+    // A divider is the pane edge facing the rest of the window: the right
+    // edge of a left pane, the top edge of a bottom one.
+    fn divider(panes: PaneRects, name: &str) -> egui::Pos2 {
+        let (rect, left) = match name {
+            "debug_display" => (panes.display, true),
+            "debugger_registers" => (panes.registers, true),
+            "debugger_cpu_memory" => (panes.memory, false),
+            _ => unreachable!(),
+        };
+        let rect = rect.unwrap_or_else(|| panic!("{name} was not laid out"));
+        if left {
+            egui::pos2(rect.right(), rect.center().y)
+        } else {
+            egui::pos2(rect.center().x, rect.top())
+        }
+    }
     for (name, offset) in [
         ("debug_display", egui::vec2(90.0, 0.0)),
         ("debugger_registers", egui::vec2(90.0, 0.0)),
         ("debugger_cpu_memory", egui::vec2(0.0, -80.0)),
     ] {
-        let id = egui::Id::new(name).with("__resize");
-        let start = context.read_response(id).unwrap().rect.center();
+        let start = divider(layout.panes, name);
         let end = start + offset;
         for events in [
             vec![egui::Event::PointerMoved(start)],
@@ -795,7 +840,7 @@ fn dragging_workspace_and_cpu_dividers_preserves_the_new_pane_sizes() {
             }],
             vec![],
         ] {
-            let (_, actions) = run_frame(
+            let (_, actions) = layout_frame(
                 &context,
                 &mut layout,
                 input([1600.0, 900.0], events),
@@ -804,7 +849,7 @@ fn dragging_workspace_and_cpu_dividers_preserves_the_new_pane_sizes() {
             );
             assert!(actions.is_empty());
         }
-        let actual = context.read_response(id).unwrap().rect.center();
+        let actual = divider(layout.panes, name);
         let axis = if offset.x != 0.0 { 0 } else { 1 };
         assert!(
             (actual[axis] - end[axis]).abs() < 2.0,
@@ -1025,13 +1070,13 @@ fn console_submission_survives_a_failed_presentation_without_repeating() {
     let mut layout = Layout::default();
     let mut panel = app.console_panel.clone().unwrap();
     panel.input = "step".into();
-    let _ = run_content_frame(
+    let _ = layout_content_frame(
         &context,
         &mut layout,
         input([1100.0, 760.0], vec![]),
         Content::Console(&mut panel, "Paused"),
     );
-    let (_, actions) = run_content_frame(
+    let (_, actions) = layout_content_frame(
         &context,
         &mut layout,
         input(
@@ -1046,7 +1091,7 @@ fn console_submission_survives_a_failed_presentation_without_repeating() {
     assert_eq!(app.emu.retired_instructions(), before + 1);
     assert_eq!(app.console_panel.as_ref().unwrap().history, ["step"]);
     let mut panel = app.console_panel.clone().unwrap();
-    let (_, actions) = run_content_frame(
+    let (_, actions) = layout_content_frame(
         &context,
         &mut layout,
         input([1100.0, 760.0], vec![]),
@@ -1086,7 +1131,7 @@ fn console_paste_history_and_execution_are_separate_from_layout() {
     let mut panel = app.console_panel.clone().unwrap();
     let before = app.emu.machine_state_bytes().unwrap();
     for size in [[600.0, 480.0], [1100.0, 760.0]] {
-        let (_, actions) = run_content_frame(
+        let (_, actions) = layout_content_frame(
             &context,
             &mut layout,
             input(size, vec![]),
@@ -1094,7 +1139,7 @@ fn console_paste_history_and_execution_are_separate_from_layout() {
         );
         assert!(actions.is_empty());
     }
-    let (_, actions) = run_content_frame(
+    let (_, actions) = layout_content_frame(
         &context,
         &mut layout,
         input(
@@ -1106,7 +1151,7 @@ fn console_paste_history_and_execution_are_separate_from_layout() {
     assert!(actions.is_empty());
     assert_eq!(panel.input, "status\nstep");
     assert_eq!(before, app.emu.machine_state_bytes().unwrap());
-    let (_, actions) = run_content_frame(
+    let (_, actions) = layout_content_frame(
         &context,
         &mut layout,
         input(
@@ -1121,7 +1166,7 @@ fn console_paste_history_and_execution_are_separate_from_layout() {
     if let egui::Event::Key { pressed, .. } = &mut released {
         *pressed = false;
     }
-    let _ = run_content_frame(
+    let _ = layout_content_frame(
         &context,
         &mut layout,
         input([1100.0, 760.0], vec![released]),
@@ -1129,7 +1174,7 @@ fn console_paste_history_and_execution_are_separate_from_layout() {
     );
     // Exercise egui's repeated sizing pass as well as ordinary command input.
     context.options_mut(|options| options.max_passes = 2.try_into().unwrap());
-    let (_, actions) = run_content_frame(
+    let (_, actions) = layout_content_frame(
         &context,
         &mut layout,
         input(
@@ -1158,7 +1203,7 @@ fn console_paste_history_and_execution_are_separate_from_layout() {
         (egui::Key::ArrowUp, "status"),
         (egui::Key::ArrowDown, "step"),
     ] {
-        let (_, actions) = run_content_frame(
+        let (_, actions) = layout_content_frame(
             &context,
             &mut layout,
             input([1100.0, 760.0], vec![key(key_name, egui::Modifiers::NONE)]),
@@ -1187,7 +1232,7 @@ fn saved_workspace_and_cpu_pane_sizes_restore_in_a_fresh_egui_context() {
     };
     let context = egui::Context::default();
     for _ in 0..3 {
-        let _ = run_frame(
+        let _ = layout_frame(
             &context,
             &mut restored,
             input([1600.0, 900.0], vec![]),
@@ -1197,15 +1242,17 @@ fn saved_workspace_and_cpu_pane_sizes_restore_in_a_fresh_egui_context() {
     }
     assert!((restored.preferences.register_width - 310.0).abs() < 1.0);
     assert!((restored.preferences.memory_height - 245.0).abs() < 1.0);
-    for (id, expected, axis) in [
-        ("debug_display", 560.0, 0),
-        ("debugger_registers", 310.0, 0),
-        ("debugger_cpu_memory", 245.0, 1),
+    // The panes themselves were laid out at the restored sizes, not only
+    // the preferences carried through.
+    for (name, rect, expected, axis) in [
+        ("debug_display", restored.panes.display, 560.0, 0),
+        ("debugger_registers", restored.panes.registers, 310.0, 0),
+        ("debugger_cpu_memory", restored.panes.memory, 245.0, 1),
     ] {
-        let size = egui::containers::panel::PanelState::load(&context, egui::Id::new(id))
-            .unwrap()
+        let size = rect
+            .unwrap_or_else(|| panic!("{name} was not laid out"))
             .size();
-        assert!((size[axis] - expected).abs() < 1.0, "{id}: {size:?}");
+        assert!((size[axis] - expected).abs() < 1.0, "{name}: {size:?}");
     }
 }
 
@@ -1220,7 +1267,7 @@ fn clicking_analyzer_addresses_dispatches_the_matching_destination() {
     let mut layout = Layout::default();
     let mut point = None;
     for _ in 0..3 {
-        let (output, _) = run_content_frame(
+        let (output, _) = layout_content_frame(
             &context,
             &mut layout,
             input([1100.0, 1000.0], vec![]),
@@ -1252,7 +1299,7 @@ fn clicking_analyzer_addresses_dispatches_the_matching_destination() {
         }],
     ] {
         actions.extend(
-            run_content_frame(
+            layout_content_frame(
                 &context,
                 &mut layout,
                 input([1100.0, 1000.0], events),
@@ -1347,7 +1394,7 @@ fn analyzer_tabs_and_resource_previews_leave_machine_state_unchanged() {
             assert!(view.resources.as_ref().unwrap().detail.is_some());
         }
         for size in [[600.0, 480.0], [1100.0, 760.0], [1600.0, 1000.0]] {
-            let (output, actions) = run_content_frame(
+            let (output, actions) = layout_content_frame(
                 &context,
                 &mut layout,
                 input(size, vec![]),
@@ -1370,7 +1417,7 @@ fn analyzer_shortcuts_capture_once_and_pickers_track_resized_images() {
     let mut layout = Layout::default();
     let mut panel = app.frame_analyzer_panel.clone().unwrap();
     let view = app.build_frame_analyzer_view(&panel);
-    let (_, actions) = run_content_frame(
+    let (_, actions) = layout_content_frame(
         &context,
         &mut layout,
         input(
@@ -1385,7 +1432,7 @@ fn analyzer_shortcuts_capture_once_and_pickers_track_resized_images() {
     assert_eq!(app.emu.bus().emulated_frames(), frame + 1);
     for size in [[600.0, 480.0], [1100.0, 760.0]] {
         for _ in 0..3 {
-            let _ = run_content_frame(
+            let _ = layout_content_frame(
                 &context,
                 &mut layout,
                 input(size, vec![]),
@@ -1394,11 +1441,11 @@ fn analyzer_shortcuts_capture_once_and_pickers_track_resized_images() {
         }
         assert_eq!(context.viewport_rect().width(), size[0]);
         let rect = context
-            .read_response(egui::Id::new("analyzer_beam_pick"))
+            .read_response(egui::Id::unique("analyzer_beam_pick"))
             .unwrap()
             .rect;
         let point = rect.min + rect.size() * egui::vec2(0.75, 0.25);
-        let _ = run_content_frame(
+        let _ = layout_content_frame(
             &context,
             &mut layout,
             input(size, vec![egui::Event::PointerMoved(point)]),
@@ -1406,7 +1453,7 @@ fn analyzer_shortcuts_capture_once_and_pickers_track_resized_images() {
         );
         let mut clicks = Vec::new();
         for pressed in [true, false] {
-            let (_, actions) = run_content_frame(
+            let (_, actions) = layout_content_frame(
                 &context,
                 &mut layout,
                 input(
@@ -1569,7 +1616,7 @@ impl Offscreen {
             });
         device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
         rx.recv().unwrap().unwrap();
-        let bytes = buffer.slice(..).get_mapped_range();
+        let bytes = buffer.slice(..).get_mapped_range().unwrap();
         bytes
             .chunks_exact(padded as usize)
             .flat_map(|row| {
@@ -1833,7 +1880,7 @@ fn a_background_tabs_close_box_closes_that_inspector() {
     };
     let mut panel = app.debugger_panel.clone().unwrap();
     let view = app.build_debugger_view_with_clipping(&panel, false);
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input(size, vec![]),
@@ -1884,7 +1931,7 @@ fn a_closed_tab_has_no_close_box_and_opens_on_click() {
     };
     let mut panel = app.debugger_panel.clone().unwrap();
     let view = app.build_debugger_view_with_clipping(&panel, false);
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input(size, vec![]),
@@ -1930,7 +1977,7 @@ fn the_mode_switch_returns_to_play_without_closing_anything() {
     };
     let mut panel = app.debugger_panel.clone().unwrap();
     let view = app.build_debugger_view_with_clipping(&panel, false);
-    let _ = run_frame(
+    let _ = layout_frame(
         &context,
         &mut layout,
         input(size, vec![]),
@@ -1944,7 +1991,7 @@ fn the_mode_switch_returns_to_play_without_closing_anything() {
         &mut panel,
         &view,
         size,
-        egui::Id::new(("mode_segment", "Play")),
+        egui::Id::unique(("mode_segment", "Play")),
     );
     assert_eq!(actions, vec![Action::CloseWorkspace]);
     for action in actions {
@@ -2158,7 +2205,7 @@ fn debug_display_stays_clear_of_inspectors_and_clicks_only_transfer_input() {
             };
             let mut output = None;
             for _ in 0..3 {
-                let (frame, actions) = run_frame(
+                let (frame, actions) = layout_frame(
                     &context,
                     &mut layout,
                     input([width, 900.0], vec![]),
@@ -2195,7 +2242,7 @@ fn debug_display_stays_clear_of_inspectors_and_clicks_only_transfer_input() {
         let view = app.build_debugger_view_with_clipping(&panel, false);
         let mut clicked = Vec::new();
         for pressed in [true, false] {
-            let (_, actions) = run_frame(
+            let (_, actions) = layout_frame(
                 &context,
                 &mut layout,
                 input(
@@ -2302,7 +2349,7 @@ fn alternating_interlace_fields_do_not_resize_the_beam_diagram() {
         trace.rows = rows;
         trace.nominal_rows = 313;
         for _ in 0..3 {
-            let _ = run_content_frame(
+            let _ = layout_content_frame(
                 &context,
                 &mut layout,
                 input(size, vec![]),
@@ -2311,7 +2358,7 @@ fn alternating_interlace_fields_do_not_resize_the_beam_diagram() {
         }
         sizes.push(
             context
-                .read_response(egui::Id::new("analyzer_beam_pick"))
+                .read_response(egui::Id::unique("analyzer_beam_pick"))
                 .expect("the beam diagram is laid out")
                 .rect
                 .size(),

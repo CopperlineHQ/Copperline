@@ -1651,7 +1651,12 @@ present worker paints them (`window/egui_paint.rs`) after the scaler, CRT
 and bezel passes, without reclaiming the GPU to the main thread. Texture
 updates are applied inside the render callback: a present skipped for a
 covered window holds them for the next, and the updates of a job the
-worker refuses are carried into the next job. egui renders into an
+worker refuses are carried into the next job. Each update moves out of the
+job that carried it exactly once (`EguiPaint::receive`); a job reused for an
+unchanged status bar copies only its meshes. egui 0.37 asserts in debug
+builds that no non-empty `TexturesDelta` is dropped, so a frame whose
+updates have nowhere to go (a test that only lays out, a window closing)
+clears them explicitly. egui renders into an
 `Rgba8Unorm` layer, where its blending works on the encoded colours as the
 texture's does, and the layer is composited onto the sRGB surface through
 an sRGB view of itself. The texture keeps what dims the display behind
@@ -1678,8 +1683,10 @@ fallbacks and proportional labels retain their default fonts. The asset's
 README and build script record how to reproduce it; `THIRD_PARTY_FONTS.txt`
 preserves its credits and licences in packaged builds.
 
-The egui versions in Cargo.toml share pixels' wgpu major version; upgrading
-them requires keeping those device and encoder types compatible.
+The egui versions in Cargo.toml share pixels' wgpu major version (wgpu 30
+since egui 0.37; pixels comes from CopperlineHQ's fork until a release
+carries that port, see the `[patch.crates-io]` note in Cargo.toml).
+Upgrading them requires keeping those device and encoder types compatible.
 
 The view builder supplies side-effect-free snapshots, including structured CPU
 registers, disassembly, and memory. Software rendering helpers use fixed-width

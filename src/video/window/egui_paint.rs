@@ -35,7 +35,10 @@ pub(super) const SURFACES: usize = 2;
 /// and the surface they are laid out for. The meshes are shared, so a
 /// surface that has not changed (the status bar, as a rule) sends the
 /// last frame's again without copying them.
-#[derive(Clone)]
+///
+/// Not `Clone`: a frame's texture updates go to the GPU side exactly once,
+/// and egui asserts that none is dropped unapplied. [`Self::meshes`] is the
+/// copy that leaves them behind.
 pub(super) struct EguiSurfaceJob {
     pub(super) jobs: std::sync::Arc<Vec<egui::ClippedPrimitive>>,
     pub(super) textures: egui::TexturesDelta,
@@ -44,6 +47,17 @@ pub(super) struct EguiSurfaceJob {
 }
 
 impl EguiSurfaceJob {
+    /// The same meshes for the same surface, with no texture updates: for
+    /// drawing a frame again once its updates have gone with the first.
+    pub(super) fn meshes(&self) -> Self {
+        Self {
+            jobs: std::sync::Arc::clone(&self.jobs),
+            textures: egui::TexturesDelta::default(),
+            size_in_pixels: self.size_in_pixels,
+            pixels_per_point: self.pixels_per_point,
+        }
+    }
+
     fn screen(&self) -> egui_wgpu::ScreenDescriptor {
         egui_wgpu::ScreenDescriptor {
             size_in_pixels: self.size_in_pixels,
@@ -80,6 +94,16 @@ pub(super) struct EguiPaint {
     layer: Option<Layer>,
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl Drop for EguiPaint {
+    /// Updates still waiting when the GPU side goes (the window closing)
+    /// have nothing left to apply them to.
+    fn drop(&mut self) {
+        for pending in &mut self.pending {
+            pending.clear();
+        }
+    }
 }
 
 const COMPOSITE_WGSL: &str = r#"
@@ -166,11 +190,12 @@ impl EguiPaint {
         }
     }
 
-    /// Take a frame's texture updates in, to be applied when it is drawn.
-    pub(super) fn receive(&mut self, job: &EguiJob) {
-        for (pending, surface) in self.pending.iter_mut().zip(&job.surfaces) {
+    /// Take a frame's texture updates out of it, to be applied when it is
+    /// drawn. The job keeps its meshes.
+    pub(super) fn receive(&mut self, job: &mut EguiJob) {
+        for (pending, surface) in self.pending.iter_mut().zip(&mut job.surfaces) {
             if let Some(surface) = surface {
-                pending.append(surface.textures.clone());
+                pending.append(std::mem::take(&mut surface.textures));
             }
         }
     }
@@ -220,8 +245,11 @@ impl EguiPaint {
     /// the render callback, before anything is drawn.
     pub(super) fn begin(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         for (renderer, pending) in self.renderers.iter_mut().zip(&mut self.pending) {
-            for (id, delta) in std::mem::take(&mut pending.set) {
-                renderer.update_texture(device, queue, id, &delta);
+            // Each texture's deltas apply in the order they arrived.
+            for (id, deltas) in std::mem::take(&mut pending.set) {
+                for delta in &deltas {
+                    renderer.update_texture(device, queue, id, delta);
+                }
             }
         }
     }

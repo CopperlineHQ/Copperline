@@ -875,7 +875,7 @@ fn text(p: &Painter, pos: Pos2, align: Align2, s: &str, size: f32, color: Color3
 /// A raised button that sinks while pressed; gold when `lit`.
 fn button(ui: &mut egui::Ui, r: Rect, label: &str, enabled: bool, lit: bool) -> egui::Response {
     let id = ui
-        .id()
+        .scope_id()
         .with(("button", label, r.min.x as i32, r.min.y as i32));
     let resp = ui.interact(
         r,
@@ -912,7 +912,9 @@ fn button(ui: &mut egui::Ui, r: Rect, label: &str, enabled: bool, lit: bool) -> 
 /// The Toaster's cycle gadget: a raised button with up/down arrows on
 /// its right. Left click steps forward, right click back.
 fn cycle(ui: &mut egui::Ui, r: Rect, options: &[&str], index: &mut usize, enabled: bool) -> bool {
-    let id = ui.id().with(("cycle", r.min.x as i32, r.min.y as i32));
+    let id = ui
+        .scope_id()
+        .with(("cycle", r.min.x as i32, r.min.y as i32));
     let resp = ui.interact(
         r,
         id,
@@ -1010,7 +1012,7 @@ fn divider(p: &Painter, y: f32) {
 fn checkbox(ui: &mut egui::Ui, at: Pos2, label: &str, value: &mut bool, enabled: bool) {
     let r = Rect::from_min_size(at, vec2(28.0, 28.0));
     let label_r = Rect::from_min_size(at, vec2(36.0 + label.len() as f32 * 9.0, 28.0));
-    let id = ui.id().with(("check", label));
+    let id = ui.scope_id().with(("check", label));
     let resp = ui.interact(
         label_r,
         id,
@@ -1084,7 +1086,7 @@ fn gain(ui: &mut egui::Ui, at: Pos2, label: &str, db: &mut f32, enabled: bool) {
     // The prop gadget.
     let track = Rect::from_min_size(pos2(at.x, at.y + 26.0), vec2(262.0, 30.0));
     well(&p, track);
-    let id = ui.id().with(("gain", label));
+    let id = ui.scope_id().with(("gain", label));
     let resp = ui.interact(
         track,
         id,
@@ -1190,7 +1192,7 @@ impl eframe::App for App {
             i.raw
                 .dropped_files
                 .iter()
-                .filter_map(|f| f.path.clone())
+                .map(|f| f.path().to_path_buf())
                 .collect()
         });
         if !dropped.is_empty() && self.job.is_none() {
@@ -1210,7 +1212,7 @@ impl eframe::App for App {
         p.rect_filled(bar, 0.0, FACE);
         bevel(&p, bar, true);
         let close = Rect::from_min_size(pos2(8.0, 7.0), vec2(30.0, 28.0));
-        let close_resp = ui.interact(close, ui.id().with("close"), Sense::click());
+        let close_resp = ui.interact(close, ui.scope_id().with("close"), Sense::click());
         p.rect_filled(
             close,
             0.0,
@@ -1237,8 +1239,8 @@ impl eframe::App for App {
         );
         let depth = Rect::from_min_size(pos2(WIN.x - 76.0, 7.0), vec2(30.0, 28.0));
         let mini = Rect::from_min_size(pos2(WIN.x - 40.0, 7.0), vec2(30.0, 28.0));
-        let depth_resp = ui.interact(depth, ui.id().with("depth"), Sense::click());
-        let mini_resp = ui.interact(mini, ui.id().with("mini"), Sense::click());
+        let depth_resp = ui.interact(depth, ui.scope_id().with("depth"), Sense::click());
+        let mini_resp = ui.interact(mini, ui.scope_id().with("mini"), Sense::click());
         for (r, resp) in [(depth, &depth_resp), (mini, &mini_resp)] {
             p.rect_filled(
                 r,
@@ -1269,7 +1271,7 @@ impl eframe::App for App {
         );
         let drag = ui.interact(
             Rect::from_min_max(pos2(42.0, 2.0), pos2(WIN.x - 80.0, 40.0)),
-            ui.id().with("drag"),
+            ui.scope_id().with("drag"),
             Sense::click_and_drag(),
         );
         if drag.drag_started() {
@@ -1291,7 +1293,7 @@ impl eframe::App for App {
 
         // ---- Sources: the drop area, the list, its buttons ----
         let drop = Rect::from_min_max(pos2(20.0, 56.0), pos2(472.0, 326.0));
-        let drop_resp = ui.interact(drop, ui.id().with("drop"), Sense::click());
+        let drop_resp = ui.interact(drop, ui.scope_id().with("drop"), Sense::click());
         p.rect_filled(drop, 0.0, if hovering { SELECT } else { BG });
         let dash = Stroke::new(2.0, if hovering { INK } else { LIGHT });
         for (a, b) in [
@@ -1362,7 +1364,7 @@ impl eframe::App for App {
         let row_h = 40.0;
         let rows = ((list.height() - 8.0) / row_h).floor() as usize;
         let max_scroll = self.items.len().saturating_sub(rows) as f32;
-        let list_resp = ui.interact(list, ui.id().with("list"), Sense::click());
+        let list_resp = ui.interact(list, ui.scope_id().with("list"), Sense::click());
         if list_resp.hovered() {
             let dy = ctx.input(|i| i.smooth_scroll_delta.y);
             self.scroll = (self.scroll - dy / row_h).clamp(0.0, max_scroll);
@@ -1424,7 +1426,11 @@ impl eframe::App for App {
                 16.0,
                 DIM,
             );
-            let resp = ui.interact(r.intersect(list), ui.id().with(("row", i)), Sense::click());
+            let resp = ui.interact(
+                r.intersect(list),
+                ui.scope_id().with(("row", i)),
+                Sense::click(),
+            );
             if resp.clicked() {
                 self.selected = Some(i);
             }
@@ -1478,7 +1484,7 @@ impl eframe::App for App {
                 Stroke::new(1.5, SHADE),
             );
         }
-        let tresp = ui.interact(track, ui.id().with("thumb"), Sense::drag());
+        let tresp = ui.interact(track, ui.scope_id().with("thumb"), Sense::drag());
         if let Some(pos) = tresp.interact_pointer_pos() {
             if tresp.dragged() && max_scroll > 0.0 {
                 let f = ((pos.y - track.min.y - th / 2.0) / (track.height() - th)).clamp(0.0, 1.0);
@@ -1601,7 +1607,7 @@ impl eframe::App for App {
         if let Some(i) = self.selected.filter(|&i| i < self.items.len()) {
             let edit = egui::TextEdit::singleline(&mut self.items[i].name)
                 .char_limit(NAME_MAX)
-                .vertical_align(egui::Align::Center)
+                .align(egui::Align2::LEFT_CENTER)
                 .frame(egui::Frame::NONE)
                 .font(FontId::proportional(18.0))
                 .text_color(INK)

@@ -75,7 +75,8 @@ mod tests {
             driver_info: String::new(),
             subgroup_min_size: 0,
             subgroup_max_size: 0,
-            transient_saves_memory: false,
+            transient_saves_memory: None,
+            limit_bucket: None,
         }
     }
 

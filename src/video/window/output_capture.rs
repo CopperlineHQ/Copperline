@@ -118,7 +118,11 @@ impl OutputCapture {
             .context("waiting for screenshot GPU readback")?;
         rx.recv_timeout(timeout)
             .context("waiting for screenshot pixels")??;
-        let mapped = self.buffer.slice(..).get_mapped_range();
+        let mapped = self
+            .buffer
+            .slice(..)
+            .get_mapped_range()
+            .context("reading the screenshot GPU readback")?;
         let (_, _, w, h) = self.rect;
         let mut pixels = Vec::with_capacity(w as usize * h as usize);
         for row in mapped.chunks_exact(self.stride as usize) {

@@ -9,7 +9,7 @@ impl Layout {
         panel: &mut ui::ConsolePanel,
         actions: &mut Vec<Action>,
     ) {
-        let id = egui::Id::new("console_entry");
+        let id = egui::Id::unique("console_entry");
         let first_pass = root.ctx().current_pass_index() == 0;
         let entering = self.last_tool != Some(ToolPanelKind::Console);
         let mut submit = false;
@@ -76,14 +76,12 @@ impl Layout {
                 }
             }
         });
+        let to_end = self.console_to_end;
         egui::CentralPanel::default().show(root, |ui| {
-            let mut scroll = ScrollArea::both()
+            let scroll = ScrollArea::both()
                 .id_salt("console_output_scroll")
                 .auto_shrink([false, false])
                 .stick_to_bottom(true);
-            if self.console_to_end {
-                scroll = scroll.vertical_scroll_offset(f32::INFINITY);
-            }
             scroll.show(ui, |ui| {
                 if scroll_pages != 0 {
                     ui.scroll_with_delta(egui::vec2(
@@ -102,6 +100,16 @@ impl Layout {
                         .selectable(true)
                         .wrap_mode(egui::TextWrapMode::Extend),
                 );
+                // A submission jumps to the end of the output, where
+                // `stick_to_bottom` then keeps it. egui 0.37 lays an
+                // infinite scroll offset out as a NaN rect, so the jump
+                // scrolls to the bottom of what was just laid out instead.
+                if to_end {
+                    ui.scroll_to_cursor_animation(
+                        Some(egui::Align::BOTTOM),
+                        egui::style::ScrollAnimation::none(),
+                    );
+                }
             });
         });
         root.memory_mut(|memory| {

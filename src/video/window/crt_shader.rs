@@ -260,6 +260,7 @@ pub(super) fn test_gpu(label: &str) -> Option<TestGpu> {
         power_preference: wgpu::PowerPreference::LowPower,
         force_fallback_adapter: false,
         compatible_surface: None,
+        apply_limit_buckets: false,
     })) {
         Some(Ok(adapter)) => adapter,
         _ => {
@@ -1209,7 +1210,7 @@ fn fs_main() -> @location(0) vec4<f32> {
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll");
         rx.recv().expect("map callback").expect("buffer mapped");
-        let mapped = readback.slice(..).get_mapped_range();
+        let mapped = readback.slice(..).get_mapped_range().expect("mapped range");
         let mut px = Vec::with_capacity((dim * dim) as usize);
         for y in 0..dim {
             let base = (y * padded) as usize;

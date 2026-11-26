@@ -2145,7 +2145,7 @@ struct CrtPresent {
 fn present_job(
     gpu: &mut Gpu,
     notify: Option<&Window>,
-    job: &PresentJob,
+    job: &mut PresentJob,
     rtg_frame: Option<(&[u32], u32, u32)>,
     mut after: Option<PresentAfter<'_>>,
     mut capture: Option<&mut output_capture::OutputCapture>,
@@ -2162,7 +2162,7 @@ fn present_job(
     } = gpu;
     // Its texture updates wait here until a frame is drawn: a present the
     // surface skips runs no callback, and they must not be lost with it.
-    egui.receive(&job.egui);
+    egui.receive(&mut job.egui);
     if let Some(frame) = &job.frame {
         let dst = pixels.frame_mut();
         if dst.len() != frame.len() {
@@ -2389,11 +2389,12 @@ impl PresentWorker {
                 while let Ok(cmd) = cmd_rx.recv() {
                     match cmd {
                         PresentCmd::Lend(gpu) => held = Some(gpu),
-                        PresentCmd::Frame(job) => {
+                        PresentCmd::Frame(mut job) => {
                             if let Some(gpu) = held.as_mut() {
                                 if worker_surface_current(job.surface, worker_live_size(&window)) {
                                     let notify = worker_notify_window(&window);
-                                    if let Err(e) = present_job(gpu, notify, &job, None, None, None)
+                                    if let Err(e) =
+                                        present_job(gpu, notify, &mut job, None, None, None)
                                     {
                                         log_present_error(&e);
                                     }
@@ -2401,7 +2402,16 @@ impl PresentWorker {
                                     // Skipped for a stale surface size, but
                                     // egui's texture updates still wait for
                                     // the next frame drawn.
-                                    gpu.egui.receive(&job.egui);
+                                    gpu.egui.receive(&mut job.egui);
+                                }
+                            } else {
+                                // Frames are submitted only while the GPU is
+                                // lent here, and a lend is queued ahead of
+                                // them, so this frame has no GPU side to
+                                // reach only if that order breaks: there is
+                                // then nothing to apply its updates to.
+                                for surface in job.egui.surfaces.iter_mut().flatten() {
+                                    surface.textures.clear();
                                 }
                             }
                             let back = PresentBack::Frame {
@@ -6446,7 +6456,7 @@ impl ApplicationHandler for App {
                                     Ok(capture) => present_job(
                                         gpu,
                                         Some(&window),
-                                        &job,
+                                        &mut job,
                                         rtg_frame,
                                         after,
                                         capture.as_mut(),
@@ -6454,7 +6464,7 @@ impl ApplicationHandler for App {
                                     Err(_) => present_job(
                                         gpu,
                                         Some(&window),
-                                        &job,
+                                        &mut job,
                                         rtg_frame,
                                         after,
                                         None,
