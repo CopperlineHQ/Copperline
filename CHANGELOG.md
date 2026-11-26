@@ -94,6 +94,21 @@ for the earlier release notes.
   nibbles other than $0, $5, $A and $F, came out in the wrong colours or
   brightness. AGA Lisa still looks every super-hires pixel up, and an OCS
   Denise is unchanged.
+
+- The blitter's area fill now works in ascending mode. Setting BLTCON1's
+  IFE or EFE bit runs the fill circuit and its extra idle cycle per word
+  whether or not DESC is set; DESC only decides which way the carry moves
+  from word to word. Ascending fills used to come out as plain copies and
+  finish a third sooner than on an Amiga, so software that waits on the
+  blitter saw it free too early. With both bits set the fill is exclusive,
+  as on an A500; it used to be inclusive.
+
+- A line blit that only steps sideways (an X-major line whose error term
+  stays negative) with an all-zero texture now leaves DMACONR's BZERO set,
+  as on an A500. The extra BZERO check that follows a texture-counter wrap
+  only happens after a step to a new row; such lines used to report a
+  non-zero result they never drew.
+
 - A save state preserves the 68040/68060 MMU translation cache. Resuming
   keeps the resident page mappings and the bus clocks a table walk would
   consume on a miss.
