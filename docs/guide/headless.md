@@ -546,17 +546,94 @@ COPPERLINE_VAMIGATS_FILTER=bbusy0 \
 cargo test --release --test vamiga_ts -- --ignored --nocapture
 ```
 
+Each case is one of the suite's RetroShell scripts (`<name>.retrosh`),
+and the runner builds the machine that script describes: the vAmiga
+setup (`A500_OCS_1MB`, `A500_ECS_1MB`, `A500_PLUS_1MB`, `A1200_2MB`),
+the CPU revision, `mem set SLOW_RAM`, `amiga set VIDEO_FORMAT NTSC`,
+extra drives (`dfN connect`), and joystick, mouse and keyboard input at
+the script's own times. The screenshot is taken when the script takes
+its own, which is the sum of its `wait` lines.
+
 Test options:
 
 - `COPPERLINE_VAMIGATS_FILTER=TEXT`: Run only the cases whose name contains TEXT.
 - `COPPERLINE_VAMIGATS_LIMIT=N`: Maximum tests to run.
+- `COPPERLINE_VAMIGATS_JOBS=N`: Run N cases at a time (default 1). The
+  core is deterministic and each case owns its output files, so the
+  result does not depend on N.
 - `COPPERLINE_VAMIGATS_SECONDS=SECS`: Screenshot time for every case,
-  overriding each case's own wait from its shipped script (default 9 s).
+  overriding each case's own (default 9 s for a script with no wait).
 - `COPPERLINE_VAMIGATS_OUT=DIR`: Directory to save test screenshots.
 - `COPPERLINE_VAMIGATS_BASELINE=DIR`: Baseline directory for automated PNG comparison.
-- `COPPERLINE_VAMIGATS_VAMIGA=PATH`: Path to reference `VAHeadless` binary.
+- `COPPERLINE_VAMIGATS_SHIPPED_REFS=1`: Use the vAmiga reference dump
+  the suite ships beside each script (`<name>.raw`), copied to
+  `<case>.vamiga.raw` in the output directory. No vAmiga build is needed.
+- `COPPERLINE_VAMIGATS_VAMIGA=PATH`: Generate the reference instead, by
+  running a local `VAHeadless` binary on a script that mirrors the case
+  (collision detection is always switched on in it). A case's
+  `screenshot set cutout` is applied to the generated dump, so it scores
+  the same region as the shipped one. Not together with
+  `COPPERLINE_VAMIGATS_SHIPPED_REFS`.
 - `COPPERLINE_VAMIGATS_VAMIGA_SETUP=SETUP`: Machine setup for every
   reference run, instead of the one each case's script names.
+
+### Scoring a sweep
+
+Set `COPPERLINE_SHOT_RAW=1` for a sweep so each screenshot is the raw
+716x570 framebuffer, which lines up with vAmiga's 716x285 dump, and pick
+a reference source:
+
+```sh
+COPPERLINE_VAMIGATS_DIR=/path/to/vAmigaTS \
+COPPERLINE_VAMIGATS_OUT=/path/to/out \
+COPPERLINE_VAMIGATS_SHIPPED_REFS=1 COPPERLINE_VAMIGATS_JOBS=8 \
+COPPERLINE_SHOT_RAW=1 \
+cargo test --release --test vamiga_ts run_vamiga_ts_adf_screenshots -- --ignored --nocapture
+
+python3 tools/vamigats-compare.py /path/to/out          # differing pixels per case, worst first
+python3 tools/vamigats-analyze.py /path/to/out          # the same with a divergence class (needs numpy and Pillow)
+python3 tools/vamigats-diffview.py /path/to/out/Agnus/Copper/lc/lc1 lc1.png lc1_ocs
+```
+
+The tools work two things out from each dump before comparing
+(`tools/vamigats_ref.py`). vAmiga paints a grey checkerboard over
+everything outside a script's `screenshot set cutout` box, which is how
+a test's author masks a region that is not stable, and below the end of
+an NTSC frame; that area is not scored. And the dumps come in two
+colour encodings depending on the vAmiga build that recorded them, a
+linear one and a gamma-curved one that also crushes the darkest shades
+to black; each case is scored under the encoding that fits it.
+
+A score is a count of pixels that differ from vAmiga, not from an
+Amiga. Where the suite ships a photograph of the test on real hardware
+(`*_A500_ECS.jpeg`, `*_A500_plus.jpeg`, `*_A1200.jpeg`), the photograph
+decides, and in several AGA and ECS Denise cases it sides against the
+dump. A super-hires dump also records only every other 35 ns pixel.
+
+### Self-checking CPU tests
+
+Some CPU tests ship no script and no reference picture. Each measures
+something (an exception stack frame, the registers after an address
+error, a trace sequence), compares it with the values recorded on real
+machines, and paints the verdict as the background colour. A second
+test runs each of them on every CPU it carries expected values for (a
+68000, a 68010 and a 68EC020; the 68020-only tests run on the 68EC020
+alone) and reads the verdict back:
+
+```sh
+COPPERLINE_VAMIGATS_DIR=/path/to/vAmigaTS \
+COPPERLINE_VAMIGATS_OUT=/path/to/out COPPERLINE_VAMIGATS_JOBS=8 \
+cargo test --release --test vamiga_ts run_vamiga_ts_cpu_self_checks -- --ignored --nocapture
+```
+
+It writes `selfcheck.tsv` to the output directory, one
+`name<TAB>cpu<TAB>verdict` line per run, where the verdict is `pass`,
+`fail`, `no-exception` (the instruction under test did not fault, which
+is the right answer for a data access to an odd address on a 68020) or
+`wrong-exception`. `COPPERLINE_VAMIGATS_SELFCHECK_BASELINE=FILE` names
+an earlier `selfcheck.tsv`; the test then fails if a run that passed
+there no longer does. `COPPERLINE_VAMIGATS_FILTER` and
+`COPPERLINE_VAMIGATS_JOBS` apply as above.
 
 ## Importing a WinUAE state
 

@@ -632,5 +632,9 @@ cargo test --release --test audio_stems_determinism -- --ignored
 
 `vamiga_ts.rs` is a separate ignored suite driven by `COPPERLINE_VAMIGATS_*`
 env vars against a local [vAmigaTS](https://github.com/dirkwhoffmann/vAmigaTS)
-checkout plus a Kickstart 1.3 ROM. See `docs/guide/headless.md`
+checkout plus a Kickstart 1.3 ROM. It holds two tests:
+`run_vamiga_ts_adf_screenshots` boots every shipped script's machine and
+saves a screenshot to score against the suite's reference dumps, and
+`run_vamiga_ts_cpu_self_checks` runs the CPU tests that judge themselves
+and reads back their verdicts. See `docs/guide/headless.md`
 ("Automated compatibility testing (vAmigaTS)").
