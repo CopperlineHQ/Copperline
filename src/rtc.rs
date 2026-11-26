@@ -238,7 +238,8 @@ struct ChipRules {
     /// the year digits (MSM6242: years divisible by four).
     leap_counter: bool,
     /// The year digits count years since 1900 (MSM6242) rather than the
-    /// year within its century (RP5C01). See [`ChipRules::year_digits`].
+    /// year within its century (RP5C01), both as a date loads into them
+    /// (see [`ChipRules::year_digits`]) and as the years carry.
     years_since_1900: bool,
 }
 
@@ -259,7 +260,8 @@ impl ChipRules {
     /// (Kickstart itself, 1.3 and 3.1 alike, stops at 2046-01-19, where its
     /// signed count of seconds since 1978 overflows.) A year the digit
     /// cannot hold, and every year on the RP5C01, loads as the year within
-    /// its century instead.
+    /// its century instead, which AROS and Linux read as 20xx up to 2077
+    /// (AROS) or 2069 (Linux).
     fn year_digits(self, year: u16) -> u8 {
         match year.checked_sub(1900) {
             Some(since) if self.years_since_1900 && since <= Self::MAX_YEARS_SINCE_1900 => {
@@ -378,12 +380,25 @@ impl Counters {
             return self.set_pair(MO1, month);
         }
         self.set_pair(MO1, 1);
-        // The ten-years digit wraps from 9 to 0. Above 9 -- the
-        // years-since-1900 form from 2000 on -- it counts on through its
-        // four bits and wraps from 15 to 0. The data sheets specify only
-        // years 00-99, so the count above 9 is a modelling assumption.
         let year = self.pair(Y1) + 1;
-        self.set_pair(Y1, if year == 100 || year >= 160 { 0 } else { year });
+        let year = if rules.years_since_1900 {
+            // The ten-years digit wraps from 9 to 0, as the data sheet's
+            // years 00-99 have it. Above 9 -- years since 1900 from 2000
+            // on -- it counts on through its four bits. The data sheet
+            // says nothing of a count above 9, so that is a modelling
+            // assumption, and so is what follows 159 (2059), the most the
+            // four bits hold: the carry takes the year within the century
+            // (60), the form the clock loads 2060 in, so a clock running
+            // into 2060 reads the same as one loaded with it.
+            match year {
+                100 => 0,
+                160.. => year - 100,
+                _ => year,
+            }
+        } else {
+            year % 100
+        };
+        self.set_pair(Y1, year);
         self.leap = (self.leap + 1) & 0x3;
     }
 
@@ -1535,21 +1550,50 @@ mod tests {
         assert_eq!(rtc.current_unix(10.0), seed);
     }
 
-    /// Above 9 the ten-years digit counts on (2029 to 2030 is 129 to 130),
-    /// and it wraps to 00 after 99 and after 159, the most its four bits
-    /// hold. The leap year still follows the year digits.
+    /// Above 9 the ten-years digit counts on (2029 to 2030 is 129 to 130).
+    /// After 159, the most its four bits hold, 2060 carries in as 60, the
+    /// form the clock loads 2060 in. The leap year still follows the year
+    /// digits.
     #[test]
     fn msm6242_year_carry_counts_through_the_four_bit_ten_years_digit() {
         let mut rtc = seeded_msm(VECTOR_UNIX);
         msm_set_and_start(&mut rtc, digits(59, 59, 2, 3, 31, 12, 129, 1), 0x4, 0.0);
         assert_eq!(msm_digits(&mut rtc, 1.0), digits(0, 0, 0, 0, 1, 1, 130, 2));
         msm_set_and_start(&mut rtc, digits(59, 59, 2, 3, 31, 12, 159, 1), 0x4, 2.0);
-        assert_eq!(msm_digits(&mut rtc, 3.0), digits(0, 0, 0, 0, 1, 1, 0, 2));
+        assert_eq!(msm_digits(&mut rtc, 3.0), digits(0, 0, 0, 0, 1, 1, 60, 2));
         // 2028 (128) is a leap year, 2026 (126) is not.
         msm_set_and_start(&mut rtc, digits(59, 59, 2, 3, 28, 2, 128, 1), 0x4, 4.0);
         assert_eq!(msm_digits(&mut rtc, 5.0), digits(0, 0, 0, 0, 29, 2, 128, 2));
         msm_set_and_start(&mut rtc, digits(59, 59, 2, 3, 28, 2, 126, 6), 0x4, 6.0);
         assert_eq!(msm_digits(&mut rtc, 7.0), digits(0, 0, 0, 0, 1, 3, 126, 0));
+    }
+
+    /// A clock the guest has taken over at the end of 2059 counts into
+    /// 2060, not back to 2000.
+    #[test]
+    fn msm6242_running_clock_carries_2059_into_2060() {
+        let seed = parse_rtc_time("2059-12-31 23:59:59").unwrap();
+        let mut rtc = Rtc::new(RtcChip::Msm6242);
+        rtc.set_seed(Some(seed), false);
+        let cf = Msm6242Rtc::CF_24H;
+        rtc.write(0xF * 4, 4, u64::from(cf | Msm6242Rtc::CF_STOP), 0.0);
+        rtc.write(0xF * 4, 4, u64::from(cf), 0.0);
+        assert_eq!(rtc.read(0xB * 4, 4, 1.0), 6);
+        assert_eq!(rtc.read(0xA * 4, 4, 1.0), 0);
+        assert_eq!(rtc.current_display(1.0), "2060-01-01T00:00:00");
+    }
+
+    /// The RP5C01 carries the year within its century whatever the guest
+    /// wrote: AROS writes years since 1900 to either chip, so 159 (2059)
+    /// carries to 60 and 126 (2026) to 27, both of which read back as the
+    /// right year.
+    #[test]
+    fn rp5c01_year_carry_takes_the_year_within_its_century() {
+        let mut rtc = seeded_rp5c01(VECTOR_UNIX);
+        rp_set_and_start(&mut rtc, digits(59, 59, 2, 3, 31, 12, 159, 3), 3, 0.0);
+        assert_eq!(rp_digits(&mut rtc, 1.0), digits(0, 0, 0, 0, 1, 1, 60, 4));
+        rp_set_and_start(&mut rtc, digits(59, 59, 2, 3, 31, 12, 126, 4), 2, 2.0);
+        assert_eq!(rp_digits(&mut rtc, 3.0), digits(0, 0, 0, 0, 1, 1, 27, 5));
     }
 
     #[test]

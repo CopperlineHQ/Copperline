@@ -473,11 +473,13 @@ clock automatically at boot, while Kickstart 1.3 only does so when the
 startup-sequence runs `SetClock LOAD`; and the chip holds only two year
 digits. The MSM6242 counts them as years since 1900, the form AROS writes
 and Kickstart 1.3's `SetClock` reads, using its four-bit ten-years digit to
-hold 2000-2059 as 100-159; from 2060 it holds the year within its century,
-as the RP5C01 always does. Whichever chip is fitted, Kickstart (1.3 and 3.1
-alike) reads the right date only up to 19 January 2046, where its signed
-32-bit count of seconds since 1978 overflows and `Date` fails; AROS reads
-the MSM6242 up to 2059. A host-initiated reset or power
+hold 2000-2059 as 100-159. That form ends at 2059: from 2060 the chip holds
+the year within its century (60 for 2060), as the RP5C01 always does, and a
+clock running past the end of 2059 carries into that form. AROS reads digits
+below 78 as 20xx, so it reads either chip correctly up to 2077. Whichever
+chip is fitted, Kickstart (1.3 and 3.1 alike) reads the right date only up
+to 19 January 2046, where its signed 32-bit count of seconds since 1978
+overflows and `Date` fails. A host-initiated reset or power
 cycle restarts the emulated timeline and therefore restarts a seeded clock
 from `rtc_time`; a guest-initiated reboot (the 68000 `RESET` instruction)
 leaves it ticking, like real battery-backed hardware.
