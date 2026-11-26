@@ -977,9 +977,13 @@ readback:
    latched PORTS level retains its existing immediate behaviour. A new
    Copper-written PORTS request is a source assertion, not an INTENA unmask,
    and receives a recognition deadline.
-2. A running stock 68000 samples candidates at bus-access starts. Its ordinary
-   qualified prefetch poll uses the deadline minus two CCK; a core-marked
-   unqualified operand poll uses the deadline minus four CCK. The core holds
+2. A running stock 68000 or 68010 samples candidates at bus-access starts. Its
+   ordinary qualified prefetch poll uses the deadline minus two CCK; a
+   core-marked unqualified operand poll uses the deadline minus four CCK. The
+   68010 has the 68000's bus interface and takes the same leads: photographs of
+   a 68010 A500 running the vAmigaTS `CPU/Timing` programs place its handlers
+   where a two-CCK lead does on the rows with one and two bitplanes fetching,
+   and four to twelve CPU clocks earlier than no lead does. The core holds
    the selected sample through subsequent accesses. Memory TST polls on its
    operand word (the low word for TST.L); DIVS can mark an internal poll before
    its final prefetch. Other CPU models and accelerated bus ratios retain

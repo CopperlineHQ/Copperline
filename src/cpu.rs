@@ -520,8 +520,10 @@ struct CpuBus {
     /// earlier candidate is used only by core-marked operand poll points.
     sampled_operand_irq_level: u8,
     /// The CPU model, rather than the active bus clock ratio, gates the
-    /// additional 68000 poll candidates. The Bus helper itself limits early
-    /// candidates to the stock two-CPU-clocks-per-CCK path.
+    /// additional 68000 poll candidates. The 68010 has the 68000's bus
+    /// interface and samples its IPL pins at the same point of a bus cycle,
+    /// so it takes them too. The Bus helper itself limits early candidates
+    /// to the stock two-CPU-clocks-per-CCK path.
     m68000_ipl_poll: bool,
     /// The CPU has the 68020 family's pending-interrupt latch (see
     /// `ipl_latched_level`): every model from the 68EC020 up.
@@ -779,7 +781,7 @@ impl M68kMachine {
                 instruction_fetches_cached: false,
                 sampled_irq_level: 0,
                 sampled_operand_irq_level: 0,
-                m68000_ipl_poll: cpu_model == CpuModel::M68000,
+                m68000_ipl_poll: matches!(cpu_model, CpuModel::M68000 | CpuModel::M68010),
                 ipl_latches_requests: !matches!(cpu_model, CpuModel::M68000 | CpuModel::M68010),
                 ipl_sample_held: false,
                 ipl_latched_level: 0,
@@ -2079,7 +2081,7 @@ impl M68kMachine {
         self.bus.address_mask = cpu.address_mask;
         self.bus.cacr_040_layout = cacr_040_layout(cpu.cpu_type);
         self.cpu = cpu;
-        self.bus.m68000_ipl_poll = self.cpu.cpu_type == CpuType::M68000;
+        self.bus.m68000_ipl_poll = matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010);
         self.bus.ipl_latches_requests =
             !matches!(self.cpu.cpu_type, CpuType::M68000 | CpuType::M68010);
         self.bus.sampled_operand_irq_level = 0;
@@ -12897,7 +12899,7 @@ mod tests {
     }
 
     #[test]
-    fn early_ipl_poll_is_limited_to_stock_m68000_and_zero_latency_is_raw() -> Result<()> {
+    fn early_ipl_poll_is_limited_to_the_68000_bus_and_zero_latency_is_raw() -> Result<()> {
         let delayed_bus = || {
             let mut bus = test_bus_with_pc(0x100);
             bus.paula.intena = INT_MASTER | INT_VERTB;
@@ -12910,13 +12912,23 @@ mod tests {
             bus
         };
 
+        // The 68010 shares the 68000's bus interface: its prefetch poll
+        // qualifies a request two colour clocks ahead of the deadline too.
         let bus = delayed_bus();
         assert_eq!(bus.cpu_visible_intreq() & INT_VERTB, 0);
         let mut m68010 = M68kMachine::new(bus, CpuModel::M68010, false)?;
         m68010.bus.bus.set_cpu_bus_arbitration_enabled(true);
-        assert!(!m68010.bus.m68000_ipl_poll);
+        assert!(m68010.bus.m68000_ipl_poll);
         m68010.bus.read_word(ROM_BASE as u32 + 0x100);
-        assert_eq!(m68010.bus.sampled_irq_level, 0);
+        assert_eq!(m68010.bus.sampled_irq_level, 3);
+
+        // A 68020 does not: the request is not yet visible to it.
+        let bus = delayed_bus();
+        let mut m68ec020 = M68kMachine::new(bus, CpuModel::M68EC020, false)?;
+        m68ec020.bus.bus.set_cpu_bus_arbitration_enabled(true);
+        assert!(!m68ec020.bus.m68000_ipl_poll);
+        m68ec020.bus.read_word(ROM_BASE as u32 + 0x100);
+        assert_eq!(m68ec020.bus.sampled_irq_level, 0);
 
         let mut raw_bus = test_bus_with_pc(0x100);
         raw_bus.paula.intena = INT_MASTER | INT_VERTB;

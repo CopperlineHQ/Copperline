@@ -210,6 +210,11 @@ for the earlier release notes.
 - 68010: a MOVE to `-(An)` prefetches before it writes and writes a long
   low word first, as on the 68000. It used to write first, high word
   first, and take two clocks too long.
+- 68010: an interrupt request is sampled two colour clocks ahead of its
+  recognition deadline, as on the 68000, which has the same bus interface.
+  It was sampled with no lead, so a handler that interrupts beam-timed
+  code on a 68010 started four to twelve CPU clocks late on lines where
+  one or two lores bitplanes are fetching.
 - ECS and AGA, tall programmable screen modes (DblPAL, DblNTSC,
   Productivity and others):
   - VPOSR and VPOSW carry vertical bits 9 and 10, so beam polls no longer
