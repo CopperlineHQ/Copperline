@@ -6598,8 +6598,8 @@ impl ApplicationHandler for App {
         }
         self.service_card_monitors(event_loop);
         let host_poll_started = Instant::now();
-        // Native Wayland drags arrive from the receiver's worker; they join
-        // winit's DroppedFile events before the drop is acted on.
+        // Native Wayland drops arrive whole from the receiver's worker and
+        // are acted on one by one; winit's per-file events coalesce below.
         self.take_wayland_drop_events();
         // Act on a completed drop before the OSD/control-flow computation
         // below, so a drop-raised OSD keeps the loop awake for its fade.

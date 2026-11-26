@@ -286,17 +286,29 @@ impl App {
         self.request_redraw();
     }
 
-    /// Fold what the native Wayland drop receiver saw since the last pass
-    /// into the same state winit's drag events drive.
+    /// Act on what the native Wayland drop receiver saw since the last pass.
     pub(super) fn take_wayland_drop_events(&mut self) {
         let Some(receiver) = &self.wayland_drop else {
             return;
         };
-        for event in receiver.take_events() {
+        let events = receiver.take_events();
+        self.apply_wayland_drop_events(events);
+    }
+
+    /// Drive the drop hint from the receiver's events, and route each
+    /// completed drop as its own batch: a `Dropped` event already carries
+    /// a whole drop, so two drops queued in one pass must not merge the way
+    /// winit's one-event-per-file drops are coalesced.
+    pub(super) fn apply_wayland_drop_events(&mut self, events: Vec<wayland_drop::DropEvent>) {
+        for event in events {
             match event {
                 wayland_drop::DropEvent::Hovered => self.note_file_drag_hover(),
                 wayland_drop::DropEvent::Cancelled => self.note_file_drag_cancelled(),
-                wayland_drop::DropEvent::Dropped(files) => self.note_dropped_files(files),
+                wayland_drop::DropEvent::Dropped(files) => {
+                    self.drop_hover = false;
+                    self.handle_dropped_files(files);
+                    self.request_redraw();
+                }
             }
         }
     }
