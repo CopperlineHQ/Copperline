@@ -277,6 +277,13 @@ for the earlier release notes.
   - Programmable horizontal blanking needs BPLCON3.EXTBLKEN and ECSENA as
     well as BEAMCON0.BLANKEN. BLANKEN alone no longer blanks the picture.
 - OCS Denise ignores BPLCON2.KILLEHB.
+- Workbench 1.3 no longer shows the year as 1978 when an MSM6242 battery
+  clock is fitted (#985). The clock gave the year within its century (26
+  for 2026), which Kickstart 1.3's `SetClock LOAD` reads as 1978, also
+  under the AROS ROM when a 1.3 startup-sequence runs it. It now counts
+  years since 1900 (126), as AROS writes the clock and as WinUAE and vAmiga
+  present it. Kickstart 1.3 now reads the right date up to January 2046,
+  where Kickstart's own count of seconds since 1978 overflows.
 
 ### Compatibility
 
