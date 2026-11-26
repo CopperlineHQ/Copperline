@@ -6,7 +6,8 @@ doubled CL shot) pair under a root, computes and prints (TSV, sorted by
 diff% desc):
   diff%  best-shift class  band(TMB/LR)  rel-path
 where:
-  diff%  = nibble-quantized fraction of differing pixels at X_SHIFT=0
+  diff%  = fraction of differing pixels at X_SHIFT=0, by the same colour
+           matching rule as tools/vamigats-compare.py
   class:
     POS(shift+N:a->b) = a small X-shift collapses the diff -> positioning /
                         fetch-origin / scroll bug (Fable: fetch class)
@@ -27,13 +28,18 @@ W, H = 716, 285
 Y = 2  # va row y maps to cl line-doubled row 2*(y-2)
 
 def load(png, raw):
-    """Nibble-quantised vAmiga and Copperline pictures, aligned row for row.
+    """A Copperline screenshot and a vAmiga dump, aligned row for row.
 
-    The dump's colour encoding and valid box come from vamigats_ref: the
-    dump is mapped back to Copperline's 8-bit guns before quantising, and
-    everything vAmiga filled with its checkerboard (outside a script's
-    cutout, below an NTSC frame) is zeroed in both pictures so it never
-    counts as a difference.
+    Returns (cl8, va_raw, va8, member, inside):
+      cl8     the screenshot's 8-bit guns
+      va_raw  the dump's bytes as stored
+      va8     the dump mapped back to the nearest Copperline guns (for
+              colour-keyed detectors only, never for differences)
+      member  member[c, v]: dump value v is acceptable for Copperline gun c
+              under the encoding that fits this dump best
+      inside  the dump's valid box; everything vAmiga filled with its
+              checkerboard (outside a script's cutout, below an NTSC
+              frame) is left out of every count
     """
     ref = open(raw, 'rb').read()
     if len(ref) != W*H*3:
@@ -47,28 +53,31 @@ def load(png, raw):
     if not cl_rows:
         return None
     name, _ = vref.best_decoder(cl_rows, va_rows, TABLE)
-    inverse = np.frombuffer(TABLE[name].inverse, dtype=np.uint8)
-    va8 = inverse[np.frombuffer(ref, dtype=np.uint8).reshape(H, W, 3)]
+    decoder = TABLE[name]
+    member = np.frombuffer(decoder.member, dtype=np.uint8).reshape(256, 256) != 0
+    inverse = np.frombuffer(decoder.inverse, dtype=np.uint8)
+    va_raw = np.frombuffer(ref, dtype=np.uint8).reshape(H, W, 3)
     # align va rows Y..H-1 with cl rows 0..H-1-Y
-    va8, cl8 = va8[Y:H], cl8[0:H-Y]
+    va_raw, cl8 = va_raw[Y:H], cl8[0:H-Y]
     inside = np.zeros((H-Y, W), dtype=bool)
     inside[y1-Y:y2-Y, x1:x2] = True
-    va_a = (va8.astype(np.int16) + 8)//17
-    cl_a = (cl8.astype(np.int16) + 8)//17
-    va_a[~inside] = 0
-    cl_a[~inside] = 0
-    return va_a, cl_a, va8, cl8, inside
+    return cl8, va_raw, inverse[va_raw], member, inside
 
-def diff_mask(va_a, cl_a, sx):
-    if sx == 0:
-        cl_s = cl_a
+def diff_mask(cl8, va_raw, member, inside, sx):
+    """Pixels of the valid box where dump x and screenshot x + sx differ.
+
+    A pixel matches when each gun's dump value is one the decoder accepts
+    for the Copperline value, which is the rule vamigats-compare.py scores
+    by. Comparing decoded colours instead would call a dark Copperline
+    shade that the dump encoding crushes to black a difference. A column
+    the shift pushes off the screenshot differs.
+    """
+    same = np.zeros(inside.shape, dtype=bool)
+    if sx >= 0:
+        same[:, :W-sx] = member[cl8[:, sx:], va_raw[:, :W-sx]].all(axis=2)
     else:
-        cl_s = np.full_like(cl_a, 255)
-        if sx > 0:
-            cl_s[:, :W-sx] = cl_a[:, sx:]
-        else:
-            cl_s[:, -sx:] = cl_a[:, :W+sx]
-    return (va_a != cl_s).any(axis=2)
+        same[:, -sx:] = member[cl8[:, :W+sx], va_raw[:, -sx:]].all(axis=2)
+    return inside & ~same
 
 CLI_BLUE = np.array([0, 85, 170])  # AmigaDOS 1.3 CLI background (boot-stuck)
 
@@ -76,8 +85,8 @@ def analyze(png, raw):
     L = load(png, raw)
     if L is None:
         return None
-    va_a, cl_a, va8, cl8, inside = L
-    R = va_a.shape[0]
+    cl8, va_raw, va8, member, inside = L
+    R = inside.shape[0]
     total = int(inside.sum())
     # Boot-stuck detector: CL is the AmigaDOS 1.3 CLI (the test never ran /
     # hung), while vAmiga shows the test output. These are FUNCTIONAL/boot
@@ -86,9 +95,10 @@ def analyze(png, raw):
     va_blue = (np.abs(va8.astype(int) - CLI_BLUE) < 24).all(2)[inside].mean()
     shifts = [-6, -4, -3, -2, -1, 0, 1, 2, 3, 4, 6]
     # per-row diff for every shift -> (nshift, R)
-    perrow = np.stack([diff_mask(va_a, cl_a, sx).sum(axis=1) for sx in shifts])
+    masks = [diff_mask(cl8, va_raw, member, inside, sx) for sx in shifts]
+    perrow = np.stack([mask.sum(axis=1) for mask in masks])
     zero_i = shifts.index(0)
-    m0 = diff_mask(va_a, cl_a, 0)
+    m0 = masks[zero_i]
     base = int(m0.sum())
     dpct = base / total * 100
     if dpct < 1.0:
@@ -108,9 +118,10 @@ def analyze(png, raw):
     t = [int(m0[:R//3].sum()), int(m0[R//3:2*R//3].sum()), int(m0[2*R//3:].sum())]
     lh = int(m0[:, :W//2].sum()); rh = base - lh
     band = f"T{t[0]*100//base}/M{t[1]*100//base}/B{t[2]*100//base} L{lh*100//base}/R{rh*100//base}"
-    # content direction
-    va_on = va_a.any(axis=2) & m0
-    cl_on = cl_a.any(axis=2) & m0
+    # content direction: a pixel is "on" when it could not pair with black
+    # on the other side under the same matching rule
+    va_on = ~member[0, va_raw].all(axis=2) & m0
+    cl_on = ~member[cl8, 0].all(axis=2) & m0
     va_only = int((va_on & ~cl_on).sum())
     cl_only = int((cl_on & ~va_on).sum())
     both = base - va_only - cl_only
