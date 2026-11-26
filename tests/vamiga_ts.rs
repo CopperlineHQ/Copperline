@@ -52,6 +52,9 @@ struct ShippedScript {
     /// Machine-configuration lines a generated vAmiga reference script
     /// replays verbatim ahead of `regression run`.
     vamiga_config_lines: Vec<String>,
+    /// `screenshot set cutout`: the part of the frame the test compares,
+    /// as `[x1, y1, x2, y2]` in vAmiga texture coordinates (half-open).
+    cutout: Option<[u32; 4]>,
     /// Waits and input in script order.
     steps: Vec<ScriptStep>,
 }
@@ -608,7 +611,7 @@ fn run_vamiga_reference(
             .into());
         }
 
-        let raw = fs::read(&tmp_raw).map_err(|e| {
+        let mut raw = fs::read(&tmp_raw).map_err(|e| {
             io::Error::new(
                 e.kind(),
                 format!(
@@ -626,6 +629,11 @@ fn run_vamiga_reference(
                 716 * 285 * 3
             ))
             .into());
+        }
+        // The generated script takes a full-frame screenshot; the shipped
+        // script's cutout is applied to the dump instead.
+        if let Some(cutout) = case.script.cutout {
+            mask_vamiga_dump_outside_cutout(&mut raw, cutout);
         }
         fs::write(&raw_path, raw)?;
         Ok(())
@@ -790,6 +798,9 @@ fn parse_shipped_retrosh(text: &str) -> ShippedScript {
             ["cpu", "set", "reset_val", ..]
             | ["cpu", "set", "overclocking", ..]
             | ["amiga", "reset"] => script.vamiga_config_lines.push(line.to_owned()),
+            ["screenshot", "set", "cutout", bounds @ ..] => {
+                script.cutout = parse_cutout(bounds);
+            }
             _ => {
                 if let Some(step) = parse_input_step(&lower) {
                     script.steps.push(step);
@@ -798,6 +809,63 @@ fn parse_shipped_retrosh(text: &str) -> ShippedScript {
         }
     }
     script
+}
+
+/// The four bounds of `screenshot set cutout`, which upstream writes as
+/// `x1=300 y1=26 x2=912 y2=311` and older checkouts as `300 26 912 311`.
+fn parse_cutout(bounds: &[&str]) -> Option<[u32; 4]> {
+    let [x1, y1, x2, y2] = bounds else {
+        return None;
+    };
+    let bound = |word: &str, name: &str| -> Option<u32> {
+        let value = match word.split_once('=') {
+            Some((key, value)) if key == name => value,
+            Some(_) => return None,
+            None => word,
+        };
+        value.parse().ok()
+    };
+    Some([
+        bound(x1, "x1")?,
+        bound(y1, "y1")?,
+        bound(x2, "x2")?,
+        bound(y2, "y2")?,
+    ])
+}
+
+/// The top-left texel of a vAmiga regression dump (716x285 from here).
+const VAMIGA_DUMP_X1: u32 = 196;
+const VAMIGA_DUMP_Y1: u32 = 26;
+const VAMIGA_DUMP_WIDTH: usize = 716;
+const VAMIGA_DUMP_HEIGHT: usize = 285;
+
+/// Blank a regression dump outside a script's cutout the way vAmiga's
+/// RegressionTester does: an 8-texel grey checkerboard (0x22 / 0x44) laid
+/// over the texture grid. The scoring tools recognise that fill and leave
+/// it out, so a generated reference scores the same region as the shipped
+/// one. Done here instead of in the generated script because the spelling
+/// of `screenshot set cutout` differs between VAHeadless versions.
+fn mask_vamiga_dump_outside_cutout(raw: &mut [u8], cutout: [u32; 4]) {
+    let [x1, y1, x2, y2] = cutout;
+    for (row, line) in raw
+        .chunks_exact_mut(VAMIGA_DUMP_WIDTH * 3)
+        .take(VAMIGA_DUMP_HEIGHT)
+        .enumerate()
+    {
+        let y = VAMIGA_DUMP_Y1 + row as u32;
+        for (col, texel) in line.chunks_exact_mut(3).enumerate() {
+            let x = VAMIGA_DUMP_X1 + col as u32;
+            if (y1..y2).contains(&y) && (x1..x2).contains(&x) {
+                continue;
+            }
+            let grey = if (y >> 3) & 1 == (x >> 3) & 1 {
+                0x22
+            } else {
+                0x44
+            };
+            texel.fill(grey);
+        }
+    }
 }
 
 /// `df1` .. `df3` as a drive index.
@@ -1390,6 +1458,61 @@ fn vamiga_retroshell_script_uses_temp_paths_and_setup() {
     assert!(script.contains("regression run /tmp/bbusy0.adf"));
     assert!(script.contains("wait 9 seconds"));
     assert!(script.contains("screenshot save bbusy0"));
+}
+
+#[test]
+fn shipped_cutout_is_parsed_in_both_spellings() {
+    let named = parse_shipped_retrosh(
+        "regression setup A500_OCS_1MB /tmp/kick13.rom\n\
+         screenshot set cutout x1=300 y1=26 x2=912 y2=311\n\
+         regression run /tmp/lc1.adf\n",
+    );
+    assert_eq!(named.cutout, Some([300, 26, 912, 311]));
+
+    let positional = parse_shipped_retrosh("screenshot set cutout 300 26 912 311\n");
+    assert_eq!(positional.cutout, Some([300, 26, 912, 311]));
+
+    // Bounds in another order, or too few of them, are not guessed at.
+    for line in [
+        "screenshot set cutout y1=26 x1=300 x2=912 y2=311\n",
+        "screenshot set cutout 300 26 912\n",
+        "screenshot set filename lc1\n",
+    ] {
+        assert_eq!(parse_shipped_retrosh(line).cutout, None, "{line}");
+    }
+}
+
+#[test]
+fn generated_reference_is_masked_outside_the_shipped_cutout() {
+    let mut raw = vec![0xFFu8; VAMIGA_DUMP_WIDTH * VAMIGA_DUMP_HEIGHT * 3];
+    // Texture columns 300..912 and rows 34..311: the dump starts at texel
+    // (196, 26), so the box begins 104 columns in and 8 rows down.
+    mask_vamiga_dump_outside_cutout(&mut raw, [300, 34, 912, 311]);
+    let texel = |col: usize, row: usize| {
+        let at = (row * VAMIGA_DUMP_WIDTH + col) * 3;
+        [raw[at], raw[at + 1], raw[at + 2]]
+    };
+
+    // Inside the box the picture is untouched, up to both far edges.
+    assert_eq!(texel(104, 8), [0xFF; 3]);
+    assert_eq!(texel(715, 284), [0xFF; 3]);
+    // Left of it and above it lies vAmiga's checkerboard: 8-texel cells on
+    // the texture grid, 0x22 where the cell row and column parities agree.
+    assert_eq!(texel(103, 8), [0x44; 3]); // texel (299, 34): cells 37, 4
+    assert_eq!(texel(95, 8), [0x22; 3]); // texel (291, 34): cells 36, 4
+    assert_eq!(texel(104, 7), [0x44; 3]); // texel (300, 33): cells 37, 4
+    assert_eq!(texel(0, 0), [0x44; 3]); // texel (196, 26): cells 24, 3
+    assert_eq!(texel(4, 0), [0x22; 3]); // texel (200, 26): cells 25, 3
+    assert_eq!(texel(0, 6), [0x22; 3]); // texel (196, 32): cells 24, 4
+
+    // The bounds are half-open: a box that stops one texel short of the
+    // right and bottom edges blanks that last column and row.
+    let mut raw = vec![0xFFu8; VAMIGA_DUMP_WIDTH * VAMIGA_DUMP_HEIGHT * 3];
+    mask_vamiga_dump_outside_cutout(&mut raw, [196, 26, 911, 310]);
+    let at = |col: usize, row: usize| raw[(row * VAMIGA_DUMP_WIDTH + col) * 3];
+    assert_eq!(at(714, 283), 0xFF);
+    assert_ne!(at(715, 283), 0xFF);
+    assert_ne!(at(714, 284), 0xFF);
 }
 
 #[test]

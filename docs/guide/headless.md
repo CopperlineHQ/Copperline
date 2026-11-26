@@ -570,7 +570,9 @@ Test options:
   `<case>.vamiga.raw` in the output directory. No vAmiga build is needed.
 - `COPPERLINE_VAMIGATS_VAMIGA=PATH`: Generate the reference instead, by
   running a local `VAHeadless` binary on a script that mirrors the case
-  (collision detection is always switched on in it). Not together with
+  (collision detection is always switched on in it). A case's
+  `screenshot set cutout` is applied to the generated dump, so it scores
+  the same region as the shipped one. Not together with
   `COPPERLINE_VAMIGATS_SHIPPED_REFS`.
 - `COPPERLINE_VAMIGATS_VAMIGA_SETUP=SETUP`: Machine setup for every
   reference run, instead of the one each case's script names.
