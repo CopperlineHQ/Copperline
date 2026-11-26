@@ -403,14 +403,26 @@ modified bit goes through the normal translation path.
   and a fault on the destination of MOVE, CMPM or ADDX/SUBX keeps the
   source register's update, while `(An)+` and MOVE.L to `-(An)` leave An
   as it was. JMP, JSR and DBcc to an odd target fault inside the
-  instruction, on the 68010 as well: the frame stacks the opcode address
-  + 2, JSR has pushed nothing, and DBcc faults even when its counter has
-  expired. PEA with an odd stack pointer and MOVEM `(d8,An,Xn)` stack
-  their measured PCs, MOVE.B/.W set the CCR before the destination
-  write, and DIVU overflow sets N and clears Z. The 68010 keeps the
-  core's restart model (the instruction address as the stacked PC and a
-  full register rollback), so its frames match hardware only in the
-  special status word, the fault address and the CCR.
+  instruction, on the 68010 as well: JSR has pushed nothing, and DBcc
+  faults even when its counter has expired. The PC the 68000 stacks for
+  them depends on the instruction. It is the opcode address + 2 for
+  DBcc, for JSR `(An)` and `(d16,An)` and for every JMP mode: JMP
+  `(An)`, JSR `(d16,An)` and DBcc are the photographed cases, and the
+  SingleStepTests traces give the same value for JSR `(An)` and the
+  other JMP modes. The remaining JSR modes (indexed, PC-relative and
+  absolute) have no photograph and keep the SingleStepTests value, the
+  address of the next instruction: opcode + 4, or + 6 for `JSR xxx.L`.
+  PEA with an odd stack pointer and MOVEM `(d8,An,Xn)` stack their
+  measured PCs, MOVE.B/.W set the CCR before the destination write, and
+  DIVU overflow sets N and clears Z. The 68010 keeps the core's restart model: a full
+  register rollback, and the instruction's own address as the stacked
+  PC whatever the instruction (an odd `JMP (An)` at `$2000` stacks
+  `$2000`, where the 68000 stacks `$2002`), so its frames match
+  hardware only in the special status word, the fault address and the
+  CCR. The debugger's exception stop is separate from both frames: for
+  an odd jump target it reports the address of the jump instruction
+  itself as the faulting PC on the 68000 and the 68010, and the odd
+  target from the 68020 on.
 - **FPU.** Enabled exceptions (BSUN, SNAN, OPERR, OVFL, UNFL, DZ, INEX)
   are taken through vectors 48-54. A signalling NaN raises SNAN alone.
   FPCR and FPSR read their unused bits as zero. FRESTORE validates the
