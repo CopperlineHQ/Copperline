@@ -1103,6 +1103,114 @@ fn console_submission_survives_a_failed_presentation_without_repeating() {
     assert_eq!(app.emu.retired_instructions(), before + 1);
 }
 
+/// The console output's text shape (its first line starts `000 `) and the
+/// clip rect it is drawn in.
+fn console_output_rect(output: &egui::FullOutput) -> (egui::Rect, egui::Rect) {
+    output
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.text().starts_with("000 ") => Some((
+                egui::Rect::from_min_size(text.pos, text.galley.size()),
+                clipped.clip_rect,
+            )),
+            _ => None,
+        })
+        .expect("console output text")
+}
+
+#[test]
+fn console_submit_jumps_to_the_end_and_keeps_the_horizontal_scroll() {
+    let mut app = test_app();
+    app.open_console();
+    let context = egui::Context::default();
+    let mut layout = Layout::default();
+    let mut panel = app.console_panel.clone().unwrap();
+    panel.output = (0..200)
+        .map(|i| format!("{i:03} {}", "wide column ".repeat(40)))
+        .collect();
+    let frame = |layout: &mut Layout, panel: &mut ui::ConsolePanel, events| {
+        layout_content_frame(
+            &context,
+            layout,
+            input([1100.0, 760.0], events),
+            Content::Console(panel, "Paused"),
+        )
+        .0
+    };
+    let pointer = egui::Event::PointerMoved(egui::pos2(550.0, 400.0));
+    let (home, clip) = console_output_rect(&frame(&mut layout, &mut panel, vec![pointer.clone()]));
+    frame(
+        &mut layout,
+        &mut panel,
+        vec![
+            pointer.clone(),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                // Right by 300 points, and up past the top: the console
+                // starts pinned to the end of its output.
+                delta: egui::vec2(-300.0, 100_000.0),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    let mut scrolled = home;
+    for _ in 0..60 {
+        scrolled = console_output_rect(&frame(&mut layout, &mut panel, vec![pointer.clone()])).0;
+    }
+    assert!(
+        scrolled.min.x < home.min.x - 100.0,
+        "scrolled right: {scrolled:?}"
+    );
+    assert!(
+        (scrolled.min.y - clip.min.y).abs() < 20.0,
+        "scrolled to the top: {scrolled:?} in {clip:?}"
+    );
+    panel.input = "status".into();
+    frame(
+        &mut layout,
+        &mut panel,
+        vec![
+            pointer.clone(),
+            key(egui::Key::Enter, egui::Modifiers::NONE),
+        ],
+    );
+    let mut end = scrolled;
+    for _ in 0..3 {
+        end = console_output_rect(&frame(&mut layout, &mut panel, vec![pointer.clone()])).0;
+    }
+    assert!(
+        (end.min.x - scrolled.min.x).abs() < 1.0,
+        "horizontal offset kept: {end:?}"
+    );
+    // The end is where scrolling all the way down by wheel stops.
+    frame(
+        &mut layout,
+        &mut panel,
+        vec![
+            pointer.clone(),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -100_000.0),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    let mut bottom = end;
+    for _ in 0..60 {
+        bottom = console_output_rect(&frame(&mut layout, &mut panel, vec![pointer.clone()])).0;
+    }
+    assert!(end.max.y < scrolled.max.y - 100.0, "moved down: {end:?}");
+    assert!(
+        (end.max.y - bottom.max.y).abs() < 1.0,
+        "jumped to the end: {end:?}, end of output {bottom:?}"
+    );
+}
+
 #[test]
 fn console_batches_preserve_case_and_ignore_blank_lines() {
     let mut app = test_app();

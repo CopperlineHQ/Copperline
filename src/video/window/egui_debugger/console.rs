@@ -95,18 +95,20 @@ impl Layout {
                     .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join("\n");
-                ui.add(
+                let text = ui.add(
                     egui::Label::new(RichText::new(output).monospace())
                         .selectable(true)
                         .wrap_mode(egui::TextWrapMode::Extend),
                 );
                 // A submission jumps to the end of the output, where
-                // `stick_to_bottom` then keeps it. egui 0.37 lays an
-                // infinite scroll offset out as a NaN rect, so the jump
-                // scrolls to the bottom of what was just laid out instead.
+                // `stick_to_bottom` then keeps it. Only the vertical offset
+                // moves, so a reader of wide output's right-hand columns
+                // keeps their place. egui 0.37 lays an infinite offset out
+                // as a NaN rect, so the jump is a finite scroll by the
+                // whole output's height, which the area clamps to its end.
                 if to_end {
-                    ui.scroll_to_cursor_animation(
-                        Some(egui::Align::BOTTOM),
+                    ui.scroll_with_delta_animation(
+                        egui::vec2(0.0, -text.rect.height()),
                         egui::style::ScrollAnimation::none(),
                     );
                 }
