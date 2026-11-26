@@ -3,12 +3,12 @@
 ## The wrapper and the bus adapter
 
 `M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core: release
-0.18.0 with the 68010's conditional branch times and MOVE bus order on
-top.
+0.18.1 with the 68000 and 68010 address-error frames and side effects
+measured on an A500 on top.
 The exact commit is also tagged
-[copperline-68010-0.18.0-2](https://github.com/CopperlineHQ/m68k-rs/tree/copperline-68010-0.18.0-2).
+[copperline-addrerr-0.18.1-2](https://github.com/CopperlineHQ/m68k-rs/tree/copperline-addrerr-0.18.1-2).
 Switch back to the published crate when a release includes
-[upstream PR #271](https://github.com/benletchford/m68k-rs/pull/271).
+[upstream PR #275](https://github.com/benletchford/m68k-rs/pull/275).
 
 The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
@@ -396,6 +396,33 @@ modified bit goes through the normal translation path.
   traces. The 68010 frame carries the special status word and the fault
   address. The 68020/68030 stack the format $B bus fault frame for an odd
   instruction fetch, the 68060 the format $2 frame the 68040 already had.
+  Where the manual is silent, the 68000 follows the vAmigaTS
+  `CPU/Exceptions/StackFrame/addrerr11`-`43` tests, each photographed on
+  an A500. A fault does not undo an address register update the CPU has
+  already written back: a `-(An)` operand read leaves An decremented,
+  and a fault on the destination of MOVE, CMPM or ADDX/SUBX keeps the
+  source register's update, while `(An)+` and MOVE.L to `-(An)` leave An
+  as it was. JMP, JSR and DBcc to an odd target fault inside the
+  instruction, on the 68010 as well: JSR has pushed nothing, and DBcc
+  faults even when its counter has expired. The PC the 68000 stacks for
+  them depends on the instruction. It is the opcode address + 2 for
+  DBcc, for JSR `(An)` and `(d16,An)` and for every JMP mode: JMP
+  `(An)`, JSR `(d16,An)` and DBcc are the photographed cases, and the
+  SingleStepTests traces give the same value for JSR `(An)` and the
+  other JMP modes. The remaining JSR modes (indexed, PC-relative and
+  absolute) have no photograph and keep the SingleStepTests value, the
+  address of the next instruction: opcode + 4, or + 6 for `JSR xxx.L`.
+  PEA with an odd stack pointer and MOVEM `(d8,An,Xn)` stack their
+  measured PCs, MOVE.B/.W set the CCR before the destination write, and
+  DIVU overflow sets N and clears Z. The 68010 keeps the core's restart model: a full
+  register rollback, and the instruction's own address as the stacked
+  PC whatever the instruction (an odd `JMP (An)` at `$2000` stacks
+  `$2000`, where the 68000 stacks `$2002`), so its frames match
+  hardware only in the special status word, the fault address and the
+  CCR. The debugger's exception stop is separate from both frames: for
+  an odd jump target it reports the address of the jump instruction
+  itself as the faulting PC on the 68000 and the 68010, and the odd
+  target from the 68020 on.
 - **FPU.** Enabled exceptions (BSUN, SNAN, OPERR, OVFL, UNFL, DZ, INEX)
   are taken through vectors 48-54. A signalling NaN raises SNAN alone.
   FPCR and FPSR read their unused bits as zero. FRESTORE validates the

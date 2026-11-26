@@ -109,6 +109,24 @@ for the earlier release notes.
   only happens after a step to a new row; such lines used to report a
   non-zero result they never drew.
 
+- A 68000 address error leaves the registers and the exception frame as
+  an A500 does. A fault on a `-(An)` operand read leaves An decremented,
+  and one on the destination of MOVE, CMPM or ADDX/SUBX keeps the source
+  register's update; `(An)+` and MOVE.L to `-(An)` leave An unchanged.
+  JMP, JSR and DBcc to an odd address fault inside the instruction (also
+  on a 68010): JSR has pushed nothing, and DBcc faults even when its
+  counter has run out, where it used to raise no exception. The frame no
+  longer stacks the odd target as its PC. A 68000 stacks the opcode
+  address + 2 for JMP, DBcc and JSR `(An)` or `(d16,An)`, and the
+  address of the next instruction for the other JSR modes, which no
+  hardware measurement covers; a 68010 stacks the address of the
+  instruction itself. PEA with an odd stack pointer and MOVEM with an
+  indexed source stack the PC the hardware does, MOVE.B and MOVE.W
+  record the new condition codes, and a DIVU overflow sets N and clears
+  Z. Copperline's own exception stop reports the address of the jump
+  instruction as the faulting PC on both CPUs, rather than its odd
+  target.
+
 - A save state preserves the 68040/68060 MMU translation cache. Resuming
   keeps the resident page mappings and the bus clocks a table walk would
   consume on a miss.

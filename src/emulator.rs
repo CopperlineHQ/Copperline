@@ -6955,9 +6955,9 @@ mod tests {
                 );
             }
 
-            // F80010 MOVEA.L #$1001,A0 / F80016 JMP (A0): an instruction
-            // fetch from an odd address, which faults on every model with
-            // its long bus/address error frame.
+            // F80010 MOVEA.L #$1001,A0 / F80016 JMP (A0): a jump to an odd
+            // address, which faults on every model with its long
+            // bus/address error frame.
             let mut emu = emulator_with_rom_program(
                 model,
                 &[
@@ -6971,16 +6971,23 @@ mod tests {
             );
             assert!(emu.machine.ui_toggle_catch(3));
             let stop = step_to_debug_stop(&mut emu, 64);
-            // The faulting access is the first opcode fetch at the
-            // target, so the stop names the target, not the JMP.
+            // The 68000 and 68010 take the fault inside the JMP, before the
+            // fetch at the target starts, so the stop names the JMP
+            // (measured on an A500: vAmigaTS addrerr28). From the 68020 on
+            // the faulting access is the first opcode fetch at the target,
+            // and the stop names the target.
+            let expected_fault_pc = match model {
+                CpuModel::M68000 | CpuModel::M68010 => 0x00F8_0016,
+                _ => 0x1001,
+            };
             assert!(
                 matches!(
                     stop,
                     DebugStop::Exception {
                         vector: 3,
                         pc: 0x00F8_0030,
-                        fault_pc: Some(0x1001),
-                    }
+                        fault_pc: Some(fault_pc),
+                    } if fault_pc == expected_fault_pc
                 ),
                 "{model:?}: {stop:?}"
             );

@@ -221,9 +221,9 @@ host-serial = ["dep:serialport"]
 [dependencies]
 # NewTek Video Flyer clips (container, VTASC codec): the flyerclip program.
 flyerclip = { path = "crates/flyerclip" }
-# The 68010 conditional branch times and MOVE bus order on top of 0.18.0.
+# The 68000/68010 address-error frames and side effects on top of 0.18.1.
 # Keep the conformance runner on the same revision (tools/check-m68k-locks.py).
-m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "9fc7d531ab77aa2687a0987630a071e1a43c45cb", features = ["serde"] }
+m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "82c915b022507482bf73cc937f6620282f4a9bd6", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "aa54c40c232a826f3d6f117ac8a0b165e7571f32", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
