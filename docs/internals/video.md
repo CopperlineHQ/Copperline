@@ -70,14 +70,51 @@ Overscan editor on ECS: DDFSTRT `$28` with DIWSTRT h `$5D`), the early
 words are visible inside the window rather than being snapped away
 (issue #186).
 
+Denise's display gate has two parts: the horizontal DIW flip-flop AND the
+rasterline's first BPL1DAT load. DIWSTRT alone does not open the window.
 When DDFSTRT is late enough that DIW opens before DMA has delivered the
-first BPL1DAT word for the row, playfield output remains border-colour until
-that plane-0 fetch reaches Denise instead of sampling stale shifter contents.
+first BPL1DAT word for the row, the output stays border until that plane-0
+fetch reaches Denise, and a rasterline with no BPL1DAT load at all (BPU = 0,
+or a mode whose fetch table carries no planes) is border across its full
+width whatever DIWSTRT and DIWSTOP say. On OCS Denise the border is COLOR00
+either way, so the distinction is invisible there; with ECS/AGA
+BPLCON3.BRDRBLNK (and ECSENA) those stretches are black, which is how the
+vAmigaTS `Denise/Registers/BPLCON3/brdrblnk2` and `Agnus/DDF/AGADDF`
+A1200 photos show it: plane-less Copper-ruler lines vanish under BRDRBLNK,
+and nothing but black sits left of the bitplane data. The window stays open
+from the load to DIWSTOP, so the stretch after the last fetched word keeps
+showing COLOR00. The gate column of a DMA line follows the BPL1DAT load
+itself (the last slot of the first fetch group), not the shifter reload the
+picture is placed at; the two coincide for an on-grid DDFSTRT. For an
+off-grid lo-res DDFSTRT the picture waits for the next reload slot while
+the gate is already open, so COLOR00 shows in front of the data
+(`Agnus/DDF/AGADDF/agaddf3`, DDFSTRT `$3C`: a grey strip left of the lo-res
+data on the A500+ and A1200 photos that the on-grid `agaddf1` lacks). The
+gate never opens after the first painted sample, so a wide-FMODE picture
+placed ahead of its fetch slot is not cut back, and BPLCON1 delays the data,
+not the gate, so a scrolled line shows COLOR00 between the two. A manual
+BPL1DAT write (Copper or CPU) opens the gate too, at the bus-recorded
+write column. After the playfield paint the renderer repaints the open-DIW
+stretch before the gate with the border pixel
+(`enforce_display_gate_border`), sampling BPLCON3 and COLOR00 per pixel.
+
 That gate is placed in the bitplane/DIW coordinate domain, not the normal
 Copper/register-write output domain, because it follows the fetch slot that
 loads BPL1DAT. Once that first DMA word is visible, the renderer samples the
 enabled bitplanes from the complete latched word; it does not expose the
 first word plane-by-plane according to each plane's individual DMA slot.
+
+BRDRBLNK itself switches the border between COLOR00 and black at Denise's
+colour-output stage: a BPLCON3 write that toggles it takes effect at the
+column a COLORxx write in the same bus slot would (without Lisa's
+one-hires-pixel palette delay), mid-line, so a BPLCON3 MOVE replacing one
+COLOR00 move of a Copper ruler blanks from exactly the stripe it replaces
+(`brdrblnk2` A500+ and A1200 photos). The other BPLCON3 fields keep the
+generic register timeline. The two timelines are independent: when a
+control write shortly before the toggle (a BPLCON2 MOVE in the previous
+Copper slot, say) has already recorded its change at a later column, the
+blanking bit still starts at its own colour-output column and is carried
+into that later change, and neither write moves the other.
 
 If a manual BPL1DAT write starts a word before a later DMA BPL1DAT load
 point, replay stops the manual word where that DMA word replaces Denise's
@@ -243,7 +280,17 @@ the carried-in run's data, with only the closed gap masked as border.
 Rows that enter the framebuffer closed keep the DIWSTRT anchor as the
 paint start, so ordinary windows clip exactly as before. (Sprites still
 clip by the register-derived window rather than the flip-flop -- a
-remaining gap.) Horizontal DIW clipping applies to sprites unless AGA
+remaining gap.) Sprites answer to the same two-part gate as the playfield:
+the horizontal DIW window AND the line's first BPL1DAT load, so a sprite
+between DIWSTRT and the first fetched word of a late-DDF line stays hidden
+and a sprite on a line with no BPL1DAT load is not shown. The vAmigaTS
+`Denise/Sprites/clip/diwclip1..8` photos show it on all three Denise
+generations (A500 with OCS Denise, A500+, A1200): the sprite bar's left
+edge holds at the first data pixel while DIWSTRT sweeps left of it, and
+the knee moves with DDFSTRT. The renderer's sprite clip uses the same
+per-line gate column as the border repaint above. The bus-side live
+collision detector still opens the gate of a DMA line at DIWSTRT -- a
+remaining gap. Horizontal DIW clipping applies to sprites unless AGA
 border sprites are enabled by BPLCON3.BRDSPRT; if BPLCON3.BRDRBLNK is
 asserted, the border-sprite bypass is suppressed along with the blanked
 border.

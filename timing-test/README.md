@@ -1138,12 +1138,12 @@ eight 64 KiB banks. Copperline follows the 2 MiB select decoded by the
 
 ## Denise and Lisa register probes
 
-`./build.sh ecsblank-pin`, `ehbprobe-kill`, `diwhigh-fine`,
-`hamprobe-shres6` and `shresprobe-pair` build five display probes for
-behaviour that differs by Denise generation. All five are golden renders
-in `tests/probe_golden.rs`; `ecsblank-pin`, `ehbprobe-kill` and
-`shresprobe-pair` boot twice, on two Denise revisions beside the same
-Agnus.
+`./build.sh ecsblank-pin`, `ehbprobe-kill`, `gateprobe-brdrblnk`,
+`diwhigh-fine`, `hamprobe-shres6` and `shresprobe-pair` build six display
+probes for behaviour that differs by Denise generation. All six are golden
+renders in `tests/probe_golden.rs`; `ecsblank-pin`, `ehbprobe-kill`,
+`gateprobe-brdrblnk` and `shresprobe-pair` boot twice, on two Denise
+revisions beside the same Agnus.
 
 | Probe | Machine | Expected observation |
 |---|---|---|
@@ -1151,6 +1151,8 @@ Agnus.
 | `ecsblank-pin` | ECS Agnus with an OCS Denise (late A500, A2000) | The same ruler with no slit: BEAMCON0.BLANKEN alone does not reach the picture. |
 | `ehbprobe-kill` | Any OCS Denise | Grey and orange bars, the right half of the line at half intensity: the 8362 has no KILLEHB and stays extra-half-brite. |
 | `ehbprobe-kill` | ECS Agnus with an ECS Denise | Both halves alike: KILLEHB turns extra-half-brite off, without ECSENA. |
+| `gateprobe-brdrblnk` | ECS Agnus with an ECS Denise | BRDRBLNK black border; one-plane yellow bars. DDFSTRT `$50` lines are black up to the first data pixel at `$B1` (not grey from DIWSTRT `$81`) and grey after the data to DIWSTOP. Plane-less lines with BRDRBLNK are black edge to edge; a plane-less Copper ruler with BRDRBLNK written at stripe 20 and cleared at stripe 32 is black between exactly those stripes. On the late-DDF sprite band the magenta sprite (wholly between DIWSTRT and the data) is hidden and the green one shows only from `$B1`; both show in full on the standard-DDF band; neither shows on plane-less lines. |
+| `gateprobe-brdrblnk` | ECS Agnus with an OCS Denise | No BRDRBLNK: border and gated stretches are all COLOR00 grey and the rulers show in full, but the sprite gate is the same as on the ECS Denise. |
 | `shresprobe-pair` | ECS Agnus with an ECS Denise | Seventeen flat bands on black. Bands 0-15 are COLOR00 to COLOR15 in order: red steps 0, 5, A, F every band and green steps every four bands. Band 16 is flat mid grey. ECS Denise pairs super-hires pixels across each lo-res-wide group into one register and splits its nibbles over the pair (band 16's COLOR05 $C3C shows as $F0F and $0F0). |
 | `shresprobe-pair` | ECS Agnus with an OCS Denise | Red only, no green: each pixel looks its own register up (COLOR k&3 beside COLOR k>>2), and band 16 is dark red COLOR01. |
 | `diwhigh-fine` | A1200 or A4000 | Yellow field on dark blue in twelve 16-line bands from line `$40`. In the first four the left edge steps right one 35 ns column per band, in the next four the right edge does, in the last four both do. The harness checks every step. |
@@ -1172,6 +1174,7 @@ vAmiga where it models the behaviour (`tools/vamiga-ref.sh`,
 | `ehbprobe-kill-ecs-denise` | not a reference: 4.4 keeps extra-half-brite on `A500_PLUS_1MB`, it has no KILLEHB |
 | `ecsblank-pin` | not a reference: 4.4 draws no slit on `A500_PLUS_1MB`, it has no EXTBLKEN |
 | `diwhigh-fine` | not comparable: vAmiga has no native 35 ns AGA frame |
+| `gateprobe-brdrblnk`, `gateprobe-brdrblnk-ocs-denise` | not a reference in 5.1: the BPL1DAT display gate and mid-line BRDRBLNK are in vAmiga's upstream master, after 5.1. The hardware evidence is the vAmigaTS `brdrblnk2`, `AGADDF` and `diwclip` photographs |
 | `shresprobe-pair` | not cross-checked: vAmiga implements the pairing after 5.1 (`PixelEngine::colorizeShres`); the rule is from the vAmigaTS `Denise/Modes/shres` A500+ photographs |
 | `shresprobe-pair-ocs-denise` | not a reference: what an 8362 does with BPLCON0 bit 6 is unmeasured; the render pins Copperline's unchanged per-pixel path |
 

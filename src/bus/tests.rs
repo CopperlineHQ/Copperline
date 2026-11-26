@@ -6755,7 +6755,7 @@ fn bitplane_dma_sets_sprite_display_enable_at_display_window_start() {
 }
 
 #[test]
-fn late_bitplane_fetch_does_not_delay_sprite_display_inside_diw() {
+fn late_bitplane_fetch_records_coarse_display_enable_at_diw_start() {
     let mut bus = empty_bus();
     bus.agnus.dmacon = DMACON_DMAEN | DMACON_BPLEN;
     bus.agnus.vpos = RENDER_VISIBLE_START_VPOS;

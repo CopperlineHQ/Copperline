@@ -127,6 +127,22 @@ for the earlier release notes.
   instruction as the faulting PC on both CPUs, rather than its odd
   target.
 
+- With BPLCON3 BRDRBLNK set on an ECS or AGA Denise, a rasterline with no
+  bitplanes enabled is now black across its whole width, and the stretch
+  between DIWSTRT and the first fetched bitplane word of a line is black
+  too. Denise opens its display window only at the line's first BPL1DAT
+  load; everything before it is border. Copperline showed COLOR00 there,
+  so plane-less Copper rulers that are invisible on a real A1200 appeared,
+  and a grey band sat left of late-starting bitplane data.
+- A BPLCON3 write that sets or clears BRDRBLNK now blanks the border from
+  the pixel the write lands on, as a COLOR00 write in the same Copper slot
+  would. It took effect 13 colour clocks (52 pixels) later, so a ruler
+  with a BRDRBLNK toggle showed an extra stripe before going black.
+- Sprites are now clipped by the same display gate as the playfield, on
+  OCS, ECS and AGA alike: a sprite between DIWSTRT and the first fetched
+  bitplane word of a line stays hidden until the data starts, instead of
+  showing from DIWSTRT.
+
 - A save state preserves the 68040/68060 MMU translation cache. Resuming
   keeps the resident page mappings and the bus clocks a table walk would
   consume on a miss.

@@ -1015,6 +1015,168 @@ fn enforce_h_window_closed_intervals(
     }
 }
 
+/// Framebuffer columns between the fetch slot of a plane-0 word
+/// ([`bitplane_fetch_framebuffer_x`]) and the column at which that BPL1DAT
+/// load opens Denise's display gate. Calibrated so that on-grid fetches
+/// (DDFSTRT $38 lo-res, $3C hi-res: the BPL1DAT slot at $3F) open the gate
+/// exactly at the first data pixel, DIW $81 -- the AGADDF and diwclip
+/// photographs show no COLOR00 in front of on-grid data.
+const BPL1DAT_DISPLAY_GATE_LAG_FB: usize = 6;
+
+/// Framebuffer column at which a bitplane-DMA line's first BPL1DAT load
+/// opens Denise's display gate.
+///
+/// The gate is set by the BPL1DAT write itself, not by the shifter load the
+/// renderer places the picture at. For an on-grid DDFSTRT the two coincide.
+/// For an off-grid lo-res DDFSTRT the picture waits for the next reload slot
+/// while the gate is already open, so COLOR00 shows between them (vAmigaTS
+/// Agnus/DDF/AGADDF agaddf3, DDFSTRT $3C: the A500+ and A1200 photos have a
+/// grey strip left of the lo-res data that the on-grid agaddf1 lacks). The
+/// gate never opens after the first painted sample (`painted_start_x`, the
+/// first fetched sample before any BPLCON1 delay): a wide-FMODE picture
+/// placed ahead of its fetch slot is not cut back.
+fn dma_display_gate_x(painted_start_x: usize, bpl1dat_fetch_hpos: Option<u32>) -> usize {
+    bpl1dat_fetch_hpos.map_or(painted_start_x, |hpos| {
+        (bitplane_fetch_framebuffer_x(hpos) + BPL1DAT_DISPLAY_GATE_LAG_FB).min(painted_start_x)
+    })
+}
+
+/// Colour clock of a line's first BPL1DAT load, given the start of its
+/// first fetch group: BPL1DAT is the last slot of the group (lo-res offset
+/// 7, hi-res 3, super-hires 1; a wide-FMODE group is that many words long).
+fn bpl1dat_first_fetch_hpos(control: ControlState, word_fetch_hpos: Option<u32>) -> Option<u32> {
+    word_fetch_hpos.map(|hpos| hpos + control.fetch_cck_per_word() * control.fetch_quantum() - 1)
+}
+
+/// The first fetched sample of a painted bitplane-DMA line, before any
+/// BPLCON1 delay: the column the playfield paint starts from.
+fn dma_painted_start_x(control: ControlState, x_start: usize, bpl_output_start_x: usize) -> usize {
+    let repeat = control.framebuffer_pixel_repeat();
+    let native = control.native_samples_per_framebuffer_pixel();
+    let fetch_start = control.fetch_start_native_x(control.diw_h_start(), repeat);
+    (x_start + fetch_start.div_ceil(native) * repeat).max(bpl_output_start_x)
+}
+
+/// Colour clocks between a manual BPL1DAT write's recorded render-event
+/// position and the Denise-side column the bus records for it: the event
+/// carries the write slot plus the Denise write-effect delay (4 CCK), the
+/// bus enable column the slot minus Denise's pixel-counter lag (4 CCK).
+const MANUAL_BPL1DAT_GATE_EVENT_LAG_CCK: i32 = 8;
+
+fn manual_bpl1dat_gate_x(event_hpos: u32) -> usize {
+    ((event_hpos as i32 - MANUAL_BPL1DAT_GATE_EVENT_LAG_CCK - copper_wait_hpos_fb0()).max(0) * 4)
+        .min(FB_WIDTH as i32) as usize
+}
+
+/// Per-row column of Denise's display gate -- the first BPL1DAT load of the
+/// line -- or `None` for a line with no load, which is border across its
+/// full width. A painted bitplane-DMA line takes its first BPL1DAT load
+/// (or an earlier manual write); any other line keeps the bus-recorded
+/// column (manual BPL1DAT writes, and DMA lines the paint did not handle),
+/// or failing that the column of its first manual BPL1DAT write event.
+fn display_gate_x_by_line_into(
+    out: &mut Vec<Option<usize>>,
+    dma_display_gate_x_by_line: &[Option<usize>],
+    manual_bpl_segments: &[ManualBplSegment],
+    bus_display_enable_x_by_y: &[Option<usize>],
+    rows: usize,
+) {
+    out.clear();
+    out.extend((0..rows).map(|y| bus_display_enable_x_for_y(bus_display_enable_x_by_y, y)));
+    for (y, gate) in out.iter_mut().enumerate() {
+        if let Some(dma_x) = dma_display_gate_x_by_line.get(y).copied().flatten() {
+            *gate = Some(dma_x);
+        }
+    }
+    for seg in manual_bpl_segments {
+        // A line without bitplane DMA keeps the bus-recorded write column
+        // when there is one; the event-derived write column only fills a
+        // gap (a frame whose events were not recorded through the bus).
+        let dma_line = dma_display_gate_x_by_line
+            .get(seg.line)
+            .copied()
+            .flatten()
+            .is_some();
+        let bus_recorded = bus_display_enable_x_by_y
+            .get(seg.line)
+            .copied()
+            .flatten()
+            .is_some();
+        let Some(gate) = out.get_mut(seg.line) else {
+            continue;
+        };
+        let mut manual_x = seg.x.clamp(0, FB_WIDTH as i32) as usize;
+        if dma_line || !bus_recorded {
+            manual_x = manual_x.min(manual_bpl1dat_gate_x(seg.hpos));
+        }
+        // The window is open wherever the manual word itself is shown:
+        // the serialiser load can sit a little left of the write column.
+        *gate = Some(gate.map_or(manual_x, |x| x.min(manual_x)));
+    }
+}
+
+/// Repaint the stretch of each row where the DIW flip-flop is open but the
+/// line's first BPL1DAT load has not happened yet with the border pixel.
+/// Runs after the playfield paint (which never draws there) and before the
+/// sprites (which the same gate clips). BRDRBLNK and COLOR00 are sampled
+/// per pixel, so a mid-line BPLCON3 write lands where it was written.
+#[allow(clippy::too_many_arguments)]
+fn enforce_display_gate_border(
+    fb: &mut [u32],
+    sprite_subpixels: &mut SpriteSubpixelState,
+    base_palettes: &[Palette],
+    palette_segments: &[Vec<PaletteSegment>],
+    base_controls: &[ControlState],
+    control_segments: &[Vec<ControlSegment>],
+    h_window_rows: &[HWindowRow],
+    display_gate_x_by_line: &[Option<usize>],
+    visible_line0: i32,
+    rows: usize,
+) {
+    let canvas_scale = active_canvas_scale();
+    let out_w = FB_WIDTH * canvas_scale;
+    for y in 0..rows {
+        let gate_x = display_gate_x_by_line
+            .get(y)
+            .copied()
+            .unwrap_or(Some(0))
+            .unwrap_or(FB_WIDTH)
+            .min(FB_WIDTH);
+        if gate_x == 0 {
+            continue;
+        }
+        let row = &mut fb[y * out_w..(y + 1) * out_w];
+        for &(open_start, open_end) in h_window_rows[y].open_runs() {
+            let stop = open_end.min(gate_x);
+            let mut sx = open_start;
+            while sx < stop {
+                let control = control_at_x(base_controls[y], &control_segments[y], sx);
+                let next_bound = control_segments[y]
+                    .iter()
+                    .map(|seg| seg.x)
+                    .chain(palette_segments[y].iter().map(|seg| seg.x))
+                    .filter(|&b| b > sx)
+                    .min()
+                    .unwrap_or(FB_WIDTH)
+                    .min(stop);
+                // Outside the vertical window the background is border already.
+                if control.display_window_contains_line(y, visible_line0) {
+                    let palette = palette_at_x(base_palettes[y], &palette_segments[y], sx);
+                    let pixel = background_pixel(&control, palette[0], true);
+                    row[sx * canvas_scale..next_bound * canvas_scale].fill(pixel);
+                    if let Some(halves) = sprite_subpixels
+                        .pixels
+                        .get_mut(y * FB_WIDTH + sx..y * FB_WIDTH + next_bound)
+                    {
+                        halves.fill([pixel; 2]);
+                    }
+                }
+                sx = next_bound;
+            }
+        }
+    }
+}
+
 impl ControlState {
     fn from_render_state(state: &RenderState) -> Self {
         Self {
@@ -3054,6 +3216,32 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
                     );
                 }
             }
+            if off == 0x106
+                && !before_visible_lines
+                && (previous_control.bplcon3 ^ next_control.bplcon3) & BPLCON3_BRDRBLNK != 0
+            {
+                // BRDRBLNK switches Denise's border output between COLOR00
+                // and black at the colour-output stage, where a COLORxx
+                // write lands, not on the later generic register timeline:
+                // a BPLCON3 MOVE that replaces one COLOR00 move of a Copper
+                // ruler blanks from exactly the stripe it replaces (vAmigaTS
+                // Denise/Registers/BPLCON3/brdrblnk2, A500+ and A1200
+                // photos). Lisa's one-hires-pixel colour delay does not
+                // apply: it is a property of the palette path. A control
+                // write a few colour clocks earlier has its own segment on
+                // the register timeline, to the right of this one; it keeps
+                // its position and takes the new blanking bit.
+                let blank_x = color_write_framebuffer_x(event.hpos, false);
+                if blank_x < beam_x {
+                    set_border_blank_from_x(
+                        control_segments,
+                        line,
+                        blank_x,
+                        base_controls[line],
+                        next_control.bplcon3 & BPLCON3_BRDRBLNK != 0,
+                    );
+                }
+            }
             control = next_control;
             if before_visible_lines {
                 // A write above the first rendered line is folded into row
@@ -3269,6 +3457,49 @@ fn push_control_segment(
         return;
     }
     control_segments[line].push(ControlSegment { x, control });
+}
+
+/// Switch BRDRBLNK from framebuffer column `x` to the end of the line,
+/// leaving every other control bit where the segments already recorded put
+/// it. BRDRBLNK acts at the colour-output stage, ahead of the generic
+/// register timeline, so `x` can lie left of segments an earlier write on
+/// the line has recorded: those keep their columns and carry the new bit.
+fn set_border_blank_from_x(
+    control_segments: &mut [Vec<ControlSegment>],
+    line: usize,
+    x: usize,
+    base_control: ControlState,
+    blank: bool,
+) {
+    let Some(segments) = control_segments.get_mut(line) else {
+        return;
+    };
+    let x = x.min(FB_WIDTH);
+    let with_blank = |mut control: ControlState| {
+        control.bplcon3 =
+            (control.bplcon3 & !BPLCON3_BRDRBLNK) | if blank { BPLCON3_BRDRBLNK } else { 0 };
+        control
+    };
+    // Segments are recorded in ascending column order.
+    let at = segments.partition_point(|segment| segment.x < x);
+    for segment in &mut segments[at..] {
+        segment.control = with_blank(segment.control);
+    }
+    if segments.get(at).is_some_and(|segment| segment.x == x) {
+        return;
+    }
+    let in_force = at
+        .checked_sub(1)
+        .map_or(base_control, |before| segments[before].control);
+    if with_blank(in_force) != in_force {
+        segments.insert(
+            at,
+            ControlSegment {
+                x,
+                control: with_blank(in_force),
+            },
+        );
+    }
 }
 
 fn bitplane_scroll_effect_x(segment_x: usize, visible_x_stop: usize) -> usize {
@@ -4761,6 +4992,8 @@ struct RenderScratch {
     sprite_lines: [Vec<SpriteLine>; 8],
     attached_sprite_beams: [Vec<i32>; 4],
     dma_output_start_x_by_line: Vec<Option<usize>>,
+    dma_display_gate_x_by_line: Vec<Option<usize>>,
+    display_gate_x_by_line: Vec<Option<usize>>,
     h_window_rows: Vec<HWindowRow>,
     ham_select_pixels: Vec<u8>,
 }
@@ -5611,6 +5844,9 @@ fn render_from_input_with_scratch(
     let mut dma_output_start_x_by_line = std::mem::take(&mut scratch.dma_output_start_x_by_line);
     dma_output_start_x_by_line.resize(rows, None);
     dma_output_start_x_by_line.fill(None);
+    let mut dma_display_gate_x_by_line = std::mem::take(&mut scratch.dma_display_gate_x_by_line);
+    dma_display_gate_x_by_line.resize(rows, None);
+    dma_display_gate_x_by_line.fill(None);
 
     let background_started = render_timing_start();
     let mut h_window_rows = std::mem::take(&mut scratch.h_window_rows);
@@ -6055,6 +6291,15 @@ fn render_from_input_with_scratch(
             );
             let bpl_output_start_x = dma_output_start_x.unwrap_or(0);
             dma_output_start_x_by_line[y] = dma_output_start_x;
+            let bpl1dat_fetch_hpos = bpl1dat_first_fetch_hpos(
+                pixel_control,
+                line_fetch_plan_for_word(base_controls[y], row_control_segments, 0, 1)
+                    .word_fetch_hpos,
+            );
+            dma_display_gate_x_by_line[y] = Some(dma_display_gate_x(
+                dma_painted_start_x(pixel_control, x_start, bpl_output_start_x),
+                bpl1dat_fetch_hpos,
+            ));
             render_planned_playfield_line_with_subpixels(
                 &line_plan,
                 fb,
@@ -6162,6 +6407,31 @@ fn render_from_input_with_scratch(
         fb,
         visible_line0,
     );
+    // Denise's display gate is the DIW flip-flop AND the line's first
+    // BPL1DAT load. The playfield paint above already starts at the first
+    // fetched word; what is left between an open DIW edge and that load (or
+    // across a whole line with no load at all) is still border, which
+    // BRDRBLNK blanks. Sprites are clipped by the same gate below.
+    let mut display_gate_x_by_line = std::mem::take(&mut scratch.display_gate_x_by_line);
+    display_gate_x_by_line_into(
+        &mut display_gate_x_by_line,
+        &dma_display_gate_x_by_line,
+        &manual_bpl_segments,
+        sprite_display_enable_x_by_y,
+        rows,
+    );
+    enforce_display_gate_border(
+        fb,
+        &mut sprite_subpixels,
+        &base_palettes,
+        &palette_segments,
+        &base_controls,
+        &control_segments,
+        &h_window_rows,
+        &display_gate_x_by_line,
+        visible_line0,
+        rows,
+    );
     let sprite_started = render_timing_start();
     let mut sprite_group_mask = std::mem::take(&mut scratch.sprite_group_mask);
     let mut sprite_lines = std::mem::take(&mut scratch.sprite_lines);
@@ -6180,7 +6450,7 @@ fn render_from_input_with_scratch(
         &palette_segments,
         &base_controls,
         &control_segments,
-        sprite_display_enable_x_by_y,
+        &display_gate_x_by_line,
         &playfield_mask,
         &mut sprite_subpixels,
         &mut collision_pixels,
@@ -6213,7 +6483,7 @@ fn render_from_input_with_scratch(
         &palette_segments,
         &base_controls,
         &control_segments,
-        sprite_display_enable_x_by_y,
+        &display_gate_x_by_line,
         &playfield_mask,
         visible_line0,
     );
@@ -6297,6 +6567,8 @@ fn render_from_input_with_scratch(
     scratch.sprite_lines = sprite_lines;
     scratch.attached_sprite_beams = attached_sprite_beams;
     scratch.dma_output_start_x_by_line = dma_output_start_x_by_line;
+    scratch.dma_display_gate_x_by_line = dma_display_gate_x_by_line;
+    scratch.display_gate_x_by_line = display_gate_x_by_line;
     scratch.h_window_rows = h_window_rows;
     scratch.ham_select_pixels = ham_select_pixels;
     // COPPERLINE_DIAG_AUTOCROP: log the per-frame content envelope the
