@@ -284,6 +284,20 @@ for the earlier release notes.
   years since 1900 (126), as AROS writes the clock and as WinUAE and vAmiga
   present it. Kickstart 1.3 now reads the right date up to January 2046,
   where Kickstart's own count of seconds since 1978 overflows.
+- The bundled zz9k crypto board verifies RSA-4096 signatures. A 4096-bit
+  verify with the usual public exponent, 65537, ran out of the plugin's
+  per-call instruction budget and took the board offline, so software
+  using it stopped getting answers from it; a 3072-bit verify used 84% of
+  the budget. The board's RSA moves to rsa 0.10, whose verify costs less
+  than half as much, and its worst case (a 4096-bit key with a 32-bit
+  exponent) now completes. WebAssembly boards also get 100 million fuel
+  units per call instead of 50 million (see docs/zorro.md), so that worst
+  case keeps a 2x margin; the budget only stops a runaway plugin.
+- The zz9k board's P-256 key exchange and ECDSA arithmetic no longer takes
+  branches that depend on secret values: it is built on crypto-bigint
+  0.7.11, which fixes RUSTSEC-2026-0387 (0.7.5 was also yanked). The move
+  to rsa 0.10 also retires RUSTSEC-2023-0071, which concerned private-key
+  operations the board never performs.
 
 ### Compatibility
 
@@ -292,6 +306,12 @@ for the earlier release notes.
   boards map. 1.2.0 skips the new chunk (with a log line), so the chunk
   does not stop it reading states this build writes. Save states keep
   container version 82 and every existing chunk keeps its version.
+- The bundled zz9k board's plugin module has changed. A state with a
+  `[zz9k]` board saved by 1.2.0 still loads, unchecked as above, but the
+  board goes offline at its next request, because the saved plugin memory
+  belongs to the old module. Boot such a machine afresh and save a new
+  state. A state saved by a build that records firmware identities is
+  refused with an error instead.
 - Save states gain optional fields for Ramsey's DRAM-depth jumper and
   Agnus's board PAL/NTSC standard. States written before load as before
   and take both from the machine they describe; no chunk version moves.

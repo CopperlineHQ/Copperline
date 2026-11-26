@@ -541,7 +541,13 @@ fn write_resource_range(path: &Path, off: u64, buf: &[u8]) -> std::io::Result<()
 /// bounds a single call to a large but finite instruction budget instead;
 /// exhausting it surfaces as an ordinary trap through the existing
 /// log-and-fall-back-to-default handling at each call site.
-const PLUGIN_FUEL_BUDGET: u64 = 50_000_000;
+///
+/// The budget only stops runaways; it is not a timing model, and real
+/// boards have no such limit. It is sized at about twice the costliest
+/// legitimate call, the bundled zz9k board's RSA-4096 verify with a 32-bit
+/// exponent (about 48M), so a compiler or runtime update cannot tip a valid
+/// request into a trap. A runaway still ends in well under a second.
+const PLUGIN_FUEL_BUDGET: u64 = 100_000_000;
 
 /// Refill a store's fuel to [`PLUGIN_FUEL_BUDGET`] ahead of a plugin call.
 /// Only fails if fuel consumption isn't configured on the engine, which
@@ -3344,8 +3350,8 @@ mod tests {
             // (BAD_REQUEST beyond) precisely so the costliest allowed
             // request stays inside PLUGIN_FUEL_BUDGET for the single host
             // call that computes it -- SHA-512, the heaviest per-byte op,
-            // measures fine at 512 KiB and exhausts fuel at 1 MiB, so the
-            // cap keeps a >= 2x margin. Lock the cap here through the real
+            // fits in 50M fuel at 512 KiB, so at the cap it uses under a
+            // quarter of the budget. Lock the cap here through the real
             // fuel-metered wasmtime host: fuel exhaustion would trap and
             // fault the board, failing the status assertions.
             let cfg = crate::zz9k::board_config(ZorroVersion::III, 0x80_0000, false, None);
@@ -3371,6 +3377,52 @@ mod tests {
             assert_eq!((id, status), (4, 4), "BAD_REQUEST beyond the cap");
             // And the board is still alive (no fault happened).
             assert_eq!(r16(&mut b, &mut host, 0x0100), 0x5A39);
+        }
+
+        #[test]
+        fn zz9k_rsa_4096_verify_fits_the_fuel_budget() {
+            // The costliest VERIFY the board accepts is RSA-4096 with the
+            // largest exponent its 4-byte field can carry: rsa 0.10's
+            // fixed-window exponentiation costs by the exponent's bit
+            // length, so e = 0xFFFFFFFF is the worst case, at about 48M of
+            // the 100M PLUGIN_FUEL_BUDGET (e = 65537 takes about 35M). The
+            // num-bigint-dig code behind rsa 0.9 ran out of the earlier 50M
+            // budget on every RSA-4096 verify and faulted the board. Lock the worst case
+            // through the real fuel-metered wasmtime host. The modulus is an
+            // arbitrary odd 4096-bit number and the signature representative
+            // is 2: the full exponentiation still runs, and the board must
+            // answer "invalid" (status OK, valid flag 0) and stay online.
+            let cfg = crate::zz9k::board_config(ZorroVersion::III, 0x80_0000, false, None);
+            let mut b = WasmBoard::from_file(&cfg.wasm_path, cfg.manifest).unwrap();
+            let mut mem = empty_memory();
+            let mut host = DeviceHost::new(&mut mem);
+            let (hash, hash_off) = alloc(&mut b, &mut host, 1, 32);
+            let (sig, sig_off) = alloc(&mut b, &mut host, 2, 512);
+            let (key, key_off) = alloc(&mut b, &mut host, 3, 516);
+            wbytes(&mut b, &mut host, hash_off, &[0x5A; 32]);
+            let mut key_bytes: Vec<u8> = (0..512u32)
+                .map(|i| (i.wrapping_mul(0x9E37_79B9) >> 24) as u8)
+                .collect();
+            key_bytes[0] |= 0x80;
+            key_bytes[511] |= 1;
+            key_bytes.extend_from_slice(&0xFFFF_FFFFu32.to_be_bytes());
+            wbytes(&mut b, &mut host, key_off, &key_bytes);
+            let mut sig_bytes = [0u8; 512];
+            sig_bytes[511] = 2;
+            wbytes(&mut b, &mut host, sig_off, &sig_bytes);
+            let mut p = [0u8; 40];
+            p[0..4].copy_from_slice(&2u32.to_be_bytes()); // RSA PKCS#1 SHA-256
+            p[4..8].copy_from_slice(&hash.to_be_bytes());
+            p[12..16].copy_from_slice(&32u32.to_be_bytes());
+            p[16..20].copy_from_slice(&sig.to_be_bytes());
+            p[24..28].copy_from_slice(&512u32.to_be_bytes());
+            p[28..32].copy_from_slice(&key.to_be_bytes());
+            p[36..40].copy_from_slice(&516u32.to_be_bytes());
+            submit(&mut b, &mut host, 4, 0x0804, &p);
+            let (id, status, payload) = wait(&mut b, &mut host);
+            assert_eq!((id, status), (4, 0));
+            assert_eq!(&payload[0..4], &0u32.to_be_bytes(), "not a valid signature");
+            assert_eq!(r16(&mut b, &mut host, 0x0100), 0x5A39, "board still online");
         }
 
         #[test]
