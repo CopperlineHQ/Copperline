@@ -89,7 +89,10 @@ for the earlier release notes.
   so Copperline now receives them from the compositor itself. A drop is
   always taken as a copy, so the file manager never moves the dropped
   file. Running through XWayland (`WAYLAND_DISPLAY=` before the command) is
-  no longer needed for drag and drop.
+  no longer needed for drag and drop. Copy and paste in Copperline's text
+  boxes and debugger console go through the same connection: compositors
+  such as Hyprland send drops and the clipboard only to an application's
+  first one, so pasting from other applications there keeps working too.
 
 - Super-hires screens on an ECS Denise (A500+, A600, A3000) show the
   colours the hardware shows. ECS Denise cannot look a colour up for every

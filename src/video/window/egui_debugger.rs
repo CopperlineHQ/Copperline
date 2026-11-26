@@ -4,7 +4,7 @@
 //! commands leave as actions, after egui's (potentially repeated) layout pass.
 //! The Amiga display and egui share the main window and its GPU surface.
 
-use super::{analyzer_layout_rows, ui, App, KeyCode, ToolPanelKind, UiControl};
+use super::{analyzer_layout_rows, ui, wayland_data, App, KeyCode, ToolPanelKind, UiControl};
 use egui::{Color32, FontId, RichText, ScrollArea, Stroke};
 use pixels::wgpu;
 use std::collections::HashMap;
@@ -67,6 +67,8 @@ enum Content<'a> {
 pub(super) struct DebuggerUi {
     context: egui::Context,
     input: egui_winit::State,
+    /// Copy and paste through Copperline's Wayland data device there.
+    clipboard: wayland_data::EguiClipboard,
     renderer: egui_wgpu::Renderer,
     layout: Layout,
     repaint_at: Option<Instant>,
@@ -94,13 +96,14 @@ impl DebuggerUi {
         window: &Window,
         pixels: &pixels::Pixels<'_>,
         preferences: preferences::Preferences,
+        clipboard: Option<wayland_data::Clipboard>,
     ) -> Self {
         let context = egui::Context::default();
         configure_style(&context);
         let input = egui_winit::State::new(
             context.clone(),
             egui::ViewportId::ROOT,
-            window,
+            &wayland_data::EguiDisplay::new(window, clipboard.as_ref()),
             Some(window.scale_factor() as f32),
             None,
             Some(pixels.device().limits().max_texture_dimension_2d as usize),
@@ -116,6 +119,7 @@ impl DebuggerUi {
         Self {
             context,
             input,
+            clipboard: wayland_data::EguiClipboard::new(clipboard),
             renderer,
             layout: Layout {
                 preferences,
@@ -137,7 +141,11 @@ impl DebuggerUi {
                 }
             }
         }
-        if self.input.on_window_event(window, event).repaint {
+        if self
+            .clipboard
+            .on_window_event(&mut self.input, window, event)
+            .repaint
+        {
             self.input_dirty = true;
             window.request_redraw();
         }
@@ -161,6 +169,7 @@ impl DebuggerUi {
             output.platform_output.cursor_icon = egui::CursorIcon::None;
             output.platform_output.cursor_image = None;
         }
+        self.clipboard.take_copies(&mut output.platform_output);
         self.input
             .handle_platform_output(window, std::mem::take(&mut output.platform_output));
         self.repaint_at = output

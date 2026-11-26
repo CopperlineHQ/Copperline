@@ -10516,7 +10516,7 @@ fn dropped_files_coalesce_across_events() {
 
 #[test]
 fn native_wayland_drops_queued_together_stay_separate() {
-    use super::wayland_drop::DropEvent;
+    use super::wayland_data::DropEvent;
     let mut app = test_app();
     // Two whole drops completed before the main loop drained the receiver:
     // each is its own action, so the second replaces DF0's disk rather
@@ -10534,7 +10534,7 @@ fn native_wayland_drops_queued_together_stay_separate() {
 
 #[test]
 fn native_wayland_drag_hint_follows_hover_and_cancel() {
-    use super::wayland_drop::DropEvent;
+    use super::wayland_data::DropEvent;
     let mut app = test_app();
     app.apply_wayland_drop_events(vec![DropEvent::Hovered]);
     assert!(app.drop_hover);

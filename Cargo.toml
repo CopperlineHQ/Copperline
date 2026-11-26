@@ -450,13 +450,14 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# File drops under native Wayland (src/video/window/wayland_drop.rs): winit
-# 0.30 binds no wl_data_device there, so the frontend opens its own event
-# queue on winit's wl_display, as egui-winit's Wayland clipboard
-# (smithay-clipboard) does. These are the releases and features
-# smithay-clipboard already builds on the same platforms, so they add no
-# crate to the graph. Remove them with that module once winit 0.31's
-# drag-and-drop events arrive through egui-winit.
+# Copperline's own Wayland data device (src/video/window/wayland_data.rs):
+# winit 0.30 binds no wl_data_device, so file drops need one, and it also
+# serves the egui states' clipboard so the process holds a single data
+# device (Hyprland routes everything to a client's first). It opens its own
+# event queue on winit's wl_display, as smithay-clipboard does. These are the
+# releases and features smithay-clipboard already builds on the same
+# platforms, so they add no crate to the graph. Remove them with that module
+# once winit 0.31's drag-and-drop events arrive through egui-winit.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
 smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop"], optional = true }
 wayland-backend = { version = "0.3.5", default-features = false, features = ["client_system"], optional = true }

@@ -288,7 +288,7 @@ impl App {
 
     /// Act on what the native Wayland drop receiver saw since the last pass.
     pub(super) fn take_wayland_drop_events(&mut self) {
-        let Some(receiver) = &self.wayland_drop else {
+        let Some(receiver) = &self.wayland_data else {
             return;
         };
         let events = receiver.take_events();
@@ -299,12 +299,12 @@ impl App {
     /// completed drop as its own batch: a `Dropped` event already carries
     /// a whole drop, so two drops queued in one pass must not merge the way
     /// winit's one-event-per-file drops are coalesced.
-    pub(super) fn apply_wayland_drop_events(&mut self, events: Vec<wayland_drop::DropEvent>) {
+    pub(super) fn apply_wayland_drop_events(&mut self, events: Vec<wayland_data::DropEvent>) {
         for event in events {
             match event {
-                wayland_drop::DropEvent::Hovered => self.note_file_drag_hover(),
-                wayland_drop::DropEvent::Cancelled => self.note_file_drag_cancelled(),
-                wayland_drop::DropEvent::Dropped(files) => {
+                wayland_data::DropEvent::Hovered => self.note_file_drag_hover(),
+                wayland_data::DropEvent::Cancelled => self.note_file_drag_cancelled(),
+                wayland_data::DropEvent::Dropped(files) => {
                     self.drop_hover = false;
                     self.handle_dropped_files(files);
                     self.request_redraw();

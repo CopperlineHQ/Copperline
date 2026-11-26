@@ -189,7 +189,8 @@ impl App {
         let Some(gpu) = r.gpu_mut() else {
             return;
         };
-        let mut ui = DebuggerUi::new(&window, &gpu.pixels, preferences);
+        let clipboard = self.wayland_data.as_ref().map(|data| data.clipboard());
+        let mut ui = DebuggerUi::new(&window, &gpu.pixels, preferences, clipboard);
         ui.layout.workspace = true;
         self.debugger_ui = Some(ui);
         self.request_redraw();

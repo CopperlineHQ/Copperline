@@ -1488,13 +1488,14 @@ pub struct App {
     /// Files from DroppedFile events, coalesced in about_to_wait: winit
     /// delivers one event per file, and a multi-file drop must act once.
     pending_dropped_files: Vec<PathBuf>,
-    /// The native Wayland drop receiver, which reports what winit 0.30 does
-    /// not deliver there (wayland_drop.rs). None on X11, XWayland and other
-    /// platforms, and for a hidden headless capture window.
-    wayland_drop: Option<wayland_drop::WaylandDrop>,
-    /// The wake the receiver's worker posts with, made before the event loop
-    /// runs (winit 0.30 makes proxies only from the EventLoop itself).
-    wayland_drop_wake: Option<winit::event_loop::EventLoopProxy<()>>,
+    /// Copperline's own Wayland data device (wayland_data.rs): the file
+    /// drops winit 0.30 does not deliver there, and the egui states'
+    /// clipboard. None on X11, XWayland and other platforms, and for a
+    /// hidden headless capture window.
+    wayland_data: Option<wayland_data::WaylandData>,
+    /// The wake its worker posts drop events with, made before the event
+    /// loop runs (winit 0.30 makes proxies only from the EventLoop itself).
+    wayland_data_wake: Option<winit::event_loop::EventLoopProxy<()>>,
     /// A support archive being fetched by the WHDLoad page.
     #[cfg(feature = "game-library")]
     whdload_job: Option<WhdloadDownload>,
@@ -3152,8 +3153,8 @@ impl App {
             osd: None,
             drop_hover: false,
             pending_dropped_files: Vec::new(),
-            wayland_drop: None,
-            wayland_drop_wake: None,
+            wayland_data: None,
+            wayland_data_wake: None,
             #[cfg(feature = "game-library")]
             library_scan: None,
             #[cfg(feature = "game-library")]
@@ -4089,8 +4090,8 @@ impl App {
         let event_loop = EventLoop::new().map_err(|e| anyhow!("EventLoop::new: {e}"))?;
         event_loop.set_control_flow(ControlFlow::Poll);
         let mut app = self;
-        if wayland_drop::SUPPORTED {
-            app.wayland_drop_wake = Some(event_loop.create_proxy());
+        if wayland_data::SUPPORTED {
+            app.wayland_data_wake = Some(event_loop.create_proxy());
         }
         #[cfg(target_os = "macos")]
         {
@@ -4812,7 +4813,8 @@ impl Drop for App {
     fn drop(&mut self) {
         self.save_egui_preferences();
         // The egui states go before the window. egui-winit's clipboard
-        // (smithay-clipboard on Wayland) holds the display connection by a
+        // (smithay-clipboard on Wayland, when Copperline's own data device
+        // is not serving it) holds the display connection by a
         // raw pointer and serves it from a thread of its own; `run_app` has
         // already consumed the event loop, and the fields drop in order,
         // `render` (the window) first. Dropped after it, the clipboard's
@@ -4904,9 +4906,9 @@ impl ApplicationHandler for App {
         if selected_monitor.is_some() && !self.start_fullscreen {
             monitors::windowed_placement_supported(&window);
         }
-        // A hidden capture window takes no drops.
-        if let Some(wake) = self.wayland_drop_wake.take().filter(|_| !headless_capture) {
-            self.wayland_drop = wayland_drop::WaylandDrop::start(
+        // A hidden capture window takes no drops and pastes nothing.
+        if let Some(wake) = self.wayland_data_wake.take().filter(|_| !headless_capture) {
+            self.wayland_data = wayland_data::WaylandData::start(
                 &window,
                 Box::new(move || {
                     let _ = wake.send_event(());
@@ -7068,10 +7070,11 @@ impl ApplicationHandler for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        // The drop receiver's worker runs on winit's wl_display; stop it
-        // while that display is still connected (winit closes it when the
-        // loop returns, before the App is dropped).
-        self.wayland_drop = None;
+        // The data-device worker runs on winit's wl_display; stop it while
+        // that display is still connected (winit closes it when the loop
+        // returns, before the App is dropped). The egui states' clipboard
+        // handles then answer nothing.
+        self.wayland_data = None;
     }
 }
 
@@ -8470,7 +8473,7 @@ mod stickers;
 #[cfg(unix)]
 mod terminal;
 mod title;
-mod wayland_drop;
+mod wayland_data;
 pub(super) use present::{scale_rect, texture_height, texture_width, Rect};
 pub(super) use statusbar::{draw_rect_bevel, fill_rect, fill_rect_blend};
 
