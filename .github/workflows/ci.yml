@@ -317,7 +317,12 @@ jobs:
     # The frontends share the root lockfile but each ships its own
     # dependency graph (the core built with different features), so check
     # each graph explicitly: a member manifest makes that crate the sole
-    # root of the graph cargo-deny checks.
+    # root of the graph cargo-deny checks. The standalone crates with
+    # committed lockfiles are checked against the same policy: their
+    # graphs build the shipped WASM boards (whose modules every default
+    # build embeds), the CPU conformance runner and the bezel preview
+    # tool, and Dependabot only raises their direct dependencies. The fuzz
+    # workspace is left out: its lockfile is derived in CI, not committed.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -331,6 +336,14 @@ jobs:
             manifest: crates/copperline-player/Cargo.toml
           - name: libretro
             manifest: crates/copperline-libretro/Cargo.toml
+          - name: cputest-runner
+            manifest: crates/cputest-runner/Cargo.toml
+          - name: hostsocket-plugin
+            manifest: crates/hostsocket-plugin/Cargo.toml
+          - name: zz9k-plugin
+            manifest: crates/zz9k-plugin/Cargo.toml
+          - name: bezel-preview
+            manifest: tools/bezel-preview/Cargo.toml
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2

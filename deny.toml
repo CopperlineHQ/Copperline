@@ -1,6 +1,9 @@
-# Shared cargo-deny policy for the native emulator and its shipped
-# frontends. Run with `cargo deny --all-features --locked check`; CI applies
-# the same file to each standalone manifest.
+# Shared cargo-deny policy for the native emulator, its shipped frontends
+# and the standalone crates with committed lockfiles (cputest-runner, the
+# hostsocket and zz9k WASM boards, bezel-preview). Run with
+# `cargo deny --all-features --locked check`; CI's "Dependency policy" job
+# applies this file to each of those manifests. The fuzz workspace derives
+# its lockfile in CI and is not checked here.
 
 [graph]
 all-features = true
@@ -12,29 +15,30 @@ yanked = "deny"
 # it. Published vulnerabilities still fail the job by default.
 ignore = [
     # 2026-11-18. All chrono releases are marked unmaintained. delharc 0.8
-    # requires it for LHA timestamps, and iroh's netwatch 0.19 enables it
-    # through wmi's default features on Windows. Remove this exception when
-    # both paths stop pulling in chrono. Review by 2027-02-18.
+    # requires it for LHA timestamps, and on Windows iroh's netwatch 0.20
+    # depends on it both directly and through wmi. Remove this exception
+    # when both paths stop pulling in chrono. Review by 2027-02-18.
     "RUSTSEC-2026-0543",
-    # 2026-09-07: iroh 1.1 -> netwatch 0.19 -> netlink-packet-core 0.8
-    # uses paste 1.0.15, an unmaintained compile-time token-pasting macro.
-    # No vulnerability or compatible upgrade is available. Remove when
-    # netwatch adopts the newer netlink stack; revisit by 2026-12-07.
-    "RUSTSEC-2024-0436",
     # 2026-08-21: unmaintained warning, not a vulnerability, and there is
     # no safe upgrade -- it arrives transitively through
     # winit -> sctk-adwaita -> ab_glyph -> owned_ttf_parser. Revisit when
     # the winit stack moves to the skrifa-based font crates.
     "RUSTSEC-2026-0192",
-    # 2026-08-21: unmaintained warning on bincode 1.x, not a published
-    # vulnerability. It decodes both
-    # the descriptor and the component stream of .clstate save states --
-    # files this project itself treats as untrusted input (see
-    # src/savestate.rs). The format is
-    # length-prefixed and bounds-checked, no known vulnerability is
-    # published against it, and migrating to bincode 2 changes the on-disk
-    # format, so that migration needs its own compatibility change rather
-    # than being hidden in a dependency-policy PR. Revisit by 2026-11-21.
+    # 2026-11-26 (first recorded 2026-08-21): unmaintained warning on
+    # bincode 1.x, not a published vulnerability. Save-state files no longer
+    # use it: .clstate chunks, the descriptor included, are MessagePack
+    # (src/savestate/chunk.rs). bincode only encodes the in-process
+    # snapshots behind reverse debugging, run-ahead and netplay rollback
+    # (M68kMachine::write_state, write_rollback_state). Only the process
+    # that wrote them reads them back, and they never come from a file or
+    # the network: netplay peers and spectators rebuild the machine from its
+    # settings, media and inputs. Those reads still go through
+    # savestate::StateReader, which never sizes a buffer from a length
+    # prefix. The advisory covers every bincode release (3.0 is a
+    # non-functional tombstone, and its authors call 1.3.3 complete), so
+    # clearing it means choosing a different snapshot encoding. As the
+    # snapshots never outlive the process, that is a code change with no
+    # file-format consequence. Review by 2027-02-26.
     "RUSTSEC-2025-0141",
 ]
 

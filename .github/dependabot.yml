@@ -76,20 +76,18 @@ updates:
           - "version-update:semver-minor"
 
   # The v1 maintenance branch (see RELEASE.md, "Branches") takes patch
-  # releases only, as one grouped PR, so a 1.0.x release never picks up a
-  # dependency's new minor series. Security fixes in a minor or major release
-  # are not covered here: Dependabot raises security PRs against the default
-  # branch only, so port those to v1 by hand (cargo-deny in CI on v1 flags
-  # them). Dependabot reads this file from the default branch only. On v1
-  # the web, player and libretro crates are still workspaces of their own,
-  # each with its lockfile, so they are listed here.
+  # releases only, as one grouped PR, so a 1.x patch release never picks up
+  # a dependency's new minor series. Security fixes in a minor or major
+  # release are not covered here: Dependabot raises security PRs against
+  # the default branch only, so port those to v1 by hand (cargo-deny in CI
+  # on v1 flags them). Dependabot reads this file from the default branch
+  # only. v1 has the same workspace layout as this branch: the web, player
+  # and libretro crates share the root lockfile, so the root entry covers
+  # them.
   - package-ecosystem: cargo
     target-branch: v1
     directories:
       - /
-      - /crates/copperline-web
-      - /crates/copperline-player
-      - /crates/copperline-libretro
       - /crates/cputest-runner
       - /crates/hostsocket-plugin
       - /crates/zz9k-plugin
