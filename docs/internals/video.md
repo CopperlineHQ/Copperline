@@ -110,7 +110,11 @@ column a COLORxx write in the same bus slot would (without Lisa's
 one-hires-pixel palette delay), mid-line, so a BPLCON3 MOVE replacing one
 COLOR00 move of a Copper ruler blanks from exactly the stripe it replaces
 (`brdrblnk2` A500+ and A1200 photos). The other BPLCON3 fields keep the
-generic register timeline.
+generic register timeline. The two timelines are independent: when a
+control write shortly before the toggle (a BPLCON2 MOVE in the previous
+Copper slot, say) has already recorded its change at a later column, the
+blanking bit still starts at its own colour-output column and is carried
+into that later change, and neither write moves the other.
 
 If a manual BPL1DAT write starts a word before a later DMA BPL1DAT load
 point, replay stops the manual word where that DMA word replaces Denise's

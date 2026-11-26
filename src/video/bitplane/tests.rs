@@ -10613,3 +10613,57 @@ fn brdrblnk_write_lands_at_colour_output_position() {
         assert_eq!(control(blank_x).bplcon3, value, "aga {aga}");
     }
 }
+
+#[test]
+fn brdrblnk_keeps_the_colour_output_position_after_a_nearby_control_write() {
+    // A BPLCON2 MOVE one Copper slot before the BPLCON3 MOVE lands on the
+    // register timeline, to the right of where BRDRBLNK acts. Each write
+    // keeps its own timing: the border blanks at the colour-output column
+    // of the BPLCON3 write, and BPLCON2 changes where it would have
+    // without that write.
+    let line = (0x50 - 0x2C) as usize;
+    let blank_value = BPLCON3_PF2OF_DEFAULT | BPLCON3_BRDRBLNK;
+    let run = |events: &[BeamRegisterWrite]| {
+        let mut state = RenderState {
+            bplcon0: BPLCON0_ECSENA,
+            ..blank_state()
+        };
+        let mut base_palettes = [state.palette; FB_HEIGHT];
+        let mut palette_segments = vec![Vec::new(); FB_HEIGHT];
+        let mut base_controls = [ControlState::from_render_state(&state); FB_HEIGHT];
+        let mut control_segments = vec![Vec::new(); FB_HEIGHT];
+        let mut manual_bpl_segments = Vec::new();
+        apply_render_events(
+            &mut state,
+            events,
+            &mut base_palettes,
+            &mut palette_segments,
+            &mut base_controls,
+            &mut control_segments,
+            &mut manual_bpl_segments,
+        );
+        (base_controls[line], control_segments[line].clone())
+    };
+    let bplcon2_only = run(&[beam_event(0x50, 0x59, 0x0104, 0x0024)]);
+    let both = run(&[
+        beam_event(0x50, 0x59, 0x0104, 0x0024),
+        beam_event(0x50, 0x5D, 0x0106, blank_value),
+    ]);
+
+    let blank_x = color_write_framebuffer_x(0x5D, false);
+    let mut bplcon2_changes = false;
+    for x in 0..FB_WIDTH {
+        let control = control_at_x(both.0, &both.1, x);
+        assert_eq!(control.border_blank_enabled(), x >= blank_x, "x {x}");
+        let alone = control_at_x(bplcon2_only.0, &bplcon2_only.1, x);
+        assert_eq!(control.bplcon2, alone.bplcon2, "x {x}");
+        bplcon2_changes |= control.bplcon2 == 0x0024 && x > blank_x;
+    }
+    // The scenario is the one that used to lose the early transition: the
+    // BPLCON2 segment sits right of the blanking column.
+    assert!(bplcon2_changes);
+    let bplcon2_x = (0..FB_WIDTH)
+        .find(|&x| control_at_x(both.0, &both.1, x).bplcon2 == 0x0024)
+        .unwrap();
+    assert!(bplcon2_x > blank_x, "{bplcon2_x} > {blank_x}");
+}

@@ -3227,24 +3227,18 @@ fn apply_render_events_and_collect_display_plan_events_with_visible_line0(
                 // ruler blanks from exactly the stripe it replaces (vAmigaTS
                 // Denise/Registers/BPLCON3/brdrblnk2, A500+ and A1200
                 // photos). Lisa's one-hires-pixel colour delay does not
-                // apply: it is a property of the palette path. A segment
-                // that would land behind one already recorded on the line
-                // keeps the register timeline.
+                // apply: it is a property of the palette path. A control
+                // write a few colour clocks earlier has its own segment on
+                // the register timeline, to the right of this one; it keeps
+                // its position and takes the new blanking bit.
                 let blank_x = color_write_framebuffer_x(event.hpos, false);
-                let behind_recorded = control_segments
-                    .get(line)
-                    .and_then(|segments| segments.last())
-                    .is_some_and(|segment| segment.x > blank_x);
-                if blank_x < beam_x && !behind_recorded {
-                    let mut blank_control = previous_control;
-                    blank_control.bplcon3 = (previous_control.bplcon3 & !BPLCON3_BRDRBLNK)
-                        | (next_control.bplcon3 & BPLCON3_BRDRBLNK);
-                    push_control_segment(
+                if blank_x < beam_x {
+                    set_border_blank_from_x(
                         control_segments,
                         line,
                         blank_x,
                         base_controls[line],
-                        blank_control,
+                        next_control.bplcon3 & BPLCON3_BRDRBLNK != 0,
                     );
                 }
             }
@@ -3463,6 +3457,49 @@ fn push_control_segment(
         return;
     }
     control_segments[line].push(ControlSegment { x, control });
+}
+
+/// Switch BRDRBLNK from framebuffer column `x` to the end of the line,
+/// leaving every other control bit where the segments already recorded put
+/// it. BRDRBLNK acts at the colour-output stage, ahead of the generic
+/// register timeline, so `x` can lie left of segments an earlier write on
+/// the line has recorded: those keep their columns and carry the new bit.
+fn set_border_blank_from_x(
+    control_segments: &mut [Vec<ControlSegment>],
+    line: usize,
+    x: usize,
+    base_control: ControlState,
+    blank: bool,
+) {
+    let Some(segments) = control_segments.get_mut(line) else {
+        return;
+    };
+    let x = x.min(FB_WIDTH);
+    let with_blank = |mut control: ControlState| {
+        control.bplcon3 =
+            (control.bplcon3 & !BPLCON3_BRDRBLNK) | if blank { BPLCON3_BRDRBLNK } else { 0 };
+        control
+    };
+    // Segments are recorded in ascending column order.
+    let at = segments.partition_point(|segment| segment.x < x);
+    for segment in &mut segments[at..] {
+        segment.control = with_blank(segment.control);
+    }
+    if segments.get(at).is_some_and(|segment| segment.x == x) {
+        return;
+    }
+    let in_force = at
+        .checked_sub(1)
+        .map_or(base_control, |before| segments[before].control);
+    if with_blank(in_force) != in_force {
+        segments.insert(
+            at,
+            ControlSegment {
+                x,
+                control: with_blank(in_force),
+            },
+        );
+    }
 }
 
 fn bitplane_scroll_effect_x(segment_x: usize, visible_x_stop: usize) -> usize {
