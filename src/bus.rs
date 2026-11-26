@@ -1781,6 +1781,13 @@ pub struct RenderRegisterSnapshot {
     /// (no HARDDIS/VARBEAMEN) is what nearly all such states hold.
     #[serde(default)]
     pub beamcon0_lifts_ddf_stop: bool,
+    /// The fitted Denise. The replay needs it where the same BPLCON0
+    /// decodes differently per chip: ECS Denise pairs super-hi-res pixels
+    /// into one colour register, Lisa looks every pixel up. Fixed per
+    /// machine and recaptured each frame, so a state written before the
+    /// field reads OCS only until the next frame starts.
+    #[serde(default)]
+    pub denise_revision: DeniseRevision,
     pub dmacon: u16,
     pub bplcon0: u16,
     pub bplcon1: u16,

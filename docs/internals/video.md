@@ -440,10 +440,31 @@ time-linearly (each colour clock covers 227/line_cck of a standard clock's
 width); without a programmed vertical sync the captured rows keep covering
 the full glass height.
 
-Super-hi-res output: Denise/Lisa resolve every 35 ns sample through the
-full palette pipeline (ECS Denise carries at most two bitplanes into
-SHRES; AGA Lisa runs the complete 8-bit index path, e.g. the 4-plane
-FMODE=3 Linux amifb console). A programmable scan that drives SHRES
+Super-hi-res output: AGA Lisa resolves every 35 ns sample through the
+full palette pipeline (the complete 8-bit index path, e.g. the 4-plane
+FMODE=3 Linux amifb console). ECS Denise (8373) cannot look a colour up
+at that dot rate and pairs pixels instead
+(`ecs_denise_shres_pair_outputs`): on each aligned group of four
+super-hi-res pixels (one lo-res pixel) it pairs across the group, pixel
+0 with 2 and 1 with 3, into a 4-bit register index
+`(pixel[base + 2] & 3) * 4 + (pixel[base] & 3)` with `base = p & 1`, so
+two bitplanes reach COLOR00..COLOR15. Of that register the first 35 ns
+sub-pixel of each 70 ns column shows the high bit pair of every RGB
+nibble and the second the low pair, each replicated over the nibble
+($0/$5/$A/$F); the classic canvas blends the two in signal space (before
+any gamma), which is what makes the perceived brightness follow the sum
+of the bit pairs. The group grid is the fetched data's own lo-res pixel
+grid: the fetch origin sits on a gulp boundary whatever DDFSTRT is, and
+ECS BPLCON1 scrolls super-hi-res in whole lo-res pixels (4 samples), so
+a group never straddles the edge of the fetched data; a manually
+written BPLxDAT word pairs on its own word grid. The priority and
+collision sample keeps the bitplane bits, not the paired index. Dual
+playfield keeps the per-pixel lookup (the measured rule covers one
+playfield), as does an OCS Denise behind an ECS Agnus. The rule and its
+evidence are vAmigaTS `Denise/Modes/shres` (A500+ photographs of
+shindex, shspot, shramp; golden probe `timing-test/shresprobe-pair`).
+The order of the two nibble halves is not observable on the photographs;
+the high pair goes first as in vAmiga and Amiberry. A programmable scan that drives SHRES
 renders a double-width canvas at the 35 ns pixel pitch
 (`canvas_scale_for`): each of the two per-column samples is emitted as
 its own framebuffer pixel, and the presentation, screenshots, and the

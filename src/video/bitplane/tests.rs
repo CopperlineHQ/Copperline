@@ -1181,6 +1181,7 @@ fn manual_sprite_compare_tracks_midline_shres_enable() {
 fn blank_state() -> RenderState {
     RenderState {
         agnus_revision: AgnusRevision::Ocs,
+        denise_revision: DeniseRevision::Ocs,
         harddis: false,
         dmacon: 0,
         bplcon0: 0,
@@ -8579,6 +8580,144 @@ fn shres_playfield_output_resolves_each_35ns_sample_through_the_palette() {
     );
 }
 
+fn ecs_denise_shres_control(bplcon0: u16) -> ControlState {
+    ControlState {
+        agnus_revision: AgnusRevision::Ecs8375,
+        denise_revision: DeniseRevision::Ecs8373,
+        bplcon0,
+        ..ControlState::default()
+    }
+}
+
+#[test]
+fn ecs_denise_pairs_shres_pixels_only_in_a_single_playfield() {
+    assert!(ecs_denise_shres_control(0x2240).ecs_denise_shres_pairs_pixels());
+    assert!(ecs_denise_shres_control(0x1240).ecs_denise_shres_pairs_pixels());
+    // Hi-res is an ordinary per-pixel lookup.
+    assert!(!ecs_denise_shres_control(0xA200).ecs_denise_shres_pairs_pixels());
+    // Dual playfield is outside the measured rule.
+    assert!(!ecs_denise_shres_control(0x2640).ecs_denise_shres_pairs_pixels());
+    // OCS Denise has no super-hi-res: BPLCON0 bit 6 behind an ECS Agnus
+    // keeps the per-pixel path.
+    let ocs_denise = ControlState {
+        denise_revision: DeniseRevision::Ocs,
+        ..ecs_denise_shres_control(0x2240)
+    };
+    assert!(!ocs_denise.ecs_denise_shres_pairs_pixels());
+}
+
+#[test]
+fn ecs_denise_shres_index_pairs_across_each_lores_wide_group() {
+    // Pixel 0 pairs with pixel 2 and pixel 1 with pixel 3; the later
+    // pixel of each pair gives the high bit pair of the index.
+    let group = [1, 2, 3, 0];
+    assert_eq!(ecs_shres_group_index(group, 0), 3 * 4 + 1);
+    assert_eq!(ecs_shres_group_index(group, 1), 2);
+    assert_eq!(ecs_shres_group_index(group, 2), 3 * 4 + 1);
+    assert_eq!(ecs_shres_group_index(group, 3), 2);
+    // A period-2 or constant pattern collapses to 5 * v: only COLOR00,
+    // COLOR05, COLOR10 and COLOR15 (vAmigaTS shindex/sh1bpl).
+    assert_eq!(ecs_shres_group_index([2, 1, 2, 1], 0), 10);
+    assert_eq!(ecs_shres_group_index([2, 1, 2, 1], 1), 5);
+    // A two-bit pixel never reaches bit 4 (vAmigaTS shindex5 / shspot16).
+    assert!((0..4).all(|p| ecs_shres_group_index([0x13, 0x1F, 0x17, 0x1B], p) < 16));
+}
+
+#[test]
+fn ecs_denise_shres_splits_each_rgb_nibble_across_the_pixel_pair() {
+    // First sub-pixel: the high bit pair of each nibble, replicated.
+    assert_eq!(ecs_shres_nibble_half(0x03C6, false), 0x00F5);
+    // Second sub-pixel: the low bit pair, replicated.
+    assert_eq!(ecs_shres_nibble_half(0x03C6, true), 0x0F0A);
+    // $0/$5/$A/$F nibbles have equal halves and survive whole.
+    assert_eq!(ecs_shres_nibble_half(0x05AF, false), 0x05AF);
+    assert_eq!(ecs_shres_nibble_half(0x05AF, true), 0x05AF);
+}
+
+#[test]
+fn ecs_denise_shres_brightness_follows_the_sum_of_the_nibble_bit_pairs() {
+    // A monitor averages the two sub-pixels in signal space, so $3 (sub-
+    // pixels $0, $F) shows brighter than $4 ($5, $0), and $2 ($0, $A)
+    // equals $5 ($5, $5) and $8 ($A, $0) (vAmigaTS shramp1-7, A500+).
+    let red = |nibble: u16| {
+        let mut palette = Palette::new();
+        palette.write_ocs(5, nibble << 8);
+        let (left, right) = ecs_denise_shres_pair_outputs(&palette, [1, 1, 1, 1], [1, 1]);
+        (blend_shres_outputs(left, right).color >> 16) & 0xFF
+    };
+    assert!(red(0x3) > red(0x4));
+    assert!(red(0x7) > red(0x8));
+    assert!(red(0xB) > red(0xC));
+    assert_eq!(red(0x2), red(0x5));
+    assert_eq!(red(0x5), red(0x8));
+    assert_eq!(red(0x3), red(0xC));
+}
+
+#[test]
+fn ecs_denise_shres_pair_outputs_keep_bitplane_priority_masks() {
+    let mut palette = Palette::new();
+    palette.write_ocs(4, 0x0FFF);
+    // Pixels 0,0,1,1 reach COLOR04 on both sub-pixels of both columns,
+    // although the first column's own bitplane bits are zero.
+    let (left, right) = ecs_denise_shres_pair_outputs(&palette, [0, 0, 1, 1], [0, 0]);
+    assert_eq!(left.color, rgb12_to_rgb24(0x0FFF));
+    assert_eq!(right.color, rgb12_to_rgb24(0x0FFF));
+    assert_eq!(left.color_latch, 0x0FFF);
+    assert_eq!((left.pf_mask, right.pf_mask), (0, 0));
+    let (_, right) = ecs_denise_shres_pair_outputs(&palette, [0, 0, 1, 1], [1, 1]);
+    assert_eq!(right.pf_mask, 2);
+}
+
+/// One ECS Denise super-hi-res row whose plane 1 alternates 0, 1 (each
+/// word $5555) under a palette where the per-pixel lookup would show
+/// COLOR01 (red) and the pairing reaches COLOR05 (white) instead.
+fn ecs_shres_alternating_input() -> RenderInput {
+    let mut input = repeated_frame_test_input();
+    input.render_base = ocs_snapshot(0x2C81, 0x2CC1, 0x3C, 0xD4);
+    input.render_base.bplcon0 = 0x1240;
+    input.render_base.dmacon = DMACON_DMAEN | DMACON_BPLEN;
+    input.render_base.agnus_revision = AgnusRevision::Ecs8375;
+    input.render_base.denise_revision = DeniseRevision::Ecs8373;
+    input.render_base.palette.write_ocs(0, 0);
+    input.render_base.palette.write_ocs(1, 0xF00);
+    input.render_base.palette.write_ocs(5, 0xFFF);
+    input.current_render_base = input.render_base;
+    let mut row = input.captured_bitplane_rows[0].clone().unwrap();
+    row.words_per_row = 80;
+    row.planes[0] = vec![0x5555; 80];
+    input.captured_bitplane_rows = std::sync::Arc::new(vec![Some(row); FB_HEIGHT]);
+    input
+}
+
+#[test]
+fn ecs_denise_shres_render_emits_the_paired_register_halves_on_the_35ns_canvas() {
+    let input = ecs_shres_alternating_input();
+    let mut native = vec![0; crate::video::MAX_CANVAS_PIXELS];
+    let result = render_native_from_input(&input, &mut native);
+    let rect = result.content_rect.expect("active playfield");
+    let y = rect.y0 + 1;
+    let pixels = &native[y * FB_WIDTH * 2 + rect.x0 * 2..y * FB_WIDTH * 2 + rect.x1 * 2];
+    // Group [0, 1, 0, 1]: even sub-pixels show the high half of COLOR00,
+    // odd ones the low half of COLOR05 - never COLOR01's red.
+    assert!(pixels
+        .chunks_exact(2)
+        .all(|p| p[0] == rgb12_to_rgba8(0) && p[1] == rgb12_to_rgba8(0xFFF)));
+}
+
+#[test]
+fn ecs_denise_shres_render_blends_the_paired_halves_on_the_standard_canvas() {
+    let input = ecs_shres_alternating_input();
+    let mut fb = vec![0; crate::video::MAX_CANVAS_PIXELS];
+    let result = render_native_from_input(&input, &mut fb.clone());
+    let rect = result.content_rect.expect("active playfield");
+    render_from_input(&input, &mut fb);
+    let y = rect.y0 + 1;
+    let grey = rgba8_blend_halves(rgb12_to_rgba8(0), rgb12_to_rgba8(0xFFF));
+    assert!(fb[y * FB_WIDTH + rect.x0..y * FB_WIDTH + rect.x1]
+        .iter()
+        .all(|&p| p == grey));
+}
+
 #[test]
 fn canvas_scale_doubles_only_for_programmable_shres_frames() {
     let shres_write = BeamRegisterWrite {
@@ -8649,9 +8788,12 @@ fn aga_shres_playfield_output_keeps_four_plane_indices() {
     palette.write_ocs(15, 0x0FFF);
     let control = ControlState {
         agnus_revision: AgnusRevision::AgaAlice,
+        denise_revision: DeniseRevision::AgaLisa,
         bplcon0: 0x4240, // 4 planes, SHRES
         ..ControlState::default()
     };
+    // Lisa looks every super-hi-res pixel up; only ECS Denise pairs them.
+    assert!(!control.ecs_denise_shres_pairs_pixels());
     let mut ham_color = 0;
 
     let (left, right) =

@@ -45,6 +45,13 @@ fn indexed_cache_reuses_tables_across_sample_and_composition_controls() {
                 2 => AgnusRevision::Ecs8375,
                 _ => AgnusRevision::AgaAlice,
             },
+            // The indexed path never reads the Denise revision; ECS
+            // super-hi-res pairing bypasses the cache.
+            denise_revision: match next_word(&mut random) % 3 {
+                0 => DeniseRevision::Ocs,
+                1 => DeniseRevision::Ecs8373,
+                _ => DeniseRevision::AgaLisa,
+            },
             harddis: next_word(&mut random) & 1 != 0,
             dmacon: next_word(&mut random),
             bplcon0: next_word(&mut random),
