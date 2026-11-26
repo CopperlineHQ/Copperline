@@ -29,7 +29,8 @@ copperline = { path = "../..", default-features = false, features = [
 ] }
 anyhow = "1"
 log = "0.4"
-env_logger = "0.11"
+# As the emulator's: no regex filters, which would bring regex back.
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 
 [build-dependencies]
 serde = { version = "1", features = ["derive"] }

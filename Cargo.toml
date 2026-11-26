@@ -227,7 +227,7 @@ m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "82c915b02250748
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "aa54c40c232a826f3d6f117ac8a0b165e7571f32", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
-coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "f86c54e399a68395e5ec3e1d5ef7771a882794f8", optional = true }
+coppersynth = { git = "https://github.com/CopperlineHQ/Coppersynth", rev = "55140eda41b3be1473eddb0bfffd3d993d595813", optional = true }
 pixels = { version = "0.17", optional = true }
 winit = { version = "0.30", optional = true }
 # egui 0.35 shares pixels 0.17's wgpu 29 device and command encoder.
@@ -240,7 +240,11 @@ egui-wgpu = { version = "0.35", optional = true, default-features = false }
 eframe = { version = "0.35", optional = true, default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 anyhow = "1"
 log = "0.4"
-env_logger = { version = "0.11", optional = true }
+# Coloured, timestamped log lines. The default `regex` feature is left off:
+# it only lets a RUST_LOG filter end in a `/regex` (without it the text after
+# the slash matches as a plain substring), and it alone brought in regex,
+# regex-automata, regex-syntax and aho-corasick.
+env_logger = { version = "0.11", optional = true, default-features = false, features = ["auto-color", "humantime"] }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 base64 = { version = "0.23", optional = true }
