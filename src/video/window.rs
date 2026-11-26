@@ -1488,6 +1488,13 @@ pub struct App {
     /// Files from DroppedFile events, coalesced in about_to_wait: winit
     /// delivers one event per file, and a multi-file drop must act once.
     pending_dropped_files: Vec<PathBuf>,
+    /// The native Wayland drop receiver, which reports what winit 0.30 does
+    /// not deliver there (wayland_drop.rs). None on X11, XWayland and other
+    /// platforms, and for a hidden headless capture window.
+    wayland_drop: Option<wayland_drop::WaylandDrop>,
+    /// The wake the receiver's worker posts with, made before the event loop
+    /// runs (winit 0.30 makes proxies only from the EventLoop itself).
+    wayland_drop_wake: Option<winit::event_loop::EventLoopProxy<()>>,
     /// A support archive being fetched by the WHDLoad page.
     #[cfg(feature = "game-library")]
     whdload_job: Option<WhdloadDownload>,
@@ -3145,6 +3152,8 @@ impl App {
             osd: None,
             drop_hover: false,
             pending_dropped_files: Vec::new(),
+            wayland_drop: None,
+            wayland_drop_wake: None,
             #[cfg(feature = "game-library")]
             library_scan: None,
             #[cfg(feature = "game-library")]
@@ -4080,6 +4089,9 @@ impl App {
         let event_loop = EventLoop::new().map_err(|e| anyhow!("EventLoop::new: {e}"))?;
         event_loop.set_control_flow(ControlFlow::Poll);
         let mut app = self;
+        if wayland_drop::SUPPORTED {
+            app.wayland_drop_wake = Some(event_loop.create_proxy());
+        }
         #[cfg(target_os = "macos")]
         {
             app.macos_about_wake = Some(event_loop.create_proxy());
@@ -4892,6 +4904,15 @@ impl ApplicationHandler for App {
         if selected_monitor.is_some() && !self.start_fullscreen {
             monitors::windowed_placement_supported(&window);
         }
+        // A hidden capture window takes no drops.
+        if let Some(wake) = self.wayland_drop_wake.take().filter(|_| !headless_capture) {
+            self.wayland_drop = wayland_drop::WaylandDrop::start(
+                &window,
+                Box::new(move || {
+                    let _ = wake.send_event(());
+                }),
+            );
+        }
         // winit's with_window_icon above does nothing for the macOS dock; set
         // the application icon explicitly now that NSApplication exists.
         #[cfg(target_os = "macos")]
@@ -5488,25 +5509,9 @@ impl ApplicationHandler for App {
                     self.request_redraw();
                 }
             }
-            WindowEvent::HoveredFile(_) => {
-                // One event per hovered file; flag once and redraw once.
-                if !self.drop_hover {
-                    self.drop_hover = true;
-                    self.request_redraw();
-                }
-            }
-            WindowEvent::HoveredFileCancelled => {
-                self.drop_hover = false;
-                self.request_redraw();
-            }
-            WindowEvent::DroppedFile(path) => {
-                // No HoveredFileCancelled follows a successful drop, so the
-                // hint is cleared here. One event arrives per dropped file;
-                // they are coalesced into a single action in about_to_wait.
-                self.drop_hover = false;
-                self.pending_dropped_files.push(path);
-                self.request_redraw();
-            }
+            WindowEvent::HoveredFile(_) => self.note_file_drag_hover(),
+            WindowEvent::HoveredFileCancelled => self.note_file_drag_cancelled(),
+            WindowEvent::DroppedFile(path) => self.note_dropped_files(vec![path]),
             WindowEvent::Focused(focused) => {
                 self.main_window_focused = focused;
                 if !focused && self.debug_layout_active {
@@ -6593,6 +6598,9 @@ impl ApplicationHandler for App {
         }
         self.service_card_monitors(event_loop);
         let host_poll_started = Instant::now();
+        // Native Wayland drags arrive from the receiver's worker; they join
+        // winit's DroppedFile events before the drop is acted on.
+        self.take_wayland_drop_events();
         // Act on a completed drop before the OSD/control-flow computation
         // below, so a drop-raised OSD keeps the loop awake for its fade.
         if !self.pending_dropped_files.is_empty() {
@@ -7057,6 +7065,13 @@ impl ApplicationHandler for App {
                 std::thread::sleep(wait);
             }
         }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // The drop receiver's worker runs on winit's wl_display; stop it
+        // while that display is still connected (winit closes it when the
+        // loop returns, before the App is dropped).
+        self.wayland_drop = None;
     }
 }
 
@@ -8455,6 +8470,7 @@ mod stickers;
 #[cfg(unix)]
 mod terminal;
 mod title;
+mod wayland_drop;
 pub(super) use present::{scale_rect, texture_height, texture_width, Rect};
 pub(super) use statusbar::{draw_rect_bevel, fill_rect, fill_rect_blend};
 

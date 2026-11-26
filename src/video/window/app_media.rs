@@ -261,6 +261,46 @@ impl App {
         self.request_redraw();
     }
 
+    /// A file drag is over the main window: show the drop hint. Hosts
+    /// report one hover per file; flag once and redraw once.
+    pub(super) fn note_file_drag_hover(&mut self) {
+        if !self.drop_hover {
+            self.drop_hover = true;
+            self.request_redraw();
+        }
+    }
+
+    /// The drag left the window without dropping.
+    pub(super) fn note_file_drag_cancelled(&mut self) {
+        self.drop_hover = false;
+        self.request_redraw();
+    }
+
+    /// Files were dropped on the main window. No cancel follows a
+    /// successful drop, so the hint is cleared here. winit delivers one
+    /// event per file; they are coalesced into a single action in
+    /// about_to_wait.
+    pub(super) fn note_dropped_files(&mut self, files: Vec<PathBuf>) {
+        self.drop_hover = false;
+        self.pending_dropped_files.extend(files);
+        self.request_redraw();
+    }
+
+    /// Fold what the native Wayland drop receiver saw since the last pass
+    /// into the same state winit's drag events drive.
+    pub(super) fn take_wayland_drop_events(&mut self) {
+        let Some(receiver) = &self.wayland_drop else {
+            return;
+        };
+        for event in receiver.take_events() {
+            match event {
+                wayland_drop::DropEvent::Hovered => self.note_file_drag_hover(),
+                wayland_drop::DropEvent::Cancelled => self.note_file_drag_cancelled(),
+                wayland_drop::DropEvent::Dropped(files) => self.note_dropped_files(files),
+            }
+        }
+    }
+
     /// Route files dropped on the window: floppy images to a drive
     /// (directly, or via the chooser panel when several drives could take
     /// them), a CD image (cue/iso/nrg/chd) to the CD drive, and everything else to
