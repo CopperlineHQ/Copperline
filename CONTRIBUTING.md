@@ -44,13 +44,15 @@ Documentation changes should also build cleanly:
 ```sh
 cd docs
 python3 ../tools/prepare-docs.py
-myst build --html --ci --strict --check-links
+myst build --html --ci --strict
 python3 ../tools/build-docs-pdf.py --ci --strict
 test -s _build/exports/copperline.pdf
+myst build --html --ci --strict --check-links
 ```
 
-These are the checks CI runs; `docs/README.md` explains the version-identity
-step and the PDF helper.
+These are the checks CI runs; the last one, external link checking, is
+advisory there and reports unresolved links as warnings. `docs/README.md`
+explains the version-identity step, the PDF helper and the link check.
 
 The ignored integration tests under `tests/` require local ROM and disk
 assets. Select the ones whose assets you have installed rather than running

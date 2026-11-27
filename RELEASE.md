@@ -216,10 +216,15 @@ Build the documentation:
 ```sh
 cd docs
 python3 ../tools/prepare-docs.py
-myst build --html --ci --strict --check-links
+myst build --html --ci --strict
 python3 ../tools/build-docs-pdf.py --ci --strict
 test -s _build/exports/copperline.pdf
+myst build --html --ci --strict --check-links
 ```
+
+CI treats the last command (external link checking) as advisory, so a
+release is the point to look at its warnings: re-run it, and fix any link
+that still fails rather than one that only timed out once.
 
 On a `v*` tag the `Docs release PDF` workflow rebuilds the PDF and attaches
 `Copperline-X.Y.Z-manual.pdf` to the GitHub Release automatically (the
