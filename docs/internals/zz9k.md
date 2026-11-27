@@ -281,8 +281,9 @@ elapsed at save time arrives on schedule after load).
   driven through 16-bit accesses like the 68k's.
 - `src/wasmboard.rs` tests drive the committed artifact through wasmtime:
   bootstrap detection, a mailbox hash round trip, IRQ line selection, the
-  fuel headroom of the largest allowed operation, and the mid-operation
-  save-state resume.
+  fuel headroom of the largest allowed hash and of the costliest RSA
+  verify (a 4096-bit modulus with a 32-bit exponent), and the
+  mid-operation save-state resume.
 - `tests/zz9k.rs` (ignored; needs the bundled AROS only) boots the
   in-repo guest probe `guest/zz9kprobe` -- the SDK's real transport code
   compiled for m68k -- against the board.

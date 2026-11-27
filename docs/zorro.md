@@ -163,7 +163,7 @@ memory -- a flat byte array that Copperline's save states snapshot and restore
 exactly like Amiga RAM, preserving deterministic replay. The engine runs with
 NaN canonicalization and without SIMD or threads for determinism; a plugin's
 persistent state must live in linear memory (WebAssembly globals are not
-captured). Every call into the module is metered: its fuel is refilled to 50
+captured). Every call into the module is metered: its fuel is refilled to 100
 million units before each export call, so a runaway loop traps (and takes the
 board offline, below) instead of hanging the emulator. A save state stores the
 module's path and replays its memory image on load, so the `.wasm` file, and

@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 copperline = { path = "../..", default-features = false }
 # Pinned exactly: the wasm-bindgen CLI that post-processes the build must be
 # the same version (installed via homebrew).
-wasm-bindgen = "=0.2.127"
+wasm-bindgen = "=0.2.130"
 anyhow = "1"
 log = "0.4"
 console_log = "1"

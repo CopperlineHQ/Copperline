@@ -272,15 +272,15 @@ pub fn verify(alg: u32, digest: &[u8], sig: &[u8], key: &[u8]) -> Result<bool, u
             if !matches!(n_bytes.len(), 256 | 384 | 512) || sig.len() != n_bytes.len() {
                 return Err(STATUS_BAD_REQUEST);
             }
-            let n = rsa::BigUint::from_bytes_be(n_bytes);
-            let e = rsa::BigUint::from_bytes_be(e_bytes);
-            let Ok(public) = rsa::RsaPublicKey::new(n, e) else {
+            let n = rsa::BoxedUint::from_be_slice_vartime(n_bytes);
+            let e = rsa::BoxedUint::from_be_slice_vartime(e_bytes);
+            let Ok(public) = rsa::PublicKey::new(n, e) else {
                 return Ok(false);
             };
             if public.size() != n_bytes.len() {
                 return Ok(false);
             }
-            let scheme = rsa::Pkcs1v15Sign::new::<sha2_legacy::Sha256>();
+            let scheme = rsa::Pkcs1v15Sign::new::<sha2::Sha256>();
             Ok(public.verify(scheme, digest, sig).is_ok())
         }
         _ => Err(STATUS_UNSUPPORTED),
