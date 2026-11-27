@@ -80,6 +80,17 @@ updates:
         update-types:
           - "version-update:semver-major"
           - "version-update:semver-minor"
+      # The Wayland data device (src/video/window/wayland_data/) uses the
+      # smithay-client-toolkit series smithay-clipboard (via egui-winit)
+      # already builds, so it adds no crate to the Linux graph; see
+      # Cargo.toml. A new series on its own adds a second toolkit and
+      # wayland-protocols-experimental, and 0.21 also replaces the
+      # delegate_seat!/delegate_data_device! macros with delegate_dispatch2!.
+      # Move it when smithay-clipboard does. Patch releases stay enabled.
+      - dependency-name: smithay-client-toolkit
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   # The v1 maintenance branch (see RELEASE.md, "Branches") takes patch
   # releases only, as one grouped PR, so a 1.x patch release never picks up
