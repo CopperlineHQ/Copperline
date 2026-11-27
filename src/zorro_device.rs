@@ -151,15 +151,6 @@ impl DeviceDeadline {
     pub fn from_cck(cck: Option<u32>) -> Self {
         cck.map_or(Self::Idle, |cck| Self::In(cck.max(1)))
     }
-
-    /// The earlier of two deadlines; an unknown one wins over any other.
-    pub fn min(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Unknown, _) | (_, Self::Unknown) => Self::Unknown,
-            (Self::Idle, d) | (d, Self::Idle) => d,
-            (Self::In(a), Self::In(b)) => Self::In(a.min(b)),
-        }
-    }
 }
 
 /// Where the video beam is, for a board that keeps time by the field (the

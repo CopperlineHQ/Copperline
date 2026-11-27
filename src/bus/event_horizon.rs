@@ -98,18 +98,22 @@ impl Bus {
             horizon.unpredictable(SERIAL_LIVE_CAP_CCK);
         }
         horizon.bound(self.next_keyboard_event_cck());
-        horizon.deadline(self.storage_deadline());
+        // Each controller and board on its own: one that cannot predict
+        // adds its fail-safe cap without hiding the others' deadlines.
+        for deadline in self.storage_deadlines() {
+            horizon.deadline(deadline);
+        }
         horizon
     }
 
-    /// When a storage controller or expansion board next changes state on
-    /// its own -- a timed drive presenting data or completing, a delayed
-    /// controller interrupt, a CD frame -- so a CPU halted in STOP waiting
-    /// for it does not nap past it. A Zorro board without a deadline model
-    /// is [`DeviceDeadline::Unknown`].
-    pub fn storage_deadline(&self) -> DeviceDeadline {
+    /// When each storage controller and expansion board next changes
+    /// state on its own -- a timed drive presenting data or completing, a
+    /// delayed controller interrupt, a CD frame -- so a CPU halted in STOP
+    /// waiting for it does not nap past it. A Zorro board without a
+    /// deadline model reports [`DeviceDeadline::Unknown`].
+    pub fn storage_deadlines(&self) -> impl Iterator<Item = DeviceDeadline> + '_ {
         use crate::zorro_device::ZorroDevice;
-        let mut deadline = [
+        [
             self.gayle.as_ref().and_then(|g| g.next_drive_event_cck()),
             self.ide_a4000
                 .as_ref()
@@ -124,14 +128,8 @@ impl Bus {
         ]
         .into_iter()
         .map(DeviceDeadline::from_cck)
-        .fold(DeviceDeadline::Idle, DeviceDeadline::min);
-        if let Some(akiko) = self.akiko.as_ref() {
-            deadline = deadline.min(akiko.next_deadline());
-        }
-        self.devices
-            .iter()
-            .map(ZorroDevice::next_deadline)
-            .fold(deadline, DeviceDeadline::min)
+        .chain(self.akiko.as_ref().map(crate::akiko::Akiko::next_deadline))
+        .chain(self.devices.iter().map(ZorroDevice::next_deadline))
     }
 }
 
@@ -172,13 +170,21 @@ mod tests {
     }
 
     #[test]
-    fn deadlines_combine_with_unknown_winning() {
+    fn an_unknown_device_does_not_hide_a_known_deadline() {
         use DeviceDeadline::*;
-        assert_eq!(Idle.min(Idle), Idle);
-        assert_eq!(Idle.min(In(5)), In(5));
-        assert_eq!(In(9).min(In(5)), In(5));
-        assert_eq!(In(9).min(Unknown), Unknown);
-        assert_eq!(Unknown.min(Idle), Unknown);
+        // In either order: the fail-safe cap joins the known deadlines,
+        // it does not replace them.
+        for deadlines in [[Unknown, In(1), Idle], [In(1), Unknown, Idle]] {
+            let mut horizon = EventHorizon {
+                cck: None,
+                exact: true,
+            };
+            for deadline in deadlines {
+                horizon.deadline(deadline);
+            }
+            assert_eq!(horizon.cck, Some(1));
+            assert!(!horizon.exact);
+        }
         assert_eq!(DeviceDeadline::from_cck(None), Idle);
         assert_eq!(DeviceDeadline::from_cck(Some(0)), In(1));
     }

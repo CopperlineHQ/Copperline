@@ -17093,12 +17093,14 @@ fn timed_scsi_completions_cap_the_stop_horizon() {
 
     use crate::zorro_device::DeviceDeadline;
     let mut bus = empty_bus();
-    assert_eq!(bus.storage_deadline(), DeviceDeadline::Idle);
+    assert!(bus.storage_deadlines().all(|d| d == DeviceDeadline::Idle));
     let mut a2091 = crate::a2091::A2091::new(vec![0u8; 0x4000]).unwrap();
     a2091.attach_drive(0, timed());
     test_unit_ready(&mut a2091.wd);
     bus.attach_devices(vec![crate::zorro_device::BoardDevice::A2091(a2091)]);
-    let DeviceDeadline::In(horizon) = bus.storage_deadline() else {
+    let Some(DeviceDeadline::In(horizon)) =
+        bus.storage_deadlines().find(|d| *d != DeviceDeadline::Idle)
+    else {
         panic!("the A2091 reports its deadline");
     };
     assert!(
@@ -17113,7 +17115,8 @@ fn timed_scsi_completions_cap_the_stop_horizon() {
     test_unit_ready(&mut sdmac.wd);
     bus.attach_sdmac(sdmac);
     assert!(
-        matches!(bus.storage_deadline(), DeviceDeadline::In(_)),
+        bus.storage_deadlines()
+            .any(|d| matches!(d, DeviceDeadline::In(_))),
         "the SDMAC reports its deadline"
     );
     let _ = std::fs::remove_file(path);
