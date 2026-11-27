@@ -125,11 +125,14 @@ for the earlier release notes.
 
 ### Fixed
 
-- Two identical runs now write byte-identical save states while a
-  `[[filesys]]` host folder has files locked, or after an MHI card has
-  played streams at more than one sample rate. The host-folder lock table
-  and MHI's per-rate resamplers were written in random hash order. States
-  written before this change still load.
+- Save states now write a `[[filesys]]` host folder's lock table and the
+  per-rate resamplers of the MHI and Toccata cards in a fixed order.
+  They were written in random hash order, so two identical runs could
+  leave different machine state in their files while a host folder had
+  files locked or a card had played at more than one sample rate. The
+  file header's save time (`saved_at_unix`) still differs between saves
+  made at different moments. States written before this change still
+  load.
 - Mouse buttons, joystick directions and fire buttons held down through a
   reset now stay held as the machine comes back up, instead of being let
   go by `Ctrl+Amiga+Amiga` or the CPU `RESET` instruction until pressed
