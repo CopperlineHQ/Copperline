@@ -85,10 +85,17 @@ Run the same checks as CI before submitting documentation changes:
 ```sh
 cd docs
 python3 ../tools/prepare-docs.py
-myst build --html --ci --strict --check-links
+myst build --html --ci --strict
 python3 ../tools/build-docs-pdf.py --ci --strict
 test -s _build/exports/copperline.pdf
+myst build --html --ci --strict --check-links
 ```
+
+The last command also checks that every external link resolves. CI runs it
+as an advisory step: an unresolved link shows as a warning on the run (and
+on the PR diff) without failing the job, because rate limiting and
+third-party outages make most of those failures transient. Check a reported
+link by hand before changing it.
 
 The custom-register pages also feed generated Rust data. When editing them,
 run `cargo test --profile ci --locked --lib custom` from the repository root
