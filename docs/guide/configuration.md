@@ -2194,6 +2194,7 @@ deterministic. Set it from the launcher's *Input* tab or
 `--mouse-sensitivity N`, and adjust it live with `Cmd+Shift+>` / `Cmd+Shift+<`
 (`Alt+Shift+>` / `Alt+Shift+<` on Linux and Windows), which ramp while held.
 
+(mouse-capture)=
 ### Mouse capture
 
 Capturing the mouse confines the host pointer to the window and hides the

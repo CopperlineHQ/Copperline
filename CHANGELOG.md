@@ -125,6 +125,12 @@ for the earlier release notes.
 
 ### Fixed
 
+- Mouse buttons, joystick directions and fire buttons held down through a
+  reset now stay held as the machine comes back up, instead of being let
+  go by `Ctrl+Amiga+Amiga` or the CPU `RESET` instruction until pressed
+  again. Holding both mouse buttons through the reset chord now opens
+  Kickstart 2.0+'s Early Startup Control (boot menu), as it does on a real
+  Amiga (#1001).
 - A CPU halted in `STOP` wakes on time for more devices, and no longer
   sleeps past ones it cannot predict. The `STOP` fast-forward and
   `[cpu] jit` batches now share one event horizon. The CD32's Akiko CD

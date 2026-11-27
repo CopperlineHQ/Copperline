@@ -3607,26 +3607,35 @@ impl InputState {
         self.ports[Self::port_index(port)].joydat()
     }
 
-    /// A machine reset: the chips reset but nothing is unplugged. Each
-    /// port keeps its device and analogue knob positions (physical
-    /// state), while the chip-side quadrature counters clear, the pad
-    /// shifters reload, and the driven lines release -- the host input
-    /// path re-asserts anything still physically held on the next
-    /// quantum. The adapter and its joysticks stay plugged in with their
-    /// switches released; the pen stays where the hand holds it.
+    /// A machine reset: /RESET reaches the chips, not the controllers.
+    /// Each port keeps its device, its analogue knob positions and every
+    /// switch the hand is holding closed (buttons, directions, CD32 pad
+    /// buttons), while the chip-side quadrature counters clear and the
+    /// pad shifters reload. A held switch is a closed contact in the
+    /// controller, so the pin stays grounded straight through the reset:
+    /// holding both mouse buttons across Ctrl-Amiga-Amiga is how Kickstart
+    /// 2.0+'s Early Startup Control is reached. The adapter and its
+    /// joysticks are pure switch state and are untouched; the pen stays
+    /// where the hand holds it.
     pub fn reset_for_machine_reset(&mut self) {
         for p in &mut self.ports {
             *p = ControllerPort {
                 device: p.device,
+                fire: p.fire,
+                button2: p.button2,
+                button3: p.button3,
+                up: p.up,
+                down: p.down,
+                left: p.left,
+                right: p.right,
+                cd32_play: p.cd32_play,
+                cd32_rwd: p.cd32_rwd,
+                cd32_ffw: p.cd32_ffw,
+                cd32_green: p.cd32_green,
+                cd32_yellow: p.cd32_yellow,
                 pot_x_ohms: p.pot_x_ohms,
                 pot_y_ohms: p.pot_y_ohms,
                 ..ControllerPort::default()
-            };
-        }
-        for joy in &mut self.parallel_joysticks {
-            *joy = ParallelJoystick {
-                fitted: joy.fitted,
-                ..ParallelJoystick::default()
             };
         }
     }
