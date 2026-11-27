@@ -29,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # Pinned to a commit: the action has no release tags.
-      - uses: Homebrew/actions/setup-homebrew@ceec4e8419bb3c97ce96e9dda7738499ed5f869d # main, 2026-11-06
+      - uses: Homebrew/actions/setup-homebrew@61b401267256bb9c047d6d1481b176d5772a0ba7 # main, 2026-11-06
       - name: Style
         run: brew style "$GITHUB_WORKSPACE/Formula/copperline.rb"
       - name: Audit
