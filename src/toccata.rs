@@ -262,6 +262,10 @@ impl ZorroDevice for Toccata {
         self.ad1848.int6_pending()
     }
 
+    fn streams_audio(&self) -> bool {
+        self.ad1848.play_active()
+    }
+
     fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
         // Only the play cadence moves the FIFO and its interrupt: the next
         // codec sample is the earliest moment either can change. The mixer
@@ -534,6 +538,27 @@ mod tests {
         // close to the raw decoded sample, not zero and not wildly off.
         assert!(l > 0.9, "left sample too quiet: {l}");
         assert!(r > 0.9, "right sample too quiet: {r}");
+    }
+
+    #[test]
+    fn the_board_streams_audio_only_while_it_plays() {
+        let mut board = Toccata::new();
+        let mut mem = memory();
+        let mut host = DeviceHost::new(&mut mem);
+        assert!(!ZorroDevice::streams_audio(&board));
+        assert_eq!(
+            ZorroDevice::next_deadline(&board),
+            crate::zorro_device::DeviceDeadline::Idle
+        );
+        board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
+        board.write(0x6001, 1, 8, &mut host);
+        board.write(0x6801, 1, 0x0f, &mut host);
+        latch_format(&mut board, &mut host);
+        assert!(ZorroDevice::streams_audio(&board));
+        assert!(matches!(
+            ZorroDevice::next_deadline(&board),
+            crate::zorro_device::DeviceDeadline::In(_)
+        ));
     }
 
     #[test]

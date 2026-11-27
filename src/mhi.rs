@@ -1319,6 +1319,10 @@ impl ZorroDevice for Mhi {
         (self.intreq & self.intena) != 0
     }
 
+    fn streams_audio(&self) -> bool {
+        self.status == Status::Playing
+    }
+
     fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
         // Playback decodes on the board's own cadence, raising buffer
         // interrupts with no deadline model yet; stopped, it is idle.

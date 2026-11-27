@@ -801,8 +801,11 @@ In-tree functional boards implement the `ZorroDevice` trait
    `src/zorro_device/state.rs`, assigning a new, unused wire ID. Existing IDs
    are permanent, including those belonging to disabled features. Extend
    all of `BoardDevice`'s forwarding `match` arms (`read`, `write`,
-   `peek_word`, `tick`, `next_deadline`, `int2_line`, `int6_line`,
-   `take_activity`, `reset`, `kind`) for the new variant. `Bus` ticks every
+   `peek_word`, `tick`, `next_deadline`, `streams_audio`, `int2_line`,
+   `int6_line`, `take_activity`, `reset`, `kind`) for the new variant. A
+   board whose tick feeds one of Paula's audio rings (CD-DA, a sound card)
+   must report it from `streams_audio` while it does: the precise core's
+   wait-loop skip batches device time, which a stream cannot take. `Bus` ticks every
    board at each timed-device boundary, then samples its IRQ lines.
    `ZorroDevice::next_deadline` tells the CPU's event horizon when the board
    next asserts an interrupt line, writes guest memory or requests the bus

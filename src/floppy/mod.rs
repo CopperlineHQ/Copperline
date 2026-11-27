@@ -1703,6 +1703,41 @@ impl FloppyController {
         })
     }
 
+    /// Colour clocks until the controller goes idle on its own: with no DMA,
+    /// no selected drive and every motor off, it is left counting down
+    /// platter coast, settle and index-pulse timers, and stops ticking once
+    /// they run out. A tick is tested for idle before it runs, so a single
+    /// tick across that moment advances the drives' clocks by all of it,
+    /// where a run of short ones would stop at the transition. `None` when
+    /// it is idle, or busy until the CPU or a DMA event changes that.
+    pub fn cck_until_idle(&self) -> Option<u32> {
+        if self.is_idle()
+            || self.dma.is_some()
+            || self.direct_write.is_some()
+            || self.selected_drive().is_some()
+            || self.drives.iter().any(|drive| drive.motor_on)
+        {
+            return None;
+        }
+        let drives = self
+            .drives
+            .iter()
+            .map(|drive| {
+                drive
+                    .motor_cck
+                    .max(drive.seek_settle_cck)
+                    .max(drive.status_settle_cck)
+            })
+            .max()
+            .unwrap_or(0);
+        Some(
+            drives
+                .max(self.index_pulse_cck)
+                .max(self.index_flag_sync_cck)
+                .max(1),
+        )
+    }
+
     pub fn tick(&mut self, cck: u32, dmacon: u16, chip_ram: &mut [u8]) -> bool {
         self.dma_trace.clear();
         self.idle_cache = self.is_idle();

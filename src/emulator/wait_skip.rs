@@ -405,14 +405,13 @@ impl Emulator {
         }
         let bus = self.bus();
         let horizon = bus.cpu_event_horizon();
-        if !horizon.exact
-            || !bus.device_ticks_batch_exactly()
-            || self.machine.wait_interrupt_asserted()
-        {
+        let batch = bus.device_batch_limit_cck();
+        if !horizon.exact || batch == Some(0) || self.machine.wait_interrupt_asserted() {
             return Ok(None);
         }
         let limit = [
             horizon.cck,
+            batch,
             Some(bus.next_frame_event_cck()),
             bus.next_display_start_event_cck(),
         ]
@@ -643,6 +642,55 @@ mod tests {
         // Between interrupts the CPU sits in the two-instruction poll.
         let pc = emu.machine.pc() - ACCEL_BASE;
         assert!(pc >= GUEST_WAIT, "{pc:#X}");
+    }
+
+    /// A floppy motor coasting to a stop while the guest polls: the
+    /// controller's tick stops counting the drives' clocks when it goes
+    /// idle, so no skip may run across that moment.
+    #[test]
+    fn a_poll_across_the_floppy_coasting_to_idle_ends_where_execution_does() {
+        // Without drive sounds the idle transition bounds the skips; with
+        // them the coasting platter's sound holds them off.
+        for sounds in [false, true] {
+            poll_across_the_floppy_coasting_to_idle(sounds);
+        }
+    }
+
+    fn poll_across_the_floppy_coasting_to_idle(sounds: bool) {
+        let mut skipped = guest(CpuModel::M68020, 4, 0, true);
+        let mut executed = guest(CpuModel::M68020, 4, 0, false);
+        for emu in [&mut skipped, &mut executed] {
+            emu.bus_mut().paula.drive_sounds_mut().set_enabled(sounds);
+            // CIA-B PRB: MTR (bit 7) is latched by DF0's select edge
+            // (bit 3), so set it while deselected, then select.
+            let floppy = &mut emu.bus_mut().floppy;
+            for prb in [0x7F, 0x77, 0x7F] {
+                floppy.write_prb(prb); // motor on
+            }
+            emu.step_frame().unwrap();
+            emu.step_frame().unwrap();
+            // Off part-way through a quantum, so the platter does not come
+            // to rest on a quantum's end, where no skip runs across.
+            emu.debug_step_instructions(5_000).unwrap();
+            let floppy = &mut emu.bus_mut().floppy;
+            for prb in [0xFF, 0xF7, 0xFF] {
+                floppy.write_prb(prb); // motor off: the platter coasts
+            }
+            assert!(emu.bus().floppy.cck_until_idle().is_some());
+        }
+        for frame in 0..30 {
+            skipped.step_frame().unwrap();
+            executed.step_frame().unwrap();
+            assert!(
+                skipped.snapshot_blob().unwrap() == executed.snapshot_blob().unwrap(),
+                "machine state after frame {frame}, drive sounds {sounds}"
+            );
+        }
+        assert!(
+            skipped.bus().floppy.cck_until_idle().is_none(),
+            "coasted to idle"
+        );
+        assert!(skipped.wait_skip_instructions() > 0);
     }
 
     /// Compare after every single skip, not just every quantum: the

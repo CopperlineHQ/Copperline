@@ -147,6 +147,11 @@ impl Gayle {
     }
 
     /// The ATAPI CD-ROM drive behind this port, if either slot holds one.
+    /// Whether an ATAPI drive on this interface is playing CD-DA.
+    pub fn cd_audio_playing(&self) -> bool {
+        self.ata.cd_audio_playing()
+    }
+
     pub fn first_atapi_ref(&self) -> Option<&crate::scsi::ScsiCdRom> {
         self.ata.first_atapi_ref()
     }

@@ -466,6 +466,16 @@ pub trait ZorroDevice {
         DeviceDeadline::Unknown
     }
 
+    /// Whether the board is feeding host audio (a CD drive playing CD-DA,
+    /// a sound card playing) into one of Paula's mixer rings. Its tick
+    /// fills the ring before Paula drains it for the same span, so how the
+    /// time is cut into ticks changes what the mixer plays; the wait-loop
+    /// skip, which batches device time, waits while a board streams. A
+    /// board that streams audio must say so.
+    fn streams_audio(&self) -> bool {
+        false
+    }
+
     /// INT2 (PORTS) line state. Level-sensitive: held true while asserted.
     fn int2_line(&self) -> bool {
         false
@@ -619,6 +629,22 @@ impl ZorroDevice for BoardDevice {
             BoardDevice::Copperhf(d) => ZorroDevice::next_deadline(d),
             BoardDevice::Sf2000Sd(d) => ZorroDevice::next_deadline(d),
             BoardDevice::Flyer(d) => ZorroDevice::next_deadline(d.as_ref()),
+        }
+    }
+
+    fn streams_audio(&self) -> bool {
+        match self {
+            BoardDevice::A2091(d) => ZorroDevice::streams_audio(d),
+            BoardDevice::A4091(d) => ZorroDevice::streams_audio(d),
+            BoardDevice::IdeZorro(d) => ZorroDevice::streams_audio(d),
+            BoardDevice::Toccata(d) => ZorroDevice::streams_audio(d.as_ref()),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::streams_audio(d.as_ref()),
+            #[cfg(feature = "cd32-fmv")]
+            BoardDevice::Cd32Fmv(d) => ZorroDevice::streams_audio(d.as_ref()),
+            #[cfg(feature = "wasm-boards")]
+            BoardDevice::Wasm(d) => ZorroDevice::streams_audio(d),
+            _ => false,
         }
     }
 

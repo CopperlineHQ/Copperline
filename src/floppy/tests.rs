@@ -7050,3 +7050,32 @@ fn netplay_track_transfer_rejects_invalid_lengths_without_replacing_media() -> R
     assert_eq!(controller.export_disk_image(0)?, vec![0x5a; ADF_SIZE]);
     Ok(())
 }
+
+#[test]
+fn a_coasting_controller_goes_idle_exactly_at_its_bound() {
+    let mut ctrl = FloppyController::default();
+    let mut chip = vec![0u8; 1024];
+    // Motor on: MTR low across the select edge latches it.
+    ctrl.write_prb(drive_deselect_prb(true));
+    ctrl.write_prb(drive_select_prb(0, true));
+    ctrl.write_prb(drive_deselect_prb(true));
+    for _ in 0..200 {
+        ctrl.tick(10_000, 0, &mut chip);
+    }
+    assert_eq!(
+        ctrl.cck_until_idle(),
+        None,
+        "a running motor keeps the controller busy until the CPU stops it"
+    );
+    // Motor off: the platter coasts down, then the controller idles.
+    ctrl.write_prb(drive_deselect_prb(false));
+    ctrl.write_prb(drive_select_prb(0, false));
+    ctrl.write_prb(drive_deselect_prb(false));
+    let due = ctrl.cck_until_idle().expect("coasting to a stop");
+    assert!(due > 1);
+    ctrl.tick(due - 1, 0, &mut chip);
+    assert!(!ctrl.is_idle(), "still coasting one colour clock early");
+    ctrl.tick(1, 0, &mut chip);
+    assert!(ctrl.is_idle(), "idle at the bound");
+    assert_eq!(ctrl.cck_until_idle(), None);
+}

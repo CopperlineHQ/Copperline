@@ -1320,10 +1320,25 @@ jit`, with any debugger, trace, profiling or coverage hook armed, with a
 frame analyzer, bus observer, beam trap, waveform capture, heat map or
 freezer cartridge, while a device without an exact deadline is fitted
 (`EventHorizon::exact`), and for debugger-driven stepping and reverse
-replay. It also waits while a floppy platter winds up or coasts down with
-drive sounds on: the drive-sound synthesizer takes the platter's spin
-level at each device tick, so the ramp it plays (which save states carry)
-would depend on how the time was cut up (`Bus::device_ticks_batch_exactly`). Polls of a custom register (VPOSR, DMACONR) are never skipped:
+replay.
+
+One long device tick has to leave every device where a run of short ones
+would, for everything a save state carries, and three things are not
+linear that way (`Bus::device_batch_limit_cck`). The skip waits while one
+of them is in play, or stops short of it:
+
+- a device streaming host audio (an ATAPI or SCSI CD drive, the CDTV or
+  CD32 drive playing CD-DA, a Toccata or MHI board playing,
+  `ZorroDevice::streams_audio`) fills its mixer ring before Paula drains
+  the ring for the same span, and checks how full the ring is before it
+  adds a sector;
+- with drive sounds on, the synthesizer takes a winding or coasting floppy
+  platter's spin level at each tick, so the ramp it plays would depend on
+  how the time was cut up;
+- the floppy controller tests whether it is idle before each tick, so a
+  tick across the moment its coast and settle timers run out keeps
+  counting the drives' clocks; the skip ends before that moment
+  (`FloppyController::cck_until_idle`). Polls of a custom register (VPOSR, DMACONR) are never skipped:
 each turn is a chip-bus access whose cost depends on DMA contention.
 
 `src/emulator/wait_skip.rs` runs a guest (`tests/data/wait_skip/guest.asm`)

@@ -307,6 +307,15 @@ impl A4091 {
         self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)
     }
 
+    /// Whether a CD-ROM drive on the board's bus is playing CD-DA.
+    pub fn cd_audio_playing(&self) -> bool {
+        self.targets
+            .iter()
+            .flatten()
+            .filter_map(ScsiTarget::cd_ref)
+            .any(crate::scsi::ScsiCdRom::audio_playing)
+    }
+
     /// The disk images on the board's bus, in ID order.
     pub fn disk_images(&self) -> impl Iterator<Item = &crate::harddrive::HardDriveImage> {
         self.targets
@@ -1074,6 +1083,10 @@ impl crate::zorro_device::ZorroDevice for A4091 {
         } else {
             None
         }
+    }
+
+    fn streams_audio(&self) -> bool {
+        self.cd_audio_playing()
     }
 
     fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {

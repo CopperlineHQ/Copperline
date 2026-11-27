@@ -45,14 +45,41 @@ impl Bus {
         }
     }
 
-    /// Whether one long timed-device tick leaves every device exactly where
-    /// a run of short ones would, for everything a save state carries, not
-    /// only what the CPU can observe. It does except while a floppy platter
-    /// winds up or coasts down with drive sounds on: the drive-sound
-    /// synthesizer takes the platter's spin level at each tick, so the ramp
-    /// it plays depends on how the time was cut up.
-    pub fn device_ticks_batch_exactly(&self) -> bool {
-        !(self.paula.drive_sounds().enabled() && self.floppy.motor_changing_speed())
+    /// The longest span one timed-device tick may cover and leave every
+    /// device exactly where a run of short ticks would, for everything a
+    /// save state carries, not only what the CPU observes: `None` for no
+    /// limit, `Some(0)` for none at all right now. Device ticks are linear
+    /// in their colour clocks except:
+    ///
+    /// - while a device streams host audio (a CD drive playing CD-DA, a
+    ///   sound card playing): it fills its mixer ring before Paula drains
+    ///   the ring for the same span, and reads how full the ring is;
+    /// - while a floppy platter winds up or coasts down with drive sounds
+    ///   on: the drive-sound synthesizer takes the spin level at each tick;
+    /// - across the floppy controller's own transition to idle
+    ///   (`FloppyController::cck_until_idle`).
+    pub fn device_batch_limit_cck(&self) -> Option<u32> {
+        use crate::zorro_device::ZorroDevice;
+        let streaming = self.gayle.as_ref().is_some_and(|g| g.cd_audio_playing())
+            || self
+                .ide_a4000
+                .as_ref()
+                .is_some_and(|ide| ide.cd_audio_playing())
+            || self.sdmac.as_ref().is_some_and(|s| s.cd_audio_playing())
+            || self
+                .cdtv
+                .as_ref()
+                .is_some_and(crate::cdtv::CdtvController::audio_playing)
+            || self
+                .akiko
+                .as_ref()
+                .is_some_and(crate::akiko::Akiko::audio_playing)
+            || self.devices.iter().any(ZorroDevice::streams_audio);
+        if streaming || (self.paula.drive_sounds().enabled() && self.floppy.motor_changing_speed())
+        {
+            return Some(0);
+        }
+        self.floppy.cck_until_idle()
     }
 
     /// Whether nothing on the bus watches the CPU's or the chipset's
@@ -68,5 +95,29 @@ impl Bus {
             && self.wave.is_none()
             && !self.heat_map_armed()
             && self.cartridge.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::zorro_device::{BoardDevice, DeviceHost, ZorroDevice};
+
+    #[test]
+    fn a_device_streaming_audio_stops_batching() {
+        let mut bus = super::super::tests::empty_bus();
+        assert_eq!(bus.device_batch_limit_cck(), None);
+        let mut board = crate::toccata::Toccata::new();
+        {
+            let mut host = DeviceHost::new(&mut bus.mem);
+            board.write(0x0000, 1, 0x14, &mut host); // ACTIVE | FIFO_PLAY
+            board.write(0x6001, 1, 8, &mut host);
+            board.write(0x6801, 1, 0x0f, &mut host);
+            board.write(0x6001, 1, 9, &mut host);
+            board.write(0x6801, 1, 0x10, &mut host);
+            board.write(0x6801, 1, 0x11, &mut host); // play
+        }
+        assert!(ZorroDevice::streams_audio(&board));
+        bus.attach_devices(vec![BoardDevice::Toccata(Box::new(board))]);
+        assert_eq!(bus.device_batch_limit_cck(), Some(0));
     }
 }

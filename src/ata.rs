@@ -620,6 +620,14 @@ impl AtaBus {
         })
     }
 
+    /// Whether an ATAPI drive on this cable is playing CD-DA.
+    pub fn cd_audio_playing(&self) -> bool {
+        self.drives.iter().flatten().any(|d| match d {
+            AtaDevice::Atapi(drive) => drive.cdrom.audio_playing(),
+            AtaDevice::Disk(_) => false,
+        })
+    }
+
     /// Mutable counterpart of [`Self::first_atapi_ref`].
     pub fn first_atapi_mut(&mut self) -> Option<&mut crate::scsi::ScsiCdRom> {
         self.drives.iter_mut().flatten().find_map(|d| match d {
