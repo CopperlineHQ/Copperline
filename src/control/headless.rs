@@ -44,10 +44,11 @@ pub fn run(mut emu: Emulator, config: Config) -> Result<()> {
     let _info_file = super::announce(&local, &token, config.info_file.as_ref())?;
     log::info!("control: listening on {local}");
 
+    // Unpaced end to end. The reverse-debug ring and the PC history are
+    // armed per client, by its first request that needs them
+    // (`exec::CaptureArming`), not here: a client that never asks for
+    // reverse history should not pay for it on every frame it runs.
     emu.set_paced(false);
-    emu.enable_time_travel(config.reverse_budget_mb, config.reverse_interval_frames);
-    emu.debug_ensure_time_travel_anchor()?;
-    emu.machine.ui_set_pc_history_enabled(true);
 
     // --run + --control: a one-shot loadseg catch for the program, armed
     // before the first resume can step the machine (as --gdb does), so
@@ -239,6 +240,14 @@ struct Session {
     input: MachineInputState,
     reverse_budget_mb: usize,
     reverse_interval_frames: u64,
+    /// The client holds the reverse-debug capture: it has sent a request
+    /// that arms it (`exec::CaptureArming`).
+    holds_capture: bool,
+    /// A ring already recording when the session started. A client's own
+    /// ring leaves with it, so this can only be one armed from the
+    /// `COPPERLINE_DBG_RR*` environment before the server started: a
+    /// holder for the server's whole run, kept when the client leaves.
+    permanent_ring: bool,
     /// `--run`'s pending one-shot stop target (see `run`).
     run_stop: Option<String>,
 }
@@ -255,6 +264,7 @@ impl Session {
         stream
             .set_write_timeout(Some(Duration::from_millis(250)))
             .ok();
+        let permanent_ring = emu.time_travel_enabled();
         Self {
             emu,
             reader,
@@ -264,6 +274,8 @@ impl Session {
             input,
             reverse_budget_mb: config.reverse_budget_mb,
             reverse_interval_frames: config.reverse_interval_frames,
+            holds_capture: false,
+            permanent_ring,
             run_stop: None,
         }
     }
@@ -313,6 +325,50 @@ impl Session {
         self.ctx.remove_all_breaks(&mut self.emu);
         self.emu.bus_mut().ui_disarm_beam_trap_once();
         while self.emu.machine.take_ui_debug_stop().is_some() {}
+        // The client was the PC history's only holder, and the ring's
+        // unless the environment armed that: the next client starts
+        // without them.
+        if std::mem::take(&mut self.holds_capture) {
+            if !self.permanent_ring {
+                self.emu.disable_time_travel();
+            }
+            self.emu.machine.ui_set_pc_history_enabled(false);
+        }
+    }
+
+    /// Make the client a holder of the reverse-debug capture, arming the
+    /// ring (at the configured budget and interval) and the PC history
+    /// where they are not recording; a ring that is keeps its settings
+    /// and history. With `anchor`, an empty ring takes its first snapshot
+    /// here.
+    fn hold_capture(&mut self, anchor: bool) {
+        self.holds_capture = true;
+        if !self.emu.time_travel_enabled() {
+            self.emu
+                .enable_time_travel(self.reverse_budget_mb, self.reverse_interval_frames);
+        }
+        if anchor {
+            if let Err(e) = self.emu.debug_ensure_time_travel_anchor() {
+                log::warn!("control: arming time travel failed: {e:#}");
+            }
+        }
+        if !self.emu.machine.ui_pc_history_enabled() {
+            self.emu.machine.ui_set_pc_history_enabled(true);
+        }
+    }
+
+    /// Serve a core op, arming the capture around it as
+    /// [`exec::CaptureArming`] says.
+    fn exec_core_op(&mut self, op: &exec::CoreOp) -> Result<Value, CtlError> {
+        let arming = op.capture_arming();
+        if let Some(anchor) = arming.before() {
+            self.hold_capture(anchor);
+        }
+        let result = exec::exec_core(&mut self.emu, &mut self.ctx, op);
+        if arming.on_success() && result.is_ok() {
+            self.hold_capture(true);
+        }
+        result
     }
 
     fn write(&mut self, line: &str) -> io::Result<()> {
@@ -384,7 +440,7 @@ impl Session {
         };
         match parsed {
             Request::Core(op) => {
-                let reply = match exec::exec_core(&mut self.emu, &mut self.ctx, &op) {
+                let reply = match self.exec_core_op(&op) {
                     Ok(result) => proto::ok_line(&req.id, result),
                     Err(err) => proto::err_line(&req.id, &err),
                 };
@@ -598,12 +654,9 @@ impl Session {
                     Ok(outcome) => {
                         self.input.clear_scheduled();
                         // The snapshot ring's positions belong to the old
-                        // timeline; re-arm on the loaded one.
-                        self.emu.enable_time_travel(
-                            self.reverse_budget_mb,
-                            self.reverse_interval_frames,
-                        );
-                        self.emu.debug_ensure_time_travel_anchor()?;
+                        // timeline: restart it on the loaded one, whoever
+                        // armed it.
+                        self.emu.restart_time_travel()?;
                         proto::ok_line(
                             &id,
                             json!({
@@ -664,6 +717,9 @@ impl Session {
                 &CtlError::invalid_state("CPU is double-faulted; reset the machine"),
             ))?;
             return Ok(None);
+        }
+        if let Some(anchor) = verb.capture_arming().before() {
+            self.hold_capture(anchor);
         }
         self.ctx.running = true;
         self.ctx.pending = true;
@@ -1079,7 +1135,7 @@ impl Session {
                     self.emit_events()?;
                 }
                 Request::Core(op) if op.allowed_while_running() => {
-                    let reply = match exec::exec_core(&mut self.emu, &mut self.ctx, &op) {
+                    let reply = match self.exec_core_op(&op) {
                         Ok(result) => proto::ok_line(&req.id, result),
                         Err(err) => proto::err_line(&req.id, &err),
                     };
@@ -1113,15 +1169,11 @@ fn headless_warp_value() -> Value {
 #[cfg(test)]
 pub(crate) const TEST_TOKEN: &str = "sesame";
 
-/// The control test machine with time travel and PC history armed the
-/// way `run()` arms them.
+/// The control test machine as `run()` serves it: neither the reverse
+/// ring nor the PC history is armed until a client asks for them.
 #[cfg(test)]
 pub(crate) fn control_test_emulator() -> Emulator {
-    let mut emu = crate::control::test_emulator();
-    emu.enable_time_travel(64, 1);
-    emu.debug_ensure_time_travel_anchor().unwrap();
-    emu.machine.ui_set_pc_history_enabled(true);
-    emu
+    crate::control::test_emulator()
 }
 
 /// Serve one control connection on a background thread against a fresh
@@ -1313,8 +1365,8 @@ mod tests {
         (emu, input, ctx, end)
     }
 
-    /// Run one session against a fresh test machine. Time travel is
-    /// armed like `run()` arms it.
+    /// Run one session against a fresh test machine, unarmed as `run()`
+    /// serves it.
     fn run_session(
         recorder: Option<InputRecorder>,
         client_fn: impl FnOnce(&mut Client) + Send + 'static,
@@ -1349,7 +1401,10 @@ mod tests {
             let status = c.result("status", json!({}));
             assert_eq!(status["state"], "paused");
             assert_eq!(status["pc"], 0xF80010);
-            assert_eq!(status["tt_armed"], true);
+            assert_eq!(
+                status["tt_armed"], false,
+                "connecting does not arm reverse execution"
+            );
         });
     }
 
@@ -1461,6 +1516,12 @@ mod tests {
     fn memory_rw_roundtrip_reports_replay_unsafe() {
         run_session(None, |c| {
             c.auth();
+            let write = c.result("mem.write", json!({"addr": "$30000", "data": "beef"}));
+            assert!(
+                write.get("replay_unsafe").is_none(),
+                "nothing is recorded to replay before the client arms it"
+            );
+            c.result("reverse_anchor", json!({}));
             let write = c.result("mem.write", json!({"addr": "$30000", "data": "cafef00d"}));
             assert_eq!(write["written"], 4);
             assert_eq!(write["replay_unsafe"], true, "tt is armed in this session");
@@ -1972,6 +2033,240 @@ mod tests {
                 "the MOVE.W D0,(abs).L instruction is the writer"
             );
         });
+    }
+
+    #[test]
+    fn the_capture_arms_at_the_first_request_needing_it_and_leaves_with_the_client() {
+        let (emu, _, _, _) =
+            run_machine_session(control_test_emulator(), MachineInputState::default(), |c| {
+                c.auth();
+                for method in ["regs.get", "capture.digest", "status"] {
+                    c.result(method, json!({}));
+                }
+                c.result("run_until", json!({"frame": 2}));
+                let status = c.result("status", json!({}));
+                assert_eq!(
+                    status["tt_armed"], false,
+                    "inspection, capture and a plain run arm nothing"
+                );
+                let history = c.result("pc_history", json!({}));
+                assert_eq!(
+                    history["pcs"],
+                    json!([]),
+                    "the PC history starts at the request that armed it"
+                );
+                let status = c.result("status", json!({}));
+                assert_eq!(status["tt_armed"], true);
+                c.result("step", json!({"n": 3}));
+                let history = c.result("pc_history", json!({}));
+                assert_eq!(history["pcs"].as_array().map(Vec::len), Some(3));
+            });
+        assert!(
+            !emu.time_travel_enabled(),
+            "the ring the client armed is released when it disconnects"
+        );
+        assert!(!emu.machine.ui_pc_history_enabled());
+    }
+
+    #[test]
+    fn a_refused_break_add_arms_nothing() {
+        run_session(None, |c| {
+            c.auth();
+            let bad = c.call("break.add", json!({"kind": "pc"}));
+            assert_eq!(bad["error"]["code"], proto::INVALID_PARAMS);
+            let status = c.result("status", json!({}));
+            assert_eq!(status["tt_armed"], false, "a malformed break.add");
+        });
+        // A point that is already set (here in the machine's own store,
+        // as the GUI would set it) is refused, and arms nothing.
+        let mut emu = control_test_emulator();
+        emu.machine.ui_set_breakpoint(0xF8_0100, None, 0);
+        run_machine_session(emu, MachineInputState::default(), |c| {
+            c.auth();
+            let dup = c.call("break.add", json!({"kind": "pc", "addr": "$F80100"}));
+            assert_eq!(dup["error"]["code"], proto::INVALID_PARAMS);
+            let status = c.result("status", json!({}));
+            assert_eq!(status["tt_armed"], false, "a refused break.add");
+            c.result("break.add", json!({"kind": "pc", "addr": "$F80104"}));
+            let status = c.result("status", json!({}));
+            assert_eq!(status["tt_armed"], true, "an installed break.add");
+        });
+    }
+
+    #[test]
+    fn each_capture_method_arms_it_by_itself() {
+        let methods: [(&str, Value); 11] = [
+            ("break.add", json!({"kind": "pc", "addr": "$F80100"})),
+            ("step", json!({})),
+            ("step_over", json!({})),
+            ("step_frame", json!({})),
+            ("reverse_step", json!({})),
+            ("reverse_frame", json!({})),
+            ("reverse_continue", json!({})),
+            ("reverse_anchor", json!({})),
+            ("last_writer", json!({"addr": "$20000"})),
+            ("pc_history", json!({})),
+            // A collect list that reads the PC history arms it for the
+            // run it reports on, though run_until alone arms nothing.
+            (
+                "run_until",
+                json!({"frame": 1, "collect": [{"method": "pc_history"}]}),
+            ),
+        ];
+        for (method, params) in methods {
+            run_session(None, move |c| {
+                c.auth();
+                c.call(method, params);
+                let status = c.result("status", json!({}));
+                assert_eq!(status["tt_armed"], true, "{method} arms the ring");
+            });
+        }
+    }
+
+    #[test]
+    fn a_reverse_method_before_any_history_finds_none() {
+        for (method, params) in [
+            ("reverse_step", json!({})),
+            ("reverse_frame", json!({})),
+            ("reverse_continue", json!({})),
+        ] {
+            run_session(None, move |c| {
+                c.auth();
+                // Run (which arms nothing) so there are instructions and a
+                // frame behind the position the request arms the ring at.
+                c.result("run_until", json!({"frame": 2}));
+                let first = c.call(method, params);
+                assert_eq!(
+                    first["error"]["code"],
+                    proto::HISTORY_EXHAUSTED,
+                    "{method}: the ring was armed by this very request"
+                );
+            });
+        }
+        run_session(None, |c| {
+            c.auth();
+            c.result("run_until", json!({"frame": 2}));
+            let writer = c.result("last_writer", json!({"addr": "$20000"}));
+            assert_eq!(writer["outcome"], "beyond_history");
+            let anchor = c.result("reverse_anchor", json!({}));
+            assert!(anchor["position"].is_number());
+        });
+        // At power-on, before any instruction has retired, there is no
+        // earlier position at all.
+        run_session(None, |c| {
+            c.auth();
+            let first = c.call("reverse_step", json!({"n": 1}));
+            assert_eq!(
+                first["error"]["code"],
+                proto::HISTORY_EXHAUSTED,
+                "a reverse step at position zero does not report success"
+            );
+            let status = c.result("status", json!({}));
+            assert_eq!(status["retired_instructions"], 0);
+        });
+        run_session(None, |c| {
+            c.auth();
+            c.result("run_until", json!({"frame": 1}));
+            let first = c.call("reverse_step", json!({}));
+            assert_eq!(first["error"]["code"], proto::HISTORY_EXHAUSTED);
+            let status = c.result("status", json!({}));
+            assert_eq!(status["tt_armed"], true);
+            c.result("step", json!({"n": 2}));
+            let back = c.result("reverse_step", json!({"n": 2}));
+            assert_eq!(back["reason"], "reverse");
+        });
+    }
+
+    #[test]
+    fn an_environment_armed_ring_outlives_the_client() {
+        // A ring armed before the server (COPPERLINE_DBG_RR*) is not the
+        // client's: it is used as it is and kept, while the PC history the
+        // client armed goes with it.
+        let mut emu = control_test_emulator();
+        emu.enable_time_travel(64, 3);
+        let (emu, _, _, _) = run_machine_session(emu, MachineInputState::default(), |c| {
+            c.auth();
+            c.result("step", json!({"n": 2}));
+        });
+        assert_eq!(
+            emu.time_travel_ring().map(|ring| ring.interval_frames()),
+            Some(3),
+            "the client neither replaced nor released the ring"
+        );
+        assert!(!emu.machine.ui_pc_history_enabled());
+    }
+
+    #[test]
+    fn a_client_starts_without_the_previous_clients_capture() {
+        let (emu, input, _, _) =
+            run_machine_session(control_test_emulator(), MachineInputState::default(), |c| {
+                c.auth();
+                c.result("step", json!({"n": 5}));
+            });
+        run_machine_session(emu, input, |c| {
+            c.auth();
+            let status = c.result("status", json!({}));
+            assert_eq!(status["tt_armed"], false);
+            let back = c.call("reverse_step", json!({}));
+            assert_eq!(
+                back["error"]["code"],
+                proto::HISTORY_EXHAUSTED,
+                "the previous client's history left with it"
+            );
+        });
+    }
+
+    #[test]
+    fn state_load_restarts_the_ring_on_the_loaded_timeline() {
+        let path = scratch_path("lazy-rewind.clstate");
+        let path_param = json!({"path": path.display().to_string()});
+        let params = path_param.clone();
+        run_session(None, move |c| {
+            c.auth();
+            c.result("state.save", params.clone());
+            c.result("state.load", params.clone());
+            let status = c.result("status", json!({}));
+            assert_eq!(status["tt_armed"], false, "nobody asked for the ring");
+
+            c.result("step", json!({"n": 4}));
+            c.result("state.load", params.clone());
+            let status = c.result("status", json!({}));
+            assert_eq!(status["tt_armed"], true, "the holder's ring is re-armed");
+            let back = c.call("reverse_step", json!({}));
+            assert_eq!(
+                back["error"]["code"],
+                proto::HISTORY_EXHAUSTED,
+                "the re-armed ring holds no history before the load"
+            );
+        });
+
+        // A ring the client does not hold (armed from the environment) is
+        // restarted too, keeping its settings: the position is not part
+        // of a save state, so its pre-load snapshots lie behind the loaded
+        // machine, and a reverse step would replay the replaced timeline.
+        let mut emu = control_test_emulator();
+        emu.enable_time_travel(64, 1);
+        let params = path_param;
+        let (emu, _, _, _) = run_machine_session(emu, MachineInputState::default(), move |c| {
+            c.auth();
+            c.result("run_until", json!({"frame": 3}));
+            c.result("state.save", params.clone());
+            c.result("run_until", json!({"frame": 6}));
+            let loaded = c.result("state.load", params.clone());
+            assert!(loaded["seconds"].is_number());
+            let back = c.call("reverse_step", json!({}));
+            assert_eq!(
+                back["error"]["code"],
+                proto::HISTORY_EXHAUSTED,
+                "a reverse step after a load must not land on the old timeline"
+            );
+        });
+        std::fs::remove_file(&path).ok();
+        assert_eq!(
+            emu.time_travel_ring().map(|ring| ring.interval_frames()),
+            Some(1),
+            "the environment's ring keeps its settings and outlives the client"
+        );
     }
 
     #[test]

@@ -25,7 +25,7 @@
 //! - `k` detaches instead of killing the session: the window is the
 //!   user's, and VS Code sends `k` on Stop Debugging.
 
-use super::app_session::WarpSource;
+use super::app_session::{CaptureSource, WarpSource};
 use super::*;
 use crate::debugger::DebugStop;
 use crate::gdbstub::core::{hex_decode, CoreReply, GdbCore, ResumeRequest, GDB_WATCH_WORD_CAP};
@@ -349,6 +349,14 @@ impl App {
         self.gdb.as_ref().is_some_and(|g| g.pending)
     }
 
+    /// The budget and interval a GDB session arms the reverse ring with
+    /// when nothing else is recording.
+    pub(super) fn gdb_ring_settings(&self) -> Option<(usize, u64)> {
+        self.gdb
+            .as_ref()
+            .map(|g| (g.reverse_budget_mb, g.reverse_interval_frames))
+    }
+
     /// Drain queued GDB messages. Runs at the top of `about_to_wait`,
     /// before the machine steps, so packets land at a frame boundary;
     /// also callable directly from tests (no sockets or event loop).
@@ -379,17 +387,15 @@ impl App {
             g.core = GdbCore::new(&self.emu, g.stop_on_load.clone());
             g.core.bartman = bartman;
         }
-        let (budget, interval) = match self.gdb.as_ref() {
-            Some(g) => (g.reverse_budget_mb, g.reverse_interval_frames),
-            None => return,
-        };
-        // Arm the reverse-debug ring for this client, like the headless
-        // driver does. No pc history: the headless stub leaves it off,
-        // and enabling it would change JIT/run-ahead behaviour.
-        self.emu.enable_time_travel(budget, interval);
-        if let Err(e) = self.emu.debug_ensure_time_travel_anchor() {
-            warn!("gdb: arming time travel failed: {e:#}");
+        if self.gdb.is_none() {
+            return;
         }
+        // Hold the reverse-debug ring for this session's reverse commands,
+        // like the headless driver arms it, until the session detaches. A
+        // ring already recording (rewind, the debugger, a control client)
+        // is used as it is. No pc history: the headless stub leaves it off,
+        // and enabling it would change JIT/run-ahead behaviour.
+        self.hold_time_travel(CaptureSource::Gdb, true);
         // Attaching stops the target: gdb's first packets read registers
         // and memory expecting a stopped inferior. A control client's
         // resume outstanding on the same window ends here (this client's
@@ -411,6 +417,10 @@ impl App {
         };
         g.pending = false;
         g.breaks.remove_all(&mut self.emu);
+        // The session is over, whether or not the socket closes with it
+        // (`D` and `k` leave it open), so its hold on the reverse ring ends
+        // here; another holder's ring stays.
+        self.release_time_travel(CaptureSource::Gdb);
         // A warp the client engaged has no client left to release it;
         // another holder's warp (a control client, the guest) stays.
         if self.warp_holds.contains(WarpSource::Gdb) {

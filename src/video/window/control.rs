@@ -8,7 +8,7 @@
 //! routes input/media through the exact helpers live input uses so
 //! journaling (input recorder, reverse-replay log) is identical.
 
-use super::app_session::WarpSource;
+use super::app_session::{CaptureSource, WarpSource};
 use super::*;
 use crate::control::exec::{
     self, CoreOp, HostOp, Request, ResumeKind, ResumeVerb, RunTarget, StableStep, StableWatch,
@@ -162,6 +162,24 @@ impl App {
         self.control.as_ref().is_some_and(|c| c.exit_requested)
     }
 
+    /// Make the client a holder of the reverse-debug capture -- the
+    /// snapshot ring and the PC history -- before (or, for `break.add`,
+    /// after) serving a request that needs it (`exec::CaptureArming`). A
+    /// ring already recording (the user's rewind, the debugger's, a GDB
+    /// session's) is used as it is, never replaced.
+    fn control_hold_capture(&mut self, anchor: bool) {
+        self.hold_time_travel(CaptureSource::Control, anchor);
+        self.hold_pc_history(CaptureSource::Control);
+    }
+
+    /// The budget and interval a control client arms the reverse ring
+    /// with when nothing else is recording.
+    pub(super) fn control_ring_settings(&self) -> Option<(usize, u64)> {
+        self.control
+            .as_ref()
+            .map(|c| (c.reverse_budget_mb, c.reverse_interval_frames))
+    }
+
     /// Drain queued control commands. First statement of
     /// `about_to_wait`, before the machine steps, so commands land at a
     /// frame boundary; also callable directly from tests (no sockets or
@@ -216,7 +234,7 @@ impl App {
     }
 
     fn control_on_connected(&mut self) {
-        let (budget, interval) = {
+        {
             let ctl = self
                 .control
                 .as_mut()
@@ -224,15 +242,10 @@ impl App {
             ctl.ctx = SessionCtx::new();
             ctl.pending = None;
             ctl.temp_pc_break = None;
-            (ctl.reverse_budget_mb, ctl.reverse_interval_frames)
-        };
-        // Arm the reverse-debug ring for this client, like the headless
-        // server and the debugger window do.
-        self.emu.enable_time_travel(budget, interval);
-        if let Err(e) = self.emu.debug_ensure_time_travel_anchor() {
-            warn!("control: arming time travel failed: {e:#}");
         }
-        self.emu.machine.ui_set_pc_history_enabled(true);
+        // Connecting arms nothing: the reverse-debug ring and the PC
+        // history wait for the client's first request that needs them
+        // (`control_hold_capture`), as on the headless server.
         self.show_osd("Control client attached");
         self.request_redraw();
         // A --run stop that fired before any client attached left the
@@ -257,6 +270,12 @@ impl App {
         }
         self.emu.bus_mut().ui_disarm_beam_trap_once();
         ctx.remove_all_breaks(&mut self.emu);
+        // Like the warp below: the client's holds on the reverse ring and
+        // the PC history end with it, and each stops unless another holder
+        // (rewind, an open debugger or console, a GDB session) still
+        // needs it.
+        self.release_time_travel(CaptureSource::Control);
+        self.release_pc_history(CaptureSource::Control);
         // A warp the client engaged has no client left to release it;
         // another holder's warp (a GDB client, the guest) stays.
         if self.warp_holds.contains(WarpSource::Control) {
@@ -281,6 +300,10 @@ impl App {
                     ));
                     return;
                 }
+                let arming = op.capture_arming();
+                if let Some(anchor) = arming.before() {
+                    self.control_hold_capture(anchor);
+                }
                 // Keep the host-state flags `status` reports current.
                 let repositions = !op.allowed_while_running();
                 let (paused, powered_on, halted) = (self.paused, self.powered_on, self.cpu_halted);
@@ -294,6 +317,9 @@ impl App {
                     ctl.ctx.powered_on = powered_on;
                     exec::exec_core(&mut self.emu, &mut ctl.ctx, &op)
                 };
+                if arming.on_success() && result.is_ok() {
+                    self.control_hold_capture(true);
+                }
                 // profile.stop removes the capture and disarms the
                 // analyzer it armed before its summary write can fail,
                 // so an open pane wants its trace back on every outcome,
@@ -574,17 +600,9 @@ impl App {
                         ctl.input.clear_scheduled();
                     }
                     // The snapshot ring's positions belong to the old
-                    // timeline; re-arm on the loaded one.
-                    let (budget, interval) = self
-                        .control
-                        .as_ref()
-                        .map(|c| (c.reverse_budget_mb, c.reverse_interval_frames))
-                        .unwrap_or((
-                            crate::debugger::RR_DEFAULT_BUDGET_MB,
-                            crate::debugger::RR_DEFAULT_INTERVAL_FRAMES,
-                        ));
-                    self.emu.enable_time_travel(budget, interval);
-                    if let Err(e) = self.emu.debug_ensure_time_travel_anchor() {
+                    // timeline: restart it on the loaded one, whoever
+                    // holds it, keeping its own settings.
+                    if let Err(e) = self.emu.restart_time_travel() {
                         warn!("control: re-arming time travel failed: {e:#}");
                     }
                     proto::ok_line(&id, json!({"seconds": self.emu.bus().emulated_seconds()}))
@@ -646,6 +664,23 @@ impl App {
             ));
             return;
         }
+        let sync_step = matches!(
+            verb.kind,
+            ResumeKind::Step { .. }
+                | ResumeKind::StepOver
+                | ResumeKind::StepOut
+                | ResumeKind::StepCopper
+        );
+        if sync_step && !self.paused {
+            self.control_send(proto::err_line(
+                &id,
+                &CtlError::invalid_state("machine is running; pause first"),
+            ));
+            return;
+        }
+        if let Some(anchor) = verb.capture_arming().before() {
+            self.control_hold_capture(anchor);
+        }
         match verb.kind {
             // Bounded step verbs run synchronously at this boundary,
             // like the debugger window's own step buttons.
@@ -653,13 +688,6 @@ impl App {
             | ResumeKind::StepOver
             | ResumeKind::StepOut
             | ResumeKind::StepCopper => {
-                if !self.paused {
-                    self.control_send(proto::err_line(
-                        &id,
-                        &CtlError::invalid_state("machine is running; pause first"),
-                    ));
-                    return;
-                }
                 self.control_sync_step(id, verb);
             }
             ResumeKind::StepFrame { n } => {

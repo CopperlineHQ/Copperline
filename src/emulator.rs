@@ -1720,6 +1720,22 @@ impl Emulator {
         self.tt_ring.is_some()
     }
 
+    /// Restart an armed snapshot ring empty, with its own budget and
+    /// interval, anchored at the current position; returns whether one was
+    /// armed. A state load needs this: the retired-instruction position is
+    /// not part of a save state, so the snapshots from before the load lie
+    /// behind the loaded machine's position, and a reverse step would
+    /// restore one and replay the timeline the load replaced.
+    pub fn restart_time_travel(&mut self) -> Result<bool> {
+        let Some(ring) = self.tt_ring.as_ref() else {
+            return Ok(false);
+        };
+        let (budget_mb, interval_frames) = (ring.budget_mb(), ring.interval_frames());
+        self.enable_time_travel(budget_mb, interval_frames);
+        self.debug_ensure_time_travel_anchor()?;
+        Ok(true)
+    }
+
     pub fn time_travel_ring(&self) -> Option<&crate::timetravel::SnapshotRing> {
         self.tt_ring.as_ref()
     }
@@ -2033,6 +2049,12 @@ impl Emulator {
     /// at the new (earlier) position, returned in `Found`.
     pub fn tt_reverse_step(&mut self, n: u64) -> Result<crate::timetravel::ReverseOutcome<u64>> {
         use crate::timetravel::ReverseOutcome;
+        // Nothing retired yet, so nothing to step back over: restoring the
+        // snapshot at this very position would report a step that did not
+        // move the machine.
+        if n != 0 && self.retired_instructions == 0 {
+            return Ok(ReverseOutcome::BeyondHistory);
+        }
         let target = self.retired_instructions.saturating_sub(n);
         Ok(match self.tt_restore_to(target)? {
             ReverseOutcome::Found(()) => ReverseOutcome::Found(self.retired_instructions),

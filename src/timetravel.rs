@@ -159,6 +159,16 @@ impl SnapshotRing {
     pub fn used_bytes(&self) -> usize {
         self.used_bytes
     }
+
+    /// The memory budget the ring was armed with, in MiB.
+    pub fn budget_mb(&self) -> usize {
+        self.budget_bytes / (1024 * 1024)
+    }
+
+    /// The capture interval the ring was armed with, in frames.
+    pub fn interval_frames(&self) -> u64 {
+        self.interval_frames
+    }
 }
 
 /// A reconstructed memory write reported by the reverse watchpoint: the last

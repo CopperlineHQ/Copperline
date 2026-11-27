@@ -1355,6 +1355,12 @@ pub struct App {
     /// (its own warp-off or disconnect), all at once by the manual toggle
     /// or power off. Host-side only, never serialized.
     warp_holds: app_session::WarpHolds,
+    /// Who holds the reverse-debug snapshot ring and the PC history
+    /// (`App::hold_time_travel`, `App::hold_pc_history`): each is armed
+    /// while anyone in its set needs it and released when the set
+    /// empties. Host-side only, never serialized.
+    ring_holds: app_session::CaptureHolds,
+    pc_history_holds: app_session::CaptureHolds,
     /// Live-input recorder: logs every input event that reaches the
     /// emulated machine and writes a --script-replayable file on stop.
     /// None while not recording.
@@ -3119,6 +3125,8 @@ impl App {
             warp_launch_tracker: crate::amigaos::LibraryTracker::default(),
             warp_boot: warp_boot_gate,
             warp_holds: app_session::WarpHolds::default(),
+            ring_holds: app_session::CaptureHolds::default(),
+            pc_history_holds: app_session::CaptureHolds::default(),
             input_recorder: record_input
                 .is_some()
                 .then(|| crate::inputrec::InputRecorder::new(0.0)),
@@ -3295,6 +3303,13 @@ impl App {
         // Attach the sampler now for a directly-booted machine; the config-screen
         // placeholder passes a disabled request and attaches on Run instead.
         app.attach_session_sampler();
+        // A ring already recording was armed from the COPPERLINE_DBG_RR*
+        // environment; it holds for this machine whoever else comes and
+        // goes.
+        if app.emu.time_travel_enabled() {
+            app.ring_holds
+                .insert(app_session::CaptureSource::Environment);
+        }
         if app.rewind_armed {
             app.arm_rewind_ring();
         }
@@ -3311,20 +3326,16 @@ impl App {
         app
     }
 
-    /// Start recording rewind history with the configured budget/interval.
-    /// The debugger arms the same ring on its own terms; this re-arms it so
-    /// the rewind hotkey gets the interval the user asked for.
+    /// Start recording rewind history with the configured budget/interval:
+    /// rewind joins the snapshot ring's holders, restarting the ring at
+    /// the interval the rewind hotkey steps back by.
     fn arm_rewind_ring(&mut self) {
-        self.emu
-            .enable_time_travel(self.rewind_budget_mb, self.rewind_interval_frames);
         // Take the first anchor now rather than at the end of the next frame,
         // so rewind can reach back to the moment recording was switched on.
         // Callers are always between frames (App::new before the first one,
         // the menu/hotkey handlers between two), which is where the renderer's
         // capture buffers are consistent enough to serialize.
-        if let Err(e) = self.emu.debug_ensure_time_travel_anchor() {
-            warn!("rewind: could not take the initial snapshot: {e:#}");
-        }
+        self.hold_time_travel(app_session::CaptureSource::Rewind, true);
         info!(
             "rewind: recording history ({} MiB budget, one snapshot every {} frames)",
             self.rewind_budget_mb, self.rewind_interval_frames
@@ -3333,25 +3344,17 @@ impl App {
 
     /// Menu/hotkey toggle for rewind capture. Turning it off releases the
     /// retained snapshots, which is the point: the ring is the memory cost.
+    /// Another holder (an open debugger, a remote debugging client) keeps
+    /// the ring recording for itself; only the user's rewind stops.
     fn toggle_rewind(&mut self) {
         self.rewind_armed = !self.rewind_armed;
         if self.rewind_armed {
             self.arm_rewind_ring();
             self.show_osd("Rewind recording on");
         } else {
-            // Leave the ring alone if the debugger armed it for its own
-            // reverse controls; only the user's rewind recording stops.
-            if !self.debugger_wants_time_travel() {
-                self.emu.disable_time_travel();
-            }
+            self.release_time_travel(app_session::CaptureSource::Rewind);
             self.show_osd("Rewind recording off");
         }
-    }
-
-    /// Whether a debugger-family window is open and relying on the snapshot
-    /// ring for its reverse controls.
-    fn debugger_wants_time_travel(&self) -> bool {
-        self.debugger_panel.is_some() || self.console_panel.is_some()
     }
 
     /// Rewind the machine one capture point. Unlike the debugger's reverse

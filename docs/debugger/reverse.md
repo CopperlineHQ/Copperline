@@ -56,8 +56,10 @@ the colour clock of the write. The run then continues.
 - `COPPERLINE_DBG_RR_BUDGET_MB=N`: Maximum host memory for the snapshot ring in MiB (default: 512).
 - `COPPERLINE_DBG_RR_INTERVAL=N`: Number of emulated video frames between snapshots (default: 5).
 
-The last two also size the ring that a [control protocol](control.md) server
-or headless [`--gdb`](gdb.md) stub arms for its reverse commands.
+The last two also size the ring that a [control protocol](control.md) client
+arms with its first reverse, step or break method (see
+[Reverse history](control.md#reverse-history)), and the one a headless
+[`--gdb`](gdb.md) stub arms for its reverse commands.
 
 ## Interactive reverse controls
 
@@ -72,7 +74,10 @@ in the transport row:
 
 Opening the debugger or console arms the snapshot ring (512 MiB, one snapshot
 every 10 frames) if nothing has armed it already. History accrues only while
-the machine advances (**Run**, **Frame**), not while it is paused.
+the machine advances (**Run**, **Frame**), not while it is paused. Closing
+the last of them releases the ring and its history, unless the rewind
+recording, an attached `--gdb-gui` session or a [control](control.md) client
+still holds it.
 
 `< Run` (and the console command `RRUN`) replays the history and stops at the
 most recent event that any armed stop condition would have caught: PC
@@ -89,6 +94,10 @@ Rewind also works outside the debugger:
   holds up to `rewind_budget_mb` MiB of snapshots (default 256).
 - Press `Cmd+Z` (macOS) or `Alt+Z` (Linux/Windows) to step back one
   `rewind_interval_frames` interval (default 25 frames) at a time.
+
+Switching rewind on restarts the ring at the rewind budget and interval, even
+when the debugger or a remote debugger armed it first. Switching it off
+releases the ring unless one of those still holds it.
 
 ## Determinism requirements for reverse replay
 

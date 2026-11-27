@@ -204,6 +204,12 @@ The GDB stub integrates with Copperline's snapshot ring buffer:
 | `reverse-continue` | Executes backward until a preceding GDB breakpoint is reached |
 | `monitor last-writer ADDR` | Finds the last instruction that modified memory at `ADDR` |
 
+In a `--gdb-gui` session the GDB client holds the window's snapshot ring
+from the moment it attaches until it detaches (`D`, `k` or disconnecting).
+A ring already recording -- the rewind recording, the debugger's, a
+[control](control.md#reverse-history) client's -- is used as it is, with its
+history; detaching releases the ring unless one of those still holds it.
+
 
 ## Bartman extension backend
 

@@ -22,10 +22,8 @@ at a time. The windowed server answers a second connection with one JSON
 error line and closes it; the headless server accepts the next connection
 only after the current client disconnects, keeping the machine paused in
 between. `shutdown` ends the process. The headless server runs
-unpaced, keeps a PC history, and arms reverse execution at startup (the
-windowed server does both when a client connects), with the budget and snapshot
-interval taken from `COPPERLINE_DBG_RR_BUDGET_MB` and
-`COPPERLINE_DBG_RR_INTERVAL` (see [Reverse debugging](reverse.md)).
+unpaced. Neither server records reverse history for a client that has not
+asked for it: see [Reverse history](#reverse-history).
 
 The headless server owns the machine, so `--control` cannot be combined with
 `--gdb`/`--gdb-gui`, `--terminal`, netplay (`--netplay-host`/`--netplay-join`/
@@ -73,6 +71,63 @@ instruction, and `segments.list` then reports its hunks. A windowed session
 that reaches the stop before any client has attached parks there and tells
 the first client with `event.stopped`. The stop fires once; a client that
 wants every load arms its own `loadseg` break.
+
+(reverse-history)=
+### Reverse history
+
+The reverse-debug snapshot ring and the PC history cost host time on every
+emulated frame while they record: a snapshot serializes the whole machine
+(tens of megabytes on a machine with a lot of RAM), and the PC history keeps
+`[cpu] jit` off. Neither server records them for a client that has only
+connected. The client becomes a holder of both with its first request that
+needs them:
+
+- a reverse method (`reverse_step`, `reverse_frame`, `reverse_continue`,
+  `reverse_anchor`) or `last_writer`;
+- `pc_history`, or a resume whose `collect` list includes it;
+- a step method (`step`, `step_over`, `step_out`, `step_copper`,
+  `step_frame`);
+- a `break.add` that installs its break (one refused as already set, or
+  with bad parameters, arms nothing).
+
+A ring the client arms has the budget and snapshot interval given by
+`COPPERLINE_DBG_RR_BUDGET_MB` and `COPPERLINE_DBG_RR_INTERVAL` (see
+[Reverse debugging](reverse.md)) and takes its first snapshot at the current
+position, so history starts at that request: a step, or a `break.add`
+followed by `continue`, can be reversed back to where it was sent. Sent
+first, `reverse_step`, `reverse_frame` and `reverse_continue` find nothing
+behind that position and fail with `-32006`, and `last_writer` answers
+`beyond_history`; `reverse_anchor` just takes the first snapshot. A client
+that wants history from the moment it connects therefore sends
+`reverse_anchor` right after authenticating: it arms both and moves nothing.
+`continue`, `run_until`, inspection, input, media and capture methods arm
+nothing by themselves.
+
+Each capture records while anyone holds it and stops when its last holder
+leaves; a holder joining one that is already recording uses it as it is,
+with its budget, interval and history. The client's holds end when it
+disconnects. On a headless server it is the only holder, so the next client
+starts with neither capture and no history, unless the ring was armed from
+the environment before the server started (`COPPERLINE_DBG_RR=1`): that ring
+is held for the server's whole run, which is how to keep one reverse history
+across clients.
+
+In a windowed session the other holders are the window's rewind recording
+(**Emulation Settings -> Rewind**), the debugger and console while either is
+open (the ring and the PC history), and an attached `--gdb-gui` session (the
+ring). So switching rewind off or closing the debugger while the client
+holds a capture leaves it recording until the client disconnects, and a
+capture the debugger or rewind still holds keeps recording after the client
+leaves. Switching rewind on restarts the ring at the rewind interval, the
+interval the rewind hotkey steps back by. A machine started from the
+configuration screen comes up with both captures armed again for whoever
+still holds them.
+
+`state.load` restarts whatever ring is recording, held by the client or
+not, empty and at that ring's own budget and interval: the
+retired-instruction position is not part of a save state, so snapshots from
+before the load would replay the timeline it replaced. A reverse method
+straight after a load therefore finds no history and fails with `-32006`.
 
 ## Client usage (`copperline-ctl`)
 
@@ -516,9 +571,11 @@ refused.
 
 ### Reverse execution
 
-These verbs need reverse execution armed (`tt_armed` in `status`), which both
-servers do by default. A reverse step that runs past the retained history
-fails with code `-32006`.
+These verbs replay the reverse-debug snapshot ring, which a client's first
+reverse, step or break method arms (see [Reverse history](#reverse-history));
+`tt_armed` in `status` reports whether it is recording. A reverse step that
+runs past the retained history fails with code `-32006`, and so does one
+sent before anything was recorded behind the current position.
 
 - `reverse_step {"n": 1}`: Step backward by instruction.
 - `reverse_frame`: Step backward by video frame.
@@ -624,7 +681,7 @@ fails with code `-32006`.
   instructions before the current Copper PC, whose entry has `cursor`
   set). With `trace`, each instruction that ran in the last full Frame
   Analyzer trace carries its exact frame, VPOS and HPOS execution slot.
-- `pc_history`: Return recently executed instruction addresses (`pcs`, newest last).
+- `pc_history`: Return recently executed instruction addresses (`pcs`, newest last). The PC history records from the client's first reverse, step or break method (see [Reverse history](#reverse-history)), or from whenever an open debugger or console started it, so a first `pc_history` before either is an empty list.
 - `segments.list`: The hunk segments (`current`: `{start, size}` per hunk, first hunk first) of the program the scheduled process is running, and every program an armed `loadseg` catch has seen loaded (`modules`). At a `loadseg` stop, `current` is the just-loaded program: the addresses to relocate its symbols and debug information by.
 
 ### Windowed UI
