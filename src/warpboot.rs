@@ -10,8 +10,8 @@
 //!   Deterministic: the same config lands at the same place every run,
 //!   so once a user knows their setup shows its menu at 12s they get it
 //!   in a couple of wall seconds, every time.
-//! - `--warp-boot` warps until the boot storage (floppy and hard-disk
-//!   activity, as shown by the front-panel LEDs) has been idle for a
+//! - `--warp-boot` warps until the boot storage (a selected, spinning
+//!   floppy drive, and the HDD LED) has been idle for a
 //!   threshold of emulated seconds (`[emulation] warp_boot_idle`,
 //!   default 10). Overshoot is free: the extra idle seconds pass at warp
 //!   speed, and landing a few emulated seconds after the menu settled is

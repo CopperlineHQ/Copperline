@@ -674,7 +674,25 @@ impl FloppyController {
         None
     }
 
+    /// Each drive's activity LED. A mechanism's LED follows its motor
+    /// latch, which /SELx samples on the selecting edge and then holds, so
+    /// it stays lit while the drive is deselected with its motor running
+    /// -- the seconds trackdisk.device leaves a motor on after an access
+    /// -- and two drives can be lit at once (a DF0 to DF1 copy). A drive
+    /// that is not connected has no LED.
+    pub fn drive_activity_leds(&self) -> [bool; 4] {
+        std::array::from_fn(|idx| self.drive_connected(idx) && self.drives[idx].motor_on)
+    }
+
+    /// The front panel's single floppy LED: lit while any drive's is.
     pub fn activity_led_on(&self) -> bool {
+        self.drive_activity_leds().contains(&true)
+    }
+
+    /// Whether the drive the controller has selected right now is
+    /// spinning. Narrower than the LEDs: a motor latched on behind a
+    /// deselected drive does not count.
+    pub fn selected_drive_spinning(&self) -> bool {
         self.selected_drive()
             .is_some_and(|idx| self.drives[idx].motor_on)
     }

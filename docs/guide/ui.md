@@ -170,7 +170,9 @@ The status bar is a 44-pixel strip below the display. `Cmd+Shift+F` /
 `Alt+Shift+F` or *Video Settings -> Status Bar* hides it entirely. From
 left to right it holds:
 
-- **LED block.** PWR and FDD always. A green HDD activity LED appears on
+- **LED block.** PWR and FDD always. The FDD LED lights while any
+  drive's motor is running; each drive's own LED is on its disk button
+  (below). A green HDD activity LED appears on
   machines with a hard-disk controller (Gayle or A4000 IDE, a SCSI
   adapter, a Lide board, or the SF2000 SD controller) or a host-folder
   filesystem mount (`[[filesys]]`), and lights while either is accessed.
@@ -196,7 +198,11 @@ left to right it holds:
   (marked with the drive number) that opens a file dialog -- multi-select
   several images to queue a swap playlist for that drive -- plus a swap
   button that cycles to the next queued disk and an eject button. Swap and
-  eject grey out when there is nothing to swap to or eject. With three or
+  eject grey out when there is nothing to swap to or eject. The label on
+  the disk button is that drive's activity LED: it turns the FDD LED's
+  amber while the drive's motor runs, as a real drive's LED does, so it
+  stays lit for the seconds trackdisk.device leaves a motor on after an
+  access and two drives light together during a disk copy. With three or
   four drives the clusters stack two-up. A bay driving a physical floppy drive
   keeps its numbered disk button, so you can see the drive is there, but
   loading, swapping and ejecting do nothing for it -- the disk is in a real

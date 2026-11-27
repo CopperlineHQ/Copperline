@@ -1343,6 +1343,7 @@ mod tests {
         let busy = FrontPanelStatus {
             power_led_bright: false,
             fdd_led_on: true,
+            fdd_drive_leds: [true, false, false, true],
             fdd_track: Some(79),
             hdd_led: Some(true),
             cd_led: Some(true),

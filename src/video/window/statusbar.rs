@@ -165,6 +165,7 @@ pub(super) fn draw_status_bar(canvas: &mut dyn Canvas, view: &StatusBarView) {
                 canvas,
                 scale_rect(rect, texture_scale),
                 idx,
+                status.fdd_drive_leds[idx],
                 lit(hover, BarControl::DriveLoad(idx)),
             );
         }
@@ -921,9 +922,17 @@ pub(super) fn draw_button_base(canvas: &mut dyn Canvas, rect: Rect, hover: f32) 
     dbevel(canvas, rect, BUTTON_EDGE_LIGHT, BUTTON_EDGE_DARK);
 }
 
-pub(super) fn draw_disk_button(canvas: &mut dyn Canvas, rect: Rect, drive_idx: usize, hover: f32) {
+/// A drive's disk button, which doubles as its activity LED: `active`
+/// lights the label carrying the drive number.
+pub(super) fn draw_disk_button(
+    canvas: &mut dyn Canvas,
+    rect: Rect,
+    drive_idx: usize,
+    active: bool,
+    hover: f32,
+) {
     draw_button_base(canvas, rect, hover);
-    draw_disk_glyph(canvas, rect, drive_idx);
+    draw_disk_glyph(canvas, rect, drive_idx, active);
 }
 
 /// Swap button: two opposed horizontal arrows (cycle to the next queued
@@ -1162,8 +1171,13 @@ pub(super) fn draw_speaker_glyph(canvas: &mut dyn Canvas) {
     );
 }
 
-pub(super) fn draw_disk_glyph(canvas: &mut dyn Canvas, rect: Rect, drive_idx: usize) {
+pub(super) fn draw_disk_glyph(canvas: &mut dyn Canvas, rect: Rect, drive_idx: usize, active: bool) {
     let texture_scale = canvas.device_scale();
+    let (label, label_line) = if active {
+        (DISK_LABEL_LIT, DISK_LABEL_LINE_LIT)
+    } else {
+        (DISK_LABEL, DISK_LABEL_LINE)
+    };
     let s = texture_scale;
     // Centre the 16px disk body vertically (full-height buttons give the
     // original 3px margin; stacked buttons less).
@@ -1243,7 +1257,7 @@ pub(super) fn draw_disk_glyph(canvas: &mut dyn Canvas, rect: Rect, drive_idx: us
             w: 10 * s,
             h: 6 * s,
         },
-        DISK_LABEL,
+        label,
     );
     dfill(
         canvas,
@@ -1253,7 +1267,7 @@ pub(super) fn draw_disk_glyph(canvas: &mut dyn Canvas, rect: Rect, drive_idx: us
             w: 5 * s,
             h: s,
         },
-        DISK_LABEL_LINE,
+        label_line,
     );
     dfill(
         canvas,
@@ -1263,7 +1277,7 @@ pub(super) fn draw_disk_glyph(canvas: &mut dyn Canvas, rect: Rect, drive_idx: us
             w: 4 * s,
             h: s,
         },
-        DISK_LABEL_LINE,
+        label_line,
     );
     // The drive number, written on the right of the disk label.
     draw_tiny_digit(

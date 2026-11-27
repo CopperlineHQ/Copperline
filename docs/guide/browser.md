@@ -267,8 +267,8 @@ Other methods cover the rest of the page:
   `set_floppy_speed(percent)` (100/200/400/800, or 0 for turbo),
   `floppy_speed()`, `drive_connected(drive)`, `disk_name(drive)` and
   `floppy_write_protected(drive)`.
-- Front panel: `power_led()`, `fdd_led()`, `fdd_track()`, `hdd_led()`, `cd_led()` and
-  `caps_lock_led()`.
+- Front panel: `power_led()`, `fdd_led()`, `fdd_drive_led(drive)`, `fdd_track()`,
+  `hdd_led()`, `cd_led()` and `caps_lock_led()`.
 - Serial port: `serial_send(bytes)`, `serial_take()`, `serial_input_backlog()`,
   `serial_dtr()` and `serial_set_carrier(connected)`.
 
