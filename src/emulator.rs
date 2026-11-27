@@ -17,6 +17,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use log::{info, warn};
 
 mod fastest;
+mod wait_skip;
 
 const INSTRUCTIONS_PER_SLICE: usize = 32_000;
 const INSTRUCTIONS_PER_REALTIME_SLICE: usize = 8_192;
@@ -125,6 +126,9 @@ pub struct Emulator {
     tt_input: Option<crate::inputsched::ReplayInputLog>,
     /// One-shot "last writer" reverse watchpoint (`COPPERLINE_DBG_RWATCH`).
     tt_rwatch: Option<ReverseWatch>,
+    /// The precise core's wait-loop skip (`wait_skip.rs`). Host-side only:
+    /// it starts over at every real-time call.
+    wait_skip: wait_skip::WaitSkip,
     /// Shape of the running machine, stamped into save states and compared
     /// against a loaded state's stamp so a mismatch can reconfigure the host
     /// to match the state. Set from the boot `Config`; updated on a load that
@@ -514,6 +518,7 @@ impl Emulator {
             snapshot_size_hint: std::sync::atomic::AtomicUsize::new(0),
             tt_input: None,
             tt_rwatch: None,
+            wait_skip: wait_skip::WaitSkip::new(),
             descriptor: crate::config::MachineDescriptor::default(),
             #[cfg(feature = "control")]
             profile: None,
@@ -2912,11 +2917,14 @@ impl Emulator {
         // wake-up interrupt handler, which often performs mid-frame
         // display writes, is cycle-accurate too.
         let mut reached = false;
+        // Whatever ran the machine since the last call may have changed it:
+        // a wait loop is proven afresh (see `wait_skip.rs`).
+        self.begin_wait_quantum();
         while remaining > 0 {
             let accounting = if pc_outside.is_some() {
                 self.run_one_precise_step(&mut cpu_idle, remaining)?
             } else {
-                self.run_one_step(&mut cpu_idle, remaining)?
+                self.run_one_step_skipping(&mut cpu_idle, remaining)?
             };
             remaining = remaining.saturating_sub(accounting.budget_debit);
             if let Some((lo, hi)) = pc_outside {
@@ -2933,6 +2941,7 @@ impl Emulator {
                 break;
             }
         }
+        self.end_wait_loop();
         self.realtime_quantum_remaining = remaining;
         self.realtime_quantum_cpu_idle = remaining != 0 && cpu_idle;
         let baseline_busy = busy_started.elapsed();
@@ -3044,6 +3053,18 @@ impl Emulator {
         idle_cap: usize,
         force_precise: bool,
     ) -> Result<RealSliceAccounting> {
+        Ok(self
+            .run_one_step_with_slice(cpu_idle, idle_cap, force_precise)?
+            .0)
+    }
+
+    /// `run_one_step_mode`, also handing back what the CPU slice did.
+    fn run_one_step_with_slice(
+        &mut self,
+        cpu_idle: &mut bool,
+        idle_cap: usize,
+        force_precise: bool,
+    ) -> Result<(RealSliceAccounting, ExecutedSlice)> {
         let (chunk, idle_event_cck) = if *cpu_idle {
             self.idle_fast_forward_chunk(idle_cap)
         } else if self.cpu_jit && !force_precise {
@@ -3107,7 +3128,7 @@ impl Emulator {
         // timing in whole-slice blind naps.
         *cpu_idle =
             run.cpu_stopped && (chunk == 1 || (self.cpu_jit && run.actual_instructions == 0));
-        Ok(accounting)
+        Ok((accounting, run))
     }
 
     /// Largest instruction budget to skip while the CPU is halted in STOP.
@@ -3156,6 +3177,12 @@ impl Emulator {
                 self.stats.slices,
                 self.stats.slices as f64 / elapsed,
                 inst / elapsed / 1e6,
+            );
+        }
+        if self.wait_skip_instructions() != 0 {
+            log::info!(
+                "wait-loop skip: {} instructions retired without executing them",
+                self.wait_skip_instructions()
             );
         }
         self.bus().dump_video_pipeline_stats("emu stats");

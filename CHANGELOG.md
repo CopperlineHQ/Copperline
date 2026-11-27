@@ -71,6 +71,20 @@ for the earlier release notes.
 
 ### Changed
 
+- The precise CPU core no longer executes every turn of a guest's wait
+  loop. A loop that polls a flag in fast RAM or in the CPU caches until an
+  interrupt sets it -- proven at run time to repeat exactly, never matched
+  by its opcodes -- has its turns retired in bulk up to the next interrupt
+  or device event, the way a CPU halted in `STOP` already naps. The machine
+  ends in the same state, at the same colour clock, as executing every turn
+  would leave it, so the precise core stays cycle-exact and the skip is on
+  by default. A guest that spends most of its time polling runs several
+  times faster: about 5x on a 68020 polling fast RAM and 17x on a 68040
+  polling from its caches. A debugger or trace hook, `[cpu] jit`, or a
+  device that cannot predict its events turns it off;
+  `COPPERLINE_WAIT_SKIP=0` turns it off altogether. See
+  docs/internals/cpu.md, "Skipping wait loops".
+
 - The machine configuration screen, the menu and the status bar are drawn
   with egui over the presented frame, at the window's own resolution,
   rather than into the presentation texture and scaled with the picture.

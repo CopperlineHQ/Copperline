@@ -39,6 +39,11 @@ machines side by side, one with every programmatic debugging hook armed
 (breakpoints, watchpoints, instruction traces, and the internal CPU/bus
 observers) and one without, and compares the machine states after every frame.
 
+The precise core's wait-loop skip ([](../internals/cpu.md#skipping-wait-loops))
+turns itself off while any hook is armed. It is exact, so that leaves the
+timeline unchanged too; set `COPPERLINE_WAIT_SKIP=0` (or `false`, `off`,
+`no`) to keep it off in an undebugged run as well.
+
 Two exceptions apply:
 
 - When JIT is enabled (`[cpu] jit` / `--jit`), enabling any debug hook

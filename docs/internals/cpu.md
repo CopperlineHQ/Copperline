@@ -1267,6 +1267,75 @@ The horizon records whether every source predicted its event
 (`EventHorizon::exact`), for optimisations that must not rely on a
 fail-safe cap.
 
+## Skipping wait loops
+
+A guest that polls a flag in fast RAM until an interrupt handler sets it
+spends most of its time in a two- or three-instruction loop whose turns
+change nothing. The precise core retires such turns in bulk, the running
+counterpart of the `STOP` fast-forward (`src/emulator/wait_skip.rs`,
+`src/cpu/wait_loop.rs`). It is exact: the machine ends in the state
+executing every turn would have left it in, so it is on by default, and
+`COPPERLINE_WAIT_SKIP=0` turns it off.
+
+A loop is proven at run time, never recognised by its opcodes:
+
+- After a backward branch of at most 64 bytes, the turns from its target
+  are executed while the CPU bus counts every access a proof cannot rely
+  on: any write, any chip-bus, slow-RAM or device access, any cycle that
+  Buster or Ramsey times (their cost follows the clock and the other bus
+  masters), and with them every exception and interrupt, which write the
+  stack. A *pure* turn makes none: it hits the cache models or reads ROM or
+  fast RAM whose cost depends only on the CPU's own clock carries.
+- At each head the CPU-side state is compared: registers, status, the
+  core's full serialized state, the cache models, the interrupt-sample
+  latches, and the bus's CPU carries and phases (`Bus::cpu_side_state`).
+  A turn's CPU clocks need not be a whole number of colour clocks, so the
+  sub-colour-clock phase can take several turns to come back round; a
+  cheap key finds the period and the full state confirms it. A turn that
+  changes a register after the first is not a wait loop (a counting or
+  searching loop), and the candidate is dropped until the CPU leaves it.
+- A pure period that starts and ends in the same state, reading the same
+  bytes, repeats exactly from that state: the same instructions, cycle
+  charges and reads, until something outside the CPU acts.
+
+At the loop's head the skip retires the periods that fit before the CPU's
+event horizon, the frame wrap and the display-start line, one full period
+short of the earliest, and never past the end of the run loop's real-time
+quantum. It first checks that the state and the uncached bytes the loop
+reads are still those it proved from, and that no interrupt the CPU would
+take is already asserted. The chipset and the timed devices then advance
+through the periods' colour clocks in one span, and the instruction count,
+the reverse-debugging position and the pacing budget advance by what the
+periods would have added; the CPU is left as it was, which is where those
+periods leave it.
+
+Stopping at the quantum's end is what keeps the run identical: the
+quantum's boundaries are where the `STOP` fast-forward partitions its naps,
+so a skipped run must reach them at the same instructions an executed one
+does. The quantum is a deterministic function of the run so far, kept
+across control stops ([](architecture.md)).
+
+It stays off whenever it could not be exact or could be seen: under `[cpu]
+jit`, with any debugger, trace, profiling or coverage hook armed, with a
+frame analyzer, bus observer, beam trap, waveform capture, heat map or
+freezer cartridge, while a device without an exact deadline is fitted
+(`EventHorizon::exact`), and for debugger-driven stepping and reverse
+replay. It also waits while a floppy platter winds up or coasts down with
+drive sounds on: the drive-sound synthesizer takes the platter's spin
+level at each device tick, so the ramp it plays (which save states carry)
+would depend on how the time was cut up (`Bus::device_ticks_batch_exactly`). Polls of a custom register (VPOSR, DMACONR) are never skipped:
+each turn is a chip-bus access whose cost depends on DMA contention.
+
+`src/emulator/wait_skip.rs` runs a guest (`tests/data/wait_skip/guest.asm`)
+that polls a fast-RAM flag set from VBL, blitter and CIA timer interrupts,
+on a 68000, 68020, 68030 and 68040, with the skip on and off, and requires
+the same machine state after every quantum and after every single skip.
+On that guest, five emulated seconds take a fifth of the host time on a
+14 MHz 68020 polling fast RAM, and a seventeenth on a 25 MHz 68040 polling
+from its caches (`wait_skip_host_cost`, an ignored test). Software that
+waits less, like a demo that polls between its effects, gains little and
+pays nothing measurable for the proofs.
+
 ## Exceptions
 
 Guest exceptions -- bus and address errors, illegal and unimplemented

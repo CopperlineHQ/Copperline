@@ -338,7 +338,10 @@ The flow of a frame:
    The chip bus is arbitrated per colour clock, so a CPU chip-RAM access
    that loses arbitration genuinely waits ([](timing)).
 3. When the CPU sits in `STOP`, the loop fast-forwards device time to the
-   next event (timer underflow, raised interrupt) instead of spinning.
+   next event (timer underflow, raised interrupt) instead of spinning. A
+   CPU polling a flag in fast RAM or its caches, in a loop proven to repeat
+   exactly, has that loop's turns retired the same way up to the same event
+   ([](cpu.md#skipping-wait-loops)).
 4. Render-relevant register writes (by Copper or CPU) are recorded as
    beam-position events. At the frame boundary, the bus turns the completed
    frame's events, chip-RAM snapshot, display geometry, and Agnus blanking

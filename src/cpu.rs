@@ -20,7 +20,9 @@ use m68k::{
 
 mod ec030_acu;
 mod jit;
+mod wait_loop;
 use jit::JitBatchTiming;
+pub(crate) use wait_loop::{LoopFingerprint, LoopKey};
 
 pub const CIA_A_BASE: u32 = 0x00BF_E000;
 pub const CIA_A_SIZE: u32 = 0x0000_1000;
@@ -585,6 +587,16 @@ struct CpuBus {
     /// core still sends through this bus (`jit_local_read`). Empty outside
     /// `run_batch`; descriptors only, never a pointer.
     jit_local: JitLocalMap,
+    /// Counts the accesses whose cost or effect depends on more than the
+    /// CPU's own state and the bytes it reads: every write, chip-bus and
+    /// device access, and every cycle the expansion bus or Ramsey times. An
+    /// instruction that leaves it unchanged read only cache lines and
+    /// plain ROM or fast RAM. The wait-loop skip proves its loops with it
+    /// (`src/cpu/wait_loop.rs`). Host bookkeeping, never serialized.
+    wait_impure: u32,
+    /// The plain-memory reads that missed the cache models, as (address,
+    /// size, value), recorded only while a wait loop is being proven.
+    wait_reads: Option<Vec<(u32, u8, u32)>>,
 }
 
 /// Where a region the batch path reads directly lives.
@@ -797,6 +809,8 @@ impl M68kMachine {
                 jit_cache_exclusions_current: false,
                 jit_bus_boundary: false,
                 jit_local: JitLocalMap::default(),
+                wait_impure: 0,
+                wait_reads: None,
             },
             fpu_enabled,
             jit_enabled: false,
@@ -4829,6 +4843,8 @@ impl CpuBus {
         if !self.bus.buster.wired || self.bus.buster.cpu_driving {
             return self.read_bus_cycle(address, size, kind);
         }
+        // Buster arbitrates the cycle against the other bus masters.
+        self.note_wait_impure();
         self.bus.begin_buster_cpu_cycle();
         let value = self.read_bus_cycle(address, size, kind);
         self.bus.buster.cpu_driving = false;
@@ -4843,15 +4859,19 @@ impl CpuBus {
             .as_mut()
             .and_then(|c| c.observe_read(addr, size, kind == CpuBusAccessKind::Fetch))
         {
+            self.note_wait_impure();
             self.bill_external_access(size);
             return value;
         }
         match self.classify_plain_memory(addr, size) {
             Some(PlainMemRegion::OverlayRom(off)) => {
                 self.bill_rom(addr, size, kind);
-                return read_be(&self.bus.mem.rom, off, size);
+                let value = read_be(&self.bus.mem.rom, off, size);
+                self.note_wait_read(addr, size, value);
+                return value;
             }
             Some(PlainMemRegion::ChipRam(off)) => {
+                self.note_wait_impure();
                 let mut sampled = None;
                 self.bus.grant_cpu_bus_access_sampled(
                     Some(addr),
@@ -4870,20 +4890,35 @@ impl CpuBus {
                 return sampled.unwrap_or_else(|| read_be(&self.bus.mem.chip_ram, off, size));
             }
             Some(PlainMemRegion::ZorroRam(board, off)) => {
+                if self.bus.buster.revision != crate::buster::Revision::Absent {
+                    // Buster times the cycle against the other masters.
+                    self.note_wait_impure();
+                }
                 self.bill_zorro(self.bus.mem.zorro.ram_version(board), addr, size, true);
-                return read_be(self.bus.mem.zorro.board_ram(board), off, size);
+                let value = read_be(self.bus.mem.zorro.board_ram(board), off, size);
+                self.note_wait_read(addr, size, value);
+                return value;
             }
             Some(PlainMemRegion::MbRam(off)) => {
+                if addr >= 0x0700_0000 && self.bus.ramsey.is_some() {
+                    // Ramsey's page and refresh state follow the clock.
+                    self.note_wait_impure();
+                }
                 self.bill_motherboard_ram(addr, size);
-                return read_be(&self.bus.mem.mb_ram, off, size);
+                let value = read_be(&self.bus.mem.mb_ram, off, size);
+                self.note_wait_read(addr, size, value);
+                return value;
             }
             Some(PlainMemRegion::AccelRam(off)) => {
                 // CPU-slot (accelerator) fast RAM: local RAM on the CPU
                 // board, off the chip bus, at uncontended external speed.
                 self.bill_external_access(size);
-                return read_be(&self.bus.mem.accel_ram, off, size);
+                let value = read_be(&self.bus.mem.accel_ram, off, size);
+                self.note_wait_read(addr, size, value);
+                return value;
             }
             Some(PlainMemRegion::SlowRam(off)) => {
+                self.note_wait_impure();
                 // "Slow"/trapdoor RAM at $C00000 is decoded by Gary and reached
                 // through Agnus on the chip bus, so the CPU contends for it cycle
                 // by cycle exactly like chip RAM (that is why it is "slow" and does
@@ -4894,19 +4929,26 @@ impl CpuBus {
             }
             Some(PlainMemRegion::Rom(off)) => {
                 self.bill_rom(addr, size, kind);
-                return read_be(&self.bus.mem.rom, off, size);
+                let value = read_be(&self.bus.mem.rom, off, size);
+                self.note_wait_read(addr, size, value);
+                return value;
             }
             // A1000 WCS at $FC0000 (empty -> no match on other machines): the
             // 256 KiB writable control store the boot ROM loads Kickstart into.
             Some(PlainMemRegion::Wcs(off)) => {
                 self.bill_external_access(size);
-                return read_be(&self.bus.mem.wcs, off, size);
+                let value = read_be(&self.bus.mem.wcs, off, size);
+                self.note_wait_read(addr, size, value);
+                return value;
             }
             Some(PlainMemRegion::ExtendedRom(off)) => {
                 self.bill_rom(addr, size, kind);
-                return read_be(&self.bus.mem.extended_rom, off, size);
+                let value = read_be(&self.bus.mem.extended_rom, off, size);
+                self.note_wait_read(addr, size, value);
+                return value;
             }
             Some(PlainMemRegion::Cartridge(off)) => {
+                self.note_wait_impure();
                 // The freezer cartridge's bank: RAM on the expansion bus,
                 // off the chip bus, at external-bus cost like Zorro RAM.
                 self.bill_external_access(size);
@@ -4916,7 +4958,7 @@ impl CpuBus {
                     })
                 });
             }
-            None => {}
+            None => self.note_wait_impure(),
         }
 
         if let Some((cia_a, cia_b)) = self.gary_vpa_select(addr) {
@@ -5274,6 +5316,7 @@ impl CpuBus {
 
     #[inline(always)]
     fn write_sized_unobserved(&mut self, address: u32, size: usize, value: u32) {
+        self.note_wait_impure();
         if self.skips_overlay_split_and_buster() {
             self.write_bus_cycle(address, size, value);
             return;
@@ -6672,6 +6715,7 @@ impl AddressBus for CpuBus {
     }
 
     fn interrupt_acknowledge(&mut self, level: u8) -> u32 {
+        self.note_wait_impure();
         self.flush_jit_batch_prefix();
         // A freezer cartridge's level-7 interrupt: consumed at its
         // acknowledge, so the monitor is entered exactly once per press
@@ -6727,6 +6771,7 @@ impl AddressBus for CpuBus {
     }
 
     fn reset_devices(&mut self) {
+        self.note_wait_impure();
         self.jit_cache_exclusions_current = false;
         self.flush_jit_batch_prefix();
         self.jit_bus_boundary |= self.jit_batch.is_some();
@@ -8137,6 +8182,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
 
         assert_eq!(bus.read_long(0), 0x1111_4EF9);
@@ -8181,6 +8228,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         // Start on a refresh slot (0x003) so the fetch both waits for and then
@@ -8236,6 +8285,8 @@ mod tests {
                 jit_cache_exclusions_current: false,
                 jit_bus_boundary: false,
                 jit_local: JitLocalMap::default(),
+                wait_impure: 0,
+                wait_reads: None,
             };
             bus.bus
                 .set_chipset_revisions(AgnusRevision::AgaAlice, DeniseRevision::AgaLisa);
@@ -8306,6 +8357,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
         // INTENA/INTREQ, whose read ports INTENAR ($01C) and INTREQR ($01E) are
         // adjacent and beam-independent, so the pair reads back deterministically.
@@ -8364,6 +8417,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
         let base = CHIP_RAM_BASE as u32;
         write_chip_long(&mut bus.bus, base, 0x1122_3344);
@@ -8418,6 +8473,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -8481,6 +8538,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
 
         // Warm the opcode longword and a separate extension longword.
@@ -8804,6 +8863,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
         let fast = FAST_RAM_BASE as u32 + 0x40;
@@ -8878,6 +8939,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
         bus.bus.set_cpu_bus_arbitration_enabled(true);
 
@@ -9028,6 +9091,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
         let before = bus.read_long(ROM_BASE as u32);
         bus.write_long(ROM_BASE as u32, 0xDEAD_BEEF);
@@ -9071,6 +9136,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         };
         // $F00000 with no extended ROM fitted is genuinely undecoded (the
         // chip-register space at $C00000-$DFFFFF is not: Gary mirrors the
@@ -9146,6 +9213,8 @@ mod tests {
             jit_cache_exclusions_current: false,
             jit_bus_boundary: false,
             jit_local: JitLocalMap::default(),
+            wait_impure: 0,
+            wait_reads: None,
         }
     }
 

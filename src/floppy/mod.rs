@@ -1689,6 +1689,20 @@ impl FloppyController {
         self.idle_cache
     }
 
+    /// Whether a drive's platter is winding up to speed or coasting to a
+    /// stop: its spin level, which the drive sounds follow, then changes
+    /// with every colour clock.
+    pub fn motor_changing_speed(&self) -> bool {
+        self.drives.iter().any(|drive| {
+            let winding = if drive.motor_on {
+                drive.motor_cck < MOTOR_READY_CCK
+            } else {
+                drive.motor_cck > 0
+            };
+            winding && !drive.is_bridged()
+        })
+    }
+
     pub fn tick(&mut self, cck: u32, dmacon: u16, chip_ram: &mut [u8]) -> bool {
         self.dma_trace.clear();
         self.idle_cache = self.is_idle();
