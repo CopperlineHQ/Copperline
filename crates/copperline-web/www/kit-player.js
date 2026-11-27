@@ -354,7 +354,9 @@ export async function start(kit) {
     deferredLastTick = deferRender;
     present(false);
     led.classList.toggle('cl-on', emu.fdd_led());
-    if (nowMs - lastSavePollMs >= SAVE_POLL_MS && !emu.fdd_led()) {
+    // Save between accesses, not only once the LED goes out: a deselected
+    // drive can keep its motor latched on long after the last write.
+    if (nowMs - lastSavePollMs >= SAVE_POLL_MS && !emu.fdd_busy()) {
       lastSavePollMs = nowMs;
       flushAll();
     }

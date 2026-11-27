@@ -72,7 +72,8 @@ for the earlier release notes.
   label on a drive's disk button, marked with the drive number, lights
   amber while that drive's motor runs, so a machine with several drives
   shows which one is working (#1004). The web player's `fdd_drive_led(drive)`
-  reads the same LED.
+  reads the same LED, and `fdd_busy()` reports a drive selected with its
+  motor running, which the Web Player Kit's periodic disk save waits on.
 
 ### Changed
 
