@@ -1123,6 +1123,11 @@ impl Akiko {
         self.run_internal(mem);
     }
 
+    /// Whether the drive is playing CD-DA into the mixer.
+    pub fn audio_playing(&self) -> bool {
+        self.playing && !self.paused
+    }
+
     /// When the CD controller next changes, on its own, its INT2 line or
     /// guest memory (see [`crate::zorro_device::DeviceDeadline`]).
     ///

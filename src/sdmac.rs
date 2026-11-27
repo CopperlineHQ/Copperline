@@ -135,6 +135,11 @@ impl Sdmac {
         self.wd.first_cd()
     }
 
+    /// Whether a CD-ROM drive on the bus is playing CD-DA.
+    pub fn cd_audio_playing(&self) -> bool {
+        self.wd.cd_audio_playing()
+    }
+
     /// The disk images on the bus, in ID order.
     pub fn disk_images(&self) -> impl Iterator<Item = &crate::harddrive::HardDriveImage> {
         self.wd.disk_images()

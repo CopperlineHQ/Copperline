@@ -57,6 +57,8 @@
 !/tests/fixtures/copperhf-board-v79.bin
 # Assembled source for the repeatable blitter performance workload.
 !/timing-test/bltbench-disjoint.bin
+# Assembled guest for the wait-loop skip's differential tests.
+!/tests/data/wait_skip/guest.bin
 
 # WHDLoad support archives: freely redistributable but fetched, not
 # committed (tools/fetch-whdload.sh; assets/whdboot/README.md stays).

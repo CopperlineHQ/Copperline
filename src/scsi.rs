@@ -1214,6 +1214,15 @@ impl Wd33c93 {
         self.targets.iter().flatten().find_map(ScsiTarget::cd_ref)
     }
 
+    /// Whether a CD-ROM drive on the bus is playing CD-DA into the mixer.
+    pub fn cd_audio_playing(&self) -> bool {
+        self.targets
+            .iter()
+            .flatten()
+            .filter_map(ScsiTarget::cd_ref)
+            .any(ScsiCdRom::audio_playing)
+    }
+
     /// The disk targets on the bus in ID order, for naming the machine's
     /// media.
     pub fn disk_images(&self) -> impl Iterator<Item = &HardDriveImage> {

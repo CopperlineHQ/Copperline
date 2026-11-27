@@ -44,7 +44,7 @@ pub const LINES_040: usize = 1024;
 /// stays pragmatically direct-mapped like the other parts).
 pub const LINES_060: usize = 2048;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LongwordCache {
     tags: Vec<u32>,
     valid: Vec<bool>,
@@ -136,7 +136,7 @@ impl LongwordCache {
 }
 
 /// One cache (instruction or data) plus its CACR-controlled state.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CpuCache {
     cache: LongwordCache,
     /// CACR enable bit (EI/ED on 020/030, IE/DE on 040).

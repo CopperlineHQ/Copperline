@@ -609,6 +609,10 @@ impl crate::zorro_device::ZorroDevice for IdeZorro {
         }
     }
 
+    fn streams_audio(&self) -> bool {
+        self.ata.iter().any(AtaBus::cd_audio_playing)
+    }
+
     fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
         crate::zorro_device::DeviceDeadline::from_cck(
             self.ata.iter().filter_map(AtaBus::next_event_cck).min(),

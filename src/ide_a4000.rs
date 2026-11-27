@@ -45,6 +45,11 @@ impl IdeA4000 {
 
     /// The ATAPI CD-ROM drive on this interface, if either slot holds one;
     /// the runtime disc-swap target.
+    /// Whether an ATAPI drive on this interface is playing CD-DA.
+    pub fn cd_audio_playing(&self) -> bool {
+        self.ata.cd_audio_playing()
+    }
+
     pub fn first_atapi_ref(&self) -> Option<&crate::scsi::ScsiCdRom> {
         self.ata.first_atapi_ref()
     }

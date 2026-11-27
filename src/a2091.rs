@@ -133,6 +133,11 @@ impl A2091 {
         self.wd.first_cd()
     }
 
+    /// Whether a CD-ROM drive on the board's bus is playing CD-DA.
+    pub fn cd_audio_playing(&self) -> bool {
+        self.wd.cd_audio_playing()
+    }
+
     /// The disk images on the board's bus, in ID order.
     pub fn disk_images(&self) -> impl Iterator<Item = &crate::harddrive::HardDriveImage> {
         self.wd.disk_images()
@@ -445,6 +450,10 @@ impl crate::zorro_device::ZorroDevice for A2091 {
             let mask = self.rom.len() - 1;
             (u16::from(self.rom[off & mask]) << 8) | u16::from(self.rom[(off + 1) & mask])
         })
+    }
+
+    fn streams_audio(&self) -> bool {
+        self.cd_audio_playing()
     }
 
     fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {

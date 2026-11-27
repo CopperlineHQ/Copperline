@@ -1542,6 +1542,11 @@ impl CdtvController {
     /// transit, or the next sector of a play (its SCOR). A CPU halted in
     /// STOP must not sleep past either -- it would wake to find the bytes
     /// it was waiting for already replaced.
+    /// Whether the drive is playing CD-DA into the mixer.
+    pub fn audio_playing(&self) -> bool {
+        self.cd_playing && !self.cd_paused
+    }
+
     pub fn next_event_cck(&self) -> Option<u32> {
         // Nothing runs until the board is configured.
         self.configured_base?;

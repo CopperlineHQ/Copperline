@@ -14112,11 +14112,13 @@ fn palette_event_sequences_equivalent(a: &[BeamRegisterWrite], b: &[BeamRegister
 
 mod cia_irq;
 mod collisions;
+mod cpu_side;
 mod custom_regs;
 mod ddf_line;
 mod dma_slots;
 mod event_horizon;
 mod expansion;
+pub(crate) use cpu_side::CpuSideBusState;
 mod frame_capture;
 mod video_slot;
 mod wave;
