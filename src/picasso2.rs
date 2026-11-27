@@ -168,6 +168,16 @@ impl ZorroDevice for Picasso2 {
         self.plus && self.interrupt_enabled && self.chip.vblank_pending()
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // The retrace latch is the only state a tick changes that leaves
+        // the board; only the Picasso II+ wires it to INT2.
+        crate::zorro_device::DeviceDeadline::from_cck(
+            (self.plus && self.interrupt_enabled)
+                .then(|| self.chip.next_interrupt_cck())
+                .flatten(),
+        )
+    }
+
     fn reset(&mut self) {
         self.chip.reset();
         self.show_rtg = false;

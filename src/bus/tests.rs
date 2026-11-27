@@ -17091,19 +17091,23 @@ fn timed_scsi_completions_cap_the_stop_horizon() {
         wd.write_data_port(0x08); // Select-with-ATN-and-Transfer
     };
 
+    use crate::zorro_device::DeviceDeadline;
     let mut bus = empty_bus();
-    assert_eq!(bus.next_storage_event_cck(), None);
+    assert!(bus.storage_deadlines().all(|d| d == DeviceDeadline::Idle));
     let mut a2091 = crate::a2091::A2091::new(vec![0u8; 0x4000]).unwrap();
     a2091.attach_drive(0, timed());
     test_unit_ready(&mut a2091.wd);
     bus.attach_devices(vec![crate::zorro_device::BoardDevice::A2091(a2091)]);
-    let horizon = bus
-        .next_storage_event_cck()
-        .expect("the A2091 reports its deadline");
+    let Some(DeviceDeadline::In(horizon)) =
+        bus.storage_deadlines().find(|d| *d != DeviceDeadline::Idle)
+    else {
+        panic!("the A2091 reports its deadline");
+    };
     assert!(
         horizon > 1000,
         "the drive's overhead, not an immediate event: {horizon}"
     );
+    assert_eq!(bus.cpu_event_horizon().cck, Some(horizon));
 
     let mut bus = empty_bus();
     let mut sdmac = crate::sdmac::Sdmac::new();
@@ -17111,7 +17115,8 @@ fn timed_scsi_completions_cap_the_stop_horizon() {
     test_unit_ready(&mut sdmac.wd);
     bus.attach_sdmac(sdmac);
     assert!(
-        bus.next_storage_event_cck().is_some(),
+        bus.storage_deadlines()
+            .any(|d| matches!(d, DeviceDeadline::In(_))),
         "the SDMAC reports its deadline"
     );
     let _ = std::fs::remove_file(path);

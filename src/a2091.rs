@@ -447,8 +447,8 @@ impl crate::zorro_device::ZorroDevice for A2091 {
         })
     }
 
-    fn next_event_cck(&self) -> Option<u32> {
-        self.wd.next_event_cck()
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        crate::zorro_device::DeviceDeadline::from_cck(self.wd.next_event_cck())
     }
 
     fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {

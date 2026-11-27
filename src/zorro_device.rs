@@ -116,6 +116,43 @@ pub(crate) fn dma_write_byte(mem: &mut Memory, addr: u32, b: u8) -> bool {
     true
 }
 
+/// When a timed device next changes, on its own, something the CPU or another
+/// bus master can observe without accessing the device: an interrupt line it
+/// drives, guest memory it writes by DMA, or a request for the bus.
+///
+/// Everything else a device does between accesses -- a status bit settling,
+/// a counter advancing -- needs no deadline: every CPU access to a device
+/// first brings it up to date, and a device tick is linear in the colour
+/// clocks it is handed, so one long tick up to the deadline leaves the
+/// device exactly where a run of short ticks would.
+///
+/// The CPU's event horizon (`Bus::cpu_event_horizon`) is the earliest of
+/// these across every device. A halted CPU's `STOP` fast-forward naps to it,
+/// and a `[cpu] jit` batch runs up to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceDeadline {
+    /// Nothing is scheduled: the device changes none of those until the CPU
+    /// accesses it.
+    Idle,
+    /// The earliest such change is this many colour clocks from now (at
+    /// least 1). It is a lower bound: nothing may happen before it, and it
+    /// may pass with nothing happening.
+    In(u32),
+    /// The device cannot say: it has no deadline model, or what it does is
+    /// driven by the host (a network frame, a plugin's own code). The
+    /// horizon then treats it as due within a short fail-safe cap, and an
+    /// optimisation that must be exact may not rely on the horizon at all.
+    Unknown,
+}
+
+impl DeviceDeadline {
+    /// A deadline from a device-internal "colour clocks until the next
+    /// event, `None` when nothing is scheduled" answer.
+    pub fn from_cck(cck: Option<u32>) -> Self {
+        cck.map_or(Self::Idle, |cck| Self::In(cck.max(1)))
+    }
+}
+
 /// Where the video beam is, for a board that keeps time by the field (the
 /// Video Flyer's field clock). Only the bus's device tick knows it; a host
 /// built for a CPU access carries none.
@@ -421,11 +458,12 @@ pub trait ZorroDevice {
     /// interrupt lines. Boards own their internal idle fast paths.
     fn tick(&mut self, cck: u32, host: &mut DeviceHost);
 
-    /// Colour clocks until the board next needs a tick to change state on
-    /// its own (a timed drive's step coming due), for the emulator's idle
-    /// fast-forward; `None` when nothing is scheduled.
-    fn next_event_cck(&self) -> Option<u32> {
-        None
+    /// When the board next asserts an interrupt line, writes guest memory or
+    /// requests the bus on its own (see [`DeviceDeadline`]). The default is
+    /// [`DeviceDeadline::Unknown`]: a board that declares no deadline fails
+    /// safe, bounding the CPU's event horizon instead of being taken as idle.
+    fn next_deadline(&self) -> DeviceDeadline {
+        DeviceDeadline::Unknown
     }
 
     /// INT2 (PORTS) line state. Level-sensitive: held true while asserted.
@@ -560,12 +598,27 @@ impl ZorroDevice for BoardDevice {
         }
     }
 
-    fn next_event_cck(&self) -> Option<u32> {
+    fn next_deadline(&self) -> DeviceDeadline {
         match self {
-            BoardDevice::A2091(d) => ZorroDevice::next_event_cck(d),
-            BoardDevice::A4091(d) => ZorroDevice::next_event_cck(d),
-            BoardDevice::IdeZorro(d) => ZorroDevice::next_event_cck(d),
-            _ => None,
+            BoardDevice::A2091(d) => ZorroDevice::next_deadline(d),
+            BoardDevice::A4091(d) => ZorroDevice::next_deadline(d),
+            BoardDevice::A2065(d) => ZorroDevice::next_deadline(d),
+            #[cfg(feature = "wasm-boards")]
+            BoardDevice::Wasm(d) => ZorroDevice::next_deadline(d),
+            BoardDevice::Filesys(d) => ZorroDevice::next_deadline(d),
+            BoardDevice::Z3660(d) => ZorroDevice::next_deadline(d),
+            BoardDevice::Picasso2(d) => ZorroDevice::next_deadline(d.as_ref()),
+            BoardDevice::IdeZorro(d) => ZorroDevice::next_deadline(d),
+            BoardDevice::GraffityZ2(d) => ZorroDevice::next_deadline(d.as_ref()),
+            BoardDevice::GraffityZ3(d) => ZorroDevice::next_deadline(d.as_ref()),
+            BoardDevice::Toccata(d) => ZorroDevice::next_deadline(d.as_ref()),
+            #[cfg(feature = "mhi")]
+            BoardDevice::Mhi(d) => ZorroDevice::next_deadline(d.as_ref()),
+            #[cfg(feature = "cd32-fmv")]
+            BoardDevice::Cd32Fmv(d) => ZorroDevice::next_deadline(d.as_ref()),
+            BoardDevice::Copperhf(d) => ZorroDevice::next_deadline(d),
+            BoardDevice::Sf2000Sd(d) => ZorroDevice::next_deadline(d),
+            BoardDevice::Flyer(d) => ZorroDevice::next_deadline(d.as_ref()),
         }
     }
 

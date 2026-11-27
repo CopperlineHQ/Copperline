@@ -34,6 +34,12 @@ use std::io::Write;
 
 const CHIP_BUS_SLOT_CCK: u32 = 1;
 const BLITTER_DEADLINE_SLOT_SCAN_LIMIT: u32 = 64;
+/// Longest `[cpu] jit` batch from local memory, in colour clocks, whatever
+/// the event horizon says. It once was the only bound on host-driven
+/// devices, which now cap the horizon themselves
+/// (`event_horizon::UNPREDICTABLE_DEVICE_CAP_CCK`); it stays as the JIT's
+/// batch granularity, which interrupt latency under the JIT depends on.
+const JIT_BATCH_CEILING_CCK: u32 = 64;
 
 // Number of consecutive CPU bus-miss color clocks a busy "nice" (BLTPRI=0)
 // blitter holds the chip bus before yielding one slot to the waiting CPU.
@@ -8119,38 +8125,20 @@ impl Bus {
         std::mem::take(&mut self.devices_wrote_memory)
     }
 
-    /// Conservative deadline for a CPU burst using only local memory. Shared
-    /// bus/MMIO accesses end the burst independently. Keep a 64-CCK ceiling for
-    /// asynchronous host devices whose arrivals cannot be predicted.
+    /// Deadline for a CPU burst using only local memory: the CPU's event
+    /// horizon (`cpu_event_horizon`, shared with the `STOP` fast-forward),
+    /// the end of the scanline, and the batch ceiling. Shared bus/MMIO
+    /// accesses end the burst independently.
     pub(crate) fn jit_event_horizon_cck(&self) -> u32 {
-        // A physical plugin can request the bus from its very next tick.
-        #[cfg(feature = "wasm-boards")]
-        if self.buster.wasm_slots != 0 {
-            return 1;
-        }
+        // No frame term: the frame cannot end before the scanline does
+        // (`Agnus::cck_until_next_frame` starts from the same remainder of
+        // this line), and finding its end walks every line left in the
+        // frame, once per batch.
+        let line = self.agnus.cck_until_line_ticks(1);
         [
-            Some(64),
-            // Timer and alarm events, and a staged interrupt's arrival at
-            // Paula's external request input.
-            self.next_cia_event_cck(),
-            self.next_irq_visible_cck(),
-            self.agnus.cck_until_line_ticks(1),
-            self.next_copper_wakeup_cck(),
-            self.next_blitter_completion_cck(),
-            self.next_blitter_irq_cck(),
-            self.next_audio_irq_cck(),
-            self.next_serial_event_cck(),
-            self.next_storage_event_cck(),
-            self.next_keyboard_event_cck(),
-            self.next_pot_event_cck(),
-            self.next_cia_b_tod_alarm_cck(),
-            self.floppy.next_completion_cck(self.agnus.dmacon),
-            self.floppy.next_sync_irq_cck(self.agnus.dmacon),
-            self.floppy.next_index_pulse_cck(),
-            // No frame term: the frame cannot end before the scanline does
-            // (`Agnus::cck_until_next_frame` starts from the same remainder
-            // of this line), and finding its end walks every line left in
-            // the frame, once per batch.
+            Some(JIT_BATCH_CEILING_CCK),
+            self.cpu_event_horizon().cck,
+            line,
         ]
         .into_iter()
         .flatten()
@@ -8206,42 +8194,6 @@ impl Bus {
 
     pub fn next_serial_event_cck(&self) -> Option<u32> {
         self.paula.next_serial_event_cck()
-    }
-
-    /// Colour clocks until a storage controller next changes state on its
-    /// own -- a timed drive presenting data or completing, a delayed
-    /// controller interrupt -- so a CPU halted in STOP waiting for the
-    /// disk does not nap past it.
-    pub fn next_storage_event_cck(&self) -> Option<u32> {
-        use crate::zorro_device::ZorroDevice;
-        let gayle = self.gayle.as_ref().and_then(|g| g.next_drive_event_cck());
-        let ide_a4000 = self
-            .ide_a4000
-            .as_ref()
-            .and_then(|ide| ide.next_drive_event_cck());
-        let sdmac = self.sdmac.as_ref().and_then(|s| s.next_event_cck());
-        // The CDTV drive's subcode clock and play cadence: a guest asleep
-        // between subcode bytes is woken by each one.
-        let cdtv = self
-            .cdtv
-            .as_ref()
-            .and_then(crate::cdtv::CdtvController::next_event_cck);
-        let boards = self
-            .devices
-            .iter()
-            .filter_map(ZorroDevice::next_event_cck)
-            .min();
-        [
-            gayle,
-            ide_a4000,
-            sdmac,
-            cdtv,
-            boards,
-            self.buster_pending().then_some(1),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
     }
 
     pub fn next_pot_event_cck(&self) -> Option<u32> {
@@ -14163,6 +14115,7 @@ mod collisions;
 mod custom_regs;
 mod ddf_line;
 mod dma_slots;
+mod event_horizon;
 mod expansion;
 mod frame_capture;
 mod video_slot;

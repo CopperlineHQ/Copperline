@@ -609,8 +609,10 @@ impl crate::zorro_device::ZorroDevice for IdeZorro {
         }
     }
 
-    fn next_event_cck(&self) -> Option<u32> {
-        self.ata.iter().filter_map(AtaBus::next_event_cck).min()
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        crate::zorro_device::DeviceDeadline::from_cck(
+            self.ata.iter().filter_map(AtaBus::next_event_cck).min(),
+        )
     }
 
     fn take_activity(&mut self) -> bool {

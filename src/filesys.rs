@@ -2268,6 +2268,12 @@ impl ZorroDevice for FilesysBoard {
 
     fn tick(&mut self, _cck: u32, _host: &mut DeviceHost) {}
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // Nothing runs on the clock. The clipboard doorbell rises when the
+        // host stages text, which the frontend does between CPU slices.
+        crate::zorro_device::DeviceDeadline::Idle
+    }
+
     /// The clipboard unit's doorbell: held while host text is waiting and
     /// the guest bridge has a server to answer it.
     fn int2_line(&self) -> bool {
