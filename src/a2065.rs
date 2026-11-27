@@ -601,6 +601,17 @@ impl ZorroDevice for A2065 {
         self.int_line()
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // A running LANCE with a backend takes frames from the host network
+        // whenever they arrive; nothing predicts that. Stopped, or with no
+        // backend, the board does nothing until a register write.
+        if self.running && self.net.is_some() {
+            crate::zorro_device::DeviceDeadline::Unknown
+        } else {
+            crate::zorro_device::DeviceDeadline::Idle
+        }
+    }
+
     fn take_activity(&mut self) -> bool {
         std::mem::take(&mut self.activity)
     }

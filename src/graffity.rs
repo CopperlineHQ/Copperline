@@ -175,6 +175,12 @@ impl ZorroDevice for GraffityZ2 {
         self.chip.vblank_pending()
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // The retrace latch is the only state a tick changes that leaves
+        // the board.
+        crate::zorro_device::DeviceDeadline::from_cck(self.chip.next_interrupt_cck())
+    }
+
     fn reset(&mut self) {
         self.chip.reset();
         self.show_rtg = false;
@@ -283,6 +289,12 @@ impl ZorroDevice for GraffityZ3 {
 
     fn int2_line(&self) -> bool {
         self.chip.vblank_pending()
+    }
+
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // The retrace latch is the only state a tick changes that leaves
+        // the board.
+        crate::zorro_device::DeviceDeadline::from_cck(self.chip.next_interrupt_cck())
     }
 
     fn reset(&mut self) {

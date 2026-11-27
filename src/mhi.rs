@@ -1319,6 +1319,16 @@ impl ZorroDevice for Mhi {
         (self.intreq & self.intena) != 0
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // Playback decodes on the board's own cadence, raising buffer
+        // interrupts with no deadline model yet; stopped, it is idle.
+        if self.status == Status::Playing {
+            crate::zorro_device::DeviceDeadline::Unknown
+        } else {
+            crate::zorro_device::DeviceDeadline::Idle
+        }
+    }
+
     fn reset(&mut self) {
         self.intreq = 0;
         self.intena = 0;

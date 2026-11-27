@@ -435,6 +435,10 @@ impl crate::zorro_device::ZorroDevice for Sf2000Sd {
         // documentation).
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        crate::zorro_device::DeviceDeadline::Idle
+    }
+
     /// Side-effect-free reads for the debugger/GDB/control memory views, as
     /// `ide_zorro.rs` does for its own visible ROM: the boot overlay while
     /// it is still mapped, nothing once the first write has latched the

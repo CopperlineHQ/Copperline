@@ -88,6 +88,17 @@ for the earlier release notes.
 
 ### Fixed
 
+- A CPU halted in `STOP` wakes on time for more devices, and no longer
+  sleeps past ones it cannot predict. The `STOP` fast-forward and
+  `[cpu] jit` batches now share one event horizon. The CD32's Akiko CD
+  controller, the Picasso II+ and GVP Graffity retrace interrupts and the
+  Toccata's play FIFO now report their next event, and a WebAssembly bus
+  master bounds `STOP` naps as it already bounded JIT batches. An expansion
+  board that declares no deadline is no longer taken as idle: while one is
+  fitted and active (an A2065 with a network backend, an MHI board playing,
+  the CD32 FMV cartridge, a WebAssembly plugin), a `STOP` nap lasts at most
+  64 colour clocks, as a JIT batch already did.
+
 - Files dragged onto the window from a file manager now arrive under
   native Wayland, as they already did on X11, XWayland, macOS and Windows
   (#936). The windowing layer Copperline uses delivers no drops on Wayland,

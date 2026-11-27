@@ -1123,6 +1123,61 @@ impl Akiko {
         self.run_internal(mem);
     }
 
+    /// When the CD controller next changes, on its own, its INT2 line or
+    /// guest memory (see [`crate::zorro_device::DeviceDeadline`]).
+    ///
+    /// `tick` settles the response, command and status paths completely
+    /// (`handler` and `run_internal` run to a fixed point), so after a tick
+    /// the controller moves again only when one of its countdowns expires:
+    /// the command turnaround, a DMA channel's start-up delay, the sector,
+    /// TOC-packet and CD-DA cadences, or a delayed disc insert. The cadence
+    /// counters handle one expiry per tick, so they are deadlines even when
+    /// their expiry changes nothing visible. The exceptions due at the very
+    /// next tick are a DMA channel ready to move a byte (TX moves one per
+    /// tick), and a status push-back or play notification that `handler`
+    /// has not delivered yet.
+    pub fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        let countdown = |cck: i64| u32::try_from(cck.max(1)).unwrap_or(u32::MAX);
+        let mut next = [
+            countdown(i64::from(self.read_counter_cck)),
+            countdown(i64::from(self.frame_counter_cck)),
+            countdown(i64::from(self.audio_counter_cck)),
+        ]
+        .into_iter()
+        .min()
+        .unwrap_or(1);
+        let mut due = |cck: u32| next = next.min(cck.max(1));
+        if self.command_active > 0 {
+            due(self.command_active);
+        }
+        if self.pending_disc.is_some() {
+            // Mounts once the delay has gone below zero.
+            due(countdown(self.insert_delay_cck.saturating_add(1)));
+        }
+        let rx_ready = self.receive_length != 0
+            && self.flags & CDFLAG_RXD != 0
+            && self.cdcomrxinx != self.cdcomrxcmp;
+        if rx_ready {
+            due(self.rx_dma_delay_cck);
+        }
+        let tx_ready = self.flags & CDFLAG_TXD != 0
+            && self.flags & CDFLAG_ENABLE == 0
+            && self.cdcomtxinx != self.cdcomtxcmp
+            && self.tx_fifo_has_room();
+        if tx_ready {
+            due(self.tx_dma_delay_cck);
+        }
+        let push_back = self.receive_length == 0
+            && (self.cd_initialized == 0
+                || self.media_notify
+                || (self.cd_initialized >= 2 && self.audio_notify != 0)
+                || (self.toc_counter >= 0 && self.command_active == 0 && self.frame_sync));
+        if push_back {
+            due(1);
+        }
+        crate::zorro_device::DeviceDeadline::In(next)
+    }
+
     /// Produce the next CD-DA sector of the running play command, with
     /// the subcode frame the drive reads alongside it.
     fn stream_audio_sector(
@@ -2805,6 +2860,56 @@ mod tests {
             i = i.wrapping_add(1);
         }
         out
+    }
+
+    #[test]
+    fn nothing_leaves_the_controller_before_its_deadline() {
+        use crate::zorro_device::DeviceDeadline;
+        // Drive a command exchange and the boot-time status traffic in
+        // deadline-sized steps: one colour clock short of each deadline,
+        // neither the INT2 line, the request latch nor guest memory may
+        // have moved.
+        let mut ring = CdAudioRing::default();
+        let mut chip = vec![0u8; 64 * 1024];
+        let mut akiko = Akiko::new();
+        akiko.insert_disc(test_disc());
+        const MISC: u32 = 0x0000_1000;
+        akiko.write(AKIKO_BASE + 0x14, 4, MISC, &mut chip);
+        akiko.write(AKIKO_BASE + 0x24, 4, CDFLAG_TXD | CDFLAG_RXD, &mut chip);
+        akiko.write(
+            AKIKO_BASE + 0x10,
+            4,
+            CDINT_DRIVERECV | CDINT_RXDMADONE,
+            &mut chip,
+        );
+        let tx_base = (MISC | 0x200) as usize;
+        let cmd = [0x05u8]; // status
+        chip[tx_base] = cmd[0];
+        chip[tx_base + 1] = 0xFFu8.wrapping_sub(cmd[0]);
+        akiko.write(AKIKO_BASE + 0x1F, 1, 0xFF, &mut chip);
+        akiko.write(AKIKO_BASE + 0x1D, 1, 2, &mut chip);
+
+        let mut steps = 0;
+        let mut elapsed = 0u64;
+        while elapsed < 4 * u64::from(CCK_PER_CD_FRAME) {
+            let DeviceDeadline::In(due) = akiko.next_deadline() else {
+                panic!("the controller always has a cadence deadline");
+            };
+            let before = (akiko.int2_line(), akiko.intreq, chip.clone());
+            if due > 1 {
+                akiko.tick(due - 1, &mut chip, &mut ring);
+                let after = (akiko.int2_line(), akiko.intreq, chip.clone());
+                assert!(
+                    before == after,
+                    "a change before the deadline at step {steps}"
+                );
+            }
+            akiko.tick(1, &mut chip, &mut ring);
+            elapsed += u64::from(due);
+            steps += 1;
+        }
+        assert!(akiko.cdcomrxinx != 0, "the status reply arrived");
+        assert!(steps > 4, "deadlines cut the run into events: {steps}");
     }
 
     #[test]

@@ -174,12 +174,13 @@ The timing contract is deliberately approximate
   shared silicon), and CIA/RTC accesses keep their E-clock costs, keeping
   chipset side effects ordered against display DMA;
 - a batch of code in fast RAM or ROM runs at most 4096 instructions and
-  stops at the next hardware deadline: the next CIA timer or alarm, a
-  CIA interrupt reaching Paula's request input, Copper wake-up, blitter
-  completion or interrupt, audio, floppy, storage, serial, keyboard or pot
-  event, the end of the scanline, or a pending interrupt's recognition
-  latency, and in any case within 64 colour clocks, which bounds
-  host-driven devices whose events cannot be predicted. The budget converts that horizon to instructions with both
+  stops at the CPU's event horizon (`Bus::cpu_event_horizon`, the same
+  one a CPU halted in `STOP` naps to; see "Interrupts and STOP" below):
+  the next CIA timer or alarm, a CIA interrupt reaching Paula's request
+  input, Copper wake-up, blitter completion or interrupt, audio, floppy,
+  storage or expansion-board, serial, keyboard or pot event, or a pending
+  interrupt's recognition latency; then at the end of the scanline, and in
+  any case within 64 colour clocks. The budget converts that horizon to instructions with both
   fractional clock carries, so a batch overshoots it by at most one
   instruction;
 - inside such a batch the core reports each completed instruction through
@@ -1239,14 +1240,32 @@ Paula's INTENA/INTREQ levels are delivered as M68K autovectors through the
 modelled IPL pipe and boundary sampling described in [](timing). When the CPU
 executes `STOP`, the frame loop fast-forwards device time to the next
 event that can raise an interrupt instead of spinning -- behaviour the
-debugger's Step control inherits. One event source is invisible to that
-horizon: a serial sink with a live host input side (TCP, pty, the browser
-channel) can start a reception at any wall-clock moment. While such a sink
-is attached, the blind fast-forward span is capped to a fraction of a
-serial character time, so a byte landing mid-nap raises RBF and wakes the
-CPU before a second byte can complete and overrun Paula's one-word receive
-buffer -- matching a real machine, which wakes from `STOP` within
-microseconds of the interrupt.
+debugger's Step control inherits. It naps to the CPU's event horizon
+(`Bus::cpu_event_horizon`, shared with `[cpu] jit` batches), then to the
+frame wrap and the frame's display-start line. The horizon is the earliest
+moment any device can raise an interrupt, write guest memory by DMA or
+request the bus without the CPU touching it. Each device reports its own;
+an expansion board through `ZorroDevice::next_deadline`, the CD32's Akiko
+from its command, DMA and CD-frame countdowns.
+
+Some sources cannot be predicted, and the horizon fails safe for them
+rather than treating them as idle:
+
+- a board that declares no deadline (`DeviceDeadline::Unknown`: the
+  A2065 while its LANCE runs with a network backend, an MHI board while
+  playing, the CD32 FMV cartridge, WebAssembly plugin boards) caps the
+  horizon at 64 colour clocks;
+- a serial sink with a live host input side (TCP, pty, the browser
+  channel) can start a reception at any wall-clock moment, so while one
+  is attached the horizon is capped to a fraction of a serial character
+  time: a byte landing mid-nap raises RBF and wakes the CPU before a
+  second byte can complete and overrun Paula's one-word receive buffer --
+  matching a real machine, which wakes from `STOP` within microseconds of
+  the interrupt.
+
+The horizon records whether every source predicted its event
+(`EventHorizon::exact`), for optimisations that must not rely on a
+fail-safe cap.
 
 ## Exceptions
 

@@ -2188,6 +2188,11 @@ impl ZorroDevice for WasmBoard {
         self.call_flag(|e| e.int2.clone())
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // A plugin's tick runs its own code: nothing on this side predicts it.
+        crate::zorro_device::DeviceDeadline::Unknown
+    }
+
     fn int6_line(&self) -> bool {
         self.call_flag(|e| e.int6.clone())
     }

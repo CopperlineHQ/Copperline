@@ -262,6 +262,26 @@ impl ZorroDevice for Toccata {
         self.ad1848.int6_pending()
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // Only the play cadence moves the FIFO and its interrupt: the next
+        // codec sample is the earliest moment either can change. The mixer
+        // feeds the host's output ring, and the autocalibration countdown
+        // only settles a status bit a register read observes.
+        if !self.ad1848.play_active() {
+            return crate::zorro_device::DeviceDeadline::Idle;
+        }
+        let rate = u64::from(self.ad1848.sample_rate_hz());
+        if rate == 0 {
+            return crate::zorro_device::DeviceDeadline::Idle;
+        }
+        let short = u64::from(PAULA_CLOCK_HZ).saturating_sub(self.codec_acc);
+        crate::zorro_device::DeviceDeadline::In(
+            u32::try_from(short.div_ceil(rate))
+                .unwrap_or(u32::MAX)
+                .max(1),
+        )
+    }
+
     fn reset(&mut self) {
         self.ad1848.reset();
         self.codec_acc = 0;

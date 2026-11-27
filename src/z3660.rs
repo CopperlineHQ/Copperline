@@ -1021,6 +1021,11 @@ impl ZorroDevice for Z3660 {
         self.frame_phase = (self.frame_phase + cck) % FRAME_CCK;
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // A tick only advances the frame phase a register read reports.
+        crate::zorro_device::DeviceDeadline::Idle
+    }
+
     fn reset(&mut self) {
         self.regs.fill(0);
         // Clear VRAM so a cold boot comes up with zeroed board RAM, like the

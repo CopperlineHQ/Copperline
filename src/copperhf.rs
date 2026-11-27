@@ -2028,6 +2028,16 @@ impl ZorroDevice for CopperhfBoard {
         }
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // A queued request completes (DMA and interrupt) at the very next
+        // tick; with none queued nothing happens until a register write.
+        if self.in_flight.is_empty() {
+            crate::zorro_device::DeviceDeadline::Idle
+        } else {
+            crate::zorro_device::DeviceDeadline::In(1)
+        }
+    }
+
     fn int2_line(&self) -> bool {
         self.irq_enable && self.irq_status() != 0
     }

@@ -152,6 +152,12 @@ impl ZorroDevice for Flyer {
         }
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // The firmware works on the board's own SRAM, which the CPU reads
+        // through the device path, and drives no interrupt line or DMA.
+        crate::zorro_device::DeviceDeadline::Idle
+    }
+
     fn reset(&mut self) {
         self.firmware.reset();
     }

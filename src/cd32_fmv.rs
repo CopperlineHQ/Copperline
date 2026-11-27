@@ -1415,6 +1415,11 @@ impl ZorroDevice for Cd32Fmv {
         self.cl450_irq() || self.l64111_irq()
     }
 
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // The decoders' video and audio cadences have no deadline model.
+        crate::zorro_device::DeviceDeadline::Unknown
+    }
+
     fn reset(&mut self) {
         self.reset_all();
     }

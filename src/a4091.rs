@@ -1076,14 +1076,14 @@ impl crate::zorro_device::ZorroDevice for A4091 {
         }
     }
 
-    fn next_event_cck(&self) -> Option<u32> {
-        let due = self.stall_until?;
-        let now = self.target_now().unwrap_or(due);
-        Some(
-            u32::try_from(due.saturating_sub(now))
-                .unwrap_or(u32::MAX)
-                .max(1),
-        )
+    fn next_deadline(&self) -> crate::zorro_device::DeviceDeadline {
+        // A SCRIPTS run stalled at a block move resumes, and DMAs, once its
+        // target is ready; with no stall nothing runs until a register
+        // write starts the SCRIPTS processor.
+        crate::zorro_device::DeviceDeadline::from_cck(self.stall_until.map(|due| {
+            let now = self.target_now().unwrap_or(due);
+            u32::try_from(due.saturating_sub(now)).unwrap_or(u32::MAX)
+        }))
     }
 
     fn tick(&mut self, cck: u32, host: &mut crate::zorro_device::DeviceHost) {
@@ -1583,7 +1583,10 @@ mod tests {
         assert!(!ZorroDevice::int2_line(&b));
         assert!(b.stall_until.is_some());
         assert_eq!(b.reg32(REG_DSP), 0x1018, "DSP rewound to the DATA_IN move");
-        assert!(ZorroDevice::next_event_cck(&b).is_some());
+        assert!(matches!(
+            ZorroDevice::next_deadline(&b),
+            crate::zorro_device::DeviceDeadline::In(_)
+        ));
         let mut elapsed = 0u64;
         while !ZorroDevice::int2_line(&b) {
             ZorroDevice::tick(&mut b, 100, &mut host);

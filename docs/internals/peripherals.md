@@ -537,7 +537,8 @@ when a READ is issued and offers each DRQ block when its last sector is in
 the buffer, holding BSY until then; a WRITE takes blocks (its first one
 included) while the buffer has room and completes when the media (or, with write cache, the buffer)
 has the data. A pending step's due time caps the emulator's STOP-state
-idle fast-forward (`Bus::next_storage_event_cck`), so a guest waiting on
+idle fast-forward (`Bus::storage_deadline`, part of the CPU's event
+horizon), so a guest waiting on
 the disk interrupt is woken on time. A drive spinning up from power-on
 (`spin_up`) reads back BSY alone and ignores commands; SEEK, IDLE/STANDBY
 (immediate or with the timer, which `DriveMechanics::set_standby_timer`

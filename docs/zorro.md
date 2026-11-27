@@ -801,12 +801,19 @@ In-tree functional boards implement the `ZorroDevice` trait
    `src/zorro_device/state.rs`, assigning a new, unused wire ID. Existing IDs
    are permanent, including those belonging to disabled features. Extend
    all of `BoardDevice`'s forwarding `match` arms (`read`, `write`,
-   `peek_word`, `tick`, `int2_line`, `int6_line`, `take_activity`, `reset`,
-   `kind`) for the new variant. `Bus` ticks every board at each timed-device
-   boundary, then samples its IRQ lines. Timed boards with internal deadlines
-   can also override `ZorroDevice::next_event_cck` (and forward it in
-   `BoardDevice::next_event_cck`) so the bus's idle fast-forward wakes them
-   on time, and boards with side-effect-free ROM slices can implement
+   `peek_word`, `tick`, `next_deadline`, `int2_line`, `int6_line`,
+   `take_activity`, `reset`, `kind`) for the new variant. `Bus` ticks every
+   board at each timed-device boundary, then samples its IRQ lines.
+   `ZorroDevice::next_deadline` tells the CPU's event horizon when the board
+   next asserts an interrupt line, writes guest memory or requests the bus
+   on its own: `DeviceDeadline::Idle` when nothing happens until the CPU
+   accesses it, `In(cck)` for an internal deadline, and `Unknown` -- the
+   default -- when it cannot say. An unknown board is not taken as idle: a
+   CPU halted in `STOP` naps no further than 64 colour clocks while it is
+   fitted, so a board with no deadline model costs idle host time. A board's
+   tick must be linear in the colour clocks it is handed up to its deadline
+   (one long tick leaves it where a run of short ones would), since the
+   horizon hands it exactly such ticks. Boards with side-effect-free ROM slices can implement
    `ZorroDevice::plain_rom` (and forward it in `BoardDevice::plain_rom`) for
    direct JIT/fast-path reads.
 2. Provide a `BoardSpec` constructor mirroring the existing ones, with the

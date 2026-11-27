@@ -25,13 +25,6 @@ const INSTRUCTIONS_PER_REALTIME_SLICE: usize = 8_192;
 /// the whole host deadline advancing devices. Checked between instructions,
 /// so the final bus transaction (including DMA contention) may cross the cap.
 const SPARE_CHIPSET_BUDGET_CCK: u64 = 256;
-/// Longest blind STOP-state fast-forward, in colour clocks, while a serial
-/// sink with a live host input side is attached (see the cap site in
-/// `idle_fast_forward_chunk`). 256 cck is about 72 microseconds: well under
-/// one character time even at 115200 baud (about 10 x 31 cck), so a byte
-/// arriving from the host mid-nap raises RBF and wakes the CPU before a
-/// second byte can complete and overrun Paula's one-word receive buffer.
-const SERIAL_LIVE_IDLE_CAP_CCK: u32 = 256;
 /// Safety bound on a single reverse-debug replay so a pathological target
 /// (e.g. a permanently halted CPU) cannot spin forever. Far larger than the
 /// instruction distance between two snapshots at any sane capture interval.
@@ -3127,71 +3120,19 @@ impl Emulator {
             .min(INSTRUCTIONS_PER_SLICE)
             .min(INSTRUCTIONS_PER_REALTIME_SLICE);
         let bus = self.bus();
-        let mut event_cck = None;
-        let mut cap_cck = |cck: u32, chunk: &mut usize| {
-            event_cck = Some(event_cck.map_or(cck, |earliest: u32| earliest.min(cck)));
-            *chunk = (*chunk).min(self.instructions_for_cck(cck).max(1));
-        };
-        if let Some(cck) = bus.next_cia_event_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        // An interrupt already latched in INTREQ but still inside its
-        // IPL-pin recognition pipe is invisible to the CPU right now, and a
-        // halted CPU has nothing else to wake it: without this bound the nap
-        // sleeps straight past the moment the pipe delivers, and the handler
-        // is entered a whole nap late instead of a few colour clocks late.
-        if let Some(cck) = bus.next_irq_visible_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.floppy.next_completion_cck(bus.agnus.dmacon) {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.floppy.next_sync_irq_cck(bus.agnus.dmacon) {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.floppy.next_index_pulse_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.next_copper_wakeup_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.next_blitter_completion_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.next_blitter_irq_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.next_serial_event_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.next_storage_event_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        // A serial sink wired to a live host byte source (TCP, pty, the
-        // browser channel) can start a reception at any wall-clock moment,
-        // invisibly to the event horizon computed here. Bound the blind nap
-        // while one is attached, so a byte landing mid-nap is recognized
-        // within a fraction of a character time -- a real machine halted in
-        // STOP wakes on RBF within microseconds, and sleeping past a whole
-        // character would overrun the one-word receive buffer.
-        if bus.paula.serial.can_produce_input() {
-            cap_cck(SERIAL_LIVE_IDLE_CAP_CCK, &mut chunk);
-        }
-        if let Some(cck) = bus.next_keyboard_event_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.next_pot_event_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.next_audio_irq_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        cap_cck(bus.next_frame_event_cck(), &mut chunk);
-        if let Some(cck) = bus.next_display_start_event_cck() {
-            cap_cck(cck, &mut chunk);
-        }
-        if let Some(cck) = bus.next_cia_b_tod_alarm_cck() {
-            cap_cck(cck, &mut chunk);
+        // The devices' horizon (`Bus::cpu_event_horizon`, shared with the
+        // JIT), then the frame structure: the frame wrap, and the line where
+        // the frame's display-start snapshot is taken.
+        let event_cck = [
+            bus.cpu_event_horizon().cck,
+            Some(bus.next_frame_event_cck()),
+            bus.next_display_start_event_cck(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        if let Some(cck) = event_cck {
+            chunk = chunk.min(self.instructions_for_cck(cck).max(1));
         }
         (chunk.max(1), event_cck)
     }
@@ -6332,6 +6273,28 @@ mod tests {
         assert_eq!(accounting.device_cck, 3);
         assert_eq!(emu.retired_instructions(), retired);
         assert!(emu.machine.stopped());
+    }
+
+    #[cfg(feature = "cd32-fmv")]
+    #[test]
+    fn stopped_cpu_naps_no_further_than_the_fail_safe_cap_past_an_unknown_board() {
+        let mut emu = emulator_stopped_waiting_for_vblank(0x2700);
+        let cap = super::INSTRUCTIONS_PER_REALTIME_SLICE;
+        let (_, quiet) = emu.idle_fast_forward_chunk(cap);
+        assert!(
+            quiet.is_some_and(|cck| cck > 64),
+            "without the board the nap runs to a far event: {quiet:?}"
+        );
+        // A board that declares no deadline is not taken as idle.
+        let fmv = crate::cd32_fmv::Cd32Fmv::new(vec![0; 256 * 1024]).unwrap();
+        emu.machine
+            .bus_mut()
+            .attach_devices(vec![crate::zorro_device::BoardDevice::Cd32Fmv(Box::new(
+                fmv,
+            ))]);
+        let (chunk, deadline) = emu.idle_fast_forward_chunk(cap);
+        assert_eq!(deadline, Some(64));
+        assert_eq!(chunk, emu.instructions_for_cck(64).max(1));
     }
 
     #[test]

@@ -1049,6 +1049,29 @@ impl CirrusGd5426 {
         self.vblank_pending
     }
 
+    /// Colour clocks until a tick next latches the vertical-retrace
+    /// interrupt: the next retrace start, while the GD5428's interrupt is
+    /// enabled and not already latched. `None` when no tick can raise it
+    /// (the blitter's busy countdown only settles status bits a register
+    /// read observes).
+    pub fn next_interrupt_cck(&self) -> Option<u32> {
+        if self.model != CirrusModel::Gd5428
+            || !self.vertical_interrupt_enabled()
+            || self.vblank_pending
+        {
+            return None;
+        }
+        // The first phase `crossed_retrace_start` reports as crossed.
+        let frame = u128::from(self.frame_cck().max(1));
+        let phase = u128::from(self.retrace_start_cck()).min(frame - 1);
+        let old = u128::from(self.frame_phase_cck);
+        let mut next = old - old % frame + phase;
+        if next <= old {
+            next += frame;
+        }
+        Some(u32::try_from(next - old).unwrap_or(u32::MAX).max(1))
+    }
+
     fn dot_clock_hz(&self) -> f64 {
         let clock = usize::from((self.misc_output >> 2) & 3);
         let n = f64::from(self.seq[0x0b + clock] & 0x7f);
@@ -1502,6 +1525,30 @@ mod tests {
             !chip.vblank_pending(),
             "CR11 bit 4 clear keeps IRQ disarmed"
         );
+    }
+
+    #[test]
+    fn gd5428_interrupt_deadline_is_the_tick_that_latches_the_retrace() {
+        let mut chip = CirrusGd5426::new_gd5428(0x10_0000);
+        mode(&mut chip, 16, 16, 16);
+        crtc(&mut chip, 0, 15);
+        crtc(&mut chip, 6, 20);
+        crtc(&mut chip, 0x10, 16);
+        assert_eq!(chip.next_interrupt_cck(), None, "interrupt not enabled");
+        crtc(&mut chip, 0x11, 0x12);
+        chip.tick(123);
+        for _ in 0..2 {
+            let due = chip.next_interrupt_cck().expect("armed retrace interrupt");
+            chip.tick(due - 1);
+            assert!(!chip.vblank_pending(), "nothing before the deadline");
+            assert_eq!(chip.next_interrupt_cck(), Some(1));
+            chip.tick(1);
+            assert!(chip.vblank_pending(), "the deadline's tick latches it");
+            assert_eq!(chip.next_interrupt_cck(), None, "already latched");
+            // Acknowledge, then predict the next field's.
+            crtc(&mut chip, 0x11, 0x02);
+            crtc(&mut chip, 0x11, 0x12);
+        }
     }
 
     #[test]
