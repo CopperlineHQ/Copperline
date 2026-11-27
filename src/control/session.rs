@@ -160,9 +160,73 @@ impl MachineInputState {
     }
 
     /// Discard input aimed at the current emulated timeline. Used when
-    /// a reset or state load replaces that timeline.
+    /// a state load replaces that timeline.
     pub fn clear_scheduled(&mut self) {
         self.scheduled.clear();
+    }
+
+    /// Discard the queue for a reset and return the releases it still
+    /// owes, for the driver to apply now through its own input path.
+    ///
+    /// A reset does not let go of a held mouse button or joystick switch
+    /// (`InputState::reset_for_machine_reset`), so a hold whose press has
+    /// already landed must still end: dropping its queued release with
+    /// the rest of the queue would leave the switch closed for good. Each
+    /// mouse button the queue releases, and each joystick/pad switch a
+    /// queued state clears, is released now if it is held. Queued presses
+    /// are dropped, and a hold with no release queued (one the client, or
+    /// the operator's hand, means to keep) stays held. `applied_joy`
+    /// reports the joystick state the driver last applied to a port
+    /// (0-based, up to `PORT_COUNT`), which is what a release is taken
+    /// from.
+    pub fn take_releases_for_reset(
+        &mut self,
+        emu: &Emulator,
+        applied_joy: impl Fn(u8) -> JoyState,
+    ) -> Vec<InputAction> {
+        let input = &emu.bus().input;
+        let mut releases = Vec::new();
+        let mut joy_cleared = [0u16; crate::bus::PORT_COUNT];
+        for entry in std::mem::take(&mut self.scheduled) {
+            match entry.action {
+                InputAction::MouseButton {
+                    port,
+                    index,
+                    pressed: false,
+                } => {
+                    let release = InputAction::MouseButton {
+                        port,
+                        index,
+                        pressed: false,
+                    };
+                    if input.mouse_button_held(usize::from(port), index)
+                        && !releases.contains(&release)
+                    {
+                        releases.push(release);
+                    }
+                }
+                InputAction::Joy { port, state } => {
+                    if let Some(cleared) = joy_cleared.get_mut(usize::from(port)) {
+                        *cleared |= !joy_bits(state) & JOY_ALL;
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (port, cleared) in (0u8..).zip(joy_cleared) {
+            if cleared == 0 {
+                continue;
+            }
+            let held = joy_bits(applied_joy(port));
+            let kept = held & !cleared;
+            if kept != held {
+                releases.push(InputAction::Joy {
+                    port,
+                    state: joy_from_bits(kept),
+                });
+            }
+        }
+        releases
     }
 
     #[cfg(test)]
@@ -540,6 +604,55 @@ pub fn inject_input(
         }
     }
     secs
+}
+
+/// Every switch of a [`JoyState`], one bit each (see [`joy_bits`]).
+const JOY_ALL: u16 = 0x07FF;
+
+/// A [`JoyState`] as a bit set, so switches can be masked together.
+fn joy_bits(s: JoyState) -> u16 {
+    [
+        s.up, s.down, s.left, s.right, s.red, s.blue, s.play, s.rwd, s.ffw, s.green, s.yellow,
+    ]
+    .iter()
+    .enumerate()
+    .fold(0, |bits, (i, &on)| bits | (u16::from(on) << i))
+}
+
+/// The inverse of [`joy_bits`].
+fn joy_from_bits(bits: u16) -> JoyState {
+    let on = |i: u16| bits & (1 << i) != 0;
+    JoyState {
+        up: on(0),
+        down: on(1),
+        left: on(2),
+        right: on(3),
+        red: on(4),
+        blue: on(5),
+        play: on(6),
+        rwd: on(7),
+        ffw: on(8),
+        green: on(9),
+        yellow: on(10),
+    }
+}
+
+/// The joystick / CD32-pad switches a port's lines hold closed, read
+/// back as the [`JoyState`] that would have set them.
+pub fn joy_state_of_port(p: &crate::bus::ControllerPort) -> JoyState {
+    JoyState {
+        up: p.up,
+        down: p.down,
+        left: p.left,
+        right: p.right,
+        red: p.fire,
+        blue: p.button2,
+        play: p.cd32_play,
+        rwd: p.cd32_rwd,
+        ffw: p.cd32_ffw,
+        green: p.cd32_green,
+        yellow: p.cd32_yellow,
+    }
 }
 
 /// The recorder captures mouse/joystick state by diffing `InputState`

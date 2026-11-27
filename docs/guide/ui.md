@@ -98,6 +98,15 @@ keyboard hardware directly works too. `Ctrl+Amiga+Amiga` runs the
 authentic reset protocol (reset warning, then KCLK held low), so the
 reboot lands a fraction of a second after the chord, as on real hardware.
 
+A reset does not let go of anything the hand is holding: mouse buttons,
+joystick directions and fire buttons held down through
+`Ctrl+Amiga+Amiga` stay held as the machine comes back up. Holding both
+mouse buttons through the chord therefore opens Kickstart 2.0+'s *Early
+Startup Control* (the boot menu), as on a real Amiga. With the default
+`mouse_capture = "click"`, the click that captures the mouse is not
+passed to the Amiga, so capture the mouse first and then hold the
+buttons (see [Mouse capture](configuration.md#mouse-capture)).
+
 During a netplay session only a few of these shortcuts apply; see
 [Netplay controls](netplay.md#netplay-controls).
 

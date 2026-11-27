@@ -686,7 +686,16 @@ impl Session {
                 };
                 let reply = match result {
                     Ok(()) => {
-                        self.input.clear_scheduled();
+                        // Holds already in place outlive the reset, so
+                        // their queued releases still land, now.
+                        let releases = self.input.take_releases_for_reset(&self.emu, |port| {
+                            super::session::joy_state_of_port(
+                                &self.emu.bus().input.port_view(usize::from(port)),
+                            )
+                        });
+                        for action in releases {
+                            self.input.inject_now(&mut self.emu, action);
+                        }
                         proto::ok_line(&id, json!({}))
                     }
                     Err(e) => proto::err_line(&id, &CtlError::internal(format!("{e:#}"))),
@@ -1916,6 +1925,50 @@ mod tests {
             !emu.bus().keyboard.is_held(0x23),
             "reset must discard input aimed at the replaced timeline"
         );
+    }
+
+    #[test]
+    fn machine_reset_still_ends_holds_whose_release_was_queued() {
+        // Held switches outlive a reset, so a press that already landed
+        // must still be let go by the release queued for it, while a hold
+        // with no release queued stays down.
+        for kind in ["warm", "cold"] {
+            let (emu, input, _, _) = run_machine_session(
+                control_test_emulator(),
+                MachineInputState::default(),
+                move |c| {
+                    c.auth();
+                    c.result(
+                        "input.mouse",
+                        json!({"left": true, "right": true, "middle": true}),
+                    );
+                    c.result(
+                        "input.mouse",
+                        json!({"left": false, "right": false, "at_seconds": 0.1}),
+                    );
+                    c.result("input.joy", json!({"port": 2, "up": true, "red": true}));
+                    c.result(
+                        "input.joy",
+                        json!({"port": 2, "red": true, "at_seconds": 0.1}),
+                    );
+                    c.result("machine.reset", json!({"kind": kind}));
+                    c.result("run_until", json!({"seconds": 0.25}));
+                },
+            );
+            assert_eq!(input.pending_count(), 0);
+            let ports = &emu.bus().input.ports;
+            assert!(!ports[0].fire, "{kind}: queued left release landed");
+            assert!(!ports[0].button2, "{kind}: queued right release landed");
+            assert!(
+                ports[0].button3,
+                "{kind}: middle, never released, stays held"
+            );
+            assert!(!ports[1].up, "{kind}: queued joystick state let go of up");
+            assert!(
+                ports[1].fire,
+                "{kind}: fire, held in every state, stays held"
+            );
+        }
     }
 
     #[test]

@@ -563,7 +563,7 @@ refused.
 - `step_frame {"n": 1}`: Step `n` video frames (at most 1,000,000).
 - `run_until {"pc" | "pc_outside" | "vpos" | "frame" | "cck" | "seconds" | "stable_frames"}`: Run until exactly one condition holds. `pc_outside` is `[LOW,HIGH]`, or `true` for the default Kickstart window `$F80000-$FFFFFF`. `vpos` takes an optional `hpos`. `frame`, `cck` and `seconds` are absolute emulated positions. `stable_frames` (at least 2) stops once that many consecutive frames render identically, optionally only inside the region `x`/`y`/`w`/`h`, giving up with reason `budget` after `max_frames`. A breakpoint on the way stops the run early.
 - `pause`: Pause active execution.
-- `machine.reset {"kind": "warm"|"cold"}`: Reset the emulated machine (default: warm).
+- `machine.reset {"kind": "warm"|"cold"}`: Reset the emulated machine (default: warm). Input scheduled with `at_seconds` is dropped, but a mouse button or joystick/pad control held when the reset lands stays held through it, as a hand on a real controller would, so a queued `input.mouse` or `input.joy` that would have released it is applied at the reset instead. A hold with no release queued stays down until the client releases it.
 
 ### Speed
 - `warp.get`: Report whether warp (unpaced emulation) is active, whether the machine is paced, and the source holding warp (`none`, `manual`, `control`, `gdb`, `guest`, `launch`, `boot`, `capture`, or `headless`); in a windowed session `holders` lists every programmatic hold in force (`control`, `gdb`, `guest`), `source` being the first (the headless server has no holds and omits the field).

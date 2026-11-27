@@ -14420,7 +14420,8 @@ fn machine_reset_keeps_plugged_devices_and_knob_positions() {
     // A reset does not unplug anything: Ctrl-Amiga-Amiga, the CPU RESET
     // instruction, and a cold boot all leave the physical controllers
     // (and a paddle's knob position) where they are, while the chip-side
-    // counters clear and the driven lines release.
+    // counters clear. /RESET never reaches a controller's switches, so
+    // whatever the hand holds closed stays closed.
     bus.reset_for_keyboard_reset();
     assert_eq!(bus.input.device(0), PortDevice::Cd32Pad);
     assert_eq!(bus.input.device(1), PortDevice::Analogue);
@@ -14428,10 +14429,62 @@ fn machine_reset_keeps_plugged_devices_and_knob_positions() {
         bus.input.ports[1].pot_x_ohms,
         Some(crate::chipset::paula::pot_position_resistance_ohms(50))
     );
-    assert!(!bus.input.ports[0].fire, "reset released the fire line");
-    assert!(!bus.input.ports[0].up);
+    assert!(bus.input.ports[0].fire, "a held fire switch stays closed");
+    assert!(bus.input.ports[0].up, "a held direction stays closed");
     assert_eq!(bus.input.ports[0].counter_x, 0, "chip counters cleared");
     assert_eq!(bus.input.ports[0].cd32_shifter, 8, "pad shifter reloaded");
+}
+
+#[test]
+fn mouse_buttons_held_through_reset_still_read_pressed() {
+    // Kickstart 2.0+ opens its Early Startup Control when it finds both
+    // mouse buttons down: left on /FIR0 (CIA-A PRA bit 6), right on POT0Y
+    // (POTINP DATLY, bit 10). The usual way in is to hold both across
+    // Ctrl-Amiga-Amiga, so the contacts must still ground those pins once
+    // the CIAs and Paula come out of reset, with nothing re-pressed.
+    let mut bus = empty_bus();
+    bus.input.set_mouse_button(0, 0, true);
+    bus.input.set_mouse_button(0, 1, true);
+    bus.reset_for_keyboard_reset();
+    assert_eq!(
+        bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x40,
+        0,
+        "left button still grounds /FIR0 after a keyboard reset"
+    );
+    assert_eq!(
+        bus.custom_read(0x016, 2) & 0x0400,
+        0,
+        "right button still grounds POT0Y after a keyboard reset"
+    );
+
+    // The CPU RESET instruction drives the same line.
+    bus.reset_custom_chips_from_cpu_reset();
+    assert_eq!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x40, 0);
+    assert_eq!(bus.custom_read(0x016, 2) & 0x0400, 0);
+
+    // Letting go after the reset releases the pins as usual.
+    bus.input.set_mouse_button(0, 0, false);
+    bus.input.set_mouse_button(0, 1, false);
+    assert_ne!(bus.cia_a_read((REG_PRA as u64) * 256, 1) & 0x40, 0);
+    assert_ne!(bus.custom_read(0x016, 2) & 0x0400, 0);
+}
+
+#[test]
+fn parallel_adapter_switches_held_through_reset_stay_closed() {
+    let mut bus = empty_bus();
+    bus.input
+        .set_joystick(2, true, false, false, false, true, false);
+    bus.reset_for_keyboard_reset();
+    assert_eq!(
+        bus.input.parallel_data_pull_downs() & 0x01,
+        0x01,
+        "port 3 up still grounds D0"
+    );
+    assert_ne!(
+        bus.input.parallel_status_pull_downs() & crate::parallel::CTL_SEL,
+        0,
+        "port 3 fire still grounds SEL"
+    );
 }
 
 #[test]
