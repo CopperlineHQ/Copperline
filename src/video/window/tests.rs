@@ -10514,6 +10514,34 @@ fn dropped_files_coalesce_across_events() {
     assert_eq!(app.disk_playlists[0].len(), 2);
 }
 
+#[test]
+fn native_wayland_drops_queued_together_stay_separate() {
+    use super::wayland_data::DropEvent;
+    let mut app = test_app();
+    // Two whole drops completed before the main loop drained the receiver:
+    // each is its own action, so the second replaces DF0's disk rather
+    // than joining the first as one two-disk batch.
+    app.apply_wayland_drop_events(vec![
+        DropEvent::Hovered,
+        DropEvent::Dropped(vec![PathBuf::from("a.adf")]),
+        DropEvent::Hovered,
+        DropEvent::Dropped(vec![PathBuf::from("b.adf")]),
+    ]);
+    assert_eq!(app.disk_playlists[0], vec![PathBuf::from("b.adf")]);
+    assert!(app.pending_dropped_files.is_empty());
+    assert!(!app.drop_hover);
+}
+
+#[test]
+fn native_wayland_drag_hint_follows_hover_and_cancel() {
+    use super::wayland_data::DropEvent;
+    let mut app = test_app();
+    app.apply_wayland_drop_events(vec![DropEvent::Hovered]);
+    assert!(app.drop_hover);
+    app.apply_wayland_drop_events(vec![DropEvent::Cancelled]);
+    assert!(!app.drop_hover);
+}
+
 /// Windowed control-protocol drain tests: a synthetic ControlHandle
 /// (channel pair, no sockets) feeds commands straight into the same
 /// drain `about_to_wait` runs, against the real App and emulator.

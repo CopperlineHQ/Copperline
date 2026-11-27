@@ -348,8 +348,10 @@ only floppy images; they go to the first connected drive.
 
 The chooser opens after the drop rather than offering per-drive drop
 targets because the windowing layer reports file drops without a cursor
-position. Drops are not delivered at all under native Wayland (X11 and
-XWayland work).
+position. Under native Wayland that layer reports no drops at all, so
+Copperline takes them from the compositor itself. It accepts a dragged list
+of files (`text/uri-list`) as a copy, never as a move, so the file manager
+keeps the files; non-file URLs and files on another host are ignored.
 
 ## Menu, tool windows, and overlay panels
 

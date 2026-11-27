@@ -117,6 +117,8 @@ pub(super) struct EguiOverlay {
     bar_last: Option<(BarKey, egui_paint::EguiSurfaceJob)>,
     /// Keyboard and IME for the display canvas, while a box is typed in.
     input: egui_winit::State,
+    /// Copy and paste through Copperline's Wayland data device there.
+    clipboard: wayland_data::EguiClipboard,
     typing: egui_view::Typing,
     images: egui_view::Images,
     placement: Option<Placement>,
@@ -132,7 +134,11 @@ pub(super) struct EguiOverlay {
 }
 
 impl EguiOverlay {
-    pub(super) fn new(window: &Window, max_texture_side: usize) -> Self {
+    pub(super) fn new(
+        window: &Window,
+        max_texture_side: usize,
+        clipboard: Option<wayland_data::Clipboard>,
+    ) -> Self {
         let display = egui::Context::default();
         egui_view::configure(&display);
         let chrome = egui::Context::default();
@@ -140,7 +146,7 @@ impl EguiOverlay {
         let input = egui_winit::State::new(
             display.clone(),
             egui::ViewportId::ROOT,
-            window,
+            &wayland_data::EguiDisplay::new(window, clipboard.as_ref()),
             Some(window.scale_factor() as f32),
             None,
             Some(max_texture_side),
@@ -150,6 +156,7 @@ impl EguiOverlay {
             chrome,
             bar_last: None,
             input,
+            clipboard: wayland_data::EguiClipboard::new(clipboard),
             typing: egui_view::Typing::default(),
             images: egui_view::Images::default(),
             placement: None,
@@ -168,11 +175,15 @@ impl EguiOverlay {
                 if !self.typing.active() {
                     return false;
                 }
-                let _ = self.input.on_window_event(window, event);
+                let _ = self
+                    .clipboard
+                    .on_window_event(&mut self.input, window, event);
                 true
             }
             WindowEvent::ModifiersChanged(_) | WindowEvent::Focused(_) => {
-                let _ = self.input.on_window_event(window, event);
+                let _ = self
+                    .clipboard
+                    .on_window_event(&mut self.input, window, event);
                 false
             }
             _ => false,
@@ -302,6 +313,7 @@ impl EguiOverlay {
             ime.rect = placement.window_rect(ime.rect, pixels_per_point);
             ime.cursor_rect = placement.window_rect(ime.cursor_rect, pixels_per_point);
         }
+        self.clipboard.take_copies(&mut platform);
         self.input.handle_platform_output(window, platform);
         self.repaint |= repaint;
         surface_job
@@ -529,7 +541,8 @@ impl App {
                 return empty;
             };
             let max = gpu.pixels.device().limits().max_texture_dimension_2d as usize;
-            self.egui_overlay = Some(EguiOverlay::new(&window, max));
+            let clipboard = self.wayland_data.as_ref().map(|data| data.clipboard());
+            self.egui_overlay = Some(EguiOverlay::new(&window, max, clipboard));
         }
         let launcher_on_egui = self.launcher_on_egui();
         let menu_on_egui = self.menu_on_egui();
