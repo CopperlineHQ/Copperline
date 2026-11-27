@@ -102,16 +102,6 @@ fn joy_port_suffix(port: usize) -> &'static str {
 /// pen port, so the replay directive is the left click.
 const PEN_BUTTONS: [(&str, ControlRead); 1] = [("left", |p| p.button3)];
 
-/// A port's controls as one `ControllerPort` view, whichever connector it
-/// is on: the game ports as they are, the adapter's sockets through
-/// [`ParallelJoystick::as_controller_port`].
-fn port_view(input: &InputState, port: usize) -> ControllerPort {
-    match port {
-        0 | 1 => input.ports[port],
-        _ => input.parallel_joysticks[port - crate::bus::PARALLEL_PORT_FIRST].as_controller_port(),
-    }
-}
-
 /// Both analogue pot positions of a port, when both axes are connected.
 fn pot_positions(p: &ControllerPort) -> Option<(u8, u8)> {
     match (p.pot_x_ohms, p.pot_y_ohms) {
@@ -297,8 +287,8 @@ impl InputRecorder {
             }
         }
         for port in 0..crate::bus::PORT_COUNT {
-            let old = &port_view(&prev, port);
-            let cur = &port_view(input, port);
+            let old = &prev.port_view(port);
+            let cur = &input.port_view(port);
             if old.device != cur.device {
                 // Hot-plug: close what the old device held; the device
                 // change itself has no script directive.

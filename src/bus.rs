@@ -3488,6 +3488,31 @@ impl InputState {
         }
     }
 
+    /// Whether the switch [`Self::set_mouse_button`] drives for `index`
+    /// is closed right now.
+    pub fn mouse_button_held(&self, port: usize, index: u8) -> bool {
+        if Self::parallel_index(port).is_some() {
+            return false;
+        }
+        let p = &self.ports[Self::port_index(port)];
+        match index {
+            0 if p.device == PortDevice::LightPen => p.button3,
+            0 => p.fire,
+            1 => p.button2,
+            _ => p.button3,
+        }
+    }
+
+    /// A port's lines as one `ControllerPort` view, whichever connector it
+    /// is on: the game ports as they are, the adapter's sockets through
+    /// [`ParallelJoystick::as_controller_port`].
+    pub fn port_view(&self, port: usize) -> ControllerPort {
+        match Self::parallel_index(port) {
+            Some(i) => self.parallel_joysticks[i].as_controller_port(),
+            None => self.ports[Self::port_index(port)],
+        }
+    }
+
     /// Set a port's digital-joystick state. Engages the Joystick device on a
     /// Mouse or empty port so JOYxDAT reports directions; a CD32 pad or
     /// analogue controller keeps its device and just has its lines driven --

@@ -10866,6 +10866,43 @@ mod control_drain {
     }
 
     #[test]
+    fn windowed_reset_still_ends_holds_whose_release_was_queued() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        let requests = [
+            ("input.mouse", json!({"left": true, "middle": true})),
+            ("input.mouse", json!({"left": false, "at_seconds": 0.1})),
+            ("input.joy", json!({"port": 2, "up": true, "red": true})),
+            (
+                "input.joy",
+                json!({"port": 2, "red": true, "at_seconds": 0.1}),
+            ),
+            ("machine.reset", json!({"kind": "warm"})),
+        ];
+        for (id, (method, params)) in (1..).zip(requests) {
+            push(&cmd_tx, id, method, params);
+            app.drain_control();
+            assert_eq!(reply(&reply_rx)["id"], id);
+        }
+
+        for _ in 0..6 {
+            app.emu.step_frame().unwrap();
+            app.drain_control();
+        }
+        let ports = &app.emu.bus().input.ports;
+        assert!(
+            !ports[0].fire,
+            "the queued left release landed at the reset"
+        );
+        assert!(ports[0].button3, "middle, never released, stays held");
+        assert!(!ports[1].up, "the queued joystick state let go of up");
+        assert!(ports[1].fire, "fire, held in every state, stays held");
+        // The input pump re-asserts the scripted set every quantum, so the
+        // release has to reach it as well as the port.
+        assert!(!app.auto_joy_held[1].up);
+        assert!(app.auto_joy_held[1].red);
+    }
+
+    #[test]
     fn windowed_state_load_clears_future_input() {
         let (mut app, cmd_tx, reply_rx) = attached_app();
         let path = std::env::temp_dir().join(format!(

@@ -18,6 +18,7 @@ use crate::control::proto::{self, CtlError};
 use crate::control::session::{BreakSpec, InputAction, MachineInputState, SessionCtx};
 use crate::control::windowed::{ControlHandle, CtlMsg};
 use crate::debugger::DebugStop;
+use crate::inputsched::JoyState;
 use serde_json::{json, Value};
 
 /// Per-connection control state owned by the `App`.
@@ -634,8 +635,31 @@ impl App {
                     self.sync_live_audio_suspension();
                     self.request_redraw();
                 }
-                if let Some(ctl) = self.control.as_mut() {
-                    ctl.input.clear_scheduled();
+                // Holds already in place outlive the reset, so their
+                // queued releases still land, now. A control joystick
+                // hold is the scripted set the input pump re-asserts.
+                let held = self.auto_joy_held;
+                let releases = match self.control.as_mut() {
+                    Some(ctl) => ctl.input.take_releases_for_reset(&self.emu, |port| {
+                        held.get(usize::from(port))
+                            .map_or_else(JoyState::default, |j| JoyState {
+                                up: j.up,
+                                down: j.down,
+                                left: j.left,
+                                right: j.right,
+                                red: j.red,
+                                blue: j.blue,
+                                play: j.play,
+                                rwd: j.rwd,
+                                ffw: j.ffw,
+                                green: j.green,
+                                yellow: j.yellow,
+                            })
+                    }),
+                    None => Vec::new(),
+                };
+                for action in releases {
+                    self.control_apply_input(action);
                 }
                 self.control_send(proto::ok_line(&id, json!({})));
             }
