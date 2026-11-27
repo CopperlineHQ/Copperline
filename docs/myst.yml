@@ -9,13 +9,14 @@ project:
   title: Copperline
   description: A cycle-driven Amiga emulator in Rust
   keywords: [amiga, emulator, ocs, ecs, aga, rust]
-  # --check-links + --strict fails the CI docs build when a linked site is
-  # unreachable. archive.org has outages regularly enough that it broke an
-  # unrelated PR; exempt it from link resolution (the link stays in the
-  # rendered docs) so CI does not depend on its uptime. Keys match the
-  # exact link URL, not the domain, so any new archive.org link needs its
-  # own entry here. Everything else stays checked; add a key only for
-  # sites with a history of downtime.
+  # --check-links + --strict fails a build when a linked site is
+  # unreachable. In CI that build is an advisory step of the docs job (each
+  # unresolved link becomes a warning, not a failure). The keys below are
+  # sites that are down or slow often enough that their warnings are only
+  # noise; exempt them from link resolution (the link stays in the rendered
+  # docs). Keys match the exact link URL, not the domain, so any new
+  # archive.org link needs its own entry here. Everything else stays
+  # checked; add a key only for sites with a history of downtime.
   error_rules:
     - rule: link-resolves
       severity: ignore

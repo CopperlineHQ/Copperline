@@ -603,9 +603,11 @@ jobs:
         uses: typst-community/setup-typst@v5
       - name: Build HTML
         working-directory: docs
+        # External links are checked by the advisory step at the end of the
+        # job, so this strict build fails only on the docs' own content.
         run: |
           python3 ../tools/prepare-docs.py
-          myst build --html --ci --strict --check-links
+          myst build --html --ci --strict
       - name: Build PDF
         working-directory: docs
         # The PDF export merges every chapter into one document, so it is the
@@ -622,3 +624,38 @@ jobs:
           name: copperline-docs-pdf
           path: docs/_build/exports/copperline.pdf
           if-no-files-found: ignore
+      - name: Check external links (advisory)
+        # Advisory: a failure here does not fail the job. Whether an external
+        # link resolves depends on third-party uptime, and github.com answers
+        # the burst of requests from a shared runner IP with 503/504 often
+        # enough that a blocking check failed unrelated PRs. Each unresolved
+        # link becomes a warning annotation (inline on the PR diff when the
+        # page changed) plus a line in the job summary, to be checked by hand.
+        # The step timeout keeps a hung remote from timing out the whole job.
+        continue-on-error: true
+        timeout-minutes: 10
+        working-directory: docs
+        run: |
+          set -o pipefail
+          log="$RUNNER_TEMP/check-links.log"
+          if myst build --html --ci --strict --check-links 2>&1 | tee "$log"; then
+            exit 0
+          fi
+          # MyST reports each failure as
+          #   <icon> <page>.md:<line> Link for "<url>" did not resolve. (<status>)
+          # and repeats it without the page:line in its closing summary.
+          sed -nE 's/.*[[:space:]]([A-Za-z0-9_./-]+\.md):([0-9]+) Link for "([^"]+)" did not resolve\.[[:space:]]*(.*)$/\1\t\2\t\3\t\4/p' \
+            "$log" | sort -u > "$RUNNER_TEMP/broken-links.tsv"
+          echo "### External link check (advisory)" >> "$GITHUB_STEP_SUMMARY"
+          if [ -s "$RUNNER_TEMP/broken-links.tsv" ]; then
+            echo "These links did not resolve from the runner. Most failures are transient (rate limiting, outages); check them by hand before acting." >> "$GITHUB_STEP_SUMMARY"
+            echo >> "$GITHUB_STEP_SUMMARY"
+            while IFS=$'\t' read -r page line url status; do
+              echo "::warning file=docs/$page,line=$line,title=External link did not resolve::$url $status"
+              echo "- \`docs/$page:$line\` $url $status" >> "$GITHUB_STEP_SUMMARY"
+            done < "$RUNNER_TEMP/broken-links.tsv"
+          else
+            echo "::warning title=External link check failed::The link-checking build failed without reporting an unresolved link; see this step's log."
+            echo "The link-checking build failed without reporting an unresolved link; see this step's log." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit 1
