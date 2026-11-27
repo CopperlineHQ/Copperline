@@ -2151,6 +2151,19 @@ mod tests {
             let anchor = c.result("reverse_anchor", json!({}));
             assert!(anchor["position"].is_number());
         });
+        // At power-on, before any instruction has retired, there is no
+        // earlier position at all.
+        run_session(None, |c| {
+            c.auth();
+            let first = c.call("reverse_step", json!({"n": 1}));
+            assert_eq!(
+                first["error"]["code"],
+                proto::HISTORY_EXHAUSTED,
+                "a reverse step at position zero does not report success"
+            );
+            let status = c.result("status", json!({}));
+            assert_eq!(status["retired_instructions"], 0);
+        });
         run_session(None, |c| {
             c.auth();
             c.result("run_until", json!({"frame": 1}));

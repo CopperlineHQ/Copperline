@@ -2051,6 +2051,12 @@ impl Emulator {
     /// at the new (earlier) position, returned in `Found`.
     pub fn tt_reverse_step(&mut self, n: u64) -> Result<crate::timetravel::ReverseOutcome<u64>> {
         use crate::timetravel::ReverseOutcome;
+        // Nothing retired yet, so nothing to step back over: restoring the
+        // snapshot at this very position would report a step that did not
+        // move the machine.
+        if n != 0 && self.retired_instructions == 0 {
+            return Ok(ReverseOutcome::BeyondHistory);
+        }
         let target = self.retired_instructions.saturating_sub(n);
         Ok(match self.tt_restore_to(target)? {
             ReverseOutcome::Found(()) => ReverseOutcome::Found(self.retired_instructions),
