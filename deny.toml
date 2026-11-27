@@ -101,6 +101,4 @@ allow-git = [
     "https://github.com/CopperlineHQ/plmpeg-rs",
     "https://github.com/CopperlineHQ/FluxBridge",
     "https://github.com/CopperlineHQ/pixels",
-    # Locked RMW bus cycles and serializable 68040/060 ATC, pinned in both CPU consumers.
-    "https://github.com/CopperlineHQ/m68k-rs",
 ]
