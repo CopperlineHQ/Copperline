@@ -191,7 +191,7 @@ impl Layout {
                     ui.add(egui::Image::new((texture, display)).sense(egui::Sense::hover()));
                 let response = ui.interact(
                     response.rect,
-                    egui::Id::new("analyzer_beam_pick"),
+                    egui::Id::unique("analyzer_beam_pick"),
                     egui::Sense::click_and_drag(),
                 );
                 beam_overlays(ui, response.rect, trace);
@@ -235,7 +235,7 @@ impl Layout {
                 );
                 let response = ui.interact(
                     response.rect,
-                    egui::Id::new("analyzer_scanline_pick"),
+                    egui::Id::unique("analyzer_scanline_pick"),
                     egui::Sense::click_and_drag(),
                 );
                 let selected_x =
@@ -343,7 +343,7 @@ impl Layout {
             );
             let response = ui.interact(
                 response.rect,
-                egui::Id::new("analyzer_heat_pick"),
+                egui::Id::unique("analyzer_heat_pick"),
                 egui::Sense::click_and_drag(),
             );
             if let Some(cell) = panel.heat_selected {

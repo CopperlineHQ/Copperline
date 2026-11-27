@@ -80,6 +80,11 @@ for the earlier release notes.
 - The Boot Priority page scrolls a list of more than nine drives -- with
   the arrows at its right, the mouse wheel, or by stepping past the last
   drive in view -- instead of paging through it with **Next Page >**.
+- The desktop interface, the inspector windows and the Flyer clip
+  converter are built on egui 0.37 and wgpu 30. The inspectors take egui's
+  roomier controls: taller tab, checkbox and button rows and rounder
+  corners, so their panes show slightly less before they scroll.
+  Assistive technology sees the inspector and tool tabs as tabs.
 
 ### Fixed
 

@@ -395,7 +395,7 @@ impl Canvas for EguiCanvas<'_> {
         let left = x.saturating_sub(box_rect.x).min(i8::MAX as usize) as i8;
         let top = y.saturating_sub(box_rect.y).min(i8::MAX as usize) as i8;
         let edit = egui::TextEdit::singleline(&mut self.typing.text)
-            .id(egui::Id::new(("launcher_typing", format!("{target:?}"))))
+            .id(egui::Id::unique(("launcher_typing", format!("{target:?}"))))
             // A custom frame replaces TextEdit's own margin, so the text's
             // inset rides on the frame: where the edit line would start.
             .frame(egui::Frame::NONE.inner_margin(egui::Margin {
@@ -405,7 +405,7 @@ impl Canvas for EguiCanvas<'_> {
                 bottom: 0,
             }))
             .text_color(colour(c))
-            .vertical_align(egui::Align::Min)
+            .align(egui::Align2::LEFT_TOP)
             .desired_width(avail as f32);
         // In a child ui of its own: `put` in the parent would move the
         // parent's cursor, which nothing here lays out by but egui tracks.
@@ -839,9 +839,13 @@ mod tests {
             events,
             ..Default::default()
         };
-        let _ = ctx.run_ui(input, |root| {
+        // Nothing draws these frames, so their texture updates go
+        // explicitly (egui asserts that none is dropped unseen).
+        ctx.run_ui(input, |root| {
             show_display(root, ui, Light::default(), typing, images);
-        });
+        })
+        .textures_delta
+        .clear();
     }
 
     fn key(key: egui::Key) -> egui::Event {
@@ -1038,7 +1042,9 @@ mod tests {
         let ctx = egui::Context::default();
         configure(&ctx);
         // Fonts set now are the next frame's.
-        let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        ctx.run_ui(egui::RawInput::default(), |_| {})
+            .textures_delta
+            .clear();
         let size = ctx.fonts_mut(|fonts| {
             fonts
                 .layout_no_wrap(

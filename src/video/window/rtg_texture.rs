@@ -788,7 +788,7 @@ mod tests {
             .poll(wgpu::PollType::wait_indefinitely())
             .expect("poll");
         rx.recv().expect("map callback").expect("buffer mapped");
-        let mapped = readback.slice(..).get_mapped_range();
+        let mapped = readback.slice(..).get_mapped_range().expect("mapped range");
         let mut px = Vec::with_capacity((w * h) as usize);
         for y in 0..h {
             let base = (y * padded) as usize;

@@ -41,6 +41,7 @@ impl Layout {
                     actions.push(Action::CaptureDisplay);
                 }
             });
+        self.panes.display = Some(pane.response.rect);
         self.preferences.display_width = pane.response.rect.width();
     }
 }

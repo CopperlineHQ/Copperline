@@ -1,6 +1,7 @@
 # Hack Slash Regular
 
-This is the Hack Regular font bundled by `epaint_default_fonts` 0.35.0, with
+This is the Hack Regular font bundled by `epaint_default_fonts` 0.35.0
+through 0.37.0 (the same file in each, checksum below), with
 only U+0030 (`0`) replaced by Source Foundry's forward-slash design. Character
 advances, line metrics, all other glyphs, and their hinting are preserved. The
 replacement zero is converted from cubic to quadratic curves with a maximum
@@ -14,8 +15,8 @@ packaged builds. `LICENSE.txt` is the unmodified alt-hack licence.
 ## Sources
 
 - Base: `fonts/Hack-Regular.ttf` from
-  [epaint_default_fonts 0.35.0](https://crates.io/crates/epaint_default_fonts/0.35.0),
-  Hack 3.003.
+  [epaint_default_fonts 0.37.0](https://crates.io/crates/epaint_default_fonts/0.37.0),
+  Hack 3.003, byte-identical to the one 0.35.0 shipped.
 - Replacement: `glyphs/u0030-forwardslash/regular/zero.glif` from
   [source-foundry/alt-hack](https://github.com/source-foundry/alt-hack/tree/9fab7328cfc208046cb7f3d713ec97a724d8219a/glyphs/u0030-forwardslash),
   revision `9fab7328cfc208046cb7f3d713ec97a724d8219a`. The GLIF is included unmodified.
@@ -35,7 +36,7 @@ To reproduce it, install `fonttools==4.64.0` in a Python virtual environment,
 then run:
 
 ```sh
-python build.py /path/to/epaint_default_fonts-0.35.0/fonts/Hack-Regular.ttf
+python build.py /path/to/epaint_default_fonts-0.37.0/fonts/Hack-Regular.ttf
 ```
 
 The base font is available in Cargo's registry cache after `cargo fetch`.

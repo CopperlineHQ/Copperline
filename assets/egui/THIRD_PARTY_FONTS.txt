@@ -1,9 +1,9 @@
 Fonts embedded by the Copperline desktop frontend
 =================================================
 
-The fonts are supplied by epaint_default_fonts 0.35.0, part of egui.
-Source: https://crates.io/crates/epaint_default_fonts/0.35.0
-Upstream: https://github.com/emilk/egui/tree/0.35.0/crates/epaint_default_fonts
+The fonts are supplied by epaint_default_fonts 0.37.0, part of egui.
+Source: https://crates.io/crates/epaint_default_fonts/0.37.0
+Upstream: https://github.com/emilk/egui/tree/0.37.0/crates/epaint_default_fonts
 
 The font licenses below apply to the fonts themselves. Copperline's application
 code remains licensed under GPL-3.0-or-later.
@@ -257,6 +257,10 @@ DEALINGS IN THE FONT SOFTWARE.
 
 emoji-icon-font
 ---------------
+
+egui also bundles egui-icons, a subset of emoji-icon-font holding only the
+five glyphs egui exposes as egui::special_emojis (U+E618, U+E61F, U+E624,
+U+E625, U+F8FF). It is under the same licence as emoji-icon-font, below.
 
 MIT License
 

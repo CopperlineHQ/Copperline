@@ -126,11 +126,25 @@ pub(super) struct EguiOverlay {
     /// redraws.
     light: egui_view::Light,
     pointer: Option<egui::Pos2>,
+    /// The keyboard modifiers held, as egui-winit last reported them. The
+    /// pointer events here are synthesized in canvas coordinates rather
+    /// than translated by egui-winit, so they carry this copy.
+    modifiers: egui::Modifiers,
     /// Texture updates from frames the present worker turned away, owed to
     /// the next frame that goes.
     unsent: [egui::TexturesDelta; egui_paint::SURFACES],
     /// egui asked to be drawn again straight away (a caret, a selection).
     repaint: bool,
+}
+
+impl Drop for EguiOverlay {
+    /// Updates owed to a frame that will now never go (the window closing)
+    /// have nothing left to apply them to.
+    fn drop(&mut self) {
+        for owed in &mut self.unsent {
+            owed.clear();
+        }
+    }
 }
 
 impl EguiOverlay {
@@ -162,6 +176,7 @@ impl EguiOverlay {
             placement: None,
             light: egui_view::Light::default(),
             pointer: None,
+            modifiers: egui::Modifiers::default(),
             unsent: Default::default(),
             repaint: false,
         }
@@ -184,6 +199,28 @@ impl EguiOverlay {
                 let _ = self
                     .clipboard
                     .on_window_event(&mut self.input, window, event);
+                self.modifiers = match event {
+                    // Losing focus drops every held modifier: egui-winit
+                    // forgets its copy, and egui its own. Which focus
+                    // egui-winit settled on (it asks the window on some
+                    // hosts) is in its input.
+                    WindowEvent::Focused(_) if !self.input.egui_input_mut().focused => {
+                        egui::Modifiers::default()
+                    }
+                    // egui-winit maps the host modifiers (Command or Ctrl
+                    // per platform) and queues the result as an event.
+                    _ => self
+                        .input
+                        .egui_input_mut()
+                        .events
+                        .iter()
+                        .rev()
+                        .find_map(|event| match event {
+                            egui::Event::ModifiersChanged(modifiers) => Some(*modifiers),
+                            _ => None,
+                        })
+                        .unwrap_or(self.modifiers),
+                };
                 false
             }
             _ => false,
@@ -212,14 +249,16 @@ impl EguiOverlay {
         let Some(pos) = self.pointer else {
             return;
         };
-        let input = self.input.egui_input_mut();
-        let modifiers = input.modifiers;
-        input.events.push(egui::Event::PointerButton {
-            pos,
-            button,
-            pressed,
-            modifiers,
-        });
+        let modifiers = self.modifiers;
+        self.input
+            .egui_input_mut()
+            .events
+            .push(egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers,
+            });
     }
 
     fn pointer_left(&mut self) {
@@ -375,10 +414,7 @@ impl EguiOverlay {
             if *last == key {
                 // The same meshes, and no texture updates: those went with
                 // the frame that first drew them.
-                return egui_paint::EguiSurfaceJob {
-                    textures: egui::TexturesDelta::default(),
-                    ..job.clone()
-                };
+                return job.meshes();
             }
         }
         let view = bar.view;
@@ -396,13 +432,7 @@ impl EguiOverlay {
                 statusbar::set_nav_light(None, 0.0, false);
             },
         );
-        self.bar_last = Some((
-            key,
-            egui_paint::EguiSurfaceJob {
-                textures: egui::TexturesDelta::default(),
-                ..job.clone()
-            },
-        ));
+        self.bar_last = Some((key, job.meshes()));
         job
     }
 
@@ -813,10 +843,14 @@ mod tests {
                 ..Default::default()
             },
         );
-        for output in &outputs {
-            for (id, delta) in &output.textures_delta.set {
-                renderer.update_texture(device, queue, *id, delta);
+        for output in &mut outputs {
+            for (id, deltas) in output.textures_delta.set.drain() {
+                for delta in &deltas {
+                    renderer.update_texture(device, queue, id, delta);
+                }
             }
+            // Frees only matter between frames drawn; this draws the last.
+            output.textures_delta.clear();
         }
         let last = outputs.last().unwrap();
         let jobs = ctx.tessellate(last.shapes.clone(), last.pixels_per_point);
@@ -889,6 +923,7 @@ mod tests {
         let pixels = buffer
             .slice(..)
             .get_mapped_range()
+            .unwrap()
             .chunks_exact(padded as usize)
             .flat_map(|row| {
                 row[..w as usize * 4]

@@ -16,12 +16,12 @@ from fontTools.ufoLib.glifLib import readGlyphFromString
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "base", type=Path, help="epaint_default_fonts 0.35.0 Hack-Regular.ttf"
+        "base", type=Path, help="epaint_default_fonts 0.37.0 Hack-Regular.ttf"
     )
     args = parser.parse_args()
     expected = "15f55cc0c85a2988d2b4b3a8cdb5d77fdfbaf319e1bb5309d725db9818fb7125"
     if hashlib.sha256(args.base.read_bytes()).hexdigest() != expected:
-        parser.error("base font does not match epaint_default_fonts 0.35.0")
+        parser.error("base font does not match epaint_default_fonts 0.37.0")
 
     directory = Path(__file__).resolve().parent
     font = TTFont(args.base, recalcTimestamp=False)

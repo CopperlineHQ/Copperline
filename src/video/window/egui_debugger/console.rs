@@ -9,7 +9,7 @@ impl Layout {
         panel: &mut ui::ConsolePanel,
         actions: &mut Vec<Action>,
     ) {
-        let id = egui::Id::new("console_entry");
+        let id = egui::Id::unique("console_entry");
         let first_pass = root.ctx().current_pass_index() == 0;
         let entering = self.last_tool != Some(ToolPanelKind::Console);
         let mut submit = false;
@@ -76,14 +76,12 @@ impl Layout {
                 }
             }
         });
+        let to_end = self.console_to_end;
         egui::CentralPanel::default().show(root, |ui| {
-            let mut scroll = ScrollArea::both()
+            let scroll = ScrollArea::both()
                 .id_salt("console_output_scroll")
                 .auto_shrink([false, false])
                 .stick_to_bottom(true);
-            if self.console_to_end {
-                scroll = scroll.vertical_scroll_offset(f32::INFINITY);
-            }
             scroll.show(ui, |ui| {
                 if scroll_pages != 0 {
                     ui.scroll_with_delta(egui::vec2(
@@ -97,11 +95,23 @@ impl Layout {
                     .map(String::as_str)
                     .collect::<Vec<_>>()
                     .join("\n");
-                ui.add(
+                let text = ui.add(
                     egui::Label::new(RichText::new(output).monospace())
                         .selectable(true)
                         .wrap_mode(egui::TextWrapMode::Extend),
                 );
+                // A submission jumps to the end of the output, where
+                // `stick_to_bottom` then keeps it. Only the vertical offset
+                // moves, so a reader of wide output's right-hand columns
+                // keeps their place. egui 0.37 lays an infinite offset out
+                // as a NaN rect, so the jump is a finite scroll by the
+                // whole output's height, which the area clamps to its end.
+                if to_end {
+                    ui.scroll_with_delta_animation(
+                        egui::vec2(0.0, -text.rect.height()),
+                        egui::style::ScrollAnimation::none(),
+                    );
+                }
             });
         });
         root.memory_mut(|memory| {
