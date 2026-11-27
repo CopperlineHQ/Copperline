@@ -463,7 +463,7 @@ windows-sys = { version = "0.61", features = [
 # platforms, so they add no crate to the graph. Remove them with that module
 # once winit 0.31's drag-and-drop events arrive through egui-winit.
 [target.'cfg(any(target_os = "linux", target_os = "dragonfly", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd"))'.dependencies]
-smithay-client-toolkit = { version = "0.20", default-features = false, features = ["calloop"], optional = true }
+smithay-client-toolkit = { version = "0.21", default-features = false, features = ["calloop"], optional = true }
 wayland-backend = { version = "0.3.5", default-features = false, features = ["client_system"], optional = true }
 
 # Optional realtime-priority feature: cross-platform thread scheduling control.
