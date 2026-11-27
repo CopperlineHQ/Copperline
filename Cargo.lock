@@ -1483,7 +1483,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -2035,7 +2035,7 @@ dependencies = [
 [[package]]
 name = "fluxbridge"
 version = "0.3.0"
-source = "git+https://github.com/CopperlineHQ/FluxBridge?branch=main#f231628837e27498a2fa4a286feed9071a145870"
+source = "git+https://github.com/CopperlineHQ/FluxBridge?branch=main#5996bd3bc479f6f08107f022a311737eb76c2999"
 dependencies = [
  "bitflags 2.13.2",
  "crossbeam-channel",
