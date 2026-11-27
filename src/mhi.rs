@@ -76,7 +76,7 @@ use crate::audio::resample::Resampler;
 use crate::audio::MIX_SAMPLE_RATE;
 use crate::chipset::paula::{MhiAudioRing, PAULA_CLOCK_HZ};
 use crate::zorro_device::{DeviceHost, ZorroDevice};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use symphonia_bundle_mp3::MpaDecoder;
 use symphonia_core::audio::{Audio, GenericAudioBufferRef};
 use symphonia_core::codecs::audio::well_known::CODEC_ID_MP3;
@@ -794,7 +794,10 @@ pub struct Mhi {
     /// `advance_mixer` hasn't consumed yet.
     decoded: VecDeque<(f32, f32)>,
     mixer_acc: u64,
-    resamplers: HashMap<u32, Resampler>,
+    /// One resampler per native rate a stream has played at. Ordered, so a
+    /// save state writes them in the same order on every run, as a
+    /// `HashMap`'s per-process hash order would not.
+    resamplers: BTreeMap<u32, Resampler>,
     /// Whether the most recent `decode_next_frame` call returned `None`
     /// because of an incomplete trailing frame (`consumed == 0`) rather
     /// than a genuinely empty bitstream or an exhausted resync budget --
@@ -832,7 +835,7 @@ impl Mhi {
             native_rate: 44_100,
             decoded: VecDeque::new(),
             mixer_acc: 0,
-            resamplers: HashMap::new(),
+            resamplers: BTreeMap::new(),
             last_decode_stalled: false,
             stall_ticks: 0,
             tone_filters: ToneFilterBank::default(),
@@ -1761,6 +1764,28 @@ mod tests {
         assert!(board.resamplers.is_empty());
         ZorroDevice::tick(&mut board, 64, &mut host);
         assert_eq!(mhi_audio.next_sample(), (0.0, 0.0));
+    }
+
+    /// A save state writes the cached resamplers in the same order however
+    /// the streams' rates came up, so two identical runs leave identical
+    /// state files.
+    #[test]
+    fn cached_resamplers_serialize_in_a_fixed_order() {
+        fn state(rates: impl Iterator<Item = u32>) -> Vec<u8> {
+            let mut board = Mhi::new();
+            for rate in rates {
+                board
+                    .resamplers
+                    .insert(rate, Resampler::new(rate, MIX_SAMPLE_RATE));
+            }
+            let mut bytes = Vec::new();
+            crate::savestate::chunk::encode(&board, &mut bytes).unwrap();
+            bytes
+        }
+        let rates = [
+            8_000, 11_025, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000,
+        ];
+        assert_eq!(state(rates.into_iter()), state(rates.into_iter().rev()));
     }
 
     /// Regression test for the "STOP doesn't clear resamplers" bug: `STOP`

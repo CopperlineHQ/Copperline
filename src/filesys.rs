@@ -28,7 +28,7 @@
 //! transfer windows in [`crate::clipboard`].
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -481,8 +481,11 @@ struct FilesysUnit {
     files: HashMap<u32, (std::fs::File, LockRec)>,
     /// Cookie counter for this unit's open files (unique within the unit).
     next_file_key: u32,
-    /// Guest FileLock address -> what it locks.
-    locks: HashMap<u32, LockRec>,
+    /// Guest FileLock address -> what it locks. Ordered, so a save state
+    /// writes the locks in the same order on every run: a `HashMap` would
+    /// write them in its per-process hash order, and two identical runs
+    /// would leave different state files.
+    locks: BTreeMap<u32, LockRec>,
     /// EXAMINE_NEXT cursor per directory lock: the last child name handed out.
     /// Positioning by name (not a list index) keeps enumeration stable when the
     /// caller deletes entries as it goes, as `Delete ALL` does.
@@ -516,7 +519,7 @@ impl FilesysUnit {
             volume: None,
             files: HashMap::new(),
             next_file_key: 0,
-            locks: HashMap::new(),
+            locks: BTreeMap::new(),
             examine: HashMap::new(),
             exalls: HashMap::new(),
             next_exall_id: 0,
@@ -2919,6 +2922,25 @@ mod tests {
             boot_pri: -128,
             readonly: false,
         }]
+    }
+
+    /// A save state writes a unit's lock table in the same order however
+    /// the guest took the locks, so two identical runs leave identical
+    /// state files.
+    #[test]
+    fn lock_table_serializes_in_a_fixed_order() {
+        fn state(keys: impl Iterator<Item = u32>) -> Vec<u8> {
+            let mut unit = FilesysUnit::new(0, test_mounts().remove(0), 0x8000, 0x10000);
+            for key in keys {
+                let rel = PathBuf::from(format!("dir{key:x}"));
+                unit.locks.insert(key, LockRec { rel });
+            }
+            let mut bytes = Vec::new();
+            crate::savestate::chunk::encode(&unit, &mut bytes).unwrap();
+            bytes
+        }
+        let keys = (0..64u32).map(|i| 0x00EA_8000 + i * LOCK_SLOT_SIZE);
+        assert_eq!(state(keys.clone()), state(keys.rev()));
     }
 
     /// A flat big-endian RAM for driving handle_packet without a machine.
