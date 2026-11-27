@@ -2,13 +2,8 @@
 
 ## The wrapper and the bus adapter
 
-`M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core: release
-0.18.1 with the 68000 and 68010 address-error frames and side effects
-measured on an A500 on top.
-The exact commit is also tagged
-[copperline-addrerr-0.18.1-2](https://github.com/CopperlineHQ/m68k-rs/tree/copperline-addrerr-0.18.1-2).
-Switch back to the published crate when a release includes
-[upstream PR #275](https://github.com/benletchford/m68k-rs/pull/275).
+`M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core, published
+release 0.18.3.
 
 The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
@@ -596,7 +591,39 @@ write, a long writes its low word first, and the address computation
 costs no clocks of its own. Moira is the reference for both orders on
 the 68010; neither is measured on 68010 silicon. The golden probe
 `regprobe-longwrite-68010` holds all three against the beam and matches
-vAmiga 4.4's 68010 pixel for pixel. STOP semantics are shared with
+vAmiga 4.4's 68010 pixel for pixel.
+
+From 0.18.3 the 68010 has its own timing table, as the 68020, 68040 and
+68060 do:
+[`timing_010.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.18.3/src/core/timing_010.rs)
+transcribes the M68000UM Section 9 times for every instruction whose
+time the opcode fixes. The core bills each internal clock where it falls
+rather than leaving it for Copperline to add after the instruction's
+last bus cycle, where it would land behind the final prefetch or write
+and vanish whenever DMA had held that cycle off. Two exceptions remain:
+BCLR to memory leaves the two clocks Table 9-14 gives it over BSET, and
+a divide by zero its lead-in clocks, for Copperline to add at the end.
+Instructions that end
+on a register prefetch first and idle after, as on the 68000; Scc, TAS,
+MOVE from SR and CLR to memory, which the 68010 does not read first,
+spend Table 9-1's no-fetch clocks ahead of the prefetch and the write;
+and loop mode times each body with its DBcc as the pairs Tables 9-3 to
+9-17 print. A few rows follow photographs of an A500 with an MC68010
+(vAmigaTS `CPU/Timing` and `CPU/68010/Loopmode`) where they disagree
+with the manual: ADDQ/SUBQ.W to An is 8 clocks, CMP.L from memory 4
+plus the fetch, ADDA/SUBA.L from a register or immediate 8 plus the
+fetch, MOVE.L `Rn,-(An)` 12, a taken TRAPV 40. The multiplies and
+divides follow vAmigaTS `CPU/Prefetch` and `CPU/Timing/MUL`/`DIV`: the
+multiplier prefetches after it computes and the divider before (DIVU
+after a 16-clock lead-in), the reverse of the 68000; MULU is 40 and DIVU
+108 for any operand, MULS 40 (42 with a negative multiplier) and DIVS
+118 with no negative operand (the manual's 122 otherwise, unmeasured).
+[`cycle_timing_68010_tests.rs`](https://github.com/benletchford/m68k-rs/blob/m68k-v0.18.3/tests/cycle_timing_68010_tests.rs)
+checks about 1,900 instruction forms and 36 loops against the tables
+and asserts that the core bills their clocks itself (BCLR to memory
+excepted).
+
+STOP semantics are shared with
 the 68000: the SR operand is loaded verbatim (a single-stepped STOP
 observes S and T exactly as written; the SingleStepTests 68000 fixtures
 pin this), and an S-clear SR stops only momentarily -- at the next

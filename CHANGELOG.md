@@ -265,6 +265,28 @@ for the earlier release notes.
   It was sampled with no lead, so a handler that interrupts beam-timed
   code on a 68010 started four to twelve CPU clocks late on lines where
   one or two lores bitplanes are fetching.
+- 68010: instructions take the 68010's own times from the Section 9
+  tables of the M68000 user's manual. About 700 of 1,900 instruction
+  forms used to run on a 68020-style figure or on the 68000's without its
+  internal clocks: MOVE `(An),Dn` ran a clock long, EOR `Dn,Dn` four
+  long, and long register arithmetic, ADDQ.L, Scc, TAS and MOVE from SR
+  two to six clocks short. Internal clocks now fall where they do inside
+  the instruction instead of after its last bus cycle, so DMA holding the
+  bus off no longer swallows them, and DBcc loop mode runs each loop body
+  and its DBcc as the pairs the manual times. Where photographs of an
+  A500 with a 68010 disagree with the manual the measurement is used:
+  ADDQ.W and SUBQ.W to an address register take 8 clocks, CMP.L from
+  memory 4 plus the operand fetch, ADDA.L and SUBA.L from a register or
+  immediate 8 plus the fetch, MOVE.L `Rn,-(An)` 12, and a taken TRAPV
+  40.
+- 68010: MULU, MULS, DIVU and DIVS take the 68010's times and prefetch
+  where it does. The multiplier prefetches after it computes and the
+  divider before (DIVU after a 16-clock lead-in), the reverse of the
+  68000. MULU takes 40 clocks and DIVU 108 for any operand, MULS 40 (42
+  with a negative multiplier) and DIVS 118 when neither operand is
+  negative (the manual's 122 otherwise), each plus its effective address
+  time. They used to run on a flat 42 clocks for a multiply and the
+  68000's worst-case 140 and 158 for a divide, all prefetching first.
 - ECS and AGA, tall programmable screen modes (DblPAL, DblNTSC,
   Productivity and others):
   - VPOSR and VPOSW carry vertical bits 9 and 10, so beam polls no longer
