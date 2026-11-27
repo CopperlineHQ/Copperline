@@ -262,17 +262,11 @@ impl App {
             // neighbourhood; it is usually what you came to look at.
             panel.mem_addr = self.emu.machine.pc() & self.emu.machine.ui_addr_mask() & !0xF;
             self.debugger_panel = Some(panel);
-            self.emu.machine.ui_set_pc_history_enabled(true);
-            // Arm reverse debugging so the < Step / < Run controls work. A
-            // conservative interval keeps the per-snapshot serialize off the
-            // critical path; captures only accrue while the machine advances
-            // (Run / Step Frame inside the debugger), not while paused.
-            if !self.emu.time_travel_enabled() {
-                self.emu.enable_time_travel(
-                    crate::debugger::RR_DEFAULT_BUDGET_MB,
-                    DEBUGGER_REVERSE_INTERVAL_FRAMES,
-                );
-            }
+            // Hold the PC history for Recent PCs and the reverse ring so the
+            // < Step / < Run controls work. Captures only accrue while the
+            // machine advances (Run / Step Frame inside the debugger), not
+            // while paused.
+            self.sync_inspector_capture_holds();
         }
         self.egui_did_open_tool(ToolPanelKind::Debugger, shared_pause);
     }
@@ -302,15 +296,9 @@ impl App {
                 panel.push_output(line.clone());
             }
             self.console_panel = Some(panel);
-            self.emu.machine.ui_set_pc_history_enabled(true);
-            // Arm reverse debugging so the reverse commands work, exactly
+            // Hold the reverse ring so the reverse commands work, exactly
             // like opening the debugger window does.
-            if !self.emu.time_travel_enabled() {
-                self.emu.enable_time_travel(
-                    crate::debugger::RR_DEFAULT_BUDGET_MB,
-                    DEBUGGER_REVERSE_INTERVAL_FRAMES,
-                );
-            }
+            self.sync_inspector_capture_holds();
         }
         self.egui_did_open_tool(ToolPanelKind::Console, shared_pause);
     }

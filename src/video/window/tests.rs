@@ -10909,18 +10909,416 @@ mod control_drain {
     }
 
     #[test]
-    fn connected_arms_time_travel_and_shutdown_requests_exit() {
+    fn connecting_arms_nothing_and_shutdown_requests_exit() {
         let (mut app, cmd_tx, reply_rx) = attached_app();
-        assert!(!app.emu.time_travel_enabled());
         cmd_tx.send(CtlMsg::Connected).unwrap();
         app.drain_control();
-        assert!(app.emu.time_travel_enabled(), "connect arms the ring");
+        assert!(
+            !app.emu.time_travel_enabled(),
+            "connecting does not arm the reverse ring"
+        );
+        assert!(
+            !app.emu.machine.ui_pc_history_enabled(),
+            "connecting does not arm the PC history"
+        );
+        // Inspection, input and capture leave it that way.
+        push(&cmd_tx, 1, "status", Value::Null);
+        push(&cmd_tx, 2, "regs.get", Value::Null);
+        push(&cmd_tx, 3, "capture.digest", Value::Null);
+        app.drain_control();
+        assert_eq!(reply(&reply_rx)["result"]["tt_armed"], false);
+        assert!(!app.emu.time_travel_enabled());
+        assert!(!app.emu.machine.ui_pc_history_enabled());
 
         cmd_tx.send(CtlMsg::Shutdown { id: json!(9) }).unwrap();
         app.drain_control();
         assert!(app.control_exit_requested());
-        let msg = reply(&reply_rx);
+        let msg = loop {
+            let msg = reply(&reply_rx);
+            if msg["id"] == 9 {
+                break msg;
+            }
+        };
         assert_eq!(msg["id"], 9);
+    }
+
+    /// The reverse ring's identity, as far as a test can see it: its
+    /// capture interval and the positions it has retained.
+    fn ring_shape(app: &super::super::App) -> Option<(u64, usize, Option<u64>)> {
+        app.emu
+            .time_travel_ring()
+            .map(|ring| (ring.interval_frames(), ring.len(), ring.oldest_pos()))
+    }
+
+    /// The reply to `id`, skipping anything queued before it.
+    fn reply_to(reply_rx: &Receiver<String>, id: u64) -> Value {
+        loop {
+            let msg = reply(reply_rx);
+            if msg["id"] == id {
+                return msg;
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_break_add_arms_the_capture_and_disconnect_releases_it() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        let target = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        push(
+            &cmd_tx,
+            1,
+            "break.add",
+            json!({"kind": "pc", "addr": target}),
+        );
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 1)["result"]["id"], 1);
+        assert!(app.emu.time_travel_enabled(), "break.add arms the ring");
+        assert!(
+            app.emu.machine.ui_pc_history_enabled(),
+            "break.add arms the PC history"
+        );
+        assert_eq!(
+            app.emu.time_travel_ring().map(|ring| ring.len()),
+            Some(1),
+            "the ring is anchored where the client armed it"
+        );
+
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert!(
+            !app.emu.time_travel_enabled(),
+            "the ring the client armed goes with it"
+        );
+        assert!(!app.emu.machine.ui_pc_history_enabled());
+    }
+
+    #[test]
+    fn a_step_arms_the_capture_so_the_client_can_step_back_over_it() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        app.paused = true;
+        let before = app.emu.retired_instructions();
+        push(&cmd_tx, 1, "step", json!({"n": 2}));
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 1)["result"]["reason"], "step");
+        assert!(app.emu.time_travel_enabled());
+        assert!(app.emu.machine.ui_pc_history_enabled());
+
+        push(&cmd_tx, 2, "reverse_step", json!({"n": 2}));
+        app.drain_control();
+        let back = reply_to(&reply_rx, 2);
+        assert_eq!(back["result"]["reason"], "reverse");
+        assert_eq!(
+            back["result"]["retired_instructions"].as_u64(),
+            Some(before),
+            "history starts where the step armed it"
+        );
+    }
+
+    #[test]
+    fn a_reverse_step_before_any_history_arms_and_reports_none() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        // Run a little first, so instructions lie behind the position
+        // the reverse step arms the ring at.
+        app.emu.step_frame().unwrap();
+        assert!(app.emu.retired_instructions() > 0);
+        app.paused = true;
+        push(&cmd_tx, 1, "reverse_step", json!({}));
+        app.drain_control();
+        assert_eq!(
+            reply_to(&reply_rx, 1)["error"]["code"],
+            crate::control::proto::HISTORY_EXHAUSTED,
+            "nothing is recorded behind the position the ring was armed at"
+        );
+        assert!(app.emu.time_travel_enabled(), "the reverse method armed it");
+        push(&cmd_tx, 2, "status", Value::Null);
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 2)["result"]["tt_armed"], true);
+    }
+
+    #[test]
+    fn a_rewind_ring_survives_a_client_unchanged() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        app.toggle_rewind();
+        assert!(app.rewind_armed);
+        for _ in 0..(3 * app.rewind_interval_frames) {
+            app.emu.step_frame().unwrap();
+        }
+        let shape = ring_shape(&app);
+        assert!(
+            shape.is_some_and(|(interval, len, _)| {
+                interval == app.rewind_interval_frames && len > 1
+            }),
+            "the rewind ring is recording history: {shape:?}"
+        );
+        app.paused = true;
+
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        push(
+            &cmd_tx,
+            1,
+            "break.add",
+            json!({"kind": "pc", "addr": "$F80100"}),
+        );
+        push(&cmd_tx, 2, "reverse_anchor", Value::Null);
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 2)["id"], 2);
+        let (interval, len, oldest) = ring_shape(&app).expect("still armed");
+        assert_eq!(
+            (interval, oldest),
+            (shape.unwrap().0, shape.unwrap().2),
+            "the client uses the user's ring, interval and history"
+        );
+        assert_eq!(len, shape.unwrap().1 + 1, "plus the client's own anchor");
+
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert_eq!(
+            ring_shape(&app),
+            Some((interval, len, oldest)),
+            "rewind still holds the ring the client used"
+        );
+    }
+
+    #[test]
+    fn a_client_ring_turned_into_rewind_recording_stays_after_disconnect() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        push(&cmd_tx, 1, "reverse_anchor", Value::Null);
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 1)["id"], 1);
+        assert!(app.emu.time_travel_enabled());
+
+        // The user switches rewind on: the rewind recording joins the
+        // ring's holders, restarting it at its own interval, and still
+        // holds it once the client has gone.
+        app.toggle_rewind();
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert_eq!(
+            app.emu
+                .time_travel_ring()
+                .map(|ring| ring.interval_frames()),
+            Some(app.rewind_interval_frames),
+            "rewind keeps recording at the user's interval"
+        );
+    }
+
+    #[test]
+    fn rewind_switched_off_under_a_client_leaves_the_client_holding_the_ring() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        app.toggle_rewind();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        push(&cmd_tx, 1, "pc_history", Value::Null);
+        app.drain_control();
+        assert!(reply_to(&reply_rx, 1)["result"]["pcs"].is_array());
+
+        app.toggle_rewind();
+        assert!(!app.rewind_armed);
+        assert!(
+            app.emu.time_travel_enabled(),
+            "the client still holds the ring after rewind is switched off"
+        );
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert!(
+            !app.emu.time_travel_enabled(),
+            "with rewind off, the leaving client was the last holder"
+        );
+    }
+
+    #[test]
+    fn pc_history_stops_when_its_last_holder_leaves() {
+        // The debugger armed it: the client leaves it on.
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        app.open_debugger();
+        assert!(app.emu.machine.ui_pc_history_enabled());
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        push(&cmd_tx, 1, "pc_history", Value::Null);
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 1)["id"], 1);
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert!(
+            app.emu.machine.ui_pc_history_enabled(),
+            "the open debugger's PC history stays"
+        );
+        app.close_tool_panel(super::super::ToolPanelKind::Debugger);
+        assert!(!app.emu.machine.ui_pc_history_enabled());
+
+        // The client armed it: the debugger opening and closing in
+        // between does not take it away, and the client's leaving does.
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        push(&cmd_tx, 2, "pc_history", Value::Null);
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 2)["id"], 2);
+        app.open_debugger();
+        app.close_tool_panel(super::super::ToolPanelKind::Debugger);
+        assert!(
+            app.emu.machine.ui_pc_history_enabled(),
+            "closing the debugger leaves a client's PC history recording"
+        );
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert!(!app.emu.machine.ui_pc_history_enabled());
+
+        // The debugger armed it and closed while the client held it: the
+        // client is left the last reader, and turns it off as it leaves.
+        app.open_debugger();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        push(&cmd_tx, 3, "pc_history", Value::Null);
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 3)["id"], 3);
+        app.close_tool_panel(super::super::ToolPanelKind::Debugger);
+        assert!(app.emu.machine.ui_pc_history_enabled());
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert!(!app.emu.machine.ui_pc_history_enabled());
+    }
+
+    #[test]
+    fn state_load_rearms_only_a_holding_client() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        let path = std::env::temp_dir().join(format!(
+            "copperline-control-lazy-rewind-{}.clstate",
+            std::process::id()
+        ));
+        let path_param = json!({"path": path.display().to_string()});
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        push(&cmd_tx, 1, "state.save", path_param.clone());
+        push(&cmd_tx, 2, "state.load", path_param.clone());
+        app.drain_control();
+        assert!(reply_to(&reply_rx, 2)["result"].is_object());
+        assert!(
+            !app.emu.time_travel_enabled(),
+            "a load does not arm the ring for a client that never asked"
+        );
+
+        app.paused = true;
+        push(&cmd_tx, 3, "step", json!({"n": 3}));
+        push(&cmd_tx, 4, "state.load", path_param);
+        push(&cmd_tx, 5, "reverse_step", json!({}));
+        app.drain_control();
+        std::fs::remove_file(&path).ok();
+        assert!(reply_to(&reply_rx, 4)["result"].is_object());
+        assert_eq!(
+            app.emu.time_travel_ring().map(|ring| ring.len()),
+            Some(1),
+            "the holder's ring restarts on the loaded timeline"
+        );
+        assert_eq!(
+            reply_to(&reply_rx, 5)["error"]["code"],
+            crate::control::proto::HISTORY_EXHAUSTED
+        );
+    }
+
+    #[test]
+    fn state_load_restarts_a_rewind_ring_the_client_does_not_hold() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        let path = std::env::temp_dir().join(format!(
+            "copperline-control-rewind-load-{}.clstate",
+            std::process::id()
+        ));
+        let path_param = json!({"path": path.display().to_string()});
+        app.rewind_interval_frames = 1;
+        app.toggle_rewind();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        for _ in 0..3 {
+            app.emu.step_frame().unwrap();
+        }
+        push(&cmd_tx, 1, "state.save", path_param.clone());
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 1)["id"], 1);
+        for _ in 0..3 {
+            app.emu.step_frame().unwrap();
+        }
+        app.paused = true;
+        push(&cmd_tx, 2, "state.load", path_param);
+        push(&cmd_tx, 3, "reverse_step", json!({}));
+        app.drain_control();
+        std::fs::remove_file(&path).ok();
+        assert!(reply_to(&reply_rx, 2)["result"].is_object());
+        assert_eq!(
+            reply_to(&reply_rx, 3)["error"]["code"],
+            crate::control::proto::HISTORY_EXHAUSTED,
+            "a reverse step after a load must not land on the old timeline"
+        );
+        assert_eq!(
+            app.emu
+                .time_travel_ring()
+                .map(|ring| ring.interval_frames()),
+            Some(1),
+            "the rewind ring keeps its own interval"
+        );
+    }
+
+    #[test]
+    fn the_last_holder_leaving_releases_the_ring_a_client_armed() {
+        // The client arms the ring, the debugger opens and keeps it past
+        // the client's disconnect, and closing the debugger releases it.
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        push(&cmd_tx, 1, "reverse_anchor", Value::Null);
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 1)["id"], 1);
+        app.open_debugger();
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert!(app.emu.time_travel_enabled(), "the debugger still holds it");
+        app.close_tool_panel(super::super::ToolPanelKind::Debugger);
+        assert!(
+            !app.emu.time_travel_enabled(),
+            "with its last holder gone the ring is released"
+        );
+        assert!(!app.emu.machine.ui_pc_history_enabled());
+
+        // Across a machine swap: the holders carry over to the new
+        // machine, and the last of them leaving still releases it.
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        push(&cmd_tx, 2, "pc_history", Value::Null);
+        app.drain_control();
+        assert_eq!(reply_to(&reply_rx, 2)["id"], 2);
+        app.open_debugger();
+        let raw = crate::config::RawConfig::default();
+        let cfg = crate::config::Config::try_from(raw.clone()).expect("default config");
+        let emu = super::test_emulator(
+            Box::new(crate::audio::NullSink),
+            crate::config::CpuModel::M68000,
+            &[],
+        );
+        app.run_machine(emu, &cfg, raw);
+        assert!(app.emu.time_travel_enabled());
+        assert!(app.emu.machine.ui_pc_history_enabled());
+        app.close_tool_panel(super::super::ToolPanelKind::Debugger);
+        assert!(app.emu.time_travel_enabled(), "the client still holds it");
+        cmd_tx.send(CtlMsg::Disconnected).unwrap();
+        app.drain_control();
+        assert!(!app.emu.time_travel_enabled());
+        assert!(!app.emu.machine.ui_pc_history_enabled());
+    }
+
+    #[test]
+    fn a_refused_break_add_arms_nothing() {
+        let (mut app, cmd_tx, reply_rx) = attached_app();
+        cmd_tx.send(CtlMsg::Connected).unwrap();
+        let target = app.emu.machine.pc().wrapping_add(8) & 0x00FF_FFFF;
+        app.emu.machine.ui_set_breakpoint(target, None, 0);
+        push(
+            &cmd_tx,
+            1,
+            "break.add",
+            json!({"kind": "pc", "addr": target}),
+        );
+        app.drain_control();
+        assert_eq!(
+            reply_to(&reply_rx, 1)["error"]["code"],
+            crate::control::proto::INVALID_PARAMS,
+            "the point is already set"
+        );
+        assert!(!app.emu.time_travel_enabled());
+        assert!(!app.emu.machine.ui_pc_history_enabled());
     }
 
     #[test]
@@ -15186,6 +15584,48 @@ mod gdb_and_control {
             }
         }
         false
+    }
+
+    #[test]
+    fn the_reverse_ring_stays_while_a_gdb_session_holds_it() {
+        // The control client arms the ring first; the GDB session joins
+        // it as it is (same ring, same history) and keeps it past the
+        // control client's disconnect.
+        let mut d = attached(false);
+        d.ctl_tx.send(CtlMsg::Connected).unwrap();
+        push(&d.ctl_tx, 1, "reverse_anchor", Value::Null);
+        drain(&mut d.app);
+        let shape = |app: &App| {
+            app.emu
+                .time_travel_ring()
+                .map(|ring| (ring.interval_frames(), ring.len(), ring.oldest_pos()))
+        };
+        let armed = shape(&d.app);
+        assert!(armed.is_some());
+        d.gdb_tx.send(GdbMsg::Connected).unwrap();
+        drain(&mut d.app);
+        assert_eq!(shape(&d.app), armed, "attaching does not replace the ring");
+        d.ctl_tx.send(CtlMsg::Disconnected).unwrap();
+        drain(&mut d.app);
+        assert!(
+            d.app.emu.time_travel_enabled(),
+            "the GDB session's hold outlives the control client"
+        );
+
+        // Switching rewind on and off does not take it from the session.
+        d.app.toggle_rewind();
+        d.app.toggle_rewind();
+        assert!(!d.app.rewind_armed);
+        assert!(d.app.emu.time_travel_enabled());
+
+        // A `D` detach ends the session with its socket still open, and
+        // with it the last hold on the ring.
+        packet(&d.gdb_tx, "D");
+        drain(&mut d.app);
+        assert!(
+            !d.app.emu.time_travel_enabled(),
+            "a detached session no longer holds the ring"
+        );
     }
 
     #[test]

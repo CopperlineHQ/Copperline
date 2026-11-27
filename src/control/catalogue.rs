@@ -239,7 +239,7 @@ fn build() -> Vec<ToolDef> {
             "status",
             "Report the emulation state: `state` (paused/running), `pc`, `frame`, `vpos`, \
              `hpos`, `cck` (colour clocks), `seconds` (emulated), `retired_instructions`, \
-             `cpu`, `paced`/`warp`, `tt_armed` (reverse execution available), \
+             `cpu`, `paced`/`warp`, `tt_armed` (reverse history recording), \
              `double_faulted`, host counters (`host_busy_ms`, `pacer_slips`, audio lead \
              and underruns), and `jit_mhz` (measured throughput in equivalent MHz, including CPU bursts, under `[cpu] speed = \
              \"fastest\"`, null at a fixed clock). Cheap and side-effect free; call it to \
@@ -415,16 +415,19 @@ fn build() -> Vec<ToolDef> {
         entry(
             "reverse_step",
             "Step backward `n` instructions (default 1) through the recorded timeline. \
-             Needs time travel armed (`tt_armed` in status). Returns a stop event with \
-             reason `reverse` at the new position, or fails with error -32006 when the \
-             step runs past the retained history.",
+             History records from the session's first reverse, step, break.add or \
+             pc_history call (reverse_anchor starts it without moving the machine). \
+             Returns a stop event with reason `reverse` at the new position, or fails \
+             with error -32006 when the step runs past the retained history, as it does \
+             when nothing was recorded before this call.",
             object(vec![("n", int("Instructions to step back", Some(1), None))], &[]),
             json!({"n": 1}),
         ),
         entry(
             "reverse_frame",
-            "Step backward one video frame through the recorded timeline (time travel \
-             must be armed).",
+            "Step backward one video frame through the recorded timeline (history \
+             records from the session's first reverse, step, break.add or pc_history \
+             call).",
             no_params(),
             json!({}),
         ),
@@ -454,7 +457,8 @@ fn build() -> Vec<ToolDef> {
              the recorded history. Returns `outcome` (found, never_written or \
              beyond_history), the write as `record` (addr, old, new, pc, pos, cck, frame) \
              when found, and `position`, where the machine was left: at the write when \
-             found. Time travel must be armed.",
+             found. History records from the session's first reverse, step, break.add or \
+             pc_history call.",
             object(vec![("addr", addr("Memory address to trace"))], &["addr"]),
             json!({"addr": "0x20000"}),
         ),
@@ -775,7 +779,10 @@ fn build() -> Vec<ToolDef> {
         entry(
             "pc_history",
             "Return the most recently executed instruction addresses (newest last), the \
-             trail that led to the current PC.",
+             trail that led to the current PC. The history records from the session's \
+             first reverse, step, break.add or pc_history call (or from when the \
+             window's debugger or console started it), so a first call before any of \
+             those returns an empty list.",
             no_params(),
             json!({}),
         ),

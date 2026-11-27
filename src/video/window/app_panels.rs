@@ -1019,15 +1019,8 @@ impl App {
                 }
             }
         }
-        if self.debugger_panel.is_some() || self.console_panel.is_some() {
-            self.emu.machine.ui_set_pc_history_enabled(true);
-            if !self.emu.time_travel_enabled() {
-                self.emu.enable_time_travel(
-                    crate::debugger::RR_DEFAULT_BUDGET_MB,
-                    DEBUGGER_REVERSE_INTERVAL_FRAMES,
-                );
-            }
-        }
+        // The PC history behind Recent PCs and the reverse-debug ring are
+        // re-armed with every other holder's by `rearm_capture_holds`.
     }
 
     pub(super) fn close_tool_panel(&mut self, kind: ToolPanelKind) {
@@ -1103,9 +1096,9 @@ impl App {
             }
             self.sync_live_audio_suspension();
         }
-        if self.debugger_panel.is_none() && self.console_panel.is_none() {
-            self.emu.machine.ui_set_pc_history_enabled(false);
-        }
+        // The last inspector to close releases the reverse ring and the PC
+        // history, which stop unless another holder still needs them.
+        self.sync_inspector_capture_holds();
         // Hand the mouse back if this was the last panel holding it. With
         // two panels open, closing one leaves the other still wanting the
         // cursor, and the check inside declines until that one goes too.

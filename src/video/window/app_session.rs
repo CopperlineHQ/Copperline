@@ -104,6 +104,78 @@ impl WarpHolds {
     }
 }
 
+/// Who needs the reverse-debug snapshot ring or the PC history. Both cost
+/// host time on every emulated frame while they record (a snapshot
+/// serializes the whole machine, and the PC history keeps the JIT off), so
+/// each is armed while anyone holds it and released when its last holder
+/// leaves (`App::hold_time_travel`, `App::hold_pc_history`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CaptureSource {
+    /// A ring armed from the `COPPERLINE_DBG_RR*` environment before the
+    /// window opened, held for the machine Copperline started with.
+    Environment,
+    /// The user's rewind recording (Emulation Settings -> Rewind).
+    Rewind,
+    /// The debugger window or the console, while either is open.
+    Inspector,
+    /// An attached `--gdb-gui` session.
+    Gdb,
+    /// A `--control-gui` client that has asked for reverse history.
+    Control,
+}
+
+/// The holders of one capture (the ring, or the PC history), one slot per
+/// source, like [`WarpHolds`]: each holder joins and leaves on its own,
+/// and the capture is released when the set empties.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct CaptureHolds(u8);
+
+impl CaptureHolds {
+    /// Precedence for the settings a re-armed ring takes (`first`).
+    const ORDER: [CaptureSource; 5] = [
+        CaptureSource::Rewind,
+        CaptureSource::Inspector,
+        CaptureSource::Gdb,
+        CaptureSource::Control,
+        CaptureSource::Environment,
+    ];
+
+    fn bit(source: CaptureSource) -> u8 {
+        match source {
+            CaptureSource::Environment => 1,
+            CaptureSource::Rewind => 2,
+            CaptureSource::Inspector => 4,
+            CaptureSource::Gdb => 8,
+            CaptureSource::Control => 16,
+        }
+    }
+
+    pub(super) fn insert(&mut self, source: CaptureSource) {
+        self.0 |= Self::bit(source);
+    }
+
+    pub(super) fn remove(&mut self, source: CaptureSource) {
+        self.0 &= !Self::bit(source);
+    }
+
+    pub(super) fn contains(self, source: CaptureSource) -> bool {
+        self.0 & Self::bit(source) != 0
+    }
+
+    pub(super) fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    fn iter(self) -> impl Iterator<Item = CaptureSource> {
+        Self::ORDER.into_iter().filter(move |s| self.contains(*s))
+    }
+
+    /// The holder whose settings a re-armed ring takes.
+    fn first(self) -> Option<CaptureSource> {
+        self.iter().next()
+    }
+}
+
 /// What `App::set_warp` did: whether pacing actually changed, and why not
 /// when a request could not be honoured (or a release left the machine
 /// warping for another holder).
@@ -120,6 +192,131 @@ pub(super) const WARP_NOTE_BRIDGED: &str =
 pub(super) const WARP_NOTE_CAPTURE: &str = "capture run is unpaced end to end; warp is fixed";
 
 impl App {
+    /// The budget (MiB) and capture interval (frames) `source` arms the
+    /// snapshot ring with when nothing else is recording.
+    fn capture_ring_settings(&self, source: CaptureSource) -> (usize, u64) {
+        let fallback = (
+            crate::debugger::RR_DEFAULT_BUDGET_MB,
+            crate::debugger::RR_DEFAULT_INTERVAL_FRAMES,
+        );
+        match source {
+            CaptureSource::Rewind => (self.rewind_budget_mb, self.rewind_interval_frames),
+            // A conservative interval keeps the per-snapshot serialize off
+            // the critical path of the debugger's own Run and Step Frame.
+            CaptureSource::Inspector => (
+                crate::debugger::RR_DEFAULT_BUDGET_MB,
+                DEBUGGER_REVERSE_INTERVAL_FRAMES,
+            ),
+            #[cfg(feature = "gdb")]
+            CaptureSource::Gdb => self.gdb_ring_settings().unwrap_or(fallback),
+            #[cfg(feature = "control")]
+            CaptureSource::Control => self.control_ring_settings().unwrap_or(fallback),
+            _ => fallback,
+        }
+    }
+
+    /// `source` joins the snapshot ring's holders. The first holder arms
+    /// the ring at its own settings, and a ring already recording keeps
+    /// its settings and history -- except that the rewind recording
+    /// restarts it at the rewind budget and interval, the interval its
+    /// hotkey steps back by. With `anchor`, an empty ring takes its first
+    /// snapshot now, so reverse history reaches back to this moment;
+    /// callers are between frames or at a stop.
+    pub(super) fn hold_time_travel(&mut self, source: CaptureSource, anchor: bool) {
+        self.ring_holds.insert(source);
+        if source == CaptureSource::Rewind || !self.emu.time_travel_enabled() {
+            let (budget_mb, interval_frames) = self.capture_ring_settings(source);
+            self.emu.enable_time_travel(budget_mb, interval_frames);
+        }
+        if anchor {
+            if let Err(e) = self.emu.debug_ensure_time_travel_anchor() {
+                warn!("reverse ring: could not take the first snapshot: {e:#}");
+            }
+        }
+    }
+
+    /// `source` no longer needs the snapshot ring; the last holder to
+    /// leave releases it and its snapshots.
+    pub(super) fn release_time_travel(&mut self, source: CaptureSource) {
+        if !self.ring_holds.contains(source) {
+            return;
+        }
+        self.ring_holds.remove(source);
+        if self.ring_holds.is_empty() {
+            self.emu.disable_time_travel();
+        }
+    }
+
+    /// `source` joins the PC history's holders, the first arming it.
+    pub(super) fn hold_pc_history(&mut self, source: CaptureSource) {
+        self.pc_history_holds.insert(source);
+        if !self.emu.machine.ui_pc_history_enabled() {
+            self.emu.machine.ui_set_pc_history_enabled(true);
+        }
+    }
+
+    /// `source` no longer needs the PC history; the last holder to leave
+    /// stops it.
+    pub(super) fn release_pc_history(&mut self, source: CaptureSource) {
+        if !self.pc_history_holds.contains(source) {
+            return;
+        }
+        self.pc_history_holds.remove(source);
+        if self.pc_history_holds.is_empty() {
+            self.emu.machine.ui_set_pc_history_enabled(false);
+        }
+    }
+
+    /// The debugger window and the console hold the ring for their reverse
+    /// controls and the PC history for Recent PCs while either is open:
+    /// bring their holds in line after one opens or closes. Opening takes
+    /// no first snapshot; captures accrue once the machine advances.
+    pub(super) fn sync_inspector_capture_holds(&mut self) {
+        if self.debugger_panel.is_some() || self.console_panel.is_some() {
+            self.hold_time_travel(CaptureSource::Inspector, false);
+            self.hold_pc_history(CaptureSource::Inspector);
+        } else {
+            self.release_time_travel(CaptureSource::Inspector);
+            self.release_pc_history(CaptureSource::Inspector);
+        }
+    }
+
+    /// The machine was replaced by a fresh one, which records neither the
+    /// ring nor the PC history: arm them again for the holders still in
+    /// place, the ring at the rewind settings when rewind is among them
+    /// and otherwise at the first holder's.
+    pub(super) fn rearm_capture_holds(&mut self) {
+        // The environment armed the ring of the machine Copperline started
+        // with, not of the machines built after it.
+        self.ring_holds.remove(CaptureSource::Environment);
+        let lead = if self.ring_holds.contains(CaptureSource::Rewind) {
+            Some(CaptureSource::Rewind)
+        } else {
+            self.ring_holds.first()
+        };
+        match lead {
+            Some(source) => {
+                let (budget_mb, interval_frames) = self.capture_ring_settings(source);
+                self.emu.enable_time_travel(budget_mb, interval_frames);
+                // Every holder but the inspectors reaches back to the
+                // moment it armed; keep that on the new machine.
+                if self
+                    .ring_holds
+                    .iter()
+                    .any(|holder| holder != CaptureSource::Inspector)
+                {
+                    if let Err(e) = self.emu.debug_ensure_time_travel_anchor() {
+                        warn!("reverse ring: could not take the first snapshot: {e:#}");
+                    }
+                }
+            }
+            None => self.emu.disable_time_travel(),
+        }
+        self.emu
+            .machine
+            .ui_set_pc_history_enabled(!self.pc_history_holds.is_empty());
+    }
+
     /// Toggle borderless fullscreen on the main window. Borderless (not
     /// exclusive) keeps the compositor path and the existing Resized-driven
     /// surface rebuild; the presentation already letterboxes any window

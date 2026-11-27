@@ -297,7 +297,63 @@ pub enum CoreOp {
     ReverseAnchor,
 }
 
+/// When serving a request makes the client a holder of the reverse-debug
+/// capture -- the snapshot ring the reverse methods replay and the PC
+/// history behind `pc_history` -- arming whichever of the two is not
+/// already recording (one that is keeps its settings and history). Both
+/// servers arm at the first such request rather than on connect, so a
+/// client that only inspects, injects input or captures the display never
+/// pays for either on the frames it runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureArming {
+    /// The request arms nothing.
+    No,
+    /// Arm before serving it, the ring taking its first snapshot at the
+    /// current position: the methods that read the history (the reverse
+    /// methods, `last_writer`, `pc_history`) and the step verbs, whose
+    /// steps can then be reversed.
+    Before,
+    /// Arm before serving it without that first snapshot:
+    /// `reverse_anchor` takes its own, at the same position.
+    BeforeUnanchored,
+    /// Arm once it has succeeded: a `break.add` the machine refuses
+    /// (already set, or the install failed) arms nothing.
+    OnSuccess,
+}
+
+impl CaptureArming {
+    /// `Some(anchor)` when the capture is armed before the request is
+    /// served, `anchor` saying whether the ring's first snapshot is taken
+    /// then.
+    pub fn before(self) -> Option<bool> {
+        match self {
+            CaptureArming::Before => Some(true),
+            CaptureArming::BeforeUnanchored => Some(false),
+            CaptureArming::No | CaptureArming::OnSuccess => None,
+        }
+    }
+
+    /// Whether the capture is armed once the request has succeeded.
+    pub fn on_success(self) -> bool {
+        self == CaptureArming::OnSuccess
+    }
+}
+
 impl CoreOp {
+    /// When serving this op arms the client's reverse-debug capture.
+    pub fn capture_arming(&self) -> CaptureArming {
+        match self {
+            CoreOp::ReverseStep { .. }
+            | CoreOp::ReverseFrame
+            | CoreOp::ReverseContinue
+            | CoreOp::LastWriter { .. }
+            | CoreOp::PcHistory => CaptureArming::Before,
+            CoreOp::ReverseAnchor => CaptureArming::BeforeUnanchored,
+            CoreOp::BreakAdd(_) => CaptureArming::OnSuccess,
+            _ => CaptureArming::No,
+        }
+    }
+
     /// Whether this op may be serviced at a quantum boundary while a
     /// resume is pending. Repositioning ops (reverse, last-writer) must
     /// not race an in-flight run.
@@ -944,6 +1000,32 @@ pub enum UiWindow {
 pub struct ResumeVerb {
     pub kind: ResumeKind,
     pub collect: Vec<CoreOp>,
+}
+
+impl ResumeVerb {
+    /// When this verb arms the client's reverse-debug capture: before it
+    /// runs for the step family, and for any verb whose `collect` list
+    /// reads the history (`pc_history`), so that the history covers the
+    /// run it reports.
+    pub fn capture_arming(&self) -> CaptureArming {
+        let steps = matches!(
+            self.kind,
+            ResumeKind::Step { .. }
+                | ResumeKind::StepOver
+                | ResumeKind::StepOut
+                | ResumeKind::StepCopper
+                | ResumeKind::StepFrame { .. }
+        );
+        let reads_history = self
+            .collect
+            .iter()
+            .any(|op| op.capture_arming() != CaptureArming::No);
+        if steps || reads_history {
+            CaptureArming::Before
+        } else {
+            CaptureArming::No
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

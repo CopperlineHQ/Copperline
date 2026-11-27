@@ -86,6 +86,29 @@ for the earlier release notes.
   corners, so their panes show slightly less before they scroll.
   Assistive technology sees the inspector and tool tabs as tabs.
 
+- A control-protocol client no longer arms reverse execution and the PC
+  history just by connecting. Both servers arm them at the client's first
+  reverse, step or `pc_history` request, or `break.add` that installs a
+  break, and release them when it disconnects, so a client that attaches
+  to send one command no longer slows the machine for the rest of the
+  session (each snapshot serializes the whole machine, tens of megabytes
+  on an A4000 with a lot of RAM) or leaves the PC history keeping
+  `[cpu] jit` off. Reverse history now starts at that first request; a
+  client that wants it from the moment it connects sends `reverse_anchor`
+  first (see docs/debugger/control.md, "Reverse history").
+
+- In a window, the snapshot ring and the PC history are shared by the
+  rewind recording, the debugger and console, a `--gdb-gui` session and a
+  `--control-gui` client: each records while any of them needs it and
+  stops when the last one lets go. A control client or a GDB session that
+  attaches uses a ring already recording as it is, rather than replacing
+  it and discarding the rewind history and interval. Closing the debugger
+  and console, or detaching GDB, now stops the ring unless another of them
+  still needs it; before, a ring they armed kept recording until rewind was
+  switched off or another machine was started. A control `state.load`
+  restarts the ring at its own budget and interval instead of the control
+  server's.
+
 ### Fixed
 
 - Files dragged onto the window from a file manager now arrive under

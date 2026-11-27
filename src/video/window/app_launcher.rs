@@ -1802,16 +1802,20 @@ impl App {
         }
         // Rewind history belongs to the machine that recorded it, so the new
         // machine starts a fresh ring under its own config (or none at all).
+        // The other holders of the ring and the PC history -- open
+        // inspectors, remote debugging clients -- belong to the host, not
+        // to the machine that was just dropped: both are armed again on
+        // this one for whoever still holds them.
         self.rewind_budget_mb = cfg.emulation.rewind_budget_mb;
         self.rewind_interval_frames = cfg.emulation.rewind_interval_frames;
         self.rewind_armed = cfg.emulation.rewind;
         if self.rewind_armed {
-            self.arm_rewind_ring();
-        } else if !self.debugger_wants_time_travel() {
-            self.emu.disable_time_travel();
+            self.ring_holds.insert(app_session::CaptureSource::Rewind);
+        } else {
+            self.ring_holds.remove(app_session::CaptureSource::Rewind);
         }
-        // Inspectors left open belong to the host, not to the machine that
-        // was just dropped: re-arm what they capture with on this one.
+        self.rearm_capture_holds();
+        // Inspectors left open re-arm what else they capture with.
         self.rearm_tool_panels();
         self.keyboard_joy_held = [keymap::HeldKeys::default(); keymap::MAPPING_COUNT];
         self.about_machine_lines = crate::config::about_machine_lines(cfg);
