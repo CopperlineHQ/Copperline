@@ -18,6 +18,15 @@ for the earlier release notes.
   1.2.0 with the wait-loop skip off. That decode now runs only where its
   parts are fitted. Emulated behaviour is unchanged.
 
+- The native JIT now compiles loops that wait for a value in directly
+  mapped memory. On an A1200 with a 68040 configured at 100 MHz, this cut
+  the host time for the first 32 seconds of *Inside the Machine* by
+  55–60% across three test machines. Polls of custom and CIA registers
+  still synchronize with the hardware on every read.
+- Beam advancement and Copper DMA slots do less work per colour clock.
+  With the precise CPU, this cut host time for the first 60 seconds of
+  *State of the Art* on an A500 by 2.8–4.6% on the two Intel hosts tested.
+
 ## 1.3.0 - 2026-11-28
 
 ### Added

@@ -223,8 +223,9 @@ host-serial = ["dep:serialport"]
 [dependencies]
 # NewTek Video Flyer clips (container, VTASC codec): the flyerclip program.
 flyerclip = { path = "crates/flyerclip" }
-# Based on 0.18.3. The fork adds budget-limited native polling loops.
-# Keep the conformance runner on this revision (tools/check-m68k-locks.py).
+# The fork carries m68k-rs PR #280 on top of 0.18.3. Return to crates.io
+# once a release includes jit-poll-loops. Keep the conformance runner on
+# the same revision (tools/check-m68k-locks.py).
 m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "b3573c7238a50844dba07b048cbc1198c113a53e", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "aa54c40c232a826f3d6f117ac8a0b165e7571f32", optional = true }

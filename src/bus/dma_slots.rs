@@ -719,6 +719,8 @@ impl Bus {
             }
         }
         let tick = self.agnus.advance_by_cck(cck);
+        // LOF toggles in begin_new_beam_frame below. Both observers still
+        // see the line count of the field in which this advance started.
         if !self.ui_beam_traps.is_empty() {
             self.check_ui_beam_traps(
                 (old_vpos, old_hpos),
@@ -743,11 +745,16 @@ impl Bus {
         // select live sprite capture. Programmable scans have their own top.
         let display_start =
             if old_vpos >= RENDER_VISIBLE_START_VPOS && !self.current_frame_geometry.programmable {
+                debug_assert!(
+                    self.display_start_vpos_for_current_control() <= RENDER_VISIBLE_START_VPOS
+                );
                 RENDER_VISIBLE_START_VPOS
             } else {
                 self.display_start_vpos_for_current_control()
             };
         if tick.new_frames == 0 && old_vpos < display_start {
+            // A line crossing completes the line just left. Within a line,
+            // replay only the slots the beam has already passed.
             if tick.new_lines != 0 {
                 self.advance_sprite_dma_replay_to(self.agnus.vpos, 0);
             } else {

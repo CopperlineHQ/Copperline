@@ -915,8 +915,8 @@ fn sprite_trace_distinguishes_control_and_data_registers() {
     bus.display_dma_sprite_state[0].dma_enabled = true;
     bus.display_dma_sprite_state[0].vstop = 0x60;
 
-    bus.sprite_slot1(0, 0x2C, true, false, true);
-    let _ = bus.sprite_slot2(0, 0x2C, true, false, true);
+    bus.sprite_slot1(0, 0x2C, true, false);
+    let _ = bus.sprite_slot2(0, 0x2C, true, false);
     assert_eq!(
         bus.current_frame_bus_trace
             .record_at(0x2C, SPRITE_DMA_SLOT1_HPOS[0] as usize)
@@ -941,8 +941,8 @@ fn sprite_trace_distinguishes_control_and_data_registers() {
 
     bus.display_dma_sprpt[0] = 0x100;
     bus.display_dma_sprite_state[0].vstop = 0x2D;
-    bus.sprite_slot1(0, 0x2D, true, false, true);
-    let _ = bus.sprite_slot2(0, 0x2D, true, false, true);
+    bus.sprite_slot1(0, 0x2D, true, false);
+    let _ = bus.sprite_slot2(0, 0x2D, true, false);
     assert_eq!(
         bus.current_frame_bus_trace
             .record_at(0x2D, SPRITE_DMA_SLOT1_HPOS[0] as usize)

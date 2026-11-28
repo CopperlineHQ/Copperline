@@ -113,8 +113,9 @@ for the core's instruction-budgeted batch path
 (`CpuCore::run_batch`): hot straight-line runs and self-loops execute as
 compiled Cranelift traces (the `cpu-jit` cargo feature; without it, wasm
 builds included, the same trace machinery runs interpreted). The native
-build also compiles loops that read a memory location and branch back
-while its value matches. Each iteration consumes the usual instruction
+build also compiles loops that test or compare a directly mapped memory
+location and branch back to repeat the test. Polls of custom or CIA
+registers leave the trace at the read. Each iteration consumes the usual instruction
 budget. Copperline services devices between batches, and the next batch
 reads the operand again.
 
