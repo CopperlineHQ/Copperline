@@ -21,7 +21,7 @@ use crate::audio::MIX_SAMPLE_RATE;
 use crate::chipset::paula::PAULA_CLOCK_HZ;
 use crate::zorro_device::{DeviceHost, ZorroDevice};
 use ad1848::Ad1848;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 /// A generous safety margin on the pre-resample sample queue between the
 /// codec's own cadence and the mixer's -- the two stay near-lockstep in
@@ -100,7 +100,9 @@ pub struct Toccata {
     /// rebuilds the derived kernel table rather than storing it) instead
     /// of being `#[serde(skip)]`: a save-state load must reproduce an
     /// uninterrupted run's output exactly, not just its FIFO/IRQ timing.
-    resamplers: HashMap<u32, Resampler>,
+    /// Ordered, so a save state writes them in the same order on every
+    /// run, as a `HashMap`'s per-process hash order would not.
+    resamplers: BTreeMap<u32, Resampler>,
 }
 
 /// Snapshot of the board's codec state for the debugger's Audio tab: the
@@ -123,7 +125,7 @@ impl Toccata {
             codec_acc: 0,
             decoded: VecDeque::new(),
             mixer_acc: 0,
-            resamplers: HashMap::new(),
+            resamplers: BTreeMap::new(),
         }
     }
 
@@ -324,6 +326,26 @@ mod tests {
             wcs: Vec::new(),
             wcs_write_protected: false,
         }
+    }
+
+    /// A save state writes the cached resamplers in the same order however
+    /// the codec's rates came up, so two identical runs leave identical
+    /// state files.
+    #[test]
+    fn cached_resamplers_serialize_in_a_fixed_order() {
+        fn state(rates: impl Iterator<Item = u32>) -> Vec<u8> {
+            let mut board = Toccata::new();
+            for rate in rates {
+                board
+                    .resamplers
+                    .insert(rate, Resampler::new(rate, MIX_SAMPLE_RATE));
+            }
+            let mut bytes = Vec::new();
+            crate::savestate::chunk::encode(&board, &mut bytes).unwrap();
+            bytes
+        }
+        let rates = [5_513, 8_000, 11_025, 16_000, 22_050, 32_000, 44_100, 48_000];
+        assert_eq!(state(rates.into_iter()), state(rates.into_iter().rev()));
     }
 
     #[test]
