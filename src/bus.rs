@@ -2812,7 +2812,12 @@ pub struct FrontPanelStatus {
     /// effective audio filter: the user's filter override changes the
     /// mix, never the LED.
     pub power_led_bright: bool,
+    /// The case's floppy LED: lit while any drive's motor is latched on.
     pub fdd_led_on: bool,
+    /// DF0-DF3's own activity LEDs, each following that drive's motor
+    /// latch whether or not it is selected; dark for a drive that is not
+    /// connected.
+    pub fdd_drive_leds: [bool; 4],
     pub fdd_track: Option<u8>,
     /// HDD activity LED: None on machines without an IDE port (no Gayle),
     /// Some(on) when the machine has one.
@@ -2832,6 +2837,7 @@ impl Default for FrontPanelStatus {
         Self {
             power_led_bright: true,
             fdd_led_on: false,
+            fdd_drive_leds: [false; 4],
             fdd_track: None,
             hdd_led: None,
             cd_led: None,
@@ -5756,6 +5762,7 @@ impl Bus {
         FrontPanelStatus {
             power_led_bright: self.paula.led_filter_guest_on(),
             fdd_led_on: self.floppy.activity_led_on(),
+            fdd_drive_leds: self.floppy.drive_activity_leds(),
             fdd_track: self.floppy.selected_track(),
             hdd_led: (self.gayle.is_some()
                 || self.ide_a4000.is_some()

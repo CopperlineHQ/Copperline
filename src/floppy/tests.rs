@@ -1062,6 +1062,53 @@ fn activity_led_follows_selected_drive_and_motor_line() {
 }
 
 #[test]
+fn drive_leds_follow_each_motor_latch_through_deselect() {
+    let mut ctrl = FloppyController::default();
+    ctrl.set_connected_drives([true, true, false, true]);
+    assert_eq!(ctrl.drive_activity_leds(), [false; 4]);
+
+    // Latch DF0's motor on, then deselect it with MTR still low: the
+    // latch holds, so the LED stays lit with no drive selected.
+    ctrl.write_prb(!CIAB_DSKSEL0 & !CIAB_DSKMOTOR);
+    ctrl.write_prb(!CIAB_DSKMOTOR);
+    assert_eq!(ctrl.drive_activity_leds(), [true, false, false, false]);
+    assert!(ctrl.activity_led_on());
+    assert!(!ctrl.selected_drive_spinning());
+
+    // Restoring MTR high while nothing is selected changes no latch.
+    ctrl.write_prb(0xFF);
+    assert_eq!(ctrl.drive_activity_leds(), [true, false, false, false]);
+
+    // Start DF1 as well: both LEDs burn together, as in a DF0-to-DF1 copy.
+    ctrl.write_prb(!CIAB_DSKMOTOR);
+    ctrl.write_prb(!CIAB_DSKSEL_MASKS[1] & !CIAB_DSKMOTOR);
+    assert_eq!(ctrl.drive_activity_leds(), [true, true, false, false]);
+    assert!(ctrl.selected_drive_spinning());
+
+    // Selecting DF0 with MTR high latches its motor off; DF1 keeps going.
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(!CIAB_DSKSEL0);
+    assert_eq!(ctrl.drive_activity_leds(), [false, true, false, false]);
+    assert!(!ctrl.selected_drive_spinning());
+    assert!(ctrl.activity_led_on());
+
+    ctrl.write_prb(0xFF);
+    ctrl.write_prb(!CIAB_DSKSEL_MASKS[1]);
+    assert_eq!(ctrl.drive_activity_leds(), [false; 4]);
+    assert!(!ctrl.activity_led_on());
+}
+
+#[test]
+fn drive_leds_stay_dark_on_an_unconnected_drive() {
+    let mut ctrl = FloppyController::default();
+    ctrl.set_connected_drives([true, false, false, false]);
+
+    ctrl.write_prb(!CIAB_DSKSEL_MASKS[1] & !CIAB_DSKMOTOR);
+    assert_eq!(ctrl.drive_activity_leds(), [false; 4]);
+    assert!(!ctrl.activity_led_on());
+}
+
+#[test]
 fn side_select_maps_lower_head_to_even_adf_tracks() -> Result<()> {
     let path = temp_adf()?;
     let cfg = FloppyConfig {

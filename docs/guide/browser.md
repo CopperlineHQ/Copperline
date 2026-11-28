@@ -265,10 +265,12 @@ Other methods cover the rest of the page:
 - Audio and drives: `set_volume_percent(n)`, `set_mono_audio(on)`,
   `audio_pending()`, `set_floppy_sounds(on)`, `set_floppy_sounds_volume(n)`,
   `set_floppy_speed(percent)` (100/200/400/800, or 0 for turbo),
-  `floppy_speed()`, `drive_connected(drive)`, `disk_name(drive)` and
-  `floppy_write_protected(drive)`.
-- Front panel: `power_led()`, `fdd_led()`, `fdd_track()`, `hdd_led()`, `cd_led()` and
-  `caps_lock_led()`.
+  `floppy_speed()`, `drive_connected(drive)`, `disk_name(drive)`,
+  `floppy_write_protected(drive)` and `fdd_busy()` (a drive is selected
+  with its motor running; the Web Player Kit saves disk images only while
+  it is false).
+- Front panel: `power_led()`, `fdd_led()`, `fdd_drive_led(drive)`, `fdd_track()`,
+  `hdd_led()`, `cd_led()` and `caps_lock_led()`.
 - Serial port: `serial_send(bytes)`, `serial_take()`, `serial_input_backlog()`,
   `serial_dtr()` and `serial_set_carrier(connected)`.
 

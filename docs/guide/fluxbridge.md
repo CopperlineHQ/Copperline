@@ -123,8 +123,9 @@ index pulse is refused, because the interface cannot place it accurately.
 ## Operational differences from disk images
 
 - **Physical disk swapping:** Insert and eject disks in the drive itself.
-  The status bar shows the drive's activity LED and track counter (swap and
-  eject are disabled for bridged drives).
+  The status bar shows the drive's activity LED on its disk button and its
+  track on the track counter (swap and eject are disabled for bridged
+  drives).
 - **Drive sound effects:** Copperline's floppy drive sounds are off for bridged
   drives, since the real drive makes its own noise.
 - **Emulation pacing:** A machine with a physical drive always runs at real

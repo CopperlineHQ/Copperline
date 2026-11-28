@@ -500,12 +500,17 @@ impl App {
         if !gate.started() {
             return false;
         }
-        // Storage activity as the front panel shows it: the floppy LED and
-        // the (non-draining, timestamp-latched) HDD LED. CD-DA playback is
-        // deliberately not activity -- CD data traffic rides the HDD LED,
-        // and a menu's background audio must not hold the warp forever.
-        let panel = self.emu.bus().front_panel_status();
-        let storage_active = panel.fdd_led_on || panel.hdd_led == Some(true);
+        // Storage activity: a selected, spinning floppy drive and the
+        // (non-draining, timestamp-latched) HDD LED. Not the floppy LEDs,
+        // which burn for as long as a motor stays latched on behind a
+        // deselected drive: a loader that leaves its motor running must
+        // not hold the warp until the timeout. CD-DA playback is
+        // deliberately not activity either -- CD data traffic rides the
+        // HDD LED, and a menu's background audio must not hold the warp
+        // forever.
+        let bus = self.emu.bus();
+        let storage_active =
+            bus.floppy.selected_drive_spinning() || bus.front_panel_status().hdd_led == Some(true);
         let now = self.emu.bus().emulated_seconds();
         match gate.note(now, storage_active) {
             crate::warpboot::WarpBootOutcome::Waiting => false,

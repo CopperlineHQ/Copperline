@@ -549,6 +549,11 @@ const DISK_SHUTTER: u32 = rgba(184, 191, 196);
 const DISK_SHUTTER_DARK: u32 = rgba(83, 91, 98);
 const DISK_LABEL: u32 = rgba(238, 240, 232);
 const DISK_LABEL_LINE: u32 = rgba(130, 139, 150);
+// A drive's own activity LED is its disk button's label, lit in the
+// front-panel floppy LED's amber while that drive's motor is latched on,
+// so the drive number printed on it says which drive is busy.
+const DISK_LABEL_LIT: u32 = FDD_LED_ON;
+const DISK_LABEL_LINE_LIT: u32 = rgba(150, 84, 16);
 const CD_BODY: u32 = rgba(186, 193, 202);
 const CD_SHEEN: u32 = rgba(240, 244, 250);
 const CD_HUB: u32 = rgba(120, 124, 130);

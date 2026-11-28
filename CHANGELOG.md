@@ -68,6 +68,12 @@ for the earlier release notes.
   or STRHOR for the line it leads into, and slot 1 carries STRLONG on a
   long NTSC line. An NTSC frame is traced 228 colour clocks wide so the
   `$E3` slot of every long line is on the raster.
+- Each floppy drive shows its own activity LED in the status bar: the
+  label on a drive's disk button, marked with the drive number, lights
+  amber while that drive's motor runs, so a machine with several drives
+  shows which one is working (#1004). The web player's `fdd_drive_led(drive)`
+  reads the same LED, and `fdd_busy()` reports a drive selected with its
+  motor running, which the Web Player Kit's periodic disk save waits on.
 
 ### Changed
 
@@ -125,6 +131,12 @@ for the earlier release notes.
 
 ### Fixed
 
+- The status bar's FDD LED follows the drives' motors, lighting while any
+  drive's motor is latched on. It used to light only for the drive
+  selected at that instant, so it went dark whenever software deselected
+  a drive that was still spinning -- between the accesses of a load, and
+  through the seconds trackdisk.device leaves a motor on afterwards. The
+  web player's `fdd_led()` follows the same rule.
 - Save states now write a `[[filesys]]` host folder's lock table and the
   per-rate resamplers of the MHI and Toccata cards in a fixed order.
   They were written in random hash order, so two identical runs could

@@ -1241,6 +1241,27 @@ impl WebEmu {
         self.emu.bus().front_panel_status().fdd_led_on
     }
 
+    /// DFn's own activity LED: lit while that drive's motor is latched on,
+    /// selected or not. False for a drive that is not connected or past DF3.
+    pub fn fdd_drive_led(&self, drive: u8) -> bool {
+        self.emu
+            .bus()
+            .front_panel_status()
+            .fdd_drive_leds
+            .get(usize::from(drive))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Whether the floppy controller is mid-access: a drive selected with
+    /// its motor running. Narrower than `fdd_led()`, which stays lit while a
+    /// deselected drive keeps its motor latched on, possibly long after the
+    /// guest stopped writing; a page that saves disk images between accesses
+    /// (the Web Player Kit's save poll) waits on this instead.
+    pub fn fdd_busy(&self) -> bool {
+        self.emu.bus().floppy.selected_drive_spinning()
+    }
+
     /// Cylinder under the selected floppy drive's head, or undefined when
     /// no drive is selected. The page latches the last value so a track
     /// counter does not flicker between accesses, like the desktop bar.

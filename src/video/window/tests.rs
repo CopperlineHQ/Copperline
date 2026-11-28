@@ -26,12 +26,13 @@ use super::{
     MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
     AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
     BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF,
-    CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, FDD_LED_OFF, FDD_LED_ON,
-    HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM,
-    POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG,
-    TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON, TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT,
-    TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT,
-    TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL, VOLUME_GLYPH_X,
+    CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, DISK_LABEL_LIT, FDD_LED_OFF,
+    FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT,
+    POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS,
+    STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON, TUBE_NTSC_PRESENT_HEIGHT,
+    TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X,
+    TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
+    VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
@@ -3620,6 +3621,7 @@ fn status_bar_draws_power_and_fdd_led_states() {
             FrontPanelStatus {
                 power_led_bright: true,
                 fdd_led_on: false,
+                fdd_drive_leds: [false; 4],
                 fdd_track: Some(5),
                 hdd_led: None,
                 cd_led: None,
@@ -3664,6 +3666,7 @@ fn status_bar_draws_power_and_fdd_led_states() {
             FrontPanelStatus {
                 power_led_bright: false,
                 fdd_led_on: true,
+                fdd_drive_leds: [true, false, false, false],
                 fdd_track: Some(42),
                 hdd_led: None,
                 cd_led: None,
@@ -3694,6 +3697,7 @@ fn power_led_is_bright_dim_or_off_by_the_led_line() {
                 FrontPanelStatus {
                     power_led_bright: led_engaged,
                     fdd_led_on: false,
+                    fdd_drive_leds: [false; 4],
                     fdd_track: Some(0),
                     hdd_led: None,
                     cd_led: None,
@@ -3725,6 +3729,7 @@ fn status_bar_extinguishes_power_led_when_host_power_is_off() {
             FrontPanelStatus {
                 power_led_bright: true,
                 fdd_led_on: false,
+                fdd_drive_leds: [false; 4],
                 fdd_track: Some(0),
                 hdd_led: None,
                 cd_led: None,
@@ -3775,6 +3780,7 @@ fn status_bar_power_button_glyph_tracks_power_state() {
                 FrontPanelStatus {
                     power_led_bright: powered_on,
                     fdd_led_on: false,
+                    fdd_drive_leds: [false; 4],
                     fdd_track: Some(0),
                     hdd_led: None,
                     cd_led: None,
@@ -3903,6 +3909,7 @@ fn status_bar_pause_button_glyph_tracks_pause_state() {
             FrontPanelStatus {
                 power_led_bright: true,
                 fdd_led_on: false,
+                fdd_drive_leds: [false; 4],
                 fdd_track: Some(0),
                 hdd_led: None,
                 cd_led: None,
@@ -3925,6 +3932,7 @@ fn status_bar_pause_button_glyph_tracks_pause_state() {
             FrontPanelStatus {
                 power_led_bright: true,
                 fdd_led_on: false,
+                fdd_drive_leds: [false; 4],
                 fdd_track: Some(0),
                 hdd_led: None,
                 cd_led: None,
@@ -3948,7 +3956,8 @@ fn status_bar_draws_disk_image_button_next_to_track_counter() {
         &view(
             FrontPanelStatus {
                 power_led_bright: true,
-                fdd_led_on: true,
+                fdd_led_on: false,
+                fdd_drive_leds: [false; 4],
                 fdd_track: Some(5),
                 hdd_led: None,
                 cd_led: None,
@@ -3979,6 +3988,63 @@ fn status_bar_draws_disk_image_button_next_to_track_counter() {
         pixel(&frame, button.x + 12, button.y + 12, scale),
         DISK_BODY_SHADOW.to_le_bytes()
     );
+}
+
+#[test]
+fn status_bar_lights_each_drive_label_from_its_own_led() {
+    // Each disk button's label is that drive's activity LED: amber only
+    // behind the drives whose motors run, with the drive number still
+    // printed on it, while the case LED shows any of them.
+    for (scale, media_bar) in [(1, media(2, None)), (2, media(4, Some(true)))] {
+        let layout = bar_layout(&media_bar);
+        let mut frame = vec![0u8; texture_width(scale) * texture_height(scale) * 4];
+        let mut v = view(
+            FrontPanelStatus {
+                fdd_led_on: true,
+                fdd_drive_leds: [false, true, false, false],
+                ..FrontPanelStatus::default()
+            },
+            true,
+            false,
+        );
+        v.media = media_bar;
+        draw_status_bar_into(&mut frame, &v, scale);
+
+        let connected = (0..4).filter(|&idx| media_bar.drives[idx].connected);
+        for idx in connected {
+            let button = layout.drive_load[idx].unwrap();
+            // The 16px disk body is centred vertically in the button. Its
+            // label spans body rows 9-14 from 6px into the button, and the
+            // 3x5 drive number's bottom row (solid for every digit) is
+            // body row 13 from 12px in.
+            let body_y = button.y + (button.h - 16) / 2;
+            let at = |x: usize, y: usize| pixel(&frame, x * scale, y * scale, scale);
+            let label = at(button.x + 7, body_y + 10);
+            let digit = at(button.x + 12, body_y + 13);
+            let expected = if idx == 1 { DISK_LABEL_LIT } else { DISK_LABEL };
+            assert_eq!(
+                label,
+                expected.to_le_bytes(),
+                "DF{idx} label, scale {scale}"
+            );
+            assert_eq!(
+                digit,
+                DISK_BODY_SHADOW.to_le_bytes(),
+                "DF{idx} number, scale {scale}"
+            );
+        }
+        // PWR and FDD only: the view reports no CD LED.
+        let fdd = led_row_rect(1, 2);
+        assert_eq!(
+            pixel(
+                &frame,
+                (fdd.x + fdd.w / 2) * scale,
+                (fdd.y + fdd.h / 2) * scale,
+                scale
+            ),
+            FDD_LED_ON.to_le_bytes()
+        );
+    }
 }
 
 #[test]
@@ -4197,6 +4263,7 @@ fn status_bar_cylinder_mode_lights_the_point_after_the_cylinder() {
     let status = FrontPanelStatus {
         power_led_bright: true,
         fdd_led_on: true,
+        fdd_drive_leds: [true, false, false, false],
         fdd_track: Some(81),
         hdd_led: None,
         cd_led: None,
@@ -4407,6 +4474,7 @@ fn status_bar_draws_volume_control_and_maps_pointer_position() {
             FrontPanelStatus {
                 power_led_bright: true,
                 fdd_led_on: true,
+                fdd_drive_leds: [true, false, false, false],
                 fdd_track: Some(5),
                 hdd_led: None,
                 cd_led: None,
@@ -4507,6 +4575,7 @@ fn status_bar_latches_fdd_track_when_no_drive_is_selected() {
         FrontPanelStatus {
             power_led_bright: true,
             fdd_led_on: true,
+            fdd_drive_leds: [true, false, false, false],
             fdd_track: Some(42),
             hdd_led: None,
             cd_led: None,
@@ -4522,6 +4591,7 @@ fn status_bar_latches_fdd_track_when_no_drive_is_selected() {
         FrontPanelStatus {
             power_led_bright: true,
             fdd_led_on: false,
+            fdd_drive_leds: [false; 4],
             fdd_track: None,
             hdd_led: None,
             cd_led: None,
@@ -4544,6 +4614,7 @@ fn status_bar_draws_at_hidpi_texture_scale() {
             FrontPanelStatus {
                 power_led_bright: true,
                 fdd_led_on: true,
+                fdd_drive_leds: [true, false, false, false],
                 fdd_track: Some(159),
                 hdd_led: None,
                 cd_led: None,
