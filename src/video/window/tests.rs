@@ -423,6 +423,16 @@ fn a_key_remapped_onto_a_qualifier_outlives_a_modifier_update_blind_to_it() {
 
 #[test]
 fn raw_device_qualifiers_follow_the_keyboard_remap() {
+    let raw = |app: &mut super::App, code: KeyCode, pressed: bool| {
+        app.handle_raw_device_key_event(RawKeyEvent {
+            physical_key: PhysicalKey::Code(code),
+            state: if pressed {
+                ElementState::Pressed
+            } else {
+                ElementState::Released
+            },
+        });
+    };
     let mut app = test_app();
     app.main_window_focused = true;
     // A host Shift moved onto Ctrl is no longer a qualifier to the
@@ -430,28 +440,131 @@ fn raw_device_qualifiers_follow_the_keyboard_remap() {
     app.keymap
         .keyboard_mut()
         .set(KeyCode::ShiftLeft, Some(0x63));
+    raw(&mut app, KeyCode::ShiftLeft, true);
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT));
+    assert!(!rawkey_is_held(&app.held_rawkeys, 0x63));
+
+    // A host Shift moved onto Alt is still the listener's, sides apart.
+    app.keymap
+        .keyboard_mut()
+        .set(KeyCode::ShiftRight, Some(AMIGA_RAWKEY_LEFT_ALT));
+    raw(&mut app, KeyCode::ShiftRight, true);
+    assert!(rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_ALT));
+    app.update_host_modifiers(ModifiersState::SHIFT);
+    assert!(rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_ALT));
+    raw(&mut app, KeyCode::ShiftRight, false);
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_ALT));
+}
+
+#[test]
+fn raw_device_events_never_route_an_ordinary_key_remapped_onto_a_qualifier() {
+    // With S remapped onto Left Shift, Alt+S is still the window's
+    // screenshot shortcut. The raw-device listener sees S go down too;
+    // were it to route S by its remap target it would press the guest's
+    // Shift for a key the window kept for itself.
+    let mut app = test_app();
+    app.main_window_focused = true;
+    app.keymap
+        .keyboard_mut()
+        .set(KeyCode::KeyS, Some(AMIGA_RAWKEY_LEFT_SHIFT));
+    app.keymap
+        .keyboard_mut()
+        .set(KeyCode::CapsLock, Some(AMIGA_RAWKEY_RIGHT_ALT));
+    for code in [KeyCode::KeyS, KeyCode::CapsLock] {
+        app.handle_raw_device_key_event(RawKeyEvent {
+            physical_key: PhysicalKey::Code(code),
+            state: ElementState::Pressed,
+        });
+    }
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT));
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
+    assert!(!app.raw_device_held_rawkeys.iter().any(|held| *held));
+}
+
+#[test]
+fn an_amiga_key_stays_down_until_its_last_host_key_goes_up() {
+    let mut app = test_app();
+    app.main_window_focused = true;
+    // Caps Lock as a second Ctrl, both held, Left Ctrl let go first.
+    app.keymap.keyboard_mut().set(KeyCode::CapsLock, Some(0x63));
+    app.handle_host_amiga_key(KeyCode::CapsLock, true);
+    app.handle_host_amiga_key(KeyCode::ControlLeft, true);
+    app.handle_host_amiga_key(KeyCode::ControlLeft, false);
+    assert!(
+        app.emu.bus().keyboard.is_held(0x63),
+        "Caps Lock still holds Ctrl"
+    );
+    app.handle_host_amiga_key(KeyCode::CapsLock, false);
+    assert!(!app.emu.bus().keyboard.is_held(0x63));
+
+    // The built-in aliases share keys the same way: Right Ctrl and Right
+    // Super both type Right Amiga.
+    app.handle_host_amiga_key(KeyCode::ControlRight, true);
+    app.handle_host_amiga_key(KeyCode::SuperRight, true);
+    app.handle_host_amiga_key(KeyCode::SuperRight, false);
+    assert!(app.emu.bus().keyboard.is_held(0x67));
+    app.handle_host_amiga_key(KeyCode::ControlRight, false);
+    assert!(!app.emu.bus().keyboard.is_held(0x67));
+
+    // A release goes to the Amiga key its press went to, even if the map
+    // moved the host key while it was down.
+    app.handle_host_amiga_key(KeyCode::KeyA, true);
+    app.keymap.keyboard_mut().set(KeyCode::KeyA, Some(0x5F));
+    app.handle_host_amiga_key(KeyCode::KeyA, false);
+    assert!(!app.amiga_rawkey_held(0x20));
+    assert!(!app.live_input_held());
+}
+
+#[test]
+fn applying_a_new_map_forgets_raw_qualifier_state_recorded_under_the_old() {
+    // Left Shift held on a raw-device host while a map moving it onto Ctrl
+    // is applied: its release now translates to Ctrl, so the raw Shift bit
+    // set by the press would never clear, and would block modifier-state
+    // cleanup of both guest Shifts from then on.
+    let mut app = test_app();
+    app.main_window_focused = true;
     app.handle_raw_device_key_event(RawKeyEvent {
         physical_key: PhysicalKey::Code(KeyCode::ShiftLeft),
         state: ElementState::Pressed,
     });
-    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT));
+    assert!(rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT));
 
-    // A key moved onto Alt is one, with its sides kept apart as ever.
-    app.keymap
-        .keyboard_mut()
-        .set(KeyCode::CapsLock, Some(AMIGA_RAWKEY_RIGHT_ALT));
+    let mut map = app.keymap.clone();
+    map.keyboard_mut().set(KeyCode::ShiftLeft, Some(0x63));
+    app.apply_input_map(map);
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT));
     app.handle_raw_device_key_event(RawKeyEvent {
-        physical_key: PhysicalKey::Code(KeyCode::CapsLock),
-        state: ElementState::Pressed,
-    });
-    assert!(rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
-    app.update_host_modifiers(ModifiersState::empty());
-    assert!(rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
-    app.handle_raw_device_key_event(RawKeyEvent {
-        physical_key: PhysicalKey::Code(KeyCode::CapsLock),
+        physical_key: PhysicalKey::Code(KeyCode::ShiftLeft),
         state: ElementState::Released,
     });
-    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
+    assert!(!app.raw_device_held_rawkeys.iter().any(|held| *held));
+
+    app.handle_amiga_key_event(AMIGA_RAWKEY_RIGHT_SHIFT, true);
+    app.update_host_modifiers(ModifiersState::empty());
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_SHIFT));
+}
+
+#[test]
+fn host_key_holds_release_on_the_last_holder_and_heal_stale_entries() {
+    let mut holds = super::HostKeyHolds::default();
+    holds.press(KeyCode::CapsLock, 0x63, false);
+    holds.press(KeyCode::ControlLeft, 0x63, true);
+    // A second report of the same press (window and raw device) is one hold.
+    holds.press(KeyCode::ControlLeft, 0x63, true);
+    assert_eq!(holds.release(KeyCode::ControlLeft, Some(0x63)), None);
+    assert_eq!(holds.rawkey_of(KeyCode::CapsLock), Some(0x63));
+    assert_eq!(holds.release(KeyCode::CapsLock, Some(0x62)), Some(0x63));
+    // A release with no press on record falls back to the map.
+    assert_eq!(holds.release(KeyCode::KeyA, Some(0x20)), Some(0x20));
+    assert_eq!(holds.release(KeyCode::KeyA, None), None);
+
+    // A holder whose release was lost (the machine was reset under it) is
+    // dropped by the next press of its key, which finds the key up: it
+    // must not keep that key down after the new holder lets go.
+    holds.press(KeyCode::CapsLock, 0x63, false);
+    holds.press(KeyCode::ControlLeft, 0x63, false);
+    assert_eq!(holds.release(KeyCode::ControlLeft, None), Some(0x63));
+    assert_eq!(holds.rawkey_of(KeyCode::CapsLock), None);
 }
 
 #[test]

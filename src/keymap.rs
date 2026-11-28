@@ -959,12 +959,24 @@ impl KeyMapStore {
         // edit, and a hand-written file has to arrive at the same invariant.
         // Without this a key listed under two controls drives both at once,
         // and one listed under both mappings binds to whichever `lookup`
-        // reaches first, leaving the other silently dead. An absent table
-        // decodes its built-in layout under the same rule, so a default key
-        // the other table has taken stays with the table that names it.
-        for (index, table) in [self.controller1, self.controller2].into_iter().enumerate() {
-            let table = table.unwrap_or_else(|| encode_mapping(defaults.mapping(index)));
-            decode_mapping_into(&mut map, index, &table);
+        // reaches first, leaving the other silently dead.
+        //
+        // The tables the file names go first, so what it says wins: an
+        // absent table then fills in its built-in layout under the same
+        // rule, quietly leaving out any default key a named table has
+        // taken. Defaults first would let controller 1's Left Ctrl fire
+        // shadow a file that binds Left Ctrl on controller 2 alone.
+        let tables = [self.controller1, self.controller2];
+        for (index, table) in tables.iter().enumerate() {
+            if let Some(table) = table {
+                decode_mapping_into(&mut map, index, table, true);
+            }
+        }
+        for (index, table) in tables.iter().enumerate() {
+            if table.is_none() {
+                let table = encode_mapping(defaults.mapping(index));
+                decode_mapping_into(&mut map, index, &table, false);
+            }
         }
         map
     }
@@ -993,12 +1005,19 @@ fn encode_mapping(mapping: &KeyboardMapping) -> BTreeMap<String, Vec<String>> {
 }
 
 /// Decode one persisted mapping table into `map` at `index`, skipping any key
-/// another control or mapping has already claimed.
+/// another control or mapping has already claimed (with a warning when
+/// `warn_duplicates`, which a built-in layout filling an absent table
+/// turns off: there the skip is expected, not a mistake in the file).
 ///
 /// Controls are walked in [`CONTROLS`] order rather than the table's
 /// (alphabetical) key order, so which binding of a duplicated key survives is
 /// the order the panel lists them in, not an artefact of the control names.
-fn decode_mapping_into(map: &mut KeyMap, index: usize, table: &BTreeMap<String, Vec<String>>) {
+fn decode_mapping_into(
+    map: &mut KeyMap,
+    index: usize,
+    table: &BTreeMap<String, Vec<String>>,
+    warn_duplicates: bool,
+) {
     for control_key in table.keys() {
         if JoyControl::from_key(control_key).is_none() {
             log::warn!("keymap.toml: ignoring unknown control {control_key:?}");
@@ -1014,6 +1033,9 @@ fn decode_mapping_into(map: &mut KeyMap, index: usize, table: &BTreeMap<String, 
                 continue;
             };
             if let Some((claimed_index, claimed_control)) = map.lookup(code) {
+                if !warn_duplicates {
+                    continue;
+                }
                 log::warn!(
                     "keymap.toml: {name} is already bound to {} on controller {}; \
                      ignoring the duplicate on {}",
@@ -1408,6 +1430,27 @@ mod tests {
             &[KeyCode::NumpadParenRight, KeyCode::ScrollLock]
         );
         assert_eq!(remap.rawkey_for(KeyCode::F11), None);
+    }
+
+    /// A file naming only controller 2 bound Left Ctrl there before absent
+    /// tables kept their defaults; controller 1's default fire aliases
+    /// Left Ctrl, and must not take it back.
+    #[test]
+    fn a_named_controller_table_wins_keys_over_the_other_tables_defaults() {
+        let text = r#"
+            [controller2]
+            fire = ["ControlLeft"]
+        "#;
+        let map = toml::from_str::<KeyMapStore>(text).unwrap().into_keymap();
+        assert_eq!(
+            map.lookup(KeyCode::ControlLeft),
+            Some((1, JoyControl::Fire))
+        );
+        assert_eq!(
+            map.mapping(0).keys(JoyControl::Fire),
+            &[KeyCode::ControlRight, KeyCode::AltRight, KeyCode::KeyC]
+        );
+        assert_eq!(map.lookup(KeyCode::ArrowUp), Some((0, JoyControl::Up)));
     }
 
     #[test]

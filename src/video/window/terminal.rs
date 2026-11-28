@@ -730,9 +730,23 @@ fn terminal_keycode(key: TermKey) -> Option<KeyCode> {
         TermKey::Up => ArrowUp,
         TermKey::Down => ArrowDown,
         TermKey::CapsLock => CapsLock,
+        // Keys with no Amiga place of their own: they type nothing until
+        // a keyboard remap or a controller binding gives them a meaning,
+        // which is why they are passed on rather than dropped here.
+        TermKey::Insert => Insert,
+        TermKey::Home => Home,
+        TermKey::End => End,
+        TermKey::PageUp => PageUp,
+        TermKey::PageDown => PageDown,
+        TermKey::ScrollLock => ScrollLock,
+        TermKey::NumLock => NumLock,
+        TermKey::PrintScreen => PrintScreen,
+        TermKey::Pause => Pause,
+        TermKey::Menu => ContextMenu,
         TermKey::F(n @ 1..=11) => {
             [F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11][usize::from(n - 1)]
         }
+        TermKey::F(n @ 13..=15) => [F13, F14, F15][usize::from(n - 13)],
         TermKey::Keypad(k) => match k {
             KeypadKey::Digit(d) => [
                 Numpad0, Numpad1, Numpad2, Numpad3, Numpad4, Numpad5, Numpad6, Numpad7, Numpad8,
@@ -746,7 +760,8 @@ fn terminal_keycode(key: TermKey) -> Option<KeyCode> {
             KeypadKey::Subtract => NumpadSubtract,
             KeypadKey::Add => NumpadAdd,
             KeypadKey::Enter => NumpadEnter,
-            KeypadKey::Equal | KeypadKey::Separator => return None,
+            KeypadKey::Equal => NumpadEqual,
+            KeypadKey::Separator => return None,
         },
         TermKey::Modifier(kind, side) => match (kind, side) {
             (ModifierKey::Shift, Side::Left) => ShiftLeft,
@@ -796,6 +811,21 @@ mod tests {
         assert_eq!(terminal_keycode(TermKey::F(11)), Some(KeyCode::F11));
         // F12 is the host key, never the machine's.
         assert_eq!(terminal_keycode(TermKey::F(12)), None);
+        // Keys with no Amiga place still reach the keyboard remap and the
+        // controller bindings, which may give them one.
+        for (key, code) in [
+            (TermKey::Insert, KeyCode::Insert),
+            (TermKey::NumLock, KeyCode::NumLock),
+            (TermKey::ScrollLock, KeyCode::ScrollLock),
+            (TermKey::Pause, KeyCode::Pause),
+            (TermKey::Menu, KeyCode::ContextMenu),
+            (TermKey::PageUp, KeyCode::PageUp),
+            (TermKey::F(13), KeyCode::F13),
+            (TermKey::Keypad(KeypadKey::Equal), KeyCode::NumpadEqual),
+        ] {
+            assert_eq!(terminal_keycode(key), Some(code), "{key:?}");
+            assert!(crate::keymap::is_remappable(code), "{code:?}");
+        }
         assert_eq!(
             terminal_keycode(TermKey::Keypad(KeypadKey::Digit(7))),
             Some(KeyCode::Numpad7)

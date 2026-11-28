@@ -18,6 +18,10 @@ for the earlier release notes.
   Help or the keypad brackets on a PC keyboard.
 - `--press-after`, `--key-after` and script files name the Help,
   punctuation and keypad keys (`help`, `minus`, `kpenter`, `kplparen`, ...).
+- `--terminal` passes Insert, Home, End, Page Up and Down, Num Lock,
+  Scroll Lock, Print Screen, Pause, Menu, F13-F15 and keypad `=` on to the
+  machine instead of dropping them, so a keyboard remap or a controller
+  binding can use them as in the window.
 
 ## 1.3.0 - 2026-11-28
 

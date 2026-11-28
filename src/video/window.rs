@@ -986,8 +986,7 @@ fn animated_focus_needs_continuous_redraw(running: bool, showing: bool) -> bool 
 
 /// Whether `rawkey` is one of the Amiga qualifiers the raw-device listener
 /// tracks: the Shift and Alt pairs, whose sides a winit `ModifiersState`
-/// update cannot tell apart (see `update_host_modifiers`). The listener
-/// takes whichever host key types one, after any keyboard remap.
+/// update cannot tell apart (see `update_host_modifiers`).
 fn raw_device_qualifier(rawkey: u8) -> bool {
     matches!(
         rawkey,
@@ -996,6 +995,72 @@ fn raw_device_qualifier(rawkey: u8) -> bool {
             | AMIGA_RAWKEY_LEFT_ALT
             | AMIGA_RAWKEY_RIGHT_ALT
     )
+}
+
+/// Whether `code` is a host key the raw-device listener answers for: a host
+/// Shift or Alt, the keys whose sides winit's aggregate modifier state
+/// loses. Only these: any other host key, remapped onto a qualifier or not,
+/// is the window's, which may take it as a shortcut instead (Alt+S is a
+/// screenshot whatever S types on the Amiga).
+fn raw_device_host_key(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::ShiftLeft | KeyCode::ShiftRight | KeyCode::AltLeft | KeyCode::AltRight
+    )
+}
+
+/// Which Amiga key each host key held down went to.
+///
+/// A release goes to the key its press went to, whatever the map says by
+/// then, and only once no other host key still holds that Amiga key: with
+/// Caps Lock remapped onto Ctrl, Left Ctrl going up while Caps Lock stays
+/// down must leave Ctrl down, as must Right Ctrl and Right Super, which
+/// both type Right Amiga. The raw-device listener and the window report
+/// the same physical key under the same code, so a second report of a
+/// press or release is idempotent here.
+#[derive(Debug, Default, Clone)]
+struct HostKeyHolds {
+    holds: Vec<(KeyCode, u8)>,
+}
+
+impl HostKeyHolds {
+    /// `code` went down onto `rawkey`. `rawkey_down` is whether the
+    /// machine already holds that Amiga key: when it does not, any other
+    /// holder on record is stale -- its release was lost to a reset or a
+    /// focus change -- and is dropped, so it cannot keep the key down later.
+    fn press(&mut self, code: KeyCode, rawkey: u8, rawkey_down: bool) {
+        self.holds
+            .retain(|&(held, held_rawkey)| held != code && (rawkey_down || held_rawkey != rawkey));
+        self.holds.push((code, rawkey));
+    }
+
+    /// `code` went up: the Amiga key to release, if no other host key still
+    /// holds it. A key with no press on record releases `fallback` (what
+    /// the map sends it to now), so a release whose press was never seen
+    /// still clears a key the machine holds.
+    fn release(&mut self, code: KeyCode, fallback: Option<u8>) -> Option<u8> {
+        let rawkey = match self.holds.iter().position(|&(held, _)| held == code) {
+            Some(index) => self.holds.swap_remove(index).1,
+            None => fallback?,
+        };
+        (!self.holds.iter().any(|&(_, held)| held == rawkey)).then_some(rawkey)
+    }
+
+    /// The Amiga key `code` went down onto, if it is held.
+    fn rawkey_of(&self, code: KeyCode) -> Option<u8> {
+        self.holds
+            .iter()
+            .find(|&&(held, _)| held == code)
+            .map(|&(_, rawkey)| rawkey)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (KeyCode, u8)> + '_ {
+        self.holds.iter().copied()
+    }
+
+    fn clear(&mut self) {
+        self.holds.clear();
+    }
 }
 
 /// Whether the host's own modifier state follows `code` holding `rawkey`:
@@ -1146,6 +1211,11 @@ fn analyzer_default_heat_window(bus: &crate::bus::Bus) -> (u32, u32) {
 pub struct App {
     netplay: Option<crate::netplay::Session>,
     netplay_input: crate::netplay::LocalInput,
+    /// The Amiga key each host key held during netplay went to, for the
+    /// same last-holder release as [`App::host_key_holds`]. Its stale
+    /// entries heal on the next press of their Amiga key, so the several
+    /// places that reset `netplay_input` need not clear it.
+    netplay_key_holds: HostKeyHolds,
     netplay_keyboard_controller: bool,
     netplay_setup: Option<crate::video::launcher::NetplaySetup>,
     netplay_disk_picker: Option<(usize, app_netplay::DiskPicker)>,
@@ -1410,12 +1480,13 @@ pub struct App {
     /// winit `ModifiersState` update from releasing a qualifier the
     /// hardware still has down (see `update_host_modifiers`).
     raw_device_held_rawkeys: [bool; 128],
-    /// Amiga Shift and Alt lines held by a host key remapped onto them from
-    /// outside their family (see [`host_modifiers_follow`]). Not a source
-    /// either: like `raw_device_held_rawkeys`, it only stops a
-    /// `ModifiersState` update releasing a qualifier a key still holds, on
-    /// the hosts that deliver no raw-device key events.
-    remapped_qualifier_held: [bool; 128],
+    /// Which Amiga key each host key the operator holds went to, so its
+    /// release goes there too and waits for the last holder (see
+    /// [`HostKeyHolds`]). It is also what stops a `ModifiersState` update
+    /// releasing a qualifier held by a key remapped onto it from outside
+    /// its family (see [`host_modifiers_follow`]), on hosts that deliver
+    /// no raw-device key events.
+    host_key_holds: HostKeyHolds,
     main_window_focused: bool,
     /// Whether the user has sized the main window themselves, in which case
     /// the canvas reflows into it instead of the window snapping to the
@@ -3167,7 +3238,7 @@ impl App {
             held_rawkeys: [false; 128],
             panel_held_rawkeys: [false; 128],
             raw_device_held_rawkeys: [false; 128],
-            remapped_qualifier_held: [false; 128],
+            host_key_holds: HostKeyHolds::default(),
             main_window_focused: false,
             clipboard_next_poll: None,
             window_manually_sized: false,
@@ -3281,6 +3352,7 @@ impl App {
             autofire_hz,
             netplay: None,
             netplay_input: Default::default(),
+            netplay_key_holds: HostKeyHolds::default(),
             netplay_keyboard_controller: true,
             netplay_setup: None,
             netplay_disk_picker: None,
@@ -4014,16 +4086,14 @@ impl App {
         self.request_redraw();
     }
 
-    /// Commit the edited map: apply it to the live session and persist it.
-    /// Every key the host keyboard holds is let go first, under the map it
-    /// was pressed with, so a binding or a remap that just moved cannot
-    /// leave a controller line or an Amiga key stuck down.
+    /// Commit the edited map: apply it to the live session, letting go of
+    /// every held host key first (see [`Self::apply_input_map`]), and
+    /// persist it.
     fn input_map_save(&mut self) {
         let Some(map) = self.input_map_panel_mut().map(|panel| panel.map.clone()) else {
             return;
         };
-        self.release_host_keys_on_focus_loss();
-        self.keymap = map;
+        self.apply_input_map(map);
         match self.keymap.save() {
             Ok(()) => self.show_osd("Input mapping saved"),
             Err(e) => {
@@ -4078,7 +4148,10 @@ impl App {
         if pressed && !was_held {
             // A repeated press can arrive after routing changes. End any
             // guest key hold before taking it over as a joystick control.
-            if let Some(rawkey) = self.amiga_rawkey_for(code) {
+            if let Some(rawkey) = self
+                .host_key_holds
+                .release(code, self.amiga_rawkey_for(code))
+            {
                 self.release_amiga_rawkey_if_held(rawkey);
             }
         }

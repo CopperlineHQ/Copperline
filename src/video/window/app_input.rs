@@ -613,14 +613,24 @@ impl App {
         let PhysicalKey::Code(code) = event.physical_key else {
             return;
         };
-        let Some(rawkey) = self
-            .amiga_rawkey_for(code)
-            .filter(|rawkey| raw_device_qualifier(*rawkey))
-        else {
+        if !raw_device_host_key(code) {
+            return;
+        }
+        let pressed = event.state == ElementState::Pressed;
+        // A press goes where the map sends the key now, a release where its
+        // press went. A host Shift or Alt remapped off the qualifiers is
+        // the window's alone.
+        let rawkey = if pressed {
+            self.amiga_rawkey_for(code)
+        } else {
+            self.host_key_holds
+                .rawkey_of(code)
+                .or_else(|| self.amiga_rawkey_for(code))
+        };
+        let Some(rawkey) = rawkey.filter(|rawkey| raw_device_qualifier(*rawkey)) else {
             return;
         };
 
-        let pressed = event.state == ElementState::Pressed;
         self.raw_device_held_rawkeys[rawkey_index(rawkey)] = pressed;
         if pressed && (!self.main_window_focused || self.modal_ui_active()) {
             return;
@@ -628,7 +638,7 @@ impl App {
         if self.handle_keyboard_joystick_key(code, pressed) {
             return;
         }
-        self.handle_live_amiga_key_event(rawkey, pressed);
+        self.handle_host_amiga_key(code, pressed);
     }
 
     /// The Amiga rawkey a host key types, after the keyboard remap.
@@ -638,18 +648,36 @@ impl App {
         self.keymap.keyboard().rawkey_for(code)
     }
 
-    /// A host key going down or up on its way to the Amiga keyboard:
-    /// translated through the remap, and noted where `ModifiersState`
-    /// cannot see it (see [`host_modifiers_follow`]). A key that types
-    /// nothing is dropped.
+    /// A host key going down or up on its way to the Amiga keyboard. A
+    /// press goes through the remap and is recorded; a release goes to the
+    /// Amiga key its press went to, and only once no other host key still
+    /// holds it (see [`HostKeyHolds`]). A key that types nothing is dropped.
     pub(super) fn handle_host_amiga_key(&mut self, code: KeyCode, pressed: bool) {
-        let Some(rawkey) = self.amiga_rawkey_for(code) else {
-            return;
-        };
-        if raw_device_qualifier(rawkey) && !host_modifiers_follow(code, rawkey) {
-            self.remapped_qualifier_held[rawkey_index(rawkey)] = pressed;
+        if pressed {
+            let Some(rawkey) = self.amiga_rawkey_for(code) else {
+                return;
+            };
+            let down = rawkey_is_held(&self.held_rawkeys, rawkey);
+            self.host_key_holds.press(code, rawkey, down);
+            self.handle_live_amiga_key_event(rawkey, true);
+        } else if let Some(rawkey) = self
+            .host_key_holds
+            .release(code, self.amiga_rawkey_for(code))
+        {
+            self.handle_live_amiga_key_event(rawkey, false);
         }
-        self.handle_live_amiga_key_event(rawkey, pressed);
+    }
+
+    /// Put a new input map in force. Every key the host keyboard holds is
+    /// let go first, as on focus loss: a key held across the change would
+    /// otherwise be released under the new map, which may send it to
+    /// another Amiga key or controller control than its press went to. The
+    /// raw-device listener's qualifier state was recorded under the old map
+    /// too, and a release translated by the new one would never clear it.
+    pub(super) fn apply_input_map(&mut self, map: crate::keymap::KeyMap) {
+        self.release_host_keys_on_focus_loss();
+        self.raw_device_held_rawkeys = [false; 128];
+        self.keymap = map;
     }
 
     pub(super) fn update_host_modifiers(&mut self, modifiers: ModifiersState) {
@@ -674,7 +702,9 @@ impl App {
     /// host key remapped onto it from outside its family.
     fn qualifier_family_held_elsewhere(&self, left: u8, right: u8) -> bool {
         raw_device_qualifier_family_held(&self.raw_device_held_rawkeys, left, right)
-            || raw_device_qualifier_family_held(&self.remapped_qualifier_held, left, right)
+            || self.host_key_holds.iter().any(|(code, rawkey)| {
+                (rawkey == left || rawkey == right) && !host_modifiers_follow(code, rawkey)
+            })
     }
 
     pub(super) fn release_amiga_rawkey_if_held(&mut self, rawkey: u8) {
@@ -701,13 +731,8 @@ impl App {
     /// go. `held_rawkeys` also carries `--key-after`, `--script` and
     /// control-protocol holds, which are timed in emulated time and end at
     /// their own scheduled release whatever the window focus is doing.
-    ///
-    /// Saving the Input Mapping panel lets go the same way, for a different
-    /// reason: a key held across the save would be released under the new
-    /// map, which may send it to another Amiga key or controller control
-    /// than the one its press went to.
     pub(super) fn release_host_keys_on_focus_loss(&mut self) {
-        self.remapped_qualifier_held = [false; 128];
+        self.host_key_holds.clear();
         let live = self.live_held_rawkeys;
         for (index, held) in live.into_iter().enumerate() {
             if held {
