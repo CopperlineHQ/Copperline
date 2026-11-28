@@ -605,12 +605,12 @@ impl Bus {
                     self.harddis_active(),
                 );
                 if is_slot1 {
-                    self.sprite_slot1(sprite, vpos, spren, ddf_blocked, true);
+                    self.sprite_slot1(sprite, vpos, spren, ddf_blocked);
                 } else {
                     // Off-screen lines evolve the channel state only;
                     // the visible field's capture starts at the display
                     // start.
-                    let _ = self.sprite_slot2(sprite, vpos, spren, ddf_blocked, true);
+                    let _ = self.sprite_slot2(sprite, vpos, spren, ddf_blocked);
                 }
             }
             slot_idx += 1;
@@ -716,21 +716,10 @@ impl Bus {
         ) else {
             return;
         };
-        // Lines above the display start are provisional here: the
-        // pre-display replay re-runs them at the display start with the
-        // frame's final DMACON/SPRxPT event timeline and owns their latch
-        // write-through (sprite_slot1 doc). TODO: a mid-frame DIWSTRT
-        // rewrite that moves the display start re-runs the overlap; the
-        // accurate model writes the latch once, at the single hardware
-        // fetch time of each slot.
-        // Pre-display lines belong to the beam-paced replay
-        // (`advance_sprite_dma_replay_to`), which owns their event timeline and
-        // runs each line once its slots have passed. Running them here as well
-        // would fetch every pre-display line twice.
-        let latch_write_through = vpos >= self.display_start_vpos_for_current_control();
-        if !latch_write_through {
-            return;
-        }
+        // advance_beam routes pre-display slots through the beam-paced
+        // sprite replay. Slots captured here write their latches directly.
+        // TODO: moving DIWSTRT mid-frame can replay an overlapping span.
+        // Each latch should be written once, at its slot's hardware fetch time.
         let started = VideoPipelineStats::probe_timing_sample(
             &mut self.video_pipeline_stats.sprite_fetch_probes,
             VIDEO_FETCH_TIMING_SAMPLE_RATE,
@@ -775,13 +764,7 @@ impl Bus {
                 // even where vertical blank inhibits the DMA slots.
                 self.sprite_comparators_catch_up(sprite, vpos, dmacon_now);
                 if !vblank_inhibited {
-                    self.sprite_slot1(
-                        sprite,
-                        vpos,
-                        spren_at(dmacon_now),
-                        ddf_blocked,
-                        latch_write_through,
-                    );
+                    self.sprite_slot1(sprite, vpos, spren_at(dmacon_now), ddf_blocked);
                 }
             }
             if !(old_hpos..new_hpos).contains(&slot2_hpos) {
@@ -799,13 +782,7 @@ impl Bus {
             }
             let mut captured_line = false;
             {
-                let line = self.sprite_slot2(
-                    sprite,
-                    vpos,
-                    slot2_enabled,
-                    ddf_blocked,
-                    latch_write_through,
-                );
+                let line = self.sprite_slot2(sprite, vpos, slot2_enabled, ddf_blocked);
                 if let Some(line) = line {
                     // COPPERLINE_DIAG_SPRCAP=BEAMY|all: log captured sprite
                     // lines on that beam line (frame, channel, position, words,
@@ -883,8 +860,8 @@ impl Bus {
         if self.sprite_dma_inhibited_by_vertical_blank_at(vpos) {
             return None;
         }
-        self.sprite_slot1(sprite, vpos, true, false, true);
-        self.sprite_slot2(sprite, vpos, true, false, true)
+        self.sprite_slot1(sprite, vpos, true, false);
+        self.sprite_slot2(sprite, vpos, true, false)
     }
 
     /// Lazily run the start-of-line comparator update for every line since
@@ -991,19 +968,12 @@ impl Bus {
     /// control word's POS part is fetched. On other lines an enabled
     /// channel fetches the line's DATA word(s), sampled at this slot's beam
     /// time; the second slot assembles and emits the line.
-    /// `latch_write_through` says whether this pass is the authoritative
-    /// sprite-DMA pass for the line: pre-display lines are computed twice
-    /// (a provisional live pass, then the pre-display replay at the display
-    /// start re-runs them with the frame's final DMACON/SPRxPT event
-    /// timeline and owns the result), and only the authoritative pass may
-    /// land its fetches in the Denise display latches.
     pub(super) fn sprite_slot1(
         &mut self,
         sprite: usize,
         vpos: u32,
         spren: bool,
         ddf_blocked: bool,
-        latch_write_through: bool,
     ) {
         let beam_y = vpos as i32;
         let mut state = self.display_dma_sprite_state[sprite];
@@ -1018,9 +988,7 @@ impl Bus {
                 {
                     state.poke_pos(words[0]);
                     state.reevaluate_comparators_at(beam_y);
-                    if latch_write_through {
-                        self.denise.dma_write_sprpos(sprite, words[0]);
-                    }
+                    self.denise.dma_write_sprpos(sprite, words[0]);
                 }
             }
         } else if state.dma_enabled
@@ -1036,9 +1004,7 @@ impl Bus {
                 state.last_data_fetch_vpos = beam_y;
                 // The DATA fetch arms the display latch exactly like a
                 // manual SPRxDATA write.
-                if latch_write_through {
-                    self.denise.dma_write_sprdata(sprite, words[0]);
-                }
+                self.denise.dma_write_sprdata(sprite, words[0]);
             }
         }
         self.display_dma_sprite_state[sprite] = state;
@@ -1057,7 +1023,6 @@ impl Bus {
         vpos: u32,
         spren: bool,
         ddf_blocked: bool,
-        latch_write_through: bool,
     ) -> Option<CapturedSpriteLine> {
         let beam_y = vpos as i32;
         let mut state = self.display_dma_sprite_state[sprite];
@@ -1080,9 +1045,7 @@ impl Bus {
                     // CTL to silence a channel for good (arming it later with
                     // SPRxDATA redisplays whatever the registers hold, so the
                     // latch has to track DMA truth, not the last manual write).
-                    if latch_write_through {
-                        self.denise.dma_write_sprctl(sprite, words[0]);
-                    }
+                    self.denise.dma_write_sprctl(sprite, words[0]);
                 }
             }
             self.display_dma_sprite_state[sprite] = state;
@@ -1099,9 +1062,7 @@ impl Bus {
             {
                 datb_fetched = Some((words[0], [words[1], words[2], words[3]]));
                 // The DATB fetch lands in SPRxDATB like a manual write.
-                if latch_write_through {
-                    self.denise.dma_write_sprdatb(sprite, words[0]);
-                }
+                self.denise.dma_write_sprdatb(sprite, words[0]);
             }
         }
         // Sprites captured as "held" at the visible start are repainted by

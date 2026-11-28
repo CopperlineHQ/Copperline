@@ -11367,6 +11367,64 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(all(feature = "cpu-jit", not(target_family = "wasm")))]
+    #[test]
+    fn native_fast_ram_poll_resumes_after_vertical_blank_interrupt() -> Result<()> {
+        let poll = FAST_RAM_BASE as u32 + 0x100;
+        let flag = poll + 0x100;
+        let handler = poll + 0x200;
+        let run = |chunk: usize| -> Result<(usize, u64)> {
+            let mut bus = test_bus_with_pc(poll);
+            write_program(
+                &mut bus,
+                poll,
+                &[
+                    0x4a10, // TST.B (A0)
+                    0x67fc, // BEQ.S back to TST
+                    0x4e72, 0x2700, // STOP #$2700
+                ],
+            );
+            write_program(
+                &mut bus,
+                handler,
+                &[
+                    0x10bc, 1, // MOVE.B #1,(A0)
+                    0x33fc, INT_VERTB, 0x00df, 0xf09c, // clear VERTB in INTREQ
+                    0x4e73, // RTE to the interrupted poll
+                ],
+            );
+            set_autovector(&mut bus, 3, handler);
+            bus.paula.intena = INT_MASTER | INT_VERTB;
+            bus.irq_latency_setting = 0;
+            let mut machine = M68kMachine::new(bus, CpuModel::M68040, true)?;
+            machine.set_jit_enabled(true);
+            machine.cpu.set_a(0, flag);
+            machine.cpu.set_sr(0x2000);
+            // Leave enough time before the actual beam wrap to compile the poll.
+            let agnus = &mut machine.bus_mut().agnus;
+            agnus.vpos = agnus.current_frame_lines() - 3;
+            let mut retired = 0;
+            while retired < 8192 {
+                let slice = machine.step_slice(chunk.min(8192 - retired))?;
+                assert!(
+                    slice.instructions > 0 || slice.stopped,
+                    "CPU made no progress"
+                );
+                retired += slice.instructions;
+                if slice.stopped {
+                    assert_eq!(machine.pc(), poll + 8);
+                    assert_eq!(machine.bus.peek_byte(flag), 1);
+                    return Ok((retired, machine.bus().emulated_cck()));
+                }
+            }
+            panic!("fast-RAM poll did not observe the interrupt handler's write");
+        };
+        // A single-instruction budget gives the reference interrupt boundary.
+        // A native batch must exit the poll at the same instruction and CCK.
+        assert_eq!(run(JIT_BATCH_INSTRUCTIONS)?, run(1)?);
+        Ok(())
+    }
+
     /// A device interrupt raised while the JIT spins inside the fastmem
     /// window (no bus accesses at all) is still recognized at the next
     /// slice boundary and its autovector exception taken.

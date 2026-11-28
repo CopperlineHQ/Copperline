@@ -580,10 +580,8 @@ impl Bus {
         let trace_full = self.frame_analyzer_full;
         let trace_copper_events = trace_full || self.bus_event_observers != 0;
         let fetch_pc = (self.mem_watches_armed() || trace_full).then(|| self.copper.pc());
-        let sleeping_before = trace_copper_events && self.copper.sleeping_wait().is_some();
         let was_asleep = self.copper.sleeping_wait().is_some();
-        let mut copper = std::mem::take(&mut self.copper);
-        let action = copper.step_eligible_slot(
+        let action = self.copper.step_eligible_slot(
             &self.mem.chip_ram,
             vpos,
             hpos,
@@ -594,11 +592,10 @@ impl Bus {
             line_cck,
             copper_cycle_free,
         );
-        self.copper = copper;
         if was_asleep != self.copper.sleeping_wait().is_some() {
             self.invalidate_copper_wake_bound();
         }
-        if sleeping_before && self.copper.sleeping_wait().is_none() {
+        if trace_copper_events && was_asleep && self.copper.sleeping_wait().is_none() {
             self.note_bus_event_named(BUS_EVENT_COPPER_WAKE, Some("copper_wake"));
         }
         // Attributed only when the Copper actually took the slot. A
@@ -697,7 +694,6 @@ impl Bus {
     pub(super) fn advance_beam(&mut self, cck: u32) -> AgnusTick {
         let old_vpos = self.agnus.vpos;
         let old_hpos = self.agnus.hpos;
-        let old_frame_lines = self.agnus.current_frame_lines();
         let old_emulated_cck = self.emulated_cck;
         self.emulated_cck = self.emulated_cck.saturating_add(cck as u64);
         self.coper_cpu_irq_delay_cck = self.coper_cpu_irq_delay_cck.saturating_sub(cck);
@@ -723,38 +719,56 @@ impl Bus {
             }
         }
         let tick = self.agnus.advance_by_cck(cck);
+        // LOF toggles in begin_new_beam_frame below. Both observers still
+        // see the line count of the field in which this advance started.
         if !self.ui_beam_traps.is_empty() {
-            self.check_ui_beam_traps((old_vpos, old_hpos), old_frame_lines, tick.new_frames);
+            self.check_ui_beam_traps(
+                (old_vpos, old_hpos),
+                self.agnus.current_frame_lines(),
+                tick.new_frames,
+            );
         }
         if self.wave_on {
-            self.wave_note_beam((old_vpos, old_hpos), old_frame_lines, tick.new_frames);
+            self.wave_note_beam(
+                (old_vpos, old_hpos),
+                self.agnus.current_frame_lines(),
+                tick.new_frames,
+            );
         }
         // Pre-display sprite DMA is replayed in step with the beam: once a
         // line's sprite slots have passed, replay that line while chip RAM
         // still holds what those fetches would have read. Batching the whole
         // pre-display span at the display start instead let a vertical-blank
         // descriptor rewrite land before the control-word fetch was modelled.
-        // The display start is a function of the DIW registers and the
-        // frame geometry, which nothing below changes before its second
-        // use; resolve it once for the quantum.
-        let display_start = self.display_start_vpos_for_current_control();
+        // On fixed PAL/NTSC scans the display start cannot be later than
+        // RENDER_VISIBLE_START_VPOS. Once past that line, all DIW settings
+        // select live sprite capture. Programmable scans have their own top.
+        let display_start =
+            if old_vpos >= RENDER_VISIBLE_START_VPOS && !self.current_frame_geometry.programmable {
+                debug_assert!(
+                    self.display_start_vpos_for_current_control() <= RENDER_VISIBLE_START_VPOS
+                );
+                RENDER_VISIBLE_START_VPOS
+            } else {
+                self.display_start_vpos_for_current_control()
+            };
         if tick.new_frames == 0 && old_vpos < display_start {
-            // Replay every pre-display sprite slot the beam has now passed, so
-            // each fetch reads chip RAM at its own beam time. A line crossing
-            // completes the line just left; otherwise stop at the current hpos.
+            // A line crossing completes the line just left. Within a line,
+            // replay only the slots the beam has already passed.
             if tick.new_lines != 0 {
                 self.advance_sprite_dma_replay_to(self.agnus.vpos, 0);
             } else {
                 self.advance_sprite_dma_replay_to(old_vpos, self.agnus.hpos);
             }
-        }
-        if tick.new_frames == 0 && tick.new_lines == 0 {
+        } else if tick.new_frames == 0 && tick.new_lines == 0 {
             self.capture_sprite_dma_words_if_due(
                 old_vpos,
                 old_hpos,
                 self.agnus.hpos,
                 old_emulated_cck,
             );
+        }
+        if tick.new_frames == 0 && tick.new_lines == 0 {
             self.capture_bitplane_dma_words_if_due(
                 old_vpos,
                 old_hpos,

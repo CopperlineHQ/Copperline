@@ -425,11 +425,10 @@ or in any later one: those bits only steer Agnus's sprite DMA, and a sprite
 armed with VSTART equal to VSTOP is displayed, and collides, on every line.
 While sprite DMA fetches, the CPU/Copper write shadow is not the whole
 register history, and a latch seeded from it is kept to its vertical
-window. Only the
-authoritative sprite-DMA pass for a line
-writes the hardware view through: pre-display lines are computed twice, and
-the pre-display replay at the display start owns them (`sprprobe-latch` in
-timing-test/ pins the whole sequence).
+window. Before the display starts, beam-paced replay writes the Denise
+latches as each sprite DMA slot passes. From the display start onward,
+live capture writes those same latches at their fetch slots. The
+`sprprobe-latch` golden covers the sequence.
 
 The mapping from beam coordinates to framebuffer x is anchored by
 constants that encode the hardware's fetch-to-display pipeline delays --

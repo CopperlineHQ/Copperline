@@ -166,7 +166,7 @@ wasm-boards = ["dep:wasmtime", "dep:socket2"]
 # compiled FOR wasm32, so browser builds (--no-default-features) leave it off;
 # `[cpu] jit` still works there through the crate's interpreted trace loop,
 # just without native code generation.
-cpu-jit = ["m68k/jit"]
+cpu-jit = ["m68k/jit-poll-loops"]
 # The headless `copperline-bench` benchmark binary (core-only; also builds
 # for wasm32-wasip1). Off by default so native release artifacts are
 # unchanged.
@@ -223,10 +223,10 @@ host-serial = ["dep:serialport"]
 [dependencies]
 # NewTek Video Flyer clips (container, VTASC codec): the flyerclip program.
 flyerclip = { path = "crates/flyerclip" }
-# 0.18.3 is the first release with the 68000/68010 address-error frames and
-# side effects and the 68010's own Section 9 timing (docs/internals/cpu.md).
-# Keep the conformance runner on this same version (tools/check-m68k-locks.py).
-m68k = { version = "0.18.3", features = ["serde"] }
+# The fork carries m68k-rs PR #280 on top of 0.18.3. Return to crates.io
+# once a release includes jit-poll-loops. Keep the conformance runner on
+# the same revision (tools/check-m68k-locks.py).
+m68k = { git = "https://github.com/CopperlineHQ/m68k-rs", rev = "b3573c7238a50844dba07b048cbc1198c113a53e", features = ["serde"] }
 # The MT-32 synthesiser engine: our own port of Munt, pinned by revision.
 mt32-rs = { git = "https://github.com/CopperlineHQ/mt32-rs", rev = "aa54c40c232a826f3d6f117ac8a0b165e7571f32", optional = true }
 # The General MIDI synthesiser (Coppersynth), pinned by revision.
