@@ -2,8 +2,9 @@
 
 ## The wrapper and the bus adapter
 
-`M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core, published
-release 0.18.3.
+`M68kMachine` (`src/cpu.rs`) uses the pure-Rust m68k core. Copperline and the
+conformance runner pin the same revision of the CopperlineHQ fork, based on
+release 0.18.3 with native support for polling loops.
 
 The core sees
 the machine through an adapter implementing its `AddressBus` trait, so
@@ -111,7 +112,11 @@ check mandatory in GitHub repository settings.
 for the core's instruction-budgeted batch path
 (`CpuCore::run_batch`): hot straight-line runs and self-loops execute as
 compiled Cranelift traces (the `cpu-jit` cargo feature; without it, wasm
-builds included, the same trace machinery runs interpreted).
+builds included, the same trace machinery runs interpreted). The native
+build also compiles loops that read a memory location and branch back
+while its value matches. Each iteration consumes the usual instruction
+budget. Copperline services devices between batches, and the next batch
+reads the operand again.
 
 Local memory reaches the core as direct-memory regions, read and written
 without a bus call. The primary window (`AddressBus::fast_mem`) is the
