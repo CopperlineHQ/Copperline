@@ -8,6 +8,16 @@ for the earlier release notes.
 
 ## Unreleased
 
+### Fixed
+
+- The precise CPU core is fast again on machines without a Buster. Since
+  1.3.0 every CPU access that missed the cache models also ran the address
+  decode the A2000, A3000 and A4000 Buster model added (expansion-board
+  /OVR, Super Buster cacheability, Zorro bus widths, line bursts), even on
+  an A500, A600 or A1200, which made a 68040 A1200 up to 9% slower than
+  1.2.0 with the wait-loop skip off. That decode now runs only where its
+  parts are fitted. Emulated behaviour is unchanged.
+
 ## 1.3.0 - 2026-11-28
 
 ### Added
