@@ -716,21 +716,9 @@ impl Bus {
         ) else {
             return;
         };
-        // Lines above the display start are provisional here: the
-        // pre-display replay re-runs them at the display start with the
-        // frame's final DMACON/SPRxPT event timeline and owns their latch
-        // write-through (sprite_slot1 doc). TODO: a mid-frame DIWSTRT
-        // rewrite that moves the display start re-runs the overlap; the
-        // accurate model writes the latch once, at the single hardware
-        // fetch time of each slot.
-        // Pre-display lines belong to the beam-paced replay
-        // (`advance_sprite_dma_replay_to`), which owns their event timeline and
-        // runs each line once its slots have passed. Running them here as well
-        // would fetch every pre-display line twice.
-        let latch_write_through = vpos >= self.display_start_vpos_for_current_control();
-        if !latch_write_through {
-            return;
-        }
+        // advance_beam routes pre-display slots through the beam-paced
+        // sprite replay. Slots captured here write their latches directly.
+        // TODO: moving DIWSTRT mid-frame can replay an overlapping span.
         let started = VideoPipelineStats::probe_timing_sample(
             &mut self.video_pipeline_stats.sprite_fetch_probes,
             VIDEO_FETCH_TIMING_SAMPLE_RATE,
@@ -775,13 +763,7 @@ impl Bus {
                 // even where vertical blank inhibits the DMA slots.
                 self.sprite_comparators_catch_up(sprite, vpos, dmacon_now);
                 if !vblank_inhibited {
-                    self.sprite_slot1(
-                        sprite,
-                        vpos,
-                        spren_at(dmacon_now),
-                        ddf_blocked,
-                        latch_write_through,
-                    );
+                    self.sprite_slot1(sprite, vpos, spren_at(dmacon_now), ddf_blocked, true);
                 }
             }
             if !(old_hpos..new_hpos).contains(&slot2_hpos) {
@@ -799,13 +781,7 @@ impl Bus {
             }
             let mut captured_line = false;
             {
-                let line = self.sprite_slot2(
-                    sprite,
-                    vpos,
-                    slot2_enabled,
-                    ddf_blocked,
-                    latch_write_through,
-                );
+                let line = self.sprite_slot2(sprite, vpos, slot2_enabled, ddf_blocked, true);
                 if let Some(line) = line {
                     // COPPERLINE_DIAG_SPRCAP=BEAMY|all: log captured sprite
                     // lines on that beam line (frame, channel, position, words,
