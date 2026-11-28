@@ -273,9 +273,13 @@ timestamps. Every flag repeats:
 | `--record-input PATH` | Record all machine-bound input for the whole run and write it as a script to PATH on exit |
 
 KEY is a raw key code in decimal, `0x45` or `$45` form, or a name:
-letters, digits, `space`, `return`, `tab`, `esc`, `del`, `backspace`,
+letters, digits, `space`, `return`, `tab`, `esc`, `del`, `backspace`, `help`,
 `up`/`down`/`left`/`right`, `f1`-`f10`, `shift`/`lshift`/`rshift`, `caps`,
-`ctrl`, `lalt`/`ralt` and `lami`/`rami`. Names ignore case. A digit names
+`ctrl`, `lalt`/`ralt`, `lami`/`rami`, the punctuation keys `grave`, `minus`,
+`equal`, `backslash`, `lbracket`, `rbracket`, `semicolon`, `quote`, `comma`,
+`period` and `slash`, and the keypad's `kp0`-`kp9`, `kpperiod`, `kpenter`,
+`kpminus`, `kpplus`, `kpstar`, `kpslash`, `kplparen` and `kprparen`. Names
+ignore case, and `-` and `_` in them. A digit names
 that digit's key, so `0` is the zero key; write raw key code 0 as `0x00`. The
 `--joy-after` controls are `up`, `down`, `left`, `right`, `red` (or `fire`),
 `blue`, and the CD32 pad's `green`, `yellow`, `play`, `rwd` and `ffw`.

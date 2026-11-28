@@ -426,9 +426,7 @@ impl App {
         if self.handle_keyboard_joystick_key(code, pressed) {
             return;
         }
-        if let Some(rawkey) = host_to_amiga_rawkey(code) {
-            self.handle_live_amiga_key_event(rawkey, pressed);
-        }
+        self.handle_host_amiga_key(code, pressed);
     }
 
     fn terminal_release_due_taps(&mut self, s: &mut TermSession) {
@@ -813,7 +811,7 @@ mod tests {
     fn every_text_key_reaches_an_amiga_key() {
         for ch in "abcdefghijklmnopqrstuvwxyz0123456789`-=[]\\;',./ ".chars() {
             let code = terminal_keycode(TermKey::Char(ch)).unwrap();
-            assert!(host_to_amiga_rawkey(code).is_some(), "{ch:?}");
+            assert!(crate::keymap::positional_rawkey(code).is_some(), "{ch:?}");
         }
     }
 

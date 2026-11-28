@@ -452,7 +452,7 @@ impl App {
                     && matches!(self.keymap.lookup(*code), Some((0, _)))
                 {
                     self.keyboard_joy_held[0].set(*code, pressed);
-                } else if let Some(rawkey) = host_to_amiga_rawkey(*code) {
+                } else if let Some(rawkey) = self.amiga_rawkey_for(*code) {
                     self.netplay_input.held.set_key(rawkey, pressed);
                 }
                 true

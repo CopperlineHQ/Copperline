@@ -2334,6 +2334,7 @@ impl App {
         }
         self.held_rawkeys = [false; 128];
         self.live_held_rawkeys = [false; 128];
+        self.remapped_qualifier_held = [false; 128];
         self.reset_render_pipeline();
         self.last_fdd_track = None;
         paint_test_screen(&mut self.fb);
@@ -2360,6 +2361,7 @@ impl App {
             if clear_host_keys {
                 self.held_rawkeys = [false; 128];
                 self.live_held_rawkeys = [false; 128];
+                self.remapped_qualifier_held = [false; 128];
             }
         }
     }

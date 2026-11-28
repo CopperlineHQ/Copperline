@@ -11,33 +11,33 @@ use super::{
     copy_present_frame, copy_tv_aperture_to_window, copy_window_present_frame,
     cursor_position_in_texture, draw_seven_segment_digit, draw_status_bar_into,
     fdd_counter_readout, fdd_track_counter_rect, fdd_track_digit_rect,
-    host_shortcut_modifier_pressed, host_to_amiga_rawkey, joystick_toggle_rect, kbdpanel,
-    key_event_is_focus_gain_replay, keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv,
-    paint_test_screen, parse_amiga_key, pause_button_rect, plan_present_scaling_for,
-    power_button_rect, present_height, presentation_pixels_equal, presentation_source_y_offset,
-    raw_device_qualifier_family_held, raw_device_qualifier_rawkey, rawkey_is_held,
-    rawkey_transition_is_duplicate, reboot_button_rect, repeated_main_key_should_drop, rgba,
-    short_status_error, shorten_status_paths, shot_button_rect, should_render_emulated_frame,
-    standard_window_top_row, status_with_latched_fdd_track, take_integral_mouse_delta,
-    texture_height, texture_width, tint_display_rows, tint_lut, tint_rows_in_place,
-    track_counter_digit_rect, track_counter_layout, tv_aperture_source_row,
-    tv_centre_source_offset, tv_source_h_bounds, volume_mute_hit_rect, volume_percent_from_pos,
-    volume_slider_knob_rect, volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode,
-    MediaBar, PresentationLatch, StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT,
-    AMIGA_RAWKEY_LEFT_SHIFT, AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH,
-    BUTTON_GLYPH_DISABLED, CD_BODY, CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF,
-    CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW, DISK_LABEL, DISK_LABEL_LIT, FDD_LED_OFF,
-    FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF, POWER_GLYPH_ON, POWER_LED_BRIGHT,
-    POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES, STANDARD_PAL_VISIBLE_START_VPOS,
-    STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON, TUBE_NTSC_PRESENT_HEIGHT,
-    TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH, TV_LIVE_PAD_X,
-    TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
+    host_shortcut_modifier_pressed, joystick_toggle_rect, kbdpanel, key_event_is_focus_gain_replay,
+    keyboard_toggle_rect, led_row_rect, mask_present_frame_to_tv, paint_test_screen,
+    parse_amiga_key, pause_button_rect, plan_present_scaling_for, power_button_rect,
+    present_height, presentation_pixels_equal, presentation_source_y_offset, raw_device_qualifier,
+    raw_device_qualifier_family_held, rawkey_is_held, rawkey_transition_is_duplicate,
+    reboot_button_rect, repeated_main_key_should_drop, rgba, short_status_error,
+    shorten_status_paths, shot_button_rect, should_render_emulated_frame, standard_window_top_row,
+    status_with_latched_fdd_track, take_integral_mouse_delta, texture_height, texture_width,
+    tint_display_rows, tint_lut, tint_rows_in_place, track_counter_digit_rect,
+    track_counter_layout, tv_aperture_source_row, tv_centre_source_offset, tv_source_h_bounds,
+    volume_mute_hit_rect, volume_percent_from_pos, volume_slider_knob_rect,
+    volume_slider_track_rect, BarControl, DriveBar, JoystickInputMode, MediaBar, PresentationLatch,
+    StatusBarView, ToolPanelKind, AMIGA_RAWKEY_LEFT_ALT, AMIGA_RAWKEY_LEFT_SHIFT,
+    AMIGA_RAWKEY_RIGHT_ALT, AMIGA_RAWKEY_RIGHT_SHIFT, BUTTON_GLYPH, BUTTON_GLYPH_DISABLED, CD_BODY,
+    CD_LED_OFF, CD_LED_ON, CD_TRACK_SEGMENT_OFF, CD_TRACK_SEGMENT_ON, DISK_BODY, DISK_BODY_SHADOW,
+    DISK_LABEL, DISK_LABEL_LIT, FDD_LED_OFF, FDD_LED_ON, HDD_LED_OFF, HDD_LED_ON, POWER_GLYPH_OFF,
+    POWER_GLYPH_ON, POWER_LED_BRIGHT, POWER_LED_DIM, POWER_LED_OFF, STANDARD_PAL_VISIBLE_LINES,
+    STANDARD_PAL_VISIBLE_START_VPOS, STATUS_BG, TRACK_SEGMENT_OFF, TRACK_SEGMENT_ON,
+    TUBE_NTSC_PRESENT_HEIGHT, TUBE_PAL_PRESENT_HEIGHT, TV_CAPTURED_SOURCE_X, TV_CAPTURED_WIDTH,
+    TV_LIVE_PAD_X, TV_NTSC_PRESENT_HEIGHT, TV_PAL_PRESENT_HEIGHT, TV_PRESENT_SOURCE_Y, VOLUME_FILL,
     VOLUME_GLYPH_X,
 };
 use crate::audio::{AudioSink, NullSink};
 use crate::bus::{FrontPanelStatus, RenderRegisterSnapshot};
 use crate::config::{Overscan, Tint, TrackDisplay, WarpSpeed};
 use crate::heatmap;
+use crate::keymap::positional_rawkey;
 use crate::video::{FB_PIXELS, FB_WIDTH};
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -85,14 +85,14 @@ fn view(status: FrontPanelStatus, powered_on: bool, paused: bool) -> StatusBarVi
 
 #[test]
 fn host_mapping_includes_amiga_modifiers() {
-    assert_eq!(host_to_amiga_rawkey(KeyCode::ControlLeft), Some(0x63));
-    assert_eq!(host_to_amiga_rawkey(KeyCode::AltLeft), Some(0x64));
-    assert_eq!(host_to_amiga_rawkey(KeyCode::AltRight), Some(0x65));
-    assert_eq!(host_to_amiga_rawkey(KeyCode::SuperLeft), Some(0x66));
-    assert_eq!(host_to_amiga_rawkey(KeyCode::SuperRight), Some(0x67));
+    assert_eq!(positional_rawkey(KeyCode::ControlLeft), Some(0x63));
+    assert_eq!(positional_rawkey(KeyCode::AltLeft), Some(0x64));
+    assert_eq!(positional_rawkey(KeyCode::AltRight), Some(0x65));
+    assert_eq!(positional_rawkey(KeyCode::SuperLeft), Some(0x66));
+    assert_eq!(positional_rawkey(KeyCode::SuperRight), Some(0x67));
     // The Amiga has no right Ctrl, so host ControlRight doubles as a
     // Right Amiga ($67) alias for keyboards without a right Super key.
-    assert_eq!(host_to_amiga_rawkey(KeyCode::ControlRight), Some(0x67));
+    assert_eq!(positional_rawkey(KeyCode::ControlRight), Some(0x67));
 }
 
 #[test]
@@ -108,7 +108,7 @@ fn host_repeat_filter_accepts_unheld_amiga_qualifier_press() {
 
     assert!(!repeated_main_key_should_drop(
         &held,
-        KeyCode::ShiftRight,
+        positional_rawkey(KeyCode::ShiftRight),
         ElementState::Pressed,
         true,
         false
@@ -117,7 +117,7 @@ fn host_repeat_filter_accepts_unheld_amiga_qualifier_press() {
     held[AMIGA_RAWKEY_RIGHT_SHIFT as usize] = true;
     assert!(repeated_main_key_should_drop(
         &held,
-        KeyCode::ShiftRight,
+        positional_rawkey(KeyCode::ShiftRight),
         ElementState::Pressed,
         true,
         false
@@ -125,21 +125,21 @@ fn host_repeat_filter_accepts_unheld_amiga_qualifier_press() {
 
     assert!(repeated_main_key_should_drop(
         &held,
-        KeyCode::F12,
+        positional_rawkey(KeyCode::F12),
         ElementState::Pressed,
         true,
         false
     ));
     assert!(!repeated_main_key_should_drop(
         &held,
-        KeyCode::ShiftRight,
+        positional_rawkey(KeyCode::ShiftRight),
         ElementState::Pressed,
         false,
         false
     ));
     assert!(!repeated_main_key_should_drop(
         &held,
-        KeyCode::ArrowRight,
+        positional_rawkey(KeyCode::ArrowRight),
         ElementState::Pressed,
         true,
         true
@@ -171,7 +171,7 @@ fn focus_gain_replayed_presses_are_dropped_and_focus_loss_releases_kept() {
     let mut app = test_app();
     app.main_window_focused = true;
     app.input_recorder = Some(crate::inputrec::InputRecorder::new(0.0));
-    let rawkey = host_to_amiga_rawkey(KeyCode::Digit2).expect("Digit2 has an Amiga key");
+    let rawkey = positional_rawkey(KeyCode::Digit2).expect("Digit2 has an Amiga key");
     app.handle_live_amiga_key_event(rawkey, false);
     assert!(!app.amiga_rawkey_held(rawkey));
     assert_eq!(
@@ -182,24 +182,18 @@ fn focus_gain_replayed_presses_are_dropped_and_focus_loss_releases_kept() {
 
 #[test]
 fn raw_device_qualifier_filter_is_limited_to_amiga_modifier_lines() {
-    assert_eq!(
-        raw_device_qualifier_rawkey(KeyCode::ShiftLeft),
-        Some(AMIGA_RAWKEY_LEFT_SHIFT)
-    );
-    assert_eq!(
-        raw_device_qualifier_rawkey(KeyCode::ShiftRight),
-        Some(AMIGA_RAWKEY_RIGHT_SHIFT)
-    );
-    assert_eq!(
-        raw_device_qualifier_rawkey(KeyCode::AltLeft),
-        Some(AMIGA_RAWKEY_LEFT_ALT)
-    );
-    assert_eq!(
-        raw_device_qualifier_rawkey(KeyCode::AltRight),
-        Some(AMIGA_RAWKEY_RIGHT_ALT)
-    );
-    assert_eq!(raw_device_qualifier_rawkey(KeyCode::KeyS), None);
-    assert_eq!(raw_device_qualifier_rawkey(KeyCode::ArrowRight), None);
+    for rawkey in [
+        AMIGA_RAWKEY_LEFT_SHIFT,
+        AMIGA_RAWKEY_RIGHT_SHIFT,
+        AMIGA_RAWKEY_LEFT_ALT,
+        AMIGA_RAWKEY_RIGHT_ALT,
+    ] {
+        assert!(raw_device_qualifier(rawkey), "{rawkey:#04x}");
+    }
+    for code in [KeyCode::KeyS, KeyCode::ArrowRight, KeyCode::ControlLeft] {
+        let rawkey = positional_rawkey(code).unwrap();
+        assert!(!raw_device_qualifier(rawkey), "{code:?}");
+    }
 }
 
 #[test]
@@ -290,7 +284,7 @@ fn focus_loss_releases_every_held_host_key() {
     let mut app = test_app();
     app.main_window_focused = true;
     let held = [KeyCode::SuperLeft, KeyCode::ControlLeft, KeyCode::KeyA]
-        .map(|code| host_to_amiga_rawkey(code).expect("the key has an Amiga rawkey"));
+        .map(|code| positional_rawkey(code).expect("the key has an Amiga rawkey"));
     for rawkey in held {
         app.handle_live_amiga_key_event(rawkey, true);
         assert!(app.emu.bus().keyboard.is_held(rawkey));
@@ -338,7 +332,7 @@ fn focus_loss_keeps_scheduled_and_control_key_holds() {
     let mut app = test_app();
     app.main_window_focused = true;
     let scripted = 0x20; // A
-    let live = host_to_amiga_rawkey(KeyCode::SuperLeft).expect("Cmd is Left Amiga");
+    let live = positional_rawkey(KeyCode::SuperLeft).expect("Cmd is Left Amiga");
     app.handle_amiga_key_event(scripted, true);
     app.handle_live_amiga_key_event(live, true);
     assert!(app.emu.bus().keyboard.is_held(scripted));
@@ -358,6 +352,106 @@ fn focus_loss_keeps_scheduled_and_control_key_holds() {
     // The scripted hold still ends where it was scheduled to.
     app.handle_amiga_key_event(scripted, false);
     assert!(!app.emu.bus().keyboard.is_held(scripted));
+}
+
+#[test]
+fn keyboard_remap_reaches_the_amiga_keyboard() {
+    // Caps Lock as Ctrl, the remap a host keymap (xmodmap, an XKB option)
+    // cannot make: the host key code is the scancode, not the keysym.
+    let mut app = test_app();
+    app.main_window_focused = true;
+    app.keymap.keyboard_mut().set(KeyCode::CapsLock, Some(0x63));
+    assert_eq!(app.amiga_rawkey_for(KeyCode::CapsLock), Some(0x63));
+
+    app.handle_host_amiga_key(KeyCode::CapsLock, true);
+    assert!(app.emu.bus().keyboard.is_held(0x63));
+    assert!(
+        !app.amiga_rawkey_held(0x62),
+        "Caps Lock no longer types Caps Lock"
+    );
+    app.handle_host_amiga_key(KeyCode::CapsLock, false);
+    assert!(!app.amiga_rawkey_held(0x63));
+
+    // A key moved to nothing types nothing.
+    app.keymap.keyboard_mut().set(KeyCode::KeyA, None);
+    app.handle_host_amiga_key(KeyCode::KeyA, true);
+    assert!(!app.amiga_rawkey_held(0x20));
+    assert!(!app.live_input_held());
+}
+
+#[test]
+fn a_key_remapped_onto_a_qualifier_outlives_a_modifier_update_blind_to_it() {
+    // winit's ModifiersState follows the host's own Shift and Alt keys, so
+    // a host key remapped onto an Amiga Shift never shows in it. Without
+    // the remap's own bookkeeping, the first ModifiersChanged after the
+    // press -- any other modifier going down -- let go of the Shift while
+    // the key was still held, on hosts with no raw-device key events.
+    let mut app = test_app();
+    app.main_window_focused = true;
+    app.keymap
+        .keyboard_mut()
+        .set(KeyCode::CapsLock, Some(AMIGA_RAWKEY_LEFT_SHIFT));
+    app.handle_host_amiga_key(KeyCode::CapsLock, true);
+    app.update_host_modifiers(ModifiersState::CONTROL);
+    assert!(rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT));
+    app.handle_host_amiga_key(KeyCode::CapsLock, false);
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT));
+
+    // Across families too: a host Shift typing Amiga Alt reports Shift,
+    // which says nothing about Alt.
+    app.keymap
+        .keyboard_mut()
+        .set(KeyCode::ShiftLeft, Some(AMIGA_RAWKEY_LEFT_ALT));
+    app.handle_host_amiga_key(KeyCode::ShiftLeft, true);
+    app.update_host_modifiers(ModifiersState::SHIFT);
+    assert!(rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_ALT));
+    app.handle_host_amiga_key(KeyCode::ShiftLeft, false);
+
+    // A host Alt still typing Amiga Alt is followed as before: an update
+    // with Alt up lets go of it.
+    app.handle_host_amiga_key(KeyCode::AltRight, true);
+    app.update_host_modifiers(ModifiersState::empty());
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
+
+    // Focus loss forgets the remapped hold with the key itself.
+    app.handle_host_amiga_key(KeyCode::CapsLock, true);
+    app.release_host_keys_on_focus_loss();
+    app.handle_amiga_key_event(AMIGA_RAWKEY_RIGHT_SHIFT, true);
+    app.update_host_modifiers(ModifiersState::empty());
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_SHIFT));
+}
+
+#[test]
+fn raw_device_qualifiers_follow_the_keyboard_remap() {
+    let mut app = test_app();
+    app.main_window_focused = true;
+    // A host Shift moved onto Ctrl is no longer a qualifier to the
+    // listener, so it presses no Amiga Shift behind the remap's back.
+    app.keymap
+        .keyboard_mut()
+        .set(KeyCode::ShiftLeft, Some(0x63));
+    app.handle_raw_device_key_event(RawKeyEvent {
+        physical_key: PhysicalKey::Code(KeyCode::ShiftLeft),
+        state: ElementState::Pressed,
+    });
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_LEFT_SHIFT));
+
+    // A key moved onto Alt is one, with its sides kept apart as ever.
+    app.keymap
+        .keyboard_mut()
+        .set(KeyCode::CapsLock, Some(AMIGA_RAWKEY_RIGHT_ALT));
+    app.handle_raw_device_key_event(RawKeyEvent {
+        physical_key: PhysicalKey::Code(KeyCode::CapsLock),
+        state: ElementState::Pressed,
+    });
+    assert!(rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
+    app.update_host_modifiers(ModifiersState::empty());
+    assert!(rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
+    app.handle_raw_device_key_event(RawKeyEvent {
+        physical_key: PhysicalKey::Code(KeyCode::CapsLock),
+        state: ElementState::Released,
+    });
+    assert!(!rawkey_is_held(&app.held_rawkeys, AMIGA_RAWKEY_RIGHT_ALT));
 }
 
 #[test]
@@ -932,6 +1026,43 @@ fn input_mapping_panel_rebinds_only_on_save() {
     app.joystick_input_mode = JoystickInputMode::Keyboard;
     assert!(app.handle_keyboard_joystick_key(KeyCode::KeyQ, true));
     assert!(app.emu.bus().input.ports[1].fire);
+    app.handle_keyboard_joystick_key(KeyCode::KeyQ, false);
+
+    // The Amiga Keys tab edits the keyboard remap the same way: in the
+    // working copy until Save. (Kept in this test, the one that writes
+    // keymap.toml, so two tests never race on the developer's file.)
+    let ctrl = crate::keymap::AMIGA_KEYS
+        .iter()
+        .position(|key| key.rawkey == 0x63)
+        .unwrap();
+    app.open_input_mapping();
+    app.activate_ui_control(UiControl::RemapKeysTab);
+    app.activate_ui_control(UiControl::RemapKeyBind(ctrl));
+    assert!(app.ui_handle_key(KeyCode::CapsLock, None, None));
+    assert_eq!(
+        app.amiga_rawkey_for(KeyCode::CapsLock),
+        Some(0x62),
+        "the live remap must not change before Save"
+    );
+    // A key held when Save lands is let go under the map it went down
+    // with, not released later as whatever the new map makes it.
+    app.main_window_focused = true;
+    app.handle_host_amiga_key(KeyCode::KeyA, true);
+    assert!(app.amiga_rawkey_held(0x20));
+    app.activate_ui_control(UiControl::RemapSave);
+    assert!(!app.amiga_rawkey_held(0x20), "Save lets go of held keys");
+    assert_eq!(app.amiga_rawkey_for(KeyCode::CapsLock), Some(0x63));
+    let reloaded = crate::keymap::KeyMap::load();
+    assert_eq!(
+        reloaded.keyboard().rawkey_for(KeyCode::CapsLock),
+        Some(0x63)
+    );
+
+    app.open_input_mapping();
+    app.activate_ui_control(UiControl::RemapKeysTab);
+    app.activate_ui_control(UiControl::RemapDefaults);
+    app.activate_ui_control(UiControl::RemapSave);
+    assert!(app.keymap.keyboard().is_empty());
 
     // Restore the defaults so the edited map does not leak into the rest of
     // the suite, then put the developer's own file back byte for byte.
@@ -964,6 +1095,93 @@ fn input_mapping_panel_discards_edits_when_closed() {
     app.activate_ui_control(UiControl::PanelClose);
     assert!(app.ui.panel.is_none());
     assert_eq!(app.keymap, before, "closing discards the edits");
+}
+
+#[test]
+fn input_mapping_amiga_keys_tab_arms_pages_and_resets() {
+    let mut app = test_app();
+    app.open_input_mapping();
+    let panel = |app: &super::App| match app.ui.panel.as_ref() {
+        Some(Panel::InputMap(panel)) => panel.map.clone(),
+        _ => panic!("panel open"),
+    };
+    let state = |app: &super::App| match app.ui.panel.as_ref() {
+        Some(Panel::InputMap(panel)) => (
+            panel.amiga_keys,
+            panel.page,
+            panel.capturing,
+            panel.capturing_key,
+        ),
+        _ => panic!("panel open"),
+    };
+
+    // A controller row armed, then the tab switched: the capture belongs
+    // to the tab it was armed on.
+    app.activate_ui_control(UiControl::RemapBind(0));
+    app.activate_ui_control(UiControl::RemapKeysTab);
+    assert_eq!(state(&app), (true, 0, None, None));
+
+    // The pages stop at both ends.
+    app.activate_ui_control(UiControl::RemapKeysPage(false));
+    assert_eq!(state(&app).1, 0);
+    let last = super::ui::input_map_key_pages() - 1;
+    for _ in 0..last + 3 {
+        app.activate_ui_control(UiControl::RemapKeysPage(true));
+    }
+    assert_eq!(state(&app).1, last);
+
+    // A key that cannot be remapped leaves the row armed; Escape cancels
+    // the capture, not the panel.
+    let help = crate::keymap::AMIGA_KEYS
+        .iter()
+        .position(|key| key.rawkey == 0x5F)
+        .unwrap();
+    app.activate_ui_control(UiControl::RemapKeyBind(help));
+    assert!(app.ui_handle_key(KeyCode::Fn, None, None));
+    assert_eq!(state(&app).3, Some(help));
+    assert!(app.ui_handle_key(KeyCode::Escape, None, None));
+    assert_eq!(state(&app).3, None);
+    assert!(app.ui.panel.is_some());
+
+    app.activate_ui_control(UiControl::RemapKeyBind(help));
+    app.ui_handle_key(KeyCode::Insert, None, None);
+    assert_eq!(
+        panel(&app).keyboard().rawkey_for(KeyCode::Insert),
+        Some(0x5F)
+    );
+    app.activate_ui_control(UiControl::RemapKeyReset(help));
+    assert!(panel(&app).keyboard().is_empty());
+
+    // Defaults on each kind of tab restores only that half of the map.
+    app.activate_ui_control(UiControl::RemapKeyBind(help));
+    app.ui_handle_key(KeyCode::Insert, None, None);
+    app.activate_ui_control(UiControl::RemapSet(0));
+    app.activate_ui_control(UiControl::RemapClear(0));
+    app.activate_ui_control(UiControl::RemapKeysTab);
+    app.activate_ui_control(UiControl::RemapDefaults);
+    assert!(panel(&app).keyboard().is_empty());
+    assert_ne!(
+        panel(&app).mapping(0),
+        crate::keymap::KeyMap::default().mapping(0),
+        "the keyboard's Defaults leaves the controller edits"
+    );
+    app.activate_ui_control(UiControl::RemapKeyBind(help));
+    app.ui_handle_key(KeyCode::Insert, None, None);
+    app.activate_ui_control(UiControl::RemapSet(0));
+    app.activate_ui_control(UiControl::RemapDefaults);
+    assert_eq!(
+        panel(&app).mapping(0),
+        crate::keymap::KeyMap::default().mapping(0)
+    );
+    assert_eq!(
+        panel(&app).keyboard().rawkey_for(KeyCode::Insert),
+        Some(0x5F)
+    );
+
+    // Closing discards it all.
+    let before = app.keymap.clone();
+    app.activate_ui_control(UiControl::PanelClose);
+    assert_eq!(app.keymap, before);
 }
 
 #[test]
@@ -16834,7 +17052,7 @@ fn multitap_keyboard_takeover_keeps_guest_key_releases_balanced() {
         app.emu.bus_mut().input.set_port_device(port, D::Joystick);
     }
     app.apply_host_gamepads([Some(PadState::default()); 4]);
-    let raw = host_to_amiga_rawkey(KeyCode::ArrowLeft).unwrap();
+    let raw = positional_rawkey(KeyCode::ArrowLeft).unwrap();
     assert!(!app.handle_keyboard_joystick_key(KeyCode::ArrowLeft, true));
     app.handle_amiga_key_event(raw, true);
     app.apply_host_gamepads([None; 4]);

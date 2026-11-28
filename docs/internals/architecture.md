@@ -138,7 +138,7 @@ src/
   audio/            # AudioSink outputs, source/stem mux, resamplers, MPEG frame parsing, host fx
   priority.rs       # opt-in realtime-like thread scheduling (pacer + audio)
   gamepad.rs        # gilrs input: database layout + calibration override
-  keymap.rs         # host-keyboard to game-port controller mapping
+  keymap.rs         # host-keyboard mapping: Amiga-key remap and controller bindings
   pointer.rs        # absolute pointer positioning by mouse-motion servo
   typing.rs         # host text to Amiga keystrokes (--type-after)
   screenshot.rs     # PNG export helpers
