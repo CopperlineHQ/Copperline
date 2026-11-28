@@ -137,6 +137,14 @@ for the earlier release notes.
   a drive that was still spinning -- between the accesses of a load, and
   through the seconds trackdisk.device leaves a motor on afterwards. The
   web player's `fdd_led()` follows the same rule.
+- Save states now write a `[[filesys]]` host folder's lock table and the
+  per-rate resamplers of the MHI and Toccata cards in a fixed order.
+  They were written in random hash order, so two identical runs could
+  leave different machine state in their files while a host folder had
+  files locked or a card had played at more than one sample rate. The
+  file header's save time (`saved_at_unix`) still differs between saves
+  made at different moments. States written before this change still
+  load.
 - Mouse buttons, joystick directions and fire buttons held down through a
   reset now stay held as the machine comes back up, instead of being let
   go by `Ctrl+Amiga+Amiga` or the CPU `RESET` instruction until pressed
