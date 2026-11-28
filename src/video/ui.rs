@@ -574,13 +574,21 @@ pub struct DropChooserState {
 }
 
 /// Interactive state of the Input Mapping panel: a working copy of the
-/// keyboard map that is only committed to disk on Save, plus which mapping is
-/// on screen and which row (if any) is waiting for a key press.
+/// keyboard map that is only committed to disk on Save, plus which tab is on
+/// screen and which row (if any) is waiting for a key press.
 pub struct InputMapPanel {
     /// Keyboard mapping being edited (0 = controller 1, 1 = controller 2).
     pub mapping: usize,
+    /// Whether the Amiga Keys tab is on screen instead of `mapping`.
+    pub amiga_keys: bool,
+    /// The Amiga Keys page on screen: [`MAP_KEY_ROWS`] entries of
+    /// `keymap::AMIGA_KEYS` from `page * MAP_KEY_ROWS`.
+    pub page: usize,
     /// Control armed for capture: the next bindable key press binds to it.
     pub capturing: Option<crate::keymap::JoyControl>,
+    /// Amiga key armed for capture, as an index into `keymap::AMIGA_KEYS`:
+    /// the next remappable host key pressed is moved onto it.
+    pub capturing_key: Option<usize>,
     /// Working copy of the map. Edits here do not reach the live machine
     /// until Save.
     pub map: crate::keymap::KeyMap,
@@ -588,20 +596,65 @@ pub struct InputMapPanel {
     pub message: String,
 }
 
+/// The panel's resting hint on a controller tab.
+pub const INPUT_MAP_CONTROLLER_HINT: &str = "Click Set, then press the key to bind.";
+/// The panel's resting hint on the Amiga Keys tab.
+pub const INPUT_MAP_KEYS_HINT: &str = "Click Set, then press the host key that should type it.";
+
 impl InputMapPanel {
     pub fn new(map: crate::keymap::KeyMap) -> Self {
         Self {
             mapping: 0,
+            amiga_keys: false,
+            page: 0,
             capturing: None,
+            capturing_key: None,
             map,
-            message: "Click Set, then press the key to bind.".to_string(),
+            message: INPUT_MAP_CONTROLLER_HINT.to_string(),
         }
     }
 
-    /// Bind a captured host key to the armed control. Returns false (and
-    /// leaves the row armed) for a key that cannot be bound, so a stray press
-    /// does not silently cancel the capture.
+    /// Whether a row on either kind of tab is waiting for a key.
+    pub fn armed(&self) -> bool {
+        self.capturing.is_some() || self.capturing_key.is_some()
+    }
+
+    /// Disarm whichever row is waiting for a key.
+    pub fn disarm(&mut self) {
+        self.capturing = None;
+        self.capturing_key = None;
+    }
+
+    /// The `keymap::AMIGA_KEYS` indices on the Amiga Keys page on screen.
+    pub fn page_keys(&self) -> std::ops::Range<usize> {
+        let len = crate::keymap::AMIGA_KEYS.len();
+        let start = (self.page * MAP_KEY_ROWS).min(len);
+        start..(start + MAP_KEY_ROWS).min(len)
+    }
+
+    /// Feed a captured host key to the armed row: bind it to the armed
+    /// control, or move it onto the armed Amiga key. Returns false (and
+    /// leaves the row armed) for a key that cannot be bound, so a stray
+    /// press does not silently cancel the capture.
     pub fn capture_key(&mut self, code: winit::keyboard::KeyCode) -> bool {
+        if let Some(index) = self.capturing_key {
+            let Some(key) = crate::keymap::AMIGA_KEYS.get(index) else {
+                self.capturing_key = None;
+                return false;
+            };
+            if !crate::keymap::is_remappable(code) {
+                self.message = "That key cannot be remapped.".to_string();
+                return false;
+            }
+            self.map.keyboard_mut().set(code, Some(key.rawkey));
+            self.capturing_key = None;
+            self.message = format!(
+                "{} now types {}.",
+                crate::keymap::short_key_label(code),
+                key.label
+            );
+            return true;
+        }
         let Some(control) = self.capturing else {
             return false;
         };
@@ -723,9 +776,9 @@ pub fn panel_control_at(panel: &Panel, pos: (i32, i32)) -> Option<UiControl> {
                 }
             }
         }
-        Panel::InputMap(_) => {
-            for (control, button_rect) in input_map_control_rects(rect) {
-                if button_rect.contains(pos) {
+        Panel::InputMap(panel) => {
+            for (control, button_rect) in input_map_control_rects(rect, panel) {
+                if button_rect.contains(pos) && input_map_control_live(panel, control) {
                     return Some(control);
                 }
             }
@@ -918,6 +971,15 @@ pub enum UiControl {
     RemapDefaults,
     /// Input Mapping: persist the edited map and apply it.
     RemapSave,
+    /// Input Mapping: show the Amiga Keys tab.
+    RemapKeysTab,
+    /// Input Mapping: page the Amiga Keys tab on (true) or back (false).
+    RemapKeysPage(bool),
+    /// Input Mapping: arm Amiga key N (an index into `keymap::AMIGA_KEYS`)
+    /// for capture: the next host key pressed is moved onto it.
+    RemapKeyBind(usize),
+    /// Input Mapping: put Amiga key N back the way it ships.
+    RemapKeyReset(usize),
     /// Reverse-debug: step one instruction backward (reconstructed from the
     /// snapshot ring).
     DebugReverseStep,
@@ -3014,11 +3076,14 @@ fn draw_shortcuts(frame: &mut [u8], rect: Rect, scale: usize) {
     }
 }
 
-// Input Mapping panel geometry. One row per control, two mapping tabs above
-// them, and the action buttons on the bottom edge like the other panels.
-// Widths are sized off the longest label and the longest default binding
-// list, so nothing collides: labels are drawn at the panel text size and the
-// binding column (which can hold four aliases) at half that.
+// Input Mapping panel geometry. One row per control, three tabs above them
+// (the two controller mappings and the Amiga keyboard), and the action
+// buttons on the bottom edge like the other panels. Widths are sized off the
+// longest label and the longest default binding list, so nothing collides:
+// labels are drawn at the panel text size and the binding column (which can
+// hold four aliases) at half that. The Amiga Keys tab pages through the
+// keyboard a controller's worth of rows at a time, so the panel keeps one
+// size whichever tab is up.
 const INPUT_MAP_W: usize = 640;
 const MAP_ROW_H: usize = 24;
 const MAP_TAB_W: usize = 132;
@@ -3028,6 +3093,7 @@ const MAP_SET_W: usize = 62;
 const MAP_CLEAR_W: usize = 62;
 const MAP_ACTION_W: usize = 96;
 const MAP_ACTION_H: usize = 22;
+const MAP_PAGE_W: usize = 28;
 const MAP_MARGIN: usize = 16;
 /// Font scale of the control labels, and of the binding list beside them.
 const MAP_LABEL_PX: usize = 2;
@@ -3038,6 +3104,16 @@ const MAP_SET_X: usize = 480;
 /// Footnote under the table, naming the pad-only controls once instead of
 /// repeating "(CD32)" on five rows.
 const MAP_NOTE: &str = "Green, Yellow, Play, Rewind and Forward are CD32 pad buttons.";
+/// The Amiga Keys tab's footnote: what a key nobody has moved does.
+const MAP_KEYS_NOTE: &str = "A host key types the Amiga key in its own place unless moved here.";
+/// Amiga keys per page of the Amiga Keys tab: as many as a controller has
+/// controls, so both kinds of tab fill the same table.
+pub const MAP_KEY_ROWS: usize = crate::keymap::CONTROLS.len();
+
+/// How many pages the Amiga Keys tab has.
+pub fn input_map_key_pages() -> usize {
+    crate::keymap::AMIGA_KEYS.len().div_ceil(MAP_KEY_ROWS)
+}
 
 fn input_map_rows_top(rect: Rect) -> usize {
     rect.y + TITLE_H + 10 + MAP_TAB_H + 12
@@ -3071,26 +3147,62 @@ fn clip_to_columns(text: &str, max: usize) -> String {
     format!("{kept}~")
 }
 
-/// Every clickable control in the panel, with its rect: the two mapping tabs,
-/// a Set and a Clear button per row, then Defaults / Save.
-fn input_map_control_rects(rect: Rect) -> Vec<(UiControl, Rect)> {
-    let mut out = Vec::with_capacity(2 * crate::keymap::CONTROLS.len() + 4);
-    for set in 0..crate::keymap::MAPPING_COUNT {
+/// Every control in the panel as it is now, with its rect: the three tabs,
+/// the page arrows on the Amiga Keys tab, a Set and a Clear (or Reset)
+/// button per row, then Defaults / Save. Includes controls drawn disabled;
+/// [`input_map_control_live`] says which of them take a press.
+fn input_map_control_rects(rect: Rect, panel: &InputMapPanel) -> Vec<(UiControl, Rect)> {
+    let mut out = Vec::with_capacity(2 * MAP_KEY_ROWS + 7);
+    let tab_y = rect.y + TITLE_H + 10;
+    let tabs = [
+        UiControl::RemapSet(0),
+        UiControl::RemapSet(1),
+        UiControl::RemapKeysTab,
+    ];
+    for (i, tab) in tabs.into_iter().enumerate() {
         out.push((
-            UiControl::RemapSet(set),
+            tab,
             Rect {
-                x: rect.x + MAP_MARGIN + set * (MAP_TAB_W + 8),
-                y: rect.y + TITLE_H + 10,
+                x: rect.x + MAP_MARGIN + i * (MAP_TAB_W + 8),
+                y: tab_y,
                 w: MAP_TAB_W,
                 h: MAP_TAB_H,
             },
         ));
     }
+    if panel.amiga_keys {
+        for (i, forward) in [false, true].into_iter().enumerate() {
+            out.push((
+                UiControl::RemapKeysPage(forward),
+                Rect {
+                    x: rect.x + rect.w - MAP_MARGIN - (2 - i) * MAP_PAGE_W - (1 - i) * 8,
+                    y: tab_y,
+                    w: MAP_PAGE_W,
+                    h: MAP_TAB_H,
+                },
+            ));
+        }
+    }
     let top = input_map_rows_top(rect);
-    for (i, _) in crate::keymap::CONTROLS.iter().enumerate() {
-        let y = top + i * MAP_ROW_H + (MAP_ROW_H - MAP_BUTTON_H) / 2;
+    let rows: Vec<(UiControl, UiControl)> = if panel.amiga_keys {
+        panel
+            .page_keys()
+            .map(|index| {
+                (
+                    UiControl::RemapKeyBind(index),
+                    UiControl::RemapKeyReset(index),
+                )
+            })
+            .collect()
+    } else {
+        (0..crate::keymap::CONTROLS.len())
+            .map(|i| (UiControl::RemapBind(i), UiControl::RemapClear(i)))
+            .collect()
+    };
+    for (row, (set, clear)) in rows.into_iter().enumerate() {
+        let y = top + row * MAP_ROW_H + (MAP_ROW_H - MAP_BUTTON_H) / 2;
         out.push((
-            UiControl::RemapBind(i),
+            set,
             Rect {
                 x: rect.x + MAP_SET_X,
                 y,
@@ -3099,7 +3211,7 @@ fn input_map_control_rects(rect: Rect) -> Vec<(UiControl, Rect)> {
             },
         ));
         out.push((
-            UiControl::RemapClear(i),
+            clear,
             Rect {
                 x: rect.x + MAP_SET_X + MAP_SET_W + 8,
                 y,
@@ -3126,6 +3238,20 @@ fn input_map_control_rects(rect: Rect) -> Vec<(UiControl, Rect)> {
     out
 }
 
+/// Whether a panel control takes a press. A page arrow at the end of the
+/// keyboard, and Reset on an Amiga key nothing has moved, are drawn but
+/// dead, so the pointer and the keyboard focus both pass over them.
+fn input_map_control_live(panel: &InputMapPanel, control: UiControl) -> bool {
+    match control {
+        UiControl::RemapKeysPage(false) => panel.page > 0,
+        UiControl::RemapKeysPage(true) => panel.page + 1 < input_map_key_pages(),
+        UiControl::RemapKeyReset(index) => crate::keymap::AMIGA_KEYS
+            .get(index)
+            .is_some_and(|key| panel.map.keyboard().touches(key.rawkey)),
+        _ => true,
+    }
+}
+
 fn draw_input_map(
     frame: &mut [u8],
     rect: Rect,
@@ -3133,32 +3259,55 @@ fn draw_input_map(
     hover: Option<UiControl>,
     scale: usize,
 ) {
-    let controls = input_map_control_rects(rect);
+    let controls = input_map_control_rects(rect, panel);
     let mapping = panel.map.mapping(panel.mapping);
     for (control, button_rect) in &controls {
+        let live = input_map_control_live(panel, *control);
         match *control {
-            UiControl::RemapSet(set) => {
-                let label = if set == 0 {
-                    "Controller 1"
-                } else {
-                    "Controller 2"
+            UiControl::RemapSet(_) | UiControl::RemapKeysTab => {
+                let (label, active) = match *control {
+                    UiControl::RemapSet(0) => {
+                        ("Controller 1", !panel.amiga_keys && panel.mapping == 0)
+                    }
+                    UiControl::RemapSet(_) => {
+                        ("Controller 2", !panel.amiga_keys && panel.mapping == 1)
+                    }
+                    _ => ("Amiga Keys", panel.amiga_keys),
                 };
                 draw_launcher_chip(
                     &mut FrameCanvas::new(frame, scale),
                     *button_rect,
                     label,
-                    set == panel.mapping,
+                    active,
                     lit(hover, *control),
                     false,
                 );
             }
+            UiControl::RemapKeysPage(forward) => draw_text_button(
+                frame,
+                *button_rect,
+                if forward { ">" } else { "<" },
+                live,
+                lit(hover, *control),
+                scale,
+            ),
             UiControl::RemapBind(i) => {
                 let armed = panel.capturing == Some(crate::keymap::CONTROLS[i]);
-                let label = if armed { "..." } else { "Set" };
                 draw_text_button(
                     frame,
                     *button_rect,
-                    label,
+                    if armed { "..." } else { "Set" },
+                    true,
+                    lit(hover, *control),
+                    scale,
+                );
+            }
+            UiControl::RemapKeyBind(index) => {
+                let armed = panel.capturing_key == Some(index);
+                draw_text_button(
+                    frame,
+                    *button_rect,
+                    if armed { "..." } else { "Set" },
                     true,
                     lit(hover, *control),
                     scale,
@@ -3175,6 +3324,14 @@ fn draw_input_map(
                     scale,
                 );
             }
+            UiControl::RemapKeyReset(_) => draw_text_button(
+                frame,
+                *button_rect,
+                "Reset",
+                live,
+                lit(hover, *control),
+                scale,
+            ),
             UiControl::RemapDefaults => draw_text_button(
                 frame,
                 *button_rect,
@@ -3195,12 +3352,52 @@ fn draw_input_map(
         }
     }
 
+    if panel.amiga_keys {
+        // The page number sits left of the arrows, centred on the tab row.
+        let page = format!("Page {}/{}", panel.page + 1, input_map_key_pages());
+        let page_x =
+            rect.x + rect.w - MAP_MARGIN - 2 * MAP_PAGE_W - 8 - 8 - font::text_width(&page, 1);
+        draw_panel_text(
+            frame,
+            page_x,
+            rect.y + TITLE_H + 10 + (MAP_TAB_H - font::GLYPH_H) / 2,
+            &page,
+            PANEL_TEXT_DIM,
+            1,
+            scale,
+        );
+    }
+
+    // One (label, binding text, armed) triple per row of the tab on screen.
+    let rows: Vec<(&str, String, bool)> = if panel.amiga_keys {
+        panel
+            .page_keys()
+            .map(|index| {
+                let key = &crate::keymap::AMIGA_KEYS[index];
+                (
+                    key.label,
+                    panel.map.keyboard().binding_text(key.rawkey),
+                    panel.capturing_key == Some(index),
+                )
+            })
+            .collect()
+    } else {
+        crate::keymap::CONTROLS
+            .iter()
+            .map(|control| {
+                (
+                    control.label(),
+                    mapping.binding_text(*control),
+                    panel.capturing == Some(*control),
+                )
+            })
+            .collect()
+    };
     let top = input_map_rows_top(rect);
     let label_cols = columns_for(MAP_BINDING_X - MAP_MARGIN - 8, MAP_LABEL_PX);
     let binding_cols = columns_for(MAP_SET_X - MAP_BINDING_X - 8, MAP_BINDING_PX);
-    for (i, control) in crate::keymap::CONTROLS.iter().enumerate() {
-        let armed = panel.capturing == Some(*control);
-        let label_colour = if armed {
+    for (i, (label, binding, armed)) in rows.iter().enumerate() {
+        let label_colour = if *armed {
             PANEL_TEXT_HILIGHT
         } else {
             PANEL_TEXT
@@ -3209,13 +3406,12 @@ fn draw_input_map(
             frame,
             rect.x + MAP_MARGIN,
             top + i * MAP_ROW_H + (MAP_ROW_H - font::GLYPH_H * MAP_LABEL_PX) / 2,
-            &clip_to_columns(control.label(), label_cols),
+            &clip_to_columns(label, label_cols),
             label_colour,
             MAP_LABEL_PX,
             scale,
         );
-        let binding = mapping.binding_text(*control);
-        let binding_colour = if armed {
+        let binding_colour = if *armed {
             PANEL_TEXT_HILIGHT
         } else if binding == "-" {
             PANEL_TEXT_DIM
@@ -3226,7 +3422,7 @@ fn draw_input_map(
             frame,
             rect.x + MAP_BINDING_X,
             top + i * MAP_ROW_H + (MAP_ROW_H - font::GLYPH_H * MAP_BINDING_PX) / 2,
-            &clip_to_columns(&binding, binding_cols),
+            &clip_to_columns(binding, binding_cols),
             binding_colour,
             MAP_BINDING_PX,
             scale,
@@ -3247,7 +3443,11 @@ fn draw_input_map(
         frame,
         rect.x + MAP_MARGIN,
         message_y + 14,
-        MAP_NOTE,
+        if panel.amiga_keys {
+            MAP_KEYS_NOTE
+        } else {
+            MAP_NOTE
+        },
         PANEL_TEXT_DIM,
         1,
         scale,

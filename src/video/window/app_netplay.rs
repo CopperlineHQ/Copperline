@@ -452,8 +452,18 @@ impl App {
                     && matches!(self.keymap.lookup(*code), Some((0, _)))
                 {
                     self.keyboard_joy_held[0].set(*code, pressed);
-                } else if let Some(rawkey) = host_to_amiga_rawkey(*code) {
-                    self.netplay_input.held.set_key(rawkey, pressed);
+                } else if pressed {
+                    if let Some(rawkey) = self.amiga_rawkey_for(*code) {
+                        let keys = &self.netplay_input.held.keys;
+                        let down = keys[usize::from(rawkey / 8)] & (1 << (rawkey % 8)) != 0;
+                        self.netplay_key_holds.press(*code, rawkey, down);
+                        self.netplay_input.held.set_key(rawkey, true);
+                    }
+                } else if let Some(rawkey) = self
+                    .netplay_key_holds
+                    .release(*code, self.amiga_rawkey_for(*code))
+                {
+                    self.netplay_input.held.set_key(rawkey, false);
                 }
                 true
             }

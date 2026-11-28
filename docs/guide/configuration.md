@@ -2262,6 +2262,46 @@ other mapping, so the two controllers can never fight over one key. Deleting
 the file restores the built-in layouts, as does the panel's **Defaults**
 button.
 
+(remapping-amiga-keys)=
+### Remapping Amiga keys
+
+A host key types the Amiga key in the same place on the keyboard, whatever
+the host layout prints on it, so the guest's own keymap decides what it
+types. Copperline reads the key's position (its scancode), not the symbol
+the host keymap gives it, so remapping a key in the host keymap --
+`xmodmap`, or an XKB option such as `ctrl:nocaps` -- does not reach the
+Amiga. The same `keymap.toml` carries a `[keyboard]` table that
+does: each entry moves one host key to another Amiga key, or to none at
+all. The **Amiga Keys** tab of the **Input Mapping...** panel edits it (see
+[Input mapping](ui.md#input-mapping)), and the file can be written by hand:
+
+```toml
+[keyboard]
+CapsLock = "ctrl"       # Caps Lock types Ctrl
+ControlLeft = "caps"    # and Left Ctrl types Caps Lock: a swap
+Insert = "help"         # a home for the Help key
+NumLock = "kplparen"    # and for the keypad brackets a PC keypad lacks
+ScrollLock = "kprparen"
+F11 = "none"            # F11 (Help by default) types nothing
+```
+
+Host keys are named as the [winit `KeyCode`](https://docs.rs/winit/0.30/winit/keyboard/enum.KeyCode.html)
+spells them (`CapsLock`, `ControlLeft`, `IntlBackslash`, `Numpad7`). The
+Amiga key is any name or raw key code `--press-after` takes (see
+[Scripted input events](headless.md#scripted-input-events)), or `none`.
+Host keys with no entry keep their own place. Entries a build does not recognise are skipped
+with a warning, and a file holding only a `[keyboard]` table keeps the
+built-in controller layouts.
+
+A key bound to a keyboard-controller control still drives the controller
+while that mapping drives a port, and types its Amiga key otherwise. The
+host shortcuts keep the host's own modifiers: `Cmd`/`Alt` shortcuts need the
+real key, whatever it types on the Amiga. On macOS the system reports the
+Caps Lock key only as a lock state, never as a press and release, so a
+`CapsLock` entry has no effect there. The remap is the desktop window's
+and `--terminal`'s; the libretro core and the web player take their keys
+from their own host's input mapping.
+
 ## `[serial]` -- serial port and MIDI
 
 ```toml

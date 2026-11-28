@@ -2518,6 +2518,32 @@ fn panels_render_into_their_rects() {
     draw(&mut frame, scale, &ui, Some(UiControl::RemapSave), None);
     assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
     save(&frame, "input-mapping");
+
+    // The Amiga Keys tab, with Caps Lock moved onto Ctrl and the Ctrl row
+    // armed for another key.
+    let mut frame = vec![0u8; w * h * 4];
+    let mut map = crate::keymap::KeyMap::default();
+    map.keyboard_mut()
+        .set(winit::keyboard::KeyCode::CapsLock, Some(0x63));
+    let mut map_panel = InputMapPanel::new(map);
+    map_panel.amiga_keys = true;
+    map_panel.capturing_key = Some(0);
+    map_panel.message = INPUT_MAP_KEYS_HINT.to_string();
+    let ui = UiState {
+        menu_open: false,
+        menu_rows: Vec::new(),
+        menu_nav: menu::MenuNav::default(),
+        panel: Some(Panel::InputMap(Box::new(map_panel))),
+    };
+    draw(
+        &mut frame,
+        scale,
+        &ui,
+        Some(UiControl::RemapKeyReset(0)),
+        None,
+    );
+    assert!(panel_has_title_bar(&frame, ui.panel.as_ref().unwrap()));
+    save(&frame, "input-mapping-keys");
     let mut frame = vec![0u8; w * h * 4];
     let mut lines = vec![
         DbgLine::plain("PC 00FC0E44   SR 2700 [S IPL7 xnzvc]"),
@@ -4837,4 +4863,84 @@ fn check_netplay_controls(internet: bool, player: usize) {
             }
         ));
     }
+}
+
+#[test]
+fn input_map_amiga_keys_tab_hit_tests_only_live_controls() {
+    use crate::keymap::{KeyMap, AMIGA_KEYS};
+    let mut panel = InputMapPanel::new(KeyMap::default());
+    let rect = Rect {
+        x: 0,
+        y: 0,
+        w: INPUT_MAP_W,
+        h: input_map_panel_height(),
+    };
+    let hit = |panel: &InputMapPanel, control: UiControl| {
+        input_map_control_rects(rect, panel)
+            .into_iter()
+            .find(|(c, _)| *c == control)
+            .map(|(c, r)| (input_map_control_live(panel, c), r))
+    };
+
+    // A controller tab shows no page arrows and no keyboard rows.
+    assert!(hit(&panel, UiControl::RemapKeysPage(true)).is_none());
+    assert!(hit(&panel, UiControl::RemapKeyBind(0)).is_none());
+    assert!(hit(&panel, UiControl::RemapBind(0)).is_some());
+
+    panel.amiga_keys = true;
+    assert!(hit(&panel, UiControl::RemapBind(0)).is_none());
+    // First page: back is dead, on is live; Reset is dead until a move
+    // touches the row.
+    assert!(!hit(&panel, UiControl::RemapKeysPage(false)).unwrap().0);
+    assert!(hit(&panel, UiControl::RemapKeysPage(true)).unwrap().0);
+    assert!(hit(&panel, UiControl::RemapKeyBind(0)).unwrap().0);
+    assert!(!hit(&panel, UiControl::RemapKeyReset(0)).unwrap().0);
+    panel.map.keyboard_mut().set(
+        winit::keyboard::KeyCode::CapsLock,
+        Some(AMIGA_KEYS[0].rawkey),
+    );
+    assert!(hit(&panel, UiControl::RemapKeyReset(0)).unwrap().0);
+
+    // The last page holds what is left of the keyboard, and only that.
+    panel.page = input_map_key_pages() - 1;
+    let keys = panel.page_keys();
+    assert_eq!(keys.end, AMIGA_KEYS.len());
+    assert!(!keys.is_empty() && keys.len() <= MAP_KEY_ROWS);
+    assert!(!hit(&panel, UiControl::RemapKeysPage(true)).unwrap().0);
+    assert!(hit(&panel, UiControl::RemapKeyBind(keys.end - 1)).is_some());
+    assert!(hit(&panel, UiControl::RemapKeyBind(keys.start - 1)).is_none());
+
+    // Nothing the tab draws overlaps: the page number and arrows clear the
+    // three tabs.
+    let tabs_end = hit(&panel, UiControl::RemapKeysTab).unwrap().1;
+    let back = hit(&panel, UiControl::RemapKeysPage(false)).unwrap().1;
+    let page = format!("Page {}/{}", input_map_key_pages(), input_map_key_pages());
+    assert!(tabs_end.x + tabs_end.w + 8 <= back.x - 8 - font::text_width(&page, 1));
+}
+
+#[test]
+fn input_map_amiga_key_labels_and_notes_fit_their_columns() {
+    let label_cols = columns_for(MAP_BINDING_X - MAP_MARGIN - 8, MAP_LABEL_PX);
+    for key in crate::keymap::AMIGA_KEYS {
+        assert!(key.label.chars().count() <= label_cols, "{key:?}");
+    }
+    let line_cols = columns_for(INPUT_MAP_W - 2 * MAP_MARGIN, 1);
+    for text in [
+        MAP_NOTE,
+        MAP_KEYS_NOTE,
+        INPUT_MAP_KEYS_HINT,
+        INPUT_MAP_CONTROLLER_HINT,
+    ] {
+        assert!(text.chars().count() <= line_cols, "{text}");
+    }
+    let longest = crate::keymap::AMIGA_KEYS
+        .iter()
+        .map(|key| key.label.len())
+        .max()
+        .unwrap();
+    let armed = format!(
+        "Press the host key that should type {}... (Esc cancels)",
+        "x".repeat(longest)
+    );
+    assert!(armed.chars().count() <= line_cols, "{armed}");
 }

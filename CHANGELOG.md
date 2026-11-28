@@ -8,6 +8,21 @@ for the earlier release notes.
 
 ## Unreleased
 
+### Added
+
+- Host keys can be remapped to other Amiga keys. Copperline reads a host
+  key's position, not the symbol the host keymap gives it, so `xmodmap` and
+  XKB remaps never reached the Amiga. The new **Amiga Keys** tab of the
+  Input Mapping panel, or a `[keyboard]` table in `keymap.toml`, moves a
+  host key to another Amiga key or to none: Caps Lock as Ctrl, a home for
+  Help or the keypad brackets on a PC keyboard.
+- `--press-after`, `--key-after` and script files name the Help,
+  punctuation and keypad keys (`help`, `minus`, `kpenter`, `kplparen`, ...).
+- `--terminal` passes Insert, Home, End, Page Up and Down, Num Lock,
+  Scroll Lock, Print Screen, Pause, Menu, F13-F15 and keypad `=` on to the
+  machine instead of dropping them, so a keyboard remap or a controller
+  binding can use them as in the window.
+
 ## 1.3.0 - 2026-11-28
 
 ### Added

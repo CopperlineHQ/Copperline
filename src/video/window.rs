@@ -954,7 +954,7 @@ fn rawkey_transition_is_duplicate(held_rawkeys: &[bool; 128], rawkey: u8, presse
 
 fn repeated_main_key_should_drop(
     held_rawkeys: &[bool; 128],
-    code: KeyCode,
+    rawkey: Option<u8>,
     state: ElementState,
     repeat: bool,
     ui_accepts_repeat: bool,
@@ -962,7 +962,7 @@ fn repeated_main_key_should_drop(
     if !repeat || state != ElementState::Pressed || ui_accepts_repeat {
         return false;
     }
-    match host_to_amiga_rawkey(code) {
+    match rawkey {
         Some(rawkey) => rawkey_is_held(held_rawkeys, rawkey),
         None => true,
     }
@@ -984,13 +984,99 @@ fn animated_focus_needs_continuous_redraw(running: bool, showing: bool) -> bool 
     running && showing
 }
 
-fn raw_device_qualifier_rawkey(code: KeyCode) -> Option<u8> {
-    match code {
-        KeyCode::ShiftLeft => Some(AMIGA_RAWKEY_LEFT_SHIFT),
-        KeyCode::ShiftRight => Some(AMIGA_RAWKEY_RIGHT_SHIFT),
-        KeyCode::AltLeft => Some(AMIGA_RAWKEY_LEFT_ALT),
-        KeyCode::AltRight => Some(AMIGA_RAWKEY_RIGHT_ALT),
-        _ => None,
+/// Whether `rawkey` is one of the Amiga qualifiers the raw-device listener
+/// tracks: the Shift and Alt pairs, whose sides a winit `ModifiersState`
+/// update cannot tell apart (see `update_host_modifiers`).
+fn raw_device_qualifier(rawkey: u8) -> bool {
+    matches!(
+        rawkey,
+        AMIGA_RAWKEY_LEFT_SHIFT
+            | AMIGA_RAWKEY_RIGHT_SHIFT
+            | AMIGA_RAWKEY_LEFT_ALT
+            | AMIGA_RAWKEY_RIGHT_ALT
+    )
+}
+
+/// Whether `code` is a host key the raw-device listener answers for: a host
+/// Shift or Alt, the keys whose sides winit's aggregate modifier state
+/// loses. Only these: any other host key, remapped onto a qualifier or not,
+/// is the window's, which may take it as a shortcut instead (Alt+S is a
+/// screenshot whatever S types on the Amiga).
+fn raw_device_host_key(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::ShiftLeft | KeyCode::ShiftRight | KeyCode::AltLeft | KeyCode::AltRight
+    )
+}
+
+/// Which Amiga key each host key held down went to.
+///
+/// A release goes to the key its press went to, whatever the map says by
+/// then, and only once no other host key still holds that Amiga key: with
+/// Caps Lock remapped onto Ctrl, Left Ctrl going up while Caps Lock stays
+/// down must leave Ctrl down, as must Right Ctrl and Right Super, which
+/// both type Right Amiga. The raw-device listener and the window report
+/// the same physical key under the same code, so a second report of a
+/// press or release is idempotent here.
+#[derive(Debug, Default, Clone)]
+struct HostKeyHolds {
+    holds: Vec<(KeyCode, u8)>,
+}
+
+impl HostKeyHolds {
+    /// `code` went down onto `rawkey`. `rawkey_down` is whether the
+    /// machine already holds that Amiga key: when it does not, any other
+    /// holder on record is stale -- its release was lost to a reset or a
+    /// focus change -- and is dropped, so it cannot keep the key down later.
+    fn press(&mut self, code: KeyCode, rawkey: u8, rawkey_down: bool) {
+        self.holds
+            .retain(|&(held, held_rawkey)| held != code && (rawkey_down || held_rawkey != rawkey));
+        self.holds.push((code, rawkey));
+    }
+
+    /// `code` went up: the Amiga key to release, if no other host key still
+    /// holds it. A key with no press on record releases `fallback` (what
+    /// the map sends it to now), so a release whose press was never seen
+    /// still clears a key the machine holds.
+    fn release(&mut self, code: KeyCode, fallback: Option<u8>) -> Option<u8> {
+        let rawkey = match self.holds.iter().position(|&(held, _)| held == code) {
+            Some(index) => self.holds.swap_remove(index).1,
+            None => fallback?,
+        };
+        (!self.holds.iter().any(|&(_, held)| held == rawkey)).then_some(rawkey)
+    }
+
+    /// The Amiga key `code` went down onto, if it is held.
+    fn rawkey_of(&self, code: KeyCode) -> Option<u8> {
+        self.holds
+            .iter()
+            .find(|&&(held, _)| held == code)
+            .map(|&(_, rawkey)| rawkey)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (KeyCode, u8)> + '_ {
+        self.holds.iter().copied()
+    }
+
+    fn clear(&mut self) {
+        self.holds.clear();
+    }
+}
+
+/// Whether the host's own modifier state follows `code` holding `rawkey`:
+/// a host Shift typing an Amiga Shift, or a host Alt an Amiga Alt. A host
+/// key remapped onto a qualifier of another family (Caps Lock typing Shift,
+/// Shift typing Alt) is invisible to `ModifiersState`, so a modifier update
+/// must not take it as that qualifier's release.
+fn host_modifiers_follow(code: KeyCode, rawkey: u8) -> bool {
+    match rawkey {
+        AMIGA_RAWKEY_LEFT_SHIFT | AMIGA_RAWKEY_RIGHT_SHIFT => {
+            matches!(code, KeyCode::ShiftLeft | KeyCode::ShiftRight)
+        }
+        AMIGA_RAWKEY_LEFT_ALT | AMIGA_RAWKEY_RIGHT_ALT => {
+            matches!(code, KeyCode::AltLeft | KeyCode::AltRight)
+        }
+        _ => true,
     }
 }
 
@@ -1125,6 +1211,11 @@ fn analyzer_default_heat_window(bus: &crate::bus::Bus) -> (u32, u32) {
 pub struct App {
     netplay: Option<crate::netplay::Session>,
     netplay_input: crate::netplay::LocalInput,
+    /// The Amiga key each host key held during netplay went to, for the
+    /// same last-holder release as [`App::host_key_holds`]. Its stale
+    /// entries heal on the next press of their Amiga key, so the several
+    /// places that reset `netplay_input` need not clear it.
+    netplay_key_holds: HostKeyHolds,
     netplay_keyboard_controller: bool,
     netplay_setup: Option<crate::video::launcher::NetplaySetup>,
     netplay_disk_picker: Option<(usize, app_netplay::DiskPicker)>,
@@ -1389,6 +1480,13 @@ pub struct App {
     /// winit `ModifiersState` update from releasing a qualifier the
     /// hardware still has down (see `update_host_modifiers`).
     raw_device_held_rawkeys: [bool; 128],
+    /// Which Amiga key each host key the operator holds went to, so its
+    /// release goes there too and waits for the last holder (see
+    /// [`HostKeyHolds`]). It is also what stops a `ModifiersState` update
+    /// releasing a qualifier held by a key remapped onto it from outside
+    /// its family (see [`host_modifiers_follow`]), on hosts that deliver
+    /// no raw-device key events.
+    host_key_holds: HostKeyHolds,
     main_window_focused: bool,
     /// Whether the user has sized the main window themselves, in which case
     /// the canvas reflows into it instead of the window snapping to the
@@ -3140,6 +3238,7 @@ impl App {
             held_rawkeys: [false; 128],
             panel_held_rawkeys: [false; 128],
             raw_device_held_rawkeys: [false; 128],
+            host_key_holds: HostKeyHolds::default(),
             main_window_focused: false,
             clipboard_next_poll: None,
             window_manually_sized: false,
@@ -3253,6 +3352,7 @@ impl App {
             autofire_hz,
             netplay: None,
             netplay_input: Default::default(),
+            netplay_key_holds: HostKeyHolds::default(),
             netplay_keyboard_controller: true,
             netplay_setup: None,
             netplay_disk_picker: None,
@@ -3884,9 +3984,34 @@ impl App {
     fn input_map_select_mapping(&mut self, set: usize) {
         if let Some(panel) = self.input_map_panel_mut() {
             panel.mapping = set.min(keymap::MAPPING_COUNT - 1);
-            // An armed row belongs to the mapping it was armed on.
-            panel.capturing = None;
-            panel.message = "Click Set, then press the key to bind.".to_string();
+            panel.amiga_keys = false;
+            // An armed row belongs to the tab it was armed on.
+            panel.disarm();
+            panel.message = ui::INPUT_MAP_CONTROLLER_HINT.to_string();
+        }
+        self.request_redraw();
+    }
+
+    fn input_map_show_amiga_keys(&mut self) {
+        if let Some(panel) = self.input_map_panel_mut() {
+            panel.amiga_keys = true;
+            panel.disarm();
+            panel.message = ui::INPUT_MAP_KEYS_HINT.to_string();
+        }
+        self.request_redraw();
+    }
+
+    fn input_map_turn_page(&mut self, forward: bool) {
+        if let Some(panel) = self.input_map_panel_mut() {
+            let last = ui::input_map_key_pages() - 1;
+            panel.page = if forward {
+                (panel.page + 1).min(last)
+            } else {
+                panel.page.saturating_sub(1)
+            };
+            // An armed row belongs to the page it was armed on.
+            panel.disarm();
+            panel.message = ui::INPUT_MAP_KEYS_HINT.to_string();
         }
         self.request_redraw();
     }
@@ -3896,8 +4021,24 @@ impl App {
             let Some(control) = keymap::CONTROLS.get(index).copied() else {
                 return;
             };
+            panel.disarm();
             panel.capturing = Some(control);
             panel.message = format!("Press a key for {}... (Esc cancels)", control.label());
+        }
+        self.request_redraw();
+    }
+
+    fn input_map_arm_amiga_key(&mut self, index: usize) {
+        if let Some(panel) = self.input_map_panel_mut() {
+            let Some(key) = keymap::AMIGA_KEYS.get(index) else {
+                return;
+            };
+            panel.disarm();
+            panel.capturing_key = Some(index);
+            panel.message = format!(
+                "Press the host key that should type {}... (Esc cancels)",
+                key.label
+            );
         }
         self.request_redraw();
     }
@@ -3909,30 +4050,50 @@ impl App {
             };
             let mapping = panel.mapping;
             panel.map.mapping_mut(mapping).clear(control);
-            panel.capturing = None;
+            panel.disarm();
             panel.message = format!("{} unbound.", control.label());
         }
         self.request_redraw();
     }
 
-    fn input_map_defaults(&mut self) {
+    fn input_map_reset_amiga_key(&mut self, index: usize) {
         if let Some(panel) = self.input_map_panel_mut() {
-            panel.map = keymap::KeyMap::default();
-            panel.capturing = None;
-            panel.message = "Restored the built-in bindings (not saved yet).".to_string();
+            let Some(key) = keymap::AMIGA_KEYS.get(index) else {
+                return;
+            };
+            panel.map.keyboard_mut().reset(key.rawkey);
+            panel.disarm();
+            panel.message = format!("{} is back where it ships.", key.label);
         }
         self.request_redraw();
     }
 
-    /// Commit the edited map: apply it to the live session and persist it.
-    /// Any keys held under the old map are released first, so a binding that
-    /// just moved cannot leave a controller line stuck asserted.
+    /// Restore the built-in layout of what the panel is showing: both
+    /// controller mappings from a controller tab, the keyboard from the
+    /// Amiga Keys tab. The other half of the map keeps its edits.
+    fn input_map_defaults(&mut self) {
+        if let Some(panel) = self.input_map_panel_mut() {
+            if panel.amiga_keys {
+                panel.map.keyboard_mut().clear();
+                panel.message =
+                    "Every host key types its own place again (not saved yet).".to_string();
+            } else {
+                panel.map.reset_controllers();
+                panel.message = "Restored the built-in bindings (not saved yet).".to_string();
+            }
+            panel.disarm();
+        }
+        self.request_redraw();
+    }
+
+    /// Commit the edited map: apply it to the live session, letting go of
+    /// every held host key first (see [`Self::apply_input_map`]), and
+    /// persist it.
     fn input_map_save(&mut self) {
         let Some(map) = self.input_map_panel_mut().map(|panel| panel.map.clone()) else {
             return;
         };
-        self.keyboard_joy_held = [keymap::HeldKeys::default(); keymap::MAPPING_COUNT];
-        self.keymap = map;
+        self.apply_input_map(map);
         match self.keymap.save() {
             Ok(()) => self.show_osd("Input mapping saved"),
             Err(e) => {
@@ -3950,14 +4111,14 @@ impl App {
     fn input_map_handle_key(&mut self, code: KeyCode) -> bool {
         let armed = matches!(
             self.ui.panel.as_ref(),
-            Some(Panel::InputMap(panel)) if panel.capturing.is_some()
+            Some(Panel::InputMap(panel)) if panel.armed()
         );
         if !armed {
             return false;
         }
         if code == KeyCode::Escape {
             if let Some(panel) = self.input_map_panel_mut() {
-                panel.capturing = None;
+                panel.disarm();
                 panel.message = "Binding cancelled.".to_string();
             }
             self.request_redraw();
@@ -3987,7 +4148,10 @@ impl App {
         if pressed && !was_held {
             // A repeated press can arrive after routing changes. End any
             // guest key hold before taking it over as a joystick control.
-            if let Some(rawkey) = host_to_amiga_rawkey(code) {
+            if let Some(rawkey) = self
+                .host_key_holds
+                .release(code, self.amiga_rawkey_for(code))
+            {
                 self.release_amiga_rawkey_if_held(rawkey);
             }
         }
@@ -5411,9 +5575,7 @@ impl ApplicationHandler for App {
                         if self.handle_keyboard_joystick_key(other, pressed) {
                             return;
                         }
-                        if let Some(rawkey) = host_to_amiga_rawkey(other) {
-                            self.handle_live_amiga_key_event(rawkey, pressed);
-                        }
+                        self.handle_host_amiga_key(other, pressed);
                     }
                 }
             }
@@ -7697,7 +7859,7 @@ impl App {
     ) -> bool {
         repeated_main_key_should_drop(
             &self.held_rawkeys,
-            code,
+            self.amiga_rawkey_for(code),
             state,
             repeat,
             self.ui_key_accepts_repeat(None, code),
@@ -7723,6 +7885,10 @@ impl App {
             UiControl::RemapClear(index) => self.input_map_clear(index),
             UiControl::RemapDefaults => self.input_map_defaults(),
             UiControl::RemapSave => self.input_map_save(),
+            UiControl::RemapKeysTab => self.input_map_show_amiga_keys(),
+            UiControl::RemapKeysPage(forward) => self.input_map_turn_page(forward),
+            UiControl::RemapKeyBind(index) => self.input_map_arm_amiga_key(index),
+            UiControl::RemapKeyReset(index) => self.input_map_reset_amiga_key(index),
             UiControl::PanelClose | UiControl::CalCancel => self.close_panel(),
             UiControl::PanelBody => {}
             UiControl::CalSkip => {

@@ -659,7 +659,8 @@ the guest. Overlay panels remain modal: their keys and clicks stay in the UI.
   section of [Configuration](configuration.md#clipboard).
 - **Calibrate Gamepad...**: the guided calibration flow, described below.
 - **Input Mapping...**: edits which host keys drive the controller controls,
-  for both keyboard mappings; see [](#input-mapping).
+  for both keyboard mappings, and which Amiga key each host key types; see
+  [](#input-mapping).
 
 ### Warp Settings
 
@@ -1864,8 +1865,9 @@ once fixes it.
 ## Input mapping
 
 The keyboard also stands in for a controller, on two independent mappings so
-one keyboard can drive a two-player setup (see [](#controller-ports)). The
-menu's **Input Mapping...** item edits both.
+one keyboard can drive a two-player setup (see [](#controller-ports)), and
+any host key can be moved to another Amiga key. The menu's **Input
+Mapping...** item edits all three.
 
 ```{figure} ../images/ui-preview-input-mapping.png
 :alt: The input mapping window
@@ -1878,7 +1880,8 @@ Pick the mapping with the **Controller 1** / **Controller 2** tabs, then
 **Set** on a row and press the key to bind (Escape cancels that row without
 closing the panel). **Clear** unbinds a control entirely, **Defaults**
 restores the built-in layouts, and **Save** writes the map and applies it to
-the running machine. Closing the panel without saving discards the edits.
+the running machine, letting go of any key held at that moment. Closing the
+panel without saving discards the edits.
 
 A control may hold several keys, and they OR together: fire ships bound to
 Right Ctrl, Right Alt, Left Ctrl and `C`, so compact keyboards without the
@@ -1886,6 +1889,33 @@ right-hand modifiers still work, and releasing one alias while another is
 held keeps the button down. Binding a key removes it from wherever it was
 before -- including from the other mapping -- so the two controllers can
 never end up fighting over one key.
+
+The **Amiga Keys** tab lists the Amiga keyboard, a page at a time (the
+arrows beside the page number turn them), with the host keys that type each
+key. A host key types the Amiga key in its own place on the keyboard, so
+remapping it in the host's keymap (`xmodmap`, an XKB option) changes
+nothing here; this tab is where to do it. **Set** on a row and press a host
+key, and that key types the row's Amiga key from then on: **Set** on *Ctrl*
+then Caps Lock makes Caps Lock a second Ctrl, and **Set** on *Caps Lock*
+then Left Ctrl completes the swap. **Reset** puts a row back the way it
+ships, returning every host key moved onto or off it to its own place, and
+**Defaults** on this tab undoes every move. The first page holds the
+qualifiers and the keys a PC or Mac keyboard places differently, Help
+among them; later pages hold the main keys and the keypad.
+
+```{figure} ../images/ui-preview-input-mapping-keys.png
+:alt: The Amiga Keys tab of the input mapping window
+:width: 75%
+
+The Amiga Keys tab with Caps Lock moved onto Ctrl, and the Ctrl row armed
+for another key.
+```
+
+**Defaults** restores only the tab it is pressed on: a controller tab
+restores both controller layouts, the Amiga Keys tab the keyboard. On macOS
+the Caps Lock key cannot be captured, because the system reports it only as
+a lock state; see [Remapping Amiga keys](configuration.md#remapping-amiga-keys)
+for that, and for writing the `[keyboard]` table by hand.
 
 Saved maps live next to the gamepad calibrations, in
 `~/Documents/Copperline/keymap.toml` (same per-platform locations as above).
