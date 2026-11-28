@@ -4031,7 +4031,71 @@ impl CpuBus {
         }
     }
 
+    /// Which plain memory, if any, holds `addr..addr+size`, in the address
+    /// decoders' priority order.
+    ///
+    /// Every CPU access that misses the cache models decodes here, so a
+    /// board whose selects are fixed -- no Buster choosing windows, no
+    /// expansion board asserting /OVR, no freezer cartridge bank -- takes
+    /// [`Self::classify_fixed_select_memory`], which tries the same regions
+    /// in the same order without the tests for those parts, and makes no
+    /// calls: decoding stays as cheap as the motherboard's own selects.
+    #[inline]
     fn classify_plain_memory(&self, addr: u32, size: usize) -> Option<PlainMemRegion> {
+        if self.bus.mem.zorro.fixed_selects() && self.bus.cartridge.is_none() {
+            self.classify_fixed_select_memory(addr, size)
+        } else {
+            self.classify_selected_memory(addr, size)
+        }
+    }
+
+    /// [`Self::classify_plain_memory`] for a board with fixed selects: no
+    /// /OVR board and no Buster on the Zorro chain, and no cartridge.
+    fn classify_fixed_select_memory(&self, addr: u32, size: usize) -> Option<PlainMemRegion> {
+        if let Some(off) = self.overlay_rom_offset(addr, size) {
+            return Some(PlainMemRegion::OverlayRom(off));
+        }
+        if let Some(off) = self.chip_window_offset(addr, size) {
+            return Some(PlainMemRegion::ChipRam(off));
+        }
+        if let Some((board, off)) = self.bus.mem.zorro.fixed_region_at(addr, size) {
+            return Some(PlainMemRegion::ZorroRam(board, off));
+        }
+        if let Some(off) = region_offset(self.bus.mem.slow_ram.len(), SLOW_RAM_BASE, addr, size) {
+            return Some(PlainMemRegion::SlowRam(off));
+        }
+        if let Some(off) = region_offset(
+            self.bus.mem.mb_ram.len(),
+            self.bus.mem.mb_ram_base(),
+            addr,
+            size,
+        ) {
+            return Some(PlainMemRegion::MbRam(off));
+        }
+        if let Some(off) = region_offset(self.bus.mem.accel_ram.len(), ACCEL_RAM_BASE, addr, size) {
+            return Some(PlainMemRegion::AccelRam(off));
+        }
+        if let Some(off) = region_offset(self.bus.mem.rom.len(), ROM_BASE, addr, size) {
+            return Some(PlainMemRegion::Rom(off));
+        }
+        if let Some(off) = region_offset(self.bus.mem.wcs.len(), WCS_BASE, addr, size) {
+            return Some(PlainMemRegion::Wcs(off));
+        }
+        if let Some(off) = region_offset(
+            self.bus.mem.extended_rom.len(),
+            self.bus.mem.extended_rom_base,
+            addr,
+            size,
+        ) {
+            return Some(PlainMemRegion::ExtendedRom(off));
+        }
+        self.rom_mirror_region(addr, size)
+    }
+
+    /// [`Self::classify_plain_memory`] with every select a Buster, an /OVR
+    /// board or a cartridge adds.
+    #[inline(never)]
+    fn classify_selected_memory(&self, addr: u32, size: usize) -> Option<PlainMemRegion> {
         if let Some((idx, off)) = self.bus.mem.zorro.override_ram(addr, size) {
             return Some(PlainMemRegion::ZorroRam(idx, off));
         }
@@ -4099,7 +4163,9 @@ impl CpuBus {
     /// (A19 low) answers at $B00000 and the $F80000 half at $A80000.
     ///
     /// Only three 512 KiB blocks can hold a mirror, and the canonical
-    /// selects are tried first, so no ordinary fetch pays for this.
+    /// selects are tried first, so no ordinary fetch pays for this. Kept
+    /// inline: the plain-memory decode around it makes no calls.
+    #[inline(always)]
     fn rom_mirror_region(&self, addr: u32, size: usize) -> Option<PlainMemRegion> {
         let block = addr >> 19;
         if !matches!(block, 0x15 | 0x16 | 0x1c) {
@@ -4446,6 +4512,38 @@ impl CpuBus {
         }
     }
 
+    /// Bill an access to Zorro board `board`'s RAM. Without a Buster that is
+    /// the generic external-bus cost, decided before the board's bus
+    /// version is even looked up: every fast-RAM access that misses the
+    /// caches on an A500, A600 or A1200 comes through here.
+    #[inline]
+    fn bill_zorro_ram(&mut self, board: usize, addr: u32, size: usize) {
+        if self.bus.buster.revision == crate::buster::Revision::Absent {
+            self.bill_external_access(size);
+            return;
+        }
+        let version = self.bus.mem.zorro.ram_version(board);
+        self.bill_zorro(version, addr, size, true);
+    }
+
+    /// Bill an access to the I/O window of the Zorro board in device slot
+    /// `slot`, as [`Self::bill_zorro_ram`] does for RAM.
+    #[inline]
+    fn bill_zorro_device(&mut self, slot: usize, addr: u32, size: usize) {
+        if self.bus.buster.revision == crate::buster::Revision::Absent {
+            self.bus.cpu_slow_external_access(Self::access_words(size));
+            return;
+        }
+        let version = self
+            .bus
+            .mem
+            .zorro
+            .device_version(slot)
+            .expect("mapped board");
+        self.bill_zorro(version, addr, size, false);
+    }
+
+    #[inline(never)]
     fn bill_zorro(
         &mut self,
         version: crate::zorro::ZorroVersion,
@@ -4662,13 +4760,30 @@ impl CpuBus {
         }
     }
 
+    /// Allocate the line a cache miss just read, when the cache may hold
+    /// it. Every access the cache models miss comes through here, so the
+    /// common case stays small enough to inline: a cache that is absent,
+    /// disabled or frozen allocates nothing and skips the address decode,
+    /// and only a board that bursts a line (Ramsey, or a Zorro III Buster)
+    /// reaches the out-of-line burst fill.
+    #[inline]
     fn cache_fill_after_miss(&mut self, addr: u32, size: usize, kind: CpuBusAccessKind) {
-        if size > 4 || self.in_cache_free_window(addr, size) {
+        let accepts = |cache: &Option<Box<crate::cache::CpuCache>>| {
+            cache
+                .as_deref()
+                .is_some_and(|cache| cache.enabled && !cache.frozen)
+        };
+        let accepts = match kind {
+            CpuBusAccessKind::Fetch => accepts(&self.icache),
+            CpuBusAccessKind::Read => accepts(&self.dcache),
+            _ => false,
+        };
+        if size > 4 || !accepts || self.in_cache_free_window(addr, size) {
             return;
         }
         let cacheable = match kind {
-            CpuBusAccessKind::Fetch => self.icache.is_some() && self.icache_cacheable(addr),
-            CpuBusAccessKind::Read => self.dcache.is_some() && self.dcache_cacheable(addr),
+            CpuBusAccessKind::Fetch => self.icache_cacheable(addr),
+            CpuBusAccessKind::Read => self.dcache_cacheable(addr),
             _ => false,
         };
         if !cacheable {
@@ -4683,42 +4798,9 @@ impl CpuBus {
         };
         if let Some(cache) = cache.as_deref_mut() {
             cache.fill_after_miss(addr, size, |long| self.peek_long(long));
-            let line = addr & !15;
-            if cache.burst && !self.bus.buster.cpu_locked && cache.enabled && !cache.frozen {
-                let ramsey_ram = (0x0700_0000..0x0800_0000).contains(&line)
-                    && matches!(
-                        self.classify_plain_memory(line, 16),
-                        Some(PlainMemRegion::MbRam(_))
-                    );
-                let follows = if ramsey_ram {
-                    let now = self.bus.ramsey_clock();
-                    self.bus.ramsey.as_mut().map_or(0, |r| {
-                        r.advance_to(now);
-                        r.burst_followups(addr)
-                    })
-                } else if self.bus.buster.revision.z3_master() && self.bus.mem.zorro.burst_ram(line)
-                {
-                    3
-                } else {
-                    0
-                };
-                // The first longword was billed by the demand read. Buster
-                // increments EA3:2, wrapping within the same 16-byte line.
-                // All four data strobes share one /FCS. No other master
-                // can acquire the bus between the demand and the wrap.
-                let driving = std::mem::replace(&mut self.bus.buster.cpu_driving, true);
-                for step in 1..=follows {
-                    let next = line | ((addr.wrapping_add(4 * step)) & 12);
-                    if ramsey_ram {
-                        if !self.jit_enabled {
-                            self.bus.ramsey_access(next, true);
-                        }
-                        cache.fill_after_miss(next, 4, |long| self.peek_long(long));
-                    } else {
-                        cache.fill_after_miss(next, 4, |long| self.read_bus_cycle(long, 4, kind));
-                    }
-                }
-                self.bus.buster.cpu_driving = driving;
+            // Only Ramsey and a Zorro III Buster burst the rest of a line.
+            if cache.burst && (self.bus.ramsey.is_some() || self.bus.buster.revision.z3_master()) {
+                self.burst_fill_line(cache, addr, kind);
             }
         }
         match kind {
@@ -4726,6 +4808,55 @@ impl CpuBus {
             CpuBusAccessKind::Read => self.dcache = cache,
             _ => {}
         }
+    }
+
+    /// The follow-up longwords of a burst line fill after the demand
+    /// longword `addr`, from Ramsey's motherboard RAM or a Zorro III board
+    /// that acknowledges bursts through Buster.
+    #[inline(never)]
+    fn burst_fill_line(
+        &mut self,
+        cache: &mut crate::cache::CpuCache,
+        addr: u32,
+        kind: CpuBusAccessKind,
+    ) {
+        if self.bus.buster.cpu_locked || !cache.enabled || cache.frozen {
+            return;
+        }
+        let line = addr & !15;
+        let ramsey_ram = (0x0700_0000..0x0800_0000).contains(&line)
+            && matches!(
+                self.classify_plain_memory(line, 16),
+                Some(PlainMemRegion::MbRam(_))
+            );
+        let follows = if ramsey_ram {
+            let now = self.bus.ramsey_clock();
+            self.bus.ramsey.as_mut().map_or(0, |r| {
+                r.advance_to(now);
+                r.burst_followups(addr)
+            })
+        } else if self.bus.buster.revision.z3_master() && self.bus.mem.zorro.burst_ram(line) {
+            3
+        } else {
+            0
+        };
+        // The first longword was billed by the demand read. Buster
+        // increments EA3:2, wrapping within the same 16-byte line.
+        // All four data strobes share one /FCS. No other master
+        // can acquire the bus between the demand and the wrap.
+        let driving = std::mem::replace(&mut self.bus.buster.cpu_driving, true);
+        for step in 1..=follows {
+            let next = line | ((addr.wrapping_add(4 * step)) & 12);
+            if ramsey_ram {
+                if !self.jit_enabled {
+                    self.bus.ramsey_access(next, true);
+                }
+                cache.fill_after_miss(next, 4, |long| self.peek_long(long));
+            } else {
+                cache.fill_after_miss(next, 4, |long| self.read_bus_cycle(long, 4, kind));
+            }
+        }
+        self.bus.buster.cpu_driving = driving;
     }
 
     /// What the instruction cache may hold: any RAM or ROM. The boot-time
@@ -4894,7 +5025,7 @@ impl CpuBus {
                     // Buster times the cycle against the other masters.
                     self.note_wait_impure();
                 }
-                self.bill_zorro(self.bus.mem.zorro.ram_version(board), addr, size, true);
+                self.bill_zorro_ram(board, addr, size);
                 let value = read_be(self.bus.mem.zorro.board_ram(board), off, size);
                 self.note_wait_read(addr, size, value);
                 return value;
@@ -4960,7 +5091,16 @@ impl CpuBus {
             }
             None => self.note_wait_impure(),
         }
+        self.read_device_cycle(addr, size, kind)
+    }
 
+    /// The rest of [`Self::read_bus_cycle`]: an access no plain memory
+    /// answers, decoded by the CIA, custom-register and I/O device selects.
+    /// Out of line, so the plain-memory reads before it -- most of a
+    /// program's cache misses -- keep a small frame instead of setting up
+    /// this whole decode.
+    #[inline(never)]
+    fn read_device_cycle(&mut self, addr: u32, size: usize, kind: CpuBusAccessKind) -> u32 {
         if let Some((cia_a, cia_b)) = self.gary_vpa_select(addr) {
             if size == 4 {
                 // A long operand is two word cycles, each with its own
@@ -5108,16 +5248,7 @@ impl CpuBus {
             if let Some(rom) = self.board_plain_rom(addr, size) {
                 return read_be(rom, 0, size);
             }
-            self.bill_zorro(
-                self.bus
-                    .mem
-                    .zorro
-                    .device_version(slot)
-                    .expect("mapped board"),
-                addr,
-                size,
-                false,
-            );
+            self.bill_zorro_device(slot, addr, size);
             #[cfg(feature = "wasm-boards")]
             if let Some(v) = self
                 .bus
@@ -5406,7 +5537,7 @@ impl CpuBus {
                 return;
             }
             Some(PlainMemRegion::ZorroRam(board, off)) => {
-                self.bill_zorro(self.bus.mem.zorro.ram_version(board), addr, size, true);
+                self.bill_zorro_ram(board, addr, size);
                 write_be(self.bus.mem.zorro.board_ram_mut(board), off, size, value);
                 return;
             }
@@ -5468,7 +5599,13 @@ impl CpuBus {
             }
             None => {}
         }
+        self.write_device_cycle(addr, size, value);
+    }
 
+    /// The rest of [`Self::write_bus_cycle`], as [`Self::read_device_cycle`]
+    /// is for reads.
+    #[inline(never)]
+    fn write_device_cycle(&mut self, addr: u32, size: usize, value: u32) {
         // Ordinary memory stores above change bytes, not mappings. Autoconfig
         // and peripheral writes below can change decode, so recapture cache
         // exclusions before the next batch. RESET and slice entry also do so.
@@ -5663,16 +5800,7 @@ impl CpuBus {
         if let Some((crate::zorro::BoardBacking::Device(slot), off)) =
             self.bus.mem.zorro.device_region_at(addr, size)
         {
-            self.bill_zorro(
-                self.bus
-                    .mem
-                    .zorro
-                    .device_version(slot)
-                    .expect("mapped board"),
-                addr,
-                size,
-                false,
-            );
+            self.bill_zorro_device(slot, addr, size);
             #[cfg(feature = "wasm-boards")]
             if self
                 .bus

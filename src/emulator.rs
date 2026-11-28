@@ -2942,11 +2942,16 @@ impl Emulator {
         // Whatever ran the machine since the last call may have changed it:
         // a wait loop is proven afresh (see `wait_skip.rs`).
         self.begin_wait_quantum();
+        // Settled for the whole call: with the skip off (or not supported)
+        // `run_one_step_skipping` is `run_one_step`, so skip its tests.
+        let skipping = self.wait_skip_active();
         while remaining > 0 {
             let accounting = if pc_outside.is_some() {
                 self.run_one_precise_step(&mut cpu_idle, remaining)?
-            } else {
+            } else if skipping {
                 self.run_one_step_skipping(&mut cpu_idle, remaining)?
+            } else {
+                self.run_one_step(&mut cpu_idle, remaining)?
             };
             remaining = remaining.saturating_sub(accounting.budget_debit);
             if let Some((lo, hi)) = pc_outside {

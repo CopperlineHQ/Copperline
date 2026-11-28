@@ -936,22 +936,42 @@ impl ZorroChain {
         None
     }
 
+    /// The RAM window of a board that asserts /OVR over `addr..addr+len`.
+    /// Every CPU access asks this first; with no such board fitted it is
+    /// one test.
+    #[inline]
     pub(crate) fn override_ram(&self, addr: u32, len: usize) -> Option<(usize, usize)> {
         if !self.has_ovr {
             return None;
         }
+        self.override_ram_window(addr, len)
+    }
+
+    #[inline(never)]
+    fn override_ram_window(&self, addr: u32, len: usize) -> Option<(usize, usize)> {
         self.region_at(addr, len)
             .filter(|&(idx, _)| self.boards[idx].spec.timing.ovr)
     }
 
+    /// Whether the CPU caches may hold the board RAM at `addr`. Without a
+    /// Super Buster every configured RAM window is cacheable, which is
+    /// what every cache line fill on a board without one asks.
+    #[inline]
     pub(crate) fn cacheable_ram(&self, addr: u32) -> bool {
+        if !self.controller.super_buster() {
+            return self.region_at(addr, 1).is_some();
+        }
+        self.cacheable_ram_super_buster(addr)
+    }
+
+    #[inline(never)]
+    fn cacheable_ram_super_buster(&self, addr: u32) -> bool {
         self.region_at(addr, 1).is_some_and(|(idx, _)| {
             let spec = &self.boards[idx].spec;
-            !self.controller.super_buster()
-                || match spec.version {
-                    ZorroVersion::II => crate::buster::Z2_MEMORY.contains(&addr),
-                    ZorroVersion::III => !spec.timing.cache_inhibit,
-                }
+            match spec.version {
+                ZorroVersion::II => crate::buster::Z2_MEMORY.contains(&addr),
+                ZorroVersion::III => !spec.timing.cache_inhibit,
+            }
         })
     }
 
@@ -1213,15 +1233,31 @@ impl ZorroChain {
         // Every CPU access that misses chip RAM asks this. Without a Buster
         // every configured window is selected, so that case stays inline.
         if self.controller == crate::buster::Revision::Absent {
-            for &(base, len, idx) in &self.regions {
-                let off = addr.wrapping_sub(base);
-                if u64::from(off) + size as u64 <= u64::from(len) {
-                    return Some((idx, off as usize));
-                }
-            }
-            return None;
+            return self.fixed_region_at(addr, size);
         }
         self.region_in_decoded_windows(addr, size)
+    }
+
+    /// Whether the chain's selects are fixed: no Buster choosing which
+    /// windows answer and no board asserting /OVR over another decode.
+    /// [`Self::fixed_region_at`] is then the whole RAM window decode.
+    #[inline]
+    pub(crate) fn fixed_selects(&self) -> bool {
+        !self.has_ovr && self.controller == crate::buster::Revision::Absent
+    }
+
+    /// [`Self::region_at`] for a chain without a Buster, where every
+    /// configured window is selected.
+    #[inline]
+    pub(crate) fn fixed_region_at(&self, addr: u32, size: usize) -> Option<(usize, usize)> {
+        debug_assert_eq!(self.controller, crate::buster::Revision::Absent);
+        for &(base, len, idx) in &self.regions {
+            let off = addr.wrapping_sub(base);
+            if u64::from(off) + size as u64 <= u64::from(len) {
+                return Some((idx, off as usize));
+            }
+        }
+        None
     }
 
     #[inline(never)]

@@ -224,6 +224,13 @@ impl Emulator {
         Ok(accounting)
     }
 
+    /// Whether this real-time call may skip (`begin_wait_quantum` settles
+    /// it). While it may not, no loop is ever being proven and
+    /// `run_one_step_skipping` is `run_one_step`.
+    pub(super) fn wait_skip_active(&self) -> bool {
+        self.wait_skip.active
+    }
+
     /// Start a real-time call: forget any loop (whatever ran the machine
     /// since the last call may have changed it) and settle whether this
     /// call may skip at all.
