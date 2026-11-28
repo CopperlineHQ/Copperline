@@ -8,6 +8,8 @@ for the earlier release notes.
 
 ## Unreleased
 
+## 1.3.0 - 2026-11-28
+
 ### Added
 
 - The A2000, A3000 and A4000 model Buster expansion-bus arbitration for
@@ -74,6 +76,20 @@ for the earlier release notes.
   shows which one is working (#1004). The web player's `fdd_drive_led(drive)`
   reads the same LED, and `fdd_busy()` reports a drive selected with its
   motor running, which the Web Player Kit's periodic disk save waits on.
+- A DeMoN II freezer cartridge for the A500 and A500+
+  (`[cartridge] model = "demon2"`, `--cartridge demon2`, or the launcher's
+  **System -> Freezer cartridge** row), with 1 MiB of cartridge RAM. It
+  takes a 256 KiB EPROM image built for the board, such as the DeMoN II
+  build of Action Replay 5 (`[cartridge] rom`, `--cartridge-rom PATH` or
+  the **Cartridge ROM** row); no image is bundled. As the board's CPLD
+  does, it snoops CPU writes to the custom registers, enters the monitor
+  on reset, on the freeze button (**Freeze (DeMoN II)**,
+  `Cmd+Shift+B` / `Alt+Shift+B`, `--freeze-after`) or on its programmed
+  CIA triggers by overriding the level-7 vector, and hides its bank again
+  in stealth mode when execution leaves the cartridge. The EPROM is
+  read-only and the USB port reports no host. Cartridge RAM, visibility
+  and a pending freeze are kept in save states (see
+  docs/guide/configuration.md, "`[cartridge]` -- freezer cartridge").
 
 ### Changed
 
@@ -392,6 +408,21 @@ for the earlier release notes.
   - Programmable horizontal blanking needs BPLCON3.EXTBLKEN and ECSENA as
     well as BEAMCON0.BLANKEN. BLANKEN alone no longer blanks the picture.
 - OCS Denise ignores BPLCON2.KILLEHB.
+- AGA dual playfield with BPLCON4's BPLAM set: Lisa picks the playfield
+  that wins and adds the playfield 2 palette offset before it applies the
+  BPLAM XOR, so the colour comes from the register the hardware uses.
+  The XOR used to come first.
+- AGA HAM6 loads the full 24-bit base colour and keeps both nibbles of
+  each component it holds: modifying blue in `$123456` gives `$1234AA`.
+  With BPLAM set, HAM6 and HAM8 decode the masked plane bits for the
+  control code and palette index, and take the new component from the
+  unmasked planes, so a masked HAM picture no longer shows wrong colours.
+- Writing `$0000` to Paula's SERDAT clears the word waiting to be sent
+  and lets a transmission already under way finish, as on an A500. A
+  framed NUL (`$0100`) still transmits.
+- A1200 and A4000: the blitter's final destination write takes the next
+  free bus slot ahead of a waiting CPU, while fixed DMA keeps its priority.
+  A CPU polling for the finished word sees it one access sooner.
 - Workbench 1.3 no longer shows the year as 1978 when an MSM6242 battery
   clock is fitted (#985). The clock gave the year within its century (26
   for 2026), which Kickstart 1.3's `SetClock LOAD` reads as 1978, also
@@ -418,9 +449,15 @@ for the earlier release notes.
 
 - States written by 1.2.0 and earlier carry no firmware identities and load
   as before, unchecked, with a warning naming the built-in firmware their
-  boards map. 1.2.0 skips the new chunk (with a log line), so the chunk
-  does not stop it reading states this build writes. Save states keep
-  container version 82 and every existing chunk keeps its version.
+  boards map. 1.2.0 would skip the new chunk (with a log line), but see
+  the next entry.
+- The expansion-board chunk (`ZORR`) moves to version 2, which adds the
+  Buster arbiter and A4091 SCRIPTS transfers in progress. 1.3.0 reads the
+  version 1 chunks of 1.2.0 and earlier by migration, resuming their boards
+  as they ran before. Every state has this chunk, so 1.2.0 refuses all
+  states 1.3.0 writes ("ZORR chunk (expansion boards) is version 2, newer
+  than the version 1 this build reads"). The container stays at version 82
+  and every other chunk keeps its version.
 - The bundled zz9k board's plugin module has changed. A state with a
   `[zz9k]` board saved by 1.2.0 still loads, unchecked as above, but the
   board goes offline at its next request, because the saved plugin memory

@@ -115,6 +115,11 @@ the device clock's wall-clock fields, which newer states no longer write. An
 error naming one of those missing fields calls for a newer reader or a new
 snapshot made by the older executable.
 
+1.3.0 moves the expansion-board chunk (`ZORR`) to version 2, which every
+state carries. 1.3.0 reads the version 1 chunks of 1.2.0 and earlier by
+migration, but 1.2.0 refuses every state 1.3.0 writes, naming the `ZORR`
+chunk as newer than it reads.
+
 Built-in board firmware -- the ROM `copperhf.device` runs from, and the
 bundled `[hostsocket]` and `[zz9k]` boards' plugin modules and ROM -- is
 part of Copperline, not of a state, so a state is only sound in a build
