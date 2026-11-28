@@ -125,6 +125,7 @@ updates:
       # to patch releases: fluxbridge follows its main branch and the others
       # are pinned to commits. Move them on v1 by hand when a fix needs it.
       - dependency-name: fluxbridge
+      - dependency-name: m68k
       - dependency-name: mt32-rs
       - dependency-name: coppersynth
       - dependency-name: plmpeg
